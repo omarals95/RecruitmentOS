@@ -1,0 +1,760 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { and, count, eq, sql } from "drizzle-orm";
+import { activity, idempotency, records } from "@/db/schema";
+import { withTeam } from "@/lib/db-team";
+import {
+  bulkApplications,
+  createRecord,
+  getCandidateState,
+  getRecord,
+  listRecords,
+  bootstrapTeam,
+  updateCandidateState,
+  updateRecord,
+} from "@/lib/records";
+import type { Principal } from "@/lib/principal";
+import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+
+describe("recruitment records with real PostgreSQL migrations and RLS", () => {
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal,
+    colleague: Principal,
+    other: Principal,
+    viewer: Principal;
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db);
+    colleague = await seedIdentity(fixture.db, { userId: "test-colleague" });
+    other = await seedIdentity(fixture.db, {
+      userId: "other-owner",
+      teamId: "other-team",
+    });
+    viewer = await seedIdentity(fixture.db, {
+      userId: "test-viewer",
+      role: "viewer",
+    });
+    await fixture.client
+      .exec(`CREATE FUNCTION app.records_test_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF EXISTS(SELECT 1 FROM app.records WHERE id=NEW.record_id AND data->>'name'='Fictional forced audit rejection') THEN
+      RAISE EXCEPTION 'Fictional audit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER records_test_reject_audit BEFORE INSERT ON app.activity FOR EACH ROW EXECUTE FUNCTION app.records_test_reject_audit();`);
+    await enforceTestRls(fixture.db);
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+  const candidate = (name: string, p = owner) =>
+    createRecord(p, "candidates", { data: { name } });
+  const vacancy = (title: string, p = owner) =>
+    createRecord(p, "vacancies", { data: { title, status: "Open" } });
+
+  it("isolates reads, reference kinds, scopes and personal state across users and teams", async () => {
+    const person = await candidate("Fictional Privacy Person");
+    const foreignVacancy = await vacancy("Foreign vacancy", other);
+    await expect(
+      getRecord(other, "candidates", person.id),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      createRecord(owner, "applications", {
+        candidateId: person.id,
+        vacancyId: foreignVacancy.id,
+        data: {},
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      createRecord(owner, "applications", {
+        candidateId: person.id,
+        vacancyId: person.id,
+        data: {},
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      candidate("Viewer cannot create", viewer),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      candidate("Read token cannot create", {
+        ...owner,
+        scopes: ["candidates:read"],
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(await getCandidateState(owner, person.id)).toMatchObject({
+      version: 0,
+      note: "",
+      shortlisted: false,
+    });
+    const first = await updateCandidateState(owner, person.id, {
+      version: 0,
+      note: "Private fictional note",
+      shortlisted: true,
+    });
+    expect(first.version).toBe(1);
+    expect(await getCandidateState(colleague, person.id)).toMatchObject({
+      version: 0,
+      note: "",
+      shortlisted: false,
+    });
+    await expect(
+      updateCandidateState(owner, person.id, { version: 0, note: "Stale" }),
+    ).rejects.toMatchObject({ status: 409 });
+    const selected = await listRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({ shortlisted: "true" }),
+    );
+    expect(selected.data.map((row) => row.id)).toContain(person.id);
+    expect(
+      (
+        await listRecords(
+          colleague,
+          "candidates",
+          new URLSearchParams({ shortlisted: "true" }),
+        )
+      ).data.map((row) => row.id),
+    ).not.toContain(person.id);
+    const events = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(activity)
+        .where(
+          and(
+            eq(activity.teamId, owner.teamId),
+            eq(activity.recordId, person.id),
+          ),
+        ),
+    );
+    expect(JSON.stringify(events)).not.toContain("Private fictional note");
+  });
+
+  it("uses optimistic versions, immutable parents, independent statuses and audited manual stages", async () => {
+    const person = await candidate("Fictional Pipeline Person");
+    const job = await vacancy("Pipeline vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Screening" },
+    });
+    const advanced = await updateRecord(owner, "applications", app.id, {
+      version: 1,
+      data: { stage: "Hired" },
+    });
+    expect(advanced.version).toBe(2);
+    await expect(
+      updateRecord(owner, "applications", app.id, {
+        version: 1,
+        data: { stage: "Rejected" },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      updateRecord(owner, "applications", app.id, {
+        version: 2,
+        candidateId: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect((await getRecord(owner, "vacancies", job.id)).data).toMatchObject({
+      status: "Open",
+    });
+    const events = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(activity)
+        .where(
+          and(eq(activity.teamId, owner.teamId), eq(activity.recordId, app.id)),
+        ),
+    );
+    expect(events.map((event) => event.metadata)).toContainEqual({
+      fromStage: "Screening",
+      toStage: "Hired",
+    });
+    await updateRecord(owner, "applications", app.id, {
+      version: 2,
+      archived: true,
+    });
+    const replacement = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: {},
+    });
+    expect(replacement.id).not.toBe(app.id);
+    await expect(
+      updateRecord(owner, "applications", app.id, {
+        version: 3,
+        archived: false,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("validates every bulk parent before writing and skips active duplicate pairs", async () => {
+    const first = await candidate("Fictional Bulk First");
+    const second = await candidate("Fictional Bulk Second");
+    const job = await vacancy("Bulk vacancy");
+    await expect(
+      bulkApplications(owner, {
+        candidateIds: [first.id, randomUUID()],
+        vacancyId: job.id,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(
+      (
+        await listRecords(
+          owner,
+          "applications",
+          new URLSearchParams({ vacancyId: job.id }),
+        )
+      ).pagination.total,
+    ).toBe(0);
+    expect(
+      await bulkApplications(owner, {
+        candidateIds: [first.id, second.id, first.id],
+        vacancyId: job.id,
+      }),
+    ).toMatchObject({ created: 2, skipped: 0 });
+    expect(
+      await bulkApplications(owner, {
+        candidateIds: [first.id, second.id],
+        vacancyId: job.id,
+      }),
+    ).toMatchObject({ created: 0, skipped: 2 });
+  });
+
+  it("atomically moves populated buckets and protects the last active bucket", async () => {
+    const workflow = await bootstrapTeam(other);
+    expect(workflow.created).toBe(4);
+    expect((await bootstrapTeam(other)).created).toBe(0);
+    const [first, second, third, fourth] = workflow.data;
+    const task = await createRecord(other, "tasks", {
+      bucketId: first.id,
+      data: { title: "Fictional move task" },
+    });
+    await expect(
+      updateRecord(other, "buckets", first.id, { version: 1, archived: true }),
+    ).rejects.toMatchObject({ status: 409 });
+    await updateRecord(other, "buckets", first.id, {
+      version: 1,
+      archived: true,
+      moveToBucketId: second.id,
+    });
+    expect(await getRecord(other, "tasks", task.id)).toMatchObject({
+      bucketId: second.id,
+      version: 2,
+    });
+    await updateRecord(other, "buckets", third.id, {
+      version: 1,
+      archived: true,
+    });
+    await updateRecord(other, "buckets", fourth.id, {
+      version: 1,
+      archived: true,
+    });
+    await expect(
+      updateRecord(other, "buckets", second.id, { version: 1, archived: true }),
+    ).rejects.toMatchObject({ status: 409, code: "last_bucket" });
+  });
+
+  it("enforces custom values and blocks incompatible schema changes without losing archived values", async () => {
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Custom workflow" },
+    });
+    const field = await createRecord(owner, "task-fields", {
+      data: {
+        name: "Fictional approval",
+        type: "Dropdown",
+        options: ["Pending", "Approved"],
+      },
+    });
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: {
+        title: "Custom values task",
+        customValues: { [field.id]: "Pending" },
+      },
+    });
+    await expect(
+      updateRecord(owner, "task-fields", field.id, {
+        version: 1,
+        data: { options: ["Approved"] },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      createRecord(owner, "task-fields", {
+        data: { name: "Required retrofit", type: "Text", required: true },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      updateRecord(owner, "tasks", task.id, {
+        version: 1,
+        data: { customValues: { [field.id]: "Unknown" } },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await updateRecord(owner, "task-fields", field.id, {
+      version: 1,
+      archived: true,
+    });
+    const edited = await updateRecord(owner, "tasks", task.id, {
+      version: 1,
+      data: { title: "Edited without data loss" },
+    });
+    expect(edited.data).toMatchObject({
+      customValues: { [field.id]: "Pending" },
+    });
+    await expect(
+      updateRecord(owner, "tasks", task.id, {
+        version: 2,
+        data: { customValues: {} },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("replays idempotent creates and rejects mismatched payloads without duplicate audit events", async () => {
+    const payload = { data: { name: "Fictional Idempotent Person" } };
+    const first = await createRecord(
+      owner,
+      "candidates",
+      payload,
+      "fictional-create-1",
+    );
+    const replay = await createRecord(
+      owner,
+      "candidates",
+      payload,
+      "fictional-create-1",
+    );
+    expect(replay).toEqual(first);
+    await expect(
+      createRecord(
+        owner,
+        "candidates",
+        { data: { name: "Different person" } },
+        "fictional-create-1",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    const events = await withTeam(owner, (tx) =>
+      tx
+        .select({ total: count() })
+        .from(activity)
+        .where(
+          and(
+            eq(activity.teamId, owner.teamId),
+            eq(activity.recordId, first.id),
+          ),
+        ),
+    );
+    expect(events[0].total).toBe(1);
+    await expect(
+      createRecord(owner, "candidates", payload, "bad key"),
+    ).rejects.toMatchObject({ status: 400 });
+    const concurrent = await Promise.all([
+      createRecord(
+        owner,
+        "candidates",
+        { data: { name: "Fictional retry race" } },
+        "retry-race",
+      ),
+      createRecord(
+        owner,
+        "candidates",
+        { data: { name: "Fictional retry race" } },
+        "retry-race",
+      ),
+    ]);
+    expect(concurrent[0].id).toBe(concurrent[1].id);
+  });
+
+  it("rolls back the business record and retry cache when its audit append fails", async () => {
+    await expect(
+      createRecord(
+        owner,
+        "candidates",
+        { data: { name: "Fictional forced audit rejection" } },
+        "rollback-audit",
+      ),
+    ).rejects.toThrow();
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ search: '"Fictional forced audit rejection"' }),
+        )
+      ).pagination.total,
+    ).toBe(0);
+    const cached = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(idempotency)
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.key, "rollback-audit"),
+          ),
+        ),
+    );
+    expect(cached).toEqual([]);
+  });
+
+  it("makes saved views private and comments append-only", async () => {
+    const view = await createRecord(owner, "views", {
+      data: {
+        name: "Personal fictional view",
+        area: "directory",
+        query: { search: "fictional" },
+      },
+    });
+    await expect(getRecord(colleague, "views", view.id)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(
+      (await listRecords(colleague, "views", new URLSearchParams())).data.map(
+        (row) => row.id,
+      ),
+    ).not.toContain(view.id);
+    const person = await candidate("Fictional Discussion Person");
+    const comment = await createRecord(owner, "comments", {
+      parentRecordId: person.id,
+      data: { body: "<script>literal text</script>" },
+    });
+    expect(comment.createdBy).toBe(owner.userId);
+    await expect(
+      updateRecord(owner, "comments", comment.id, {
+        version: 1,
+        archived: true,
+      }),
+    ).rejects.toMatchObject({ status: 405 });
+    await expect(
+      createRecord(
+        { ...owner, role: "recruiter", scopes: ["recruitment:write"] },
+        "comments",
+        {
+          parentRecordId: person.id,
+          data: { body: "Forged", legacyAuthorLabel: "Owner" },
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("preserves imported provenance while never fabricating observed stage history", async () => {
+    const person = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Historic Person" },
+      legacyId: "historic-person",
+      archived: true,
+      importMeta: { createdAt: "2017-01-01", sourceFile: "fictional.xlsx" },
+    });
+    const job = await createRecord(owner, "vacancies", {
+      data: { title: "Historic vacancy" },
+      legacyId: "historic-vacancy",
+      archived: true,
+    });
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Hired" },
+      legacyId: "historic-app",
+      archived: true,
+    });
+    expect(app.data).toMatchObject({ appliedDate: "", stage: "Hired" });
+    const events = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(activity)
+        .where(
+          and(eq(activity.teamId, owner.teamId), eq(activity.recordId, app.id)),
+        ),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorType: "import",
+      action: "imported",
+      metadata: {},
+    });
+    await expect(
+      createRecord(owner, "applications", {
+        candidateId: person.id,
+        vacancyId: job.id,
+        data: {},
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    const historicalComment = await createRecord(owner, "comments", {
+      parentRecordId: person.id,
+      data: {
+        body: "Fictional historic comment",
+        legacyAuthorLabel: "Unverified source label",
+      },
+      legacyId: "historic-comment",
+    });
+    expect(historicalComment.archivedAt).toBeNull();
+    await expect(
+      createRecord(owner, "comments", {
+        parentRecordId: person.id,
+        data: { body: "New ordinary comment" },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("labels and searches application parents only within the caller’s factual read scopes", async () => {
+    const person = await candidate("FictionalUniqueLinkPerson");
+    const job = await vacancy("FictionalUniqueLinkVacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: {},
+    });
+    expect(app.label).toContain("FictionalUniqueLinkPerson");
+    expect(app.label).toContain("FictionalUniqueLinkVacancy");
+    expect(
+      (
+        await listRecords(
+          owner,
+          "applications",
+          new URLSearchParams({ search: "FictionalUniqueLinkPerson" }),
+        )
+      ).data.map((row) => row.id),
+    ).toContain(app.id);
+    const token = {
+      ...owner,
+      scopes: ["recruitment:read"] as Principal["scopes"],
+    };
+    expect(
+      (await getRecord(token, "applications", app.id)).label,
+    ).not.toContain("FictionalUniqueLinkPerson");
+    expect(
+      (
+        await listRecords(
+          token,
+          "applications",
+          new URLSearchParams({ search: "FictionalUniqueLinkPerson" }),
+        )
+      ).pagination.total,
+    ).toBe(0);
+    expect(
+      (
+        await listRecords(
+          token,
+          "applications",
+          new URLSearchParams({ search: "FictionalUniqueLinkVacancy" }),
+        )
+      ).data.map((row) => row.id),
+    ).toContain(app.id);
+    const start = await createRecord(owner, "onboarding", {
+      applicationId: app.id,
+      data: {},
+    });
+    expect(start.label).toContain("FictionalUniqueLinkPerson");
+  });
+
+  it("supports bounded saved-view tag and review filters while protecting source provenance", async () => {
+    const person = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional TagFilter Person",
+        folderCategories: ["Engineering", "Operations"],
+        skills: ["TypeScript", "Security"],
+        reviewStatus: "Verified",
+      },
+    });
+    const filters = new URLSearchParams({
+      categories: JSON.stringify(["Engineering", "Design"]),
+      skills: JSON.stringify(["TypeScript", "Security"]),
+      needsReview: "false",
+    });
+    expect(
+      (await listRecords(owner, "candidates", filters)).data.map(
+        (row) => row.id,
+      ),
+    ).toContain(person.id);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ needsReview: "true" }),
+        )
+      ).data.map((row) => row.id),
+    ).not.toContain(person.id);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ skills: JSON.stringify(["Missing skill"]) }),
+        )
+      ).data.map((row) => row.id),
+    ).not.toContain(person.id);
+    await expect(
+      listRecords(
+        owner,
+        "candidates",
+        new URLSearchParams({ categories: "not-json" }),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      updateRecord(
+        { ...owner, role: "recruiter", scopes: ["candidates:write"] },
+        "candidates",
+        person.id,
+        { version: 1, data: { rawSource: {} } },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("paginates safe factual search without treating property names as candidate attributes", async () => {
+    await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Search Alpha",
+        skills: ["Security operations", "TypeScript"],
+      },
+    });
+    await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Search Beta",
+        skills: ["Security operations", "Python"],
+      },
+    });
+    const result = await listRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({
+        search: '"security operations" -python',
+        pageSize: "1",
+      }),
+    );
+    expect(result.pagination.total).toBe(1);
+    expect(result.data[0].data).toMatchObject({
+      name: "Fictional Search Alpha",
+    });
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ search: "documentedYearsEstimate" }),
+        )
+      ).pagination.total,
+    ).toBe(0);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ search: "100%" }),
+        )
+      ).pagination.total,
+    ).toBe(0);
+    await expect(
+      listRecords(
+        owner,
+        "candidates",
+        new URLSearchParams({ sort: "data;drop table" }),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("matches literal percent signs in factual phrases and exclusions without SQL wildcard behavior", async () => {
+    const target = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Percent Target",
+        skills: ["Coverage 100%", "Security operations"],
+      },
+    });
+    const control = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Percent Control",
+        skills: ["Coverage 1000", "Security operations"],
+      },
+    });
+    const included = await listRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({ search: '"security operations" "Coverage 100%"' }),
+    );
+    expect(included.data.map((row) => row.id)).toEqual([target.id]);
+    const excluded = await listRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({ search: '"Fictional Percent" -100%' }),
+    );
+    expect(excluded.data.map((row) => row.id)).toEqual([control.id]);
+  });
+
+  it("matches literal underscores in names and email facts with matching exclusion semantics", async () => {
+    const target = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional_Underscore_Target",
+        email: "fixture_team@example.test",
+      },
+    });
+    const control = await createRecord(owner, "candidates", {
+      data: {
+        name: "FictionalXUnderscoreXTarget",
+        email: "fixtureXteam@example.test",
+      },
+    });
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ search: "fixture_team@example.test" }),
+        )
+      ).data.map((row) => row.id),
+    ).toEqual([target.id]);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ search: '"Fictional_Underscore_Target"' }),
+        )
+      ).data.map((row) => row.id),
+    ).toEqual([target.id]);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({
+            search: "Underscore -fixture_team@example.test",
+          }),
+        )
+      ).data.map((row) => row.id),
+    ).toEqual([control.id]);
+  });
+
+  it("enforces database tenant FKs, row security and immutable audit history even below the service", async () => {
+    const person = await candidate("Fictional SQL Guard Person");
+    const foreignJob = await vacancy("Foreign SQL guard vacancy", other);
+    await expect(
+      withTeam(owner, (tx) =>
+        tx.insert(records).values({
+          id: randomUUID(),
+          teamId: owner.teamId,
+          kind: "application",
+          data: {},
+          candidateId: person.id,
+          vacancyId: foreignJob.id,
+          createdBy: owner.userId,
+        }),
+      ),
+    ).rejects.toThrow();
+    const foreignRows = await withTeam(other, (tx) =>
+      tx.select().from(records).where(eq(records.id, person.id)),
+    );
+    expect(foreignRows).toEqual([]);
+    await expect(
+      withTeam(owner, (tx) =>
+        tx.execute(
+          sql`update ${activity} set summary='tampered' where ${activity.teamId}=${owner.teamId}`,
+        ),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      withTeam(owner, (tx) =>
+        tx.insert(records).values({
+          id: randomUUID(),
+          teamId: other.teamId,
+          kind: "candidate",
+          data: { name: "Blocked" },
+          createdBy: owner.userId,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+});
