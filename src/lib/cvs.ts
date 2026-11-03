@@ -312,12 +312,8 @@ export async function beginCvUpload(
   storage?: StorageGateway,
 ) {
   validId(candidateId);
-  if (!storage && !storageConfigured())
-    throw new ApiError(
-      503,
-      "STORAGE_SETUP_REQUIRED",
-      "Private CV storage is not configured. Ask the workspace administrator to configure S3.",
-    );
+  // Resolve configuration errors before reserving quota, without contacting a provider.
+  if (!storage && !storageConfigured()) await storageClient();
   if (
     (input.legacySourceId || input.sourcePath) &&
     !p.scopes.includes("imports:write")

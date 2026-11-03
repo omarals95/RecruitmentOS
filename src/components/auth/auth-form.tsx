@@ -9,6 +9,7 @@ import type { AuthOptions } from "@/lib/auth";
 type Mode =
   | "sign-in"
   | "sign-up"
+  | "create-admin"
   | "forgot-password"
   | "reset-password"
   | "verify-email"
@@ -18,6 +19,10 @@ const headings: Record<Mode, [string, string]> = {
   "sign-up": [
     "Create your account",
     "Use the email address on your team invitation.",
+  ],
+  "create-admin": [
+    "Create the first administrator",
+    "Use the administrator email and setup token supplied by your deployment administrator. Verify your email, then create your team.",
   ],
   "forgot-password": [
     "Reset your password",
@@ -103,6 +108,9 @@ export function AuthForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
+    const setupTokenInput = event.currentTarget.elements.namedItem(
+      "setupToken",
+    ) as HTMLInputElement | null;
     const email = String(fields.get("email") ?? "").trim();
     const password = String(fields.get("password") ?? "");
     if (mode === "sign-in")
@@ -112,19 +120,30 @@ export function AuthForm({
           window.location.assign(target);
         },
       );
-    if (mode === "sign-up")
+    if (mode === "sign-up" || mode === "create-admin")
       return action(
         () =>
-          authClient.signUp.email({
-            name: String(fields.get("name") ?? "").trim(),
-            email,
-            password,
-            callbackURL: `/sign-in?next=${encodeURIComponent(target)}`,
-          }),
-        () =>
+          authClient.signUp.email(
+            {
+              name: String(fields.get("name") ?? "").trim(),
+              email,
+              password,
+              callbackURL: `/sign-in?next=${encodeURIComponent(target)}`,
+            },
+            mode === "create-admin"
+              ? {
+                  headers: {
+                    "x-bootstrap-token": String(fields.get("setupToken") ?? ""),
+                  },
+                }
+              : undefined,
+          ),
+        () => {
+          if (setupTokenInput) setupTokenInput.value = "";
           setNotice(
             "Check your email for a verification link. If you already have an account, sign in or reset your password.",
-          ),
+          );
+        },
       );
     if (mode === "forgot-password")
       return action(
@@ -194,6 +213,14 @@ export function AuthForm({
             </p>
           </div>
         )}
+        {mode === "create-admin" &&
+          options.configured &&
+          !options.bootstrapConfigured && (
+            <div className="auth-notice" role="status">
+              The initial administrator email and setup token must be configured
+              by the deployment administrator.
+            </div>
+          )}
         {error && (
           <div className="auth-notice auth-error" role="alert">
             {error}
@@ -266,7 +293,7 @@ export function AuthForm({
           </div>
         ) : (
           <form className="auth-form" onSubmit={(event) => void submit(event)}>
-            {mode === "sign-up" && (
+            {(mode === "sign-up" || mode === "create-admin") && (
               <label className="auth-field">
                 Full name
                 <input
@@ -296,7 +323,9 @@ export function AuthForm({
                 />
               </label>
             )}
-            {["sign-in", "sign-up", "reset-password"].includes(mode) && (
+            {["sign-in", "sign-up", "create-admin", "reset-password"].includes(
+              mode,
+            ) && (
               <label className="auth-field">
                 Password
                 <input
@@ -311,6 +340,25 @@ export function AuthForm({
                   disabled={busy || !options.configured}
                 />
                 {mode !== "sign-in" && <small>At least 12 characters.</small>}
+              </label>
+            )}
+            {mode === "create-admin" && (
+              <label className="auth-field">
+                Setup token
+                <input
+                  name="setupToken"
+                  type="password"
+                  autoComplete="off"
+                  minLength={43}
+                  maxLength={128}
+                  required
+                  disabled={
+                    busy || !options.configured || !options.bootstrapConfigured
+                  }
+                />
+                <small>
+                  Provided securely by your deployment administrator.
+                </small>
               </label>
             )}
             {mode === "reset-password" && (
@@ -338,6 +386,7 @@ export function AuthForm({
               disabled={
                 busy ||
                 !options.configured ||
+                (mode === "create-admin" && !options.bootstrapConfigured) ||
                 (mode === "reset-password" && !token)
               }
               type="submit"
@@ -347,6 +396,7 @@ export function AuthForm({
                 : {
                     "sign-in": "Sign in",
                     "sign-up": "Create account",
+                    "create-admin": "Create administrator",
                     "forgot-password": "Send reset link",
                     "reset-password": "Reset password",
                     "verify-email": "Resend verification link",
@@ -387,6 +437,7 @@ export function AuthForm({
               </Link>
               <Link href="/forgot-password">Forgot password?</Link>
               <Link href="/verify-email">Verify email</Link>
+              <Link href="/create-admin">First-time administrator setup</Link>
             </>
           ) : (
             <Link href={`/sign-in?next=${encodeURIComponent(target)}`}>

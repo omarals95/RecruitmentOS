@@ -35,6 +35,7 @@ async function main() {
       name: "Demo Recruiter",
       email,
       emailVerified: true,
+      initialAdmin: true,
     });
     await tx.insert(account).values({
       id: randomUUID(),

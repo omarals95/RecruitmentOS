@@ -49,6 +49,7 @@ With the fictional development server running, `npm run test:local` checks the a
 ## Deployment and migration
 
 1. Follow [Vercel and Neon deployment](docs/deployment.md).
+   For distinct Preview and Production resources, use [environment isolation](docs/environment-isolation.md).
 2. Configure [private S3 storage and Vercel OIDC](docs/s3-setup.md).
 3. Review [security and data flows](docs/security.md).
 4. Run the [legacy migration](docs/migration.md) in dry-run mode first.

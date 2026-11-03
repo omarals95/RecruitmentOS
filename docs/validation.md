@@ -1,5 +1,11 @@
 # Validation before deployment
 
+## Update: first-admin setup and storage provider guard
+
+On 3 November 2026, the updated code passed TypeScript, ESLint, 106 Vitest tests and 18 native storage tests. One Windows junction test remained skipped because the sandbox could not create its test junction. Initial-admin tests use fictional accounts and an embedded database; they cover the durable claim, authorization, verification, team-owner completion and interrupted delivery. Live Neon multi-connection races and actual email delivery remain staging checks.
+
+The Vercel Blob provider is deliberately disabled until immutable, validated downloads can be guaranteed with the application's existing CV size limit. Tests confirm an explicit Blob selection fails closed rather than falling back to S3. The automated tests did not use live cloud resources or credentials.
+
 Local validation on 2 November 2026 used Node.js 24.20.0 on Windows, a fictional PGlite workspace, and fake S3 clients. No real candidate records were imported and no live AWS, Neon, Resend or OAuth resources were used.
 
 | Check                                             | Result                             |

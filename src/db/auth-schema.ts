@@ -26,6 +26,7 @@ export const user = authSchema.table(
     name: text("name").notNull(),
     email: text("email").notNull(),
     emailVerified: boolean("email_verified").notNull().default(false),
+    initialAdmin: boolean("initial_admin").notNull().default(false),
     image: text("image"),
     createdAt: date("created_at").notNull().defaultNow(),
     updatedAt: date("updated_at").notNull().defaultNow(),
@@ -198,6 +199,13 @@ export const apiRateLimits = authSchema.table("api_rate_limits", {
   key: text("key").primaryKey(),
   windowStart: date("window_start").notNull(),
   count: integer("count").notNull(),
+});
+
+export const initialAdminClaim = authSchema.table("initial_admin_claim", {
+  id: boolean("id").primaryKey().default(true),
+  claimedAt: date("claimed_at").notNull().defaultNow(),
+  userId: text("user_id"),
+  completedAt: date("completed_at"),
 });
 
 export const authTables = {

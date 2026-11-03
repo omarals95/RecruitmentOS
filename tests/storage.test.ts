@@ -59,6 +59,32 @@ test("storage is unconfigured without bucket, region and explicit credentials", 
     false,
   );
 });
+test("Blob and unknown provider selections fail closed even when S3 credentials exist", async () => {
+  const fictional = {
+    AWS_REGION: "me-central-1",
+    S3_BUCKET_NAME: "fictional-private-cvs",
+    AWS_ACCESS_KEY_ID: "fictional-access-key",
+    AWS_SECRET_ACCESS_KEY: "fictional-secret-key",
+  };
+  for (const provider of ["blob", "vercel-blob", "unexpected"]) {
+    assert.equal(
+      storageConfigured({ ...fictional, CV_STORAGE_PROVIDER: provider }),
+      false,
+    );
+    const saved = process.env.CV_STORAGE_PROVIDER;
+    try {
+      process.env.CV_STORAGE_PROVIDER = provider;
+      await assert.rejects(getStorage(), /disabled|not supported/i);
+    } finally {
+      if (saved === undefined) delete process.env.CV_STORAGE_PROVIDER;
+      else process.env.CV_STORAGE_PROVIDER = saved;
+    }
+  }
+  assert.equal(
+    storageConfigured({ ...fictional, CV_STORAGE_PROVIDER: "s3" }),
+    true,
+  );
+});
 test("OIDC accepts only a fresh hosted request token and never substitutes local environment tokens", () => {
   const now = Date.now();
   const token = (exp: number) =>

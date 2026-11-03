@@ -4,16 +4,13 @@ export function canRegisterEmail(
   email: string,
   policy: {
     publicSignup: boolean;
-    bootstrapOwnerEmail?: string;
     hasPendingInvitation: boolean;
   },
 ): boolean {
   const normalized = email.trim().toLowerCase();
   return (
     normalized.length > 0 &&
-    (policy.publicSignup ||
-      policy.hasPendingInvitation ||
-      normalized === policy.bootstrapOwnerEmail?.trim().toLowerCase())
+    (policy.publicSignup || policy.hasPendingInvitation)
   );
 }
 

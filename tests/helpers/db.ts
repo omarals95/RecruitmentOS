@@ -2,7 +2,12 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "@/db";
-import { member, organization, user } from "@/db/auth-schema";
+import {
+  initialAdminClaim,
+  member,
+  organization,
+  user,
+} from "@/db/auth-schema";
 import type { Principal } from "@/lib/principal";
 import { roleScopes, type Role } from "@/lib/permissions";
 export async function createTestDb() {
@@ -24,6 +29,10 @@ export async function seedIdentity(
   const userId = options.userId ?? "test-owner";
   const teamId = options.teamId ?? "test-team";
   const role = options.role ?? "owner";
+  const claim = await db
+    .select({ id: initialAdminClaim.id })
+    .from(initialAdminClaim)
+    .limit(1);
   await db
     .insert(user)
     .values({
@@ -31,6 +40,7 @@ export async function seedIdentity(
       name: "Fictional Test User",
       email: `${userId}@example.test`,
       emailVerified: options.emailVerified ?? true,
+      initialAdmin: claim.length === 0,
     })
     .onConflictDoNothing();
   await db

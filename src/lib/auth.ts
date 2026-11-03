@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   APIError,
   createAuthMiddleware,
@@ -28,6 +29,7 @@ export type AuthOptions = {
   microsoft: boolean;
   emailPassword: true;
   publicSignup: boolean;
+  bootstrapConfigured: boolean;
 };
 export function getAuthOptions(): AuthOptions {
   let validURL = false;
@@ -62,6 +64,10 @@ export function getAuthOptions(): AuthOptions {
     ),
     emailPassword: true,
     publicSignup: process.env.ALLOW_PUBLIC_SIGNUP === "true",
+    bootstrapConfigured: Boolean(
+      process.env.BOOTSTRAP_OWNER_EMAIL?.trim() &&
+      usableBootstrapToken(process.env.BOOTSTRAP_SETUP_TOKEN),
+    ),
   };
 }
 
@@ -70,6 +76,7 @@ type FactoryConfig = {
   secret: string;
   publicSignup: boolean;
   bootstrapOwnerEmail?: string;
+  bootstrapSetupToken?: string;
   deliver?: MailDelivery;
   google?: { clientId: string; clientSecret: string };
   microsoft?: { clientId: string; clientSecret: string; tenantId?: string };
@@ -155,7 +162,18 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       transaction: true,
     }),
     advanced: { database: { generateId: "uuid" } },
-    user: { deleteUser: { enabled: false }, changeEmail: { enabled: false } },
+    user: {
+      deleteUser: { enabled: false },
+      changeEmail: { enabled: false },
+      additionalFields: {
+        initialAdmin: {
+          type: "boolean",
+          input: false,
+          required: false,
+          defaultValue: false,
+        },
+      },
+    },
     account: {
       accountLinking: {
         enabled: true,
@@ -241,10 +259,34 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               ],
               limit: 1,
             });
+            const normalizedEmail = user.email.trim().toLowerCase();
+            const bootstrapEmail = config.bootstrapOwnerEmail
+              ?.trim()
+              .toLowerCase();
+            const initialAdmin = Boolean(
+              bootstrapEmail &&
+              normalizedEmail === bootstrapEmail &&
+              ctx.path === "/sign-up/email" &&
+              bootstrapTokenMatches(
+                config.bootstrapSetupToken,
+                ctx.request?.headers.get("x-bootstrap-token"),
+              ),
+            );
+            if (initialAdmin)
+              return {
+                data: { ...user, email: normalizedEmail, initialAdmin: true },
+              };
+            // Initial setup must be explicitly claimed before public registration can begin.
+            if (
+              (await adapter.count({ model: "user" })) === 0 &&
+              (await adapter.count({ model: "organization" })) === 0
+            )
+              throw new APIError("FORBIDDEN", {
+                message: "Initial administrator setup is required.",
+              });
             if (
               !canRegisterEmail(user.email, {
                 publicSignup: config.publicSignup,
-                bootstrapOwnerEmail: config.bootstrapOwnerEmail,
                 hasPendingInvitation: pending.length > 0,
               })
             )
@@ -368,6 +410,7 @@ export async function getAuth(): Promise<AppAuth> {
         secret: process.env.BETTER_AUTH_SECRET!,
         publicSignup: process.env.ALLOW_PUBLIC_SIGNUP === "true",
         bootstrapOwnerEmail: process.env.BOOTSTRAP_OWNER_EMAIL,
+        bootstrapSetupToken: process.env.BOOTSTRAP_SETUP_TOKEN,
         ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
           ? {
               google: {
@@ -396,3 +439,19 @@ export async function getAuth(): Promise<AppAuth> {
 }
 
 export { getSession, getVerifiedSession } from "./auth-session";
+
+export function usableBootstrapToken(token?: string): boolean {
+  return Boolean(
+    token && /^[A-Za-z0-9_-]{43,128}$/.test(token) && isUsableAuthSecret(token),
+  );
+}
+function bootstrapTokenMatches(
+  expected?: string,
+  supplied?: string | null,
+): boolean {
+  if (!usableBootstrapToken(expected) || !supplied || supplied.length > 128)
+    return false;
+  const digest = (value: string) =>
+    createHash("sha256").update(value, "utf8").digest();
+  return timingSafeEqual(digest(expected!), digest(supplied));
+}

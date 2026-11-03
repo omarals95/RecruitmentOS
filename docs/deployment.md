@@ -26,6 +26,7 @@ Set server-only environment variables from `.env.example`:
 | `BETTER_AUTH_URL`                              | Exact canonical HTTPS application origin, without a path       |
 | `BETTER_AUTH_SECRET`                           | Unique cryptographically random secret, at least 32 characters |
 | `BOOTSTRAP_OWNER_EMAIL`                        | Email allowed to register the first owner account              |
+| `BOOTSTRAP_SETUP_TOKEN`                        | High-entropy initial setup token, unique per environment       |
 | `ALLOW_PUBLIC_SIGNUP`                          | Keep `false` for invitation-only registration                  |
 | `RESEND_API_KEY`, `EMAIL_FROM`                 | Verified sender for verification, invitations and resets       |
 | `S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN` | Private versioned CV bucket and Vercel OIDC role               |
@@ -36,7 +37,7 @@ Import `omarals95/RecruitmentOS` into Vercel and select the reviewed implementat
 
 ## 4. Email and sign-in
 
-Verify a sending domain with Resend and set `EMAIL_FROM`. Register the bootstrap owner at `/sign-up`, then verify the email link. The first user creates a team in Team & settings and invites colleagues. An invitation grants access only to a verified account with its matching email. The seed script does not run in production.
+Verify a sending domain with Resend and set `EMAIL_FROM`. Apply the initial-admin migration, then use `/create-admin` with the configured bootstrap email and setup token. Verify the email, sign in, and create the first team in Team & settings; its creator becomes the owner. Setup completes when that verified claimant owns the team. Invitations require a verified account with the matching email. Use separate setup tokens and database claims for preview and production; do not put tokens in URLs, repository files or chat. See [authentication.md](authentication.md) for recovery and upgrade behavior.
 
 For Google, configure the OAuth client and callback `https://YOUR-DOMAIN/api/auth/callback/google`, then set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. For Microsoft, configure `https://YOUR-DOMAIN/api/auth/callback/microsoft`, set `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` and optionally `MICROSOFT_TENANT_ID`. Keep callback domains exact. Provider email is not permission to join an existing team, and automatic email-based account linking is disabled. Test each provider's email verification and invitation flow with your tenant before enabling it for recruiters.
 

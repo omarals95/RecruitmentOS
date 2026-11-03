@@ -68,14 +68,34 @@ function metadata(extra: Record<string, unknown> = {}) {
   };
 }
 
+it("rejects Blob upload before creating a reservation or contacting storage", async () => {
+  const previous = process.env.CV_STORAGE_PROVIDER;
+  try {
+    process.env.CV_STORAGE_PROVIDER = "blob";
+    await expect(beginCvUpload(p, candidate, metadata())).rejects.toMatchObject(
+      {
+        status: 503,
+        code: "STORAGE_SETUP_REQUIRED",
+        message: expect.stringMatching(/Blob CV storage is disabled/i),
+      },
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CV_STORAGE_PROVIDER;
+    else process.env.CV_STORAGE_PROVIDER = previous;
+  }
+});
+
 describe("private CV lifecycle against PostgreSQL migrations and fake S3", () => {
   const pg = new PGlite();
   beforeAll(async () => {
     await applyMigrations(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
-    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified) VALUES('owner','Owner','owner@example.test',true),('other','Other','other@example.test',true);
-      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner'),('other-team','Other','other-team','other');
-      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('m','team','owner','owner'),('om','other-team','other','owner');`);
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES('owner','Owner','owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('m','team','owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified) VALUES('other','Other','other@example.test',true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('other-team','Other','other-team','other');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('om','other-team','other','owner');`);
     await pg.query(
       `INSERT INTO app.records(id,team_id,kind,data,created_by) VALUES($1,'team','candidate','{"name":"Fictional Candidate"}','owner'),($2,'other-team','candidate','{"name":"Other Fictional"}','other')`,
       [candidate, otherCandidate],

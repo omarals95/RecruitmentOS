@@ -30,6 +30,9 @@ export interface StorageGateway {
 export function storageConfigured(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
+  // Do not silently fall back to S3 when a different provider was requested.
+  if ((env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3") !== "s3")
+    return false;
   return Boolean(
     env.S3_BUCKET_NAME?.trim() &&
     env.AWS_REGION?.trim() &&
@@ -133,6 +136,14 @@ export async function inspectStoredCv(
 
 /** Created within an authenticated request with explicit credentials; no CLI credential refresh. */
 export async function getStorage(): Promise<StorageGateway> {
+  const provider =
+    process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
+  if (provider !== "s3")
+    throw new StorageConfigurationError(
+      provider === "blob" || provider === "vercel-blob"
+        ? "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed."
+        : "The configured CV storage provider is not supported.",
+    );
   if (!storageConfigured())
     throw new StorageConfigurationError(
       "Private CV storage is not configured. Set S3_BUCKET_NAME, AWS_REGION and AWS_ROLE_ARN in the server environment.",

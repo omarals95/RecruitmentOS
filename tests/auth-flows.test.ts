@@ -17,12 +17,18 @@ describe("Better Auth verified invite-only flows", () => {
     baseURL: "http://localhost:3000",
     secret: "fictional-test-secret-with-at-least-32-characters",
     bootstrapOwnerEmail: "owner@example.test",
+    bootstrapSetupToken: "fictional-bootstrap-secret-0123456789abcdefghi",
     publicSignup: false,
     deliver: async (message) => {
       mail.push(message);
     },
   });
-  const call = (path: string, body: unknown, cookie?: string) =>
+  const call = (
+    path: string,
+    body: unknown,
+    cookie?: string,
+    bootstrapToken?: string,
+  ) =>
     auth.handler(
       new Request(`http://localhost:3000/api/auth/${path}`, {
         method: "POST",
@@ -30,16 +36,22 @@ describe("Better Auth verified invite-only flows", () => {
           "content-type": "application/json",
           origin: "http://localhost:3000",
           ...(cookie ? { cookie } : {}),
+          ...(bootstrapToken ? { "x-bootstrap-token": bootstrapToken } : {}),
         },
         body: JSON.stringify(body),
       }),
     );
   beforeAll(async () =>
     pg.exec(
-      await readFile(
+      (await readFile(
         new URL("../drizzle/0000_auth.sql", import.meta.url),
         "utf8",
-      ),
+      )) +
+        "\n" +
+        (await readFile(
+          new URL("../drizzle/0003_initial_admin.sql", import.meta.url),
+          "utf8",
+        )),
     ),
   );
   afterAll(async () => pg.close());
@@ -54,15 +66,79 @@ describe("Better Auth verified invite-only flows", () => {
     expect((await pg.query(`SELECT id FROM auth."user"`)).rows).toHaveLength(0);
     expect(mail).toHaveLength(0);
   });
-  it("creates a bootstrap account but blocks sign-in before verification", async () => {
-    expect(
-      (
-        await call("sign-up/email", {
+  it("rejects bootstrap signup without the secret or with the wrong secret", async () => {
+    for (const secret of [
+      undefined,
+      "incorrect-bootstrap-secret-0123456789abcdef",
+    ]) {
+      await call(
+        "sign-up/email",
+        {
+          name: "Impostor",
+          email: "owner@example.test",
+          password: "a-long-test-password",
+        },
+        undefined,
+        secret,
+      );
+      expect((await pg.query(`SELECT id FROM auth."user"`)).rows).toHaveLength(
+        0,
+      );
+      expect(
+        (await pg.query(`SELECT id FROM auth.initial_admin_claim`)).rows,
+      ).toHaveLength(0);
+    }
+    expect(mail).toHaveLength(0);
+    await call(
+      "sign-up/email",
+      {
+        name: "Wrong address",
+        email: "wrong@example.test",
+        password: "a-long-test-password",
+      },
+      undefined,
+      "fictional-bootstrap-secret-0123456789abcdefghi",
+    );
+    expect((await pg.query(`SELECT id FROM auth."user"`)).rows).toHaveLength(0);
+    await pg.exec(`DELETE FROM auth.rate_limit`);
+  });
+  it("rejects cross-origin initial setup before creating an account", async () => {
+    const response = await auth.handler(
+      new Request("http://localhost:3000/api/auth/sign-up/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://untrusted.example.test",
+          "x-bootstrap-token": "fictional-bootstrap-secret-0123456789abcdefghi",
+        },
+        body: JSON.stringify({
           name: "Owner",
           email: "owner@example.test",
           password: "a-long-test-password",
-          callbackURL: "/app",
-        })
+        }),
+      }),
+    );
+    expect(response.status).toBe(403);
+    expect((await pg.query(`SELECT id FROM auth."user"`)).rows).toHaveLength(0);
+    expect(
+      (await pg.query(`SELECT id FROM auth.initial_admin_claim`)).rows,
+    ).toHaveLength(0);
+    await pg.exec(`DELETE FROM auth.rate_limit`);
+  });
+  it("creates a bootstrap account but blocks sign-in before verification", async () => {
+    expect(
+      (
+        await call(
+          "sign-up/email",
+          {
+            name: "Owner",
+            email: "owner@example.test",
+            password: "a-long-test-password",
+            callbackURL: "/app",
+          },
+          undefined,
+          "fictional-bootstrap-secret-0123456789abcdefghi",
+        )
       ).status,
     ).toBe(200);
     expect(
@@ -72,6 +148,16 @@ describe("Better Auth verified invite-only flows", () => {
           message.subject.includes("Verify"),
       ),
     ).toBe(true);
+    expect(
+      (await pg.query(`SELECT id FROM auth.initial_admin_claim`)).rows,
+    ).toHaveLength(1);
+    expect(
+      (
+        await pg.query(
+          `SELECT initial_admin FROM auth."user" WHERE email='owner@example.test'`,
+        )
+      ).rows[0],
+    ).toMatchObject({ initial_admin: true });
     expect(
       (
         await call("sign-in/email", {
@@ -111,6 +197,49 @@ describe("Better Auth verified invite-only flows", () => {
       )?.user.emailVerified,
     ).toBe(true);
   });
+  it("blocks another public account while the verified administrator still has no owner team", async () => {
+    expect(
+      (await pg.query(`SELECT completed_at FROM auth.initial_admin_claim`))
+        .rows[0],
+    ).toMatchObject({ completed_at: null });
+    const openAuth = createAuth(db, {
+      baseURL: "http://localhost:3000",
+      secret: "fictional-test-secret-with-at-least-32-characters",
+      bootstrapOwnerEmail: "owner@example.test",
+      bootstrapSetupToken: "fictional-bootstrap-secret-0123456789abcdefghi",
+      publicSignup: true,
+      deliver: async () => {},
+    });
+    await pg.exec(`DELETE FROM auth.rate_limit`);
+    await openAuth.handler(
+      new Request("http://localhost:3000/api/auth/sign-up/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          name: "Other",
+          email: "other@example.test",
+          password: "another-long-password",
+          initialAdmin: true,
+          emailVerified: true,
+        }),
+      }),
+    );
+    expect(
+      (
+        await pg.query(
+          `SELECT id FROM auth."user" WHERE email='other@example.test'`,
+        )
+      ).rows,
+    ).toHaveLength(0);
+    expect(
+      (await pg.query(`SELECT completed_at FROM auth.initial_admin_claim`))
+        .rows[0],
+    ).toMatchObject({ completed_at: null });
+    await pg.exec(`DELETE FROM auth.rate_limit`);
+  });
   it("creates a team and sends a real invitation through the configured mail boundary", async () => {
     const response = await call(
       "organization/create",
@@ -120,6 +249,13 @@ describe("Better Auth verified invite-only flows", () => {
     expect(response.status).toBe(200);
     const team = await response.json();
     teamId = team.id;
+    expect(
+      (
+        await pg.query<{ completed_at: Date | null }>(
+          `SELECT completed_at FROM auth.initial_admin_claim`,
+        )
+      ).rows[0].completed_at,
+    ).toBeTruthy();
     expect(teamId).toBeTruthy();
     const creator = (
       await pg.query<{ email: string }>(

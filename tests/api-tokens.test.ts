@@ -29,9 +29,12 @@ describe("team scoped API tokens against actual SQL", () => {
   beforeAll(async () => {
     await applyMigrations(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
-    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified) VALUES('owner','Owner','owner@example.test',true),('recruiter','Recruiter','recruiter@example.test',true),('other','Other','other@example.test',true);
-      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner'),('other-team','Other Team','other-team','other');
-      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('owner-member','team','owner','owner'),('recruiter-member','team','recruiter','recruiter'),('other-member','other-team','other','owner');`);
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES('owner','Owner','owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('owner-member','team','owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified) VALUES('recruiter','Recruiter','recruiter@example.test',true),('other','Other','other@example.test',true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES('other-team','Other Team','other-team','other');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('recruiter-member','team','recruiter','recruiter'),('other-member','other-team','other','owner');`);
   });
   beforeEach(async () => {
     await pg.exec(`TRUNCATE app.activity; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;

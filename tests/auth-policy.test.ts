@@ -12,19 +12,17 @@ describe("registration and verified identity policy", () => {
     expect(
       canRegisterEmail("candidate@example.test", {
         publicSignup: false,
-        bootstrapOwnerEmail: "owner@example.test",
         hasPendingInvitation: false,
       }),
     ).toBe(false);
   });
-  it("accepts only a matching bootstrap email, pending invite, or explicit public signup", () => {
+  it("accepts only a pending invite or explicit public signup after bootstrap", () => {
     expect(
       canRegisterEmail(" Owner@Example.test ", {
         publicSignup: false,
-        bootstrapOwnerEmail: "owner@example.test",
         hasPendingInvitation: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       canRegisterEmail("person@example.test", {
         publicSignup: false,
