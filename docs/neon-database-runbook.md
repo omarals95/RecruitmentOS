@@ -1,0 +1,35 @@
+# Neon database setup runbook
+
+This is a preparation checklist. No migration, role creation, grant, credential rotation, or candidate-data import is performed by this document. Preview and Production use independent Neon resources. Repeat every step separately for each environment, starting with Preview and using fictional data only.
+
+## Stop conditions
+
+- Do not run a migration or start the application until Vercel project linking and the required environment settings have been verified. The first administrator's email, setup token, authentication origin and secret, and verified email sender must be configured separately for each environment.
+- The current runtime-role template grants changes to every table in the `auth` schema, including `auth.initial_admin_claim`. Direct changes to that singleton can undermine the durable setup state. Its privileges and the first-admin triggers need a reviewed, tested least-privilege design before creating the runtime role or deploying. Do not apply `infrastructure/postgres-runtime-role.sql` unchanged.
+- Do not attach an owner or migration connection as the deployed `DATABASE_URL`. The application refuses a runtime role with superuser, `BYPASSRLS`, or app-table owner privileges in production.
+- Stop on unexpected project, branch, database, role, privilege, migration state, connection failure, or authentication behavior. Investigate before retrying. Never log, commit, or put connection strings, passwords, setup tokens, or verification links into chat.
+
+## 1. Identify and prepare both environments
+
+1. In the Neon and Vercel consoles, confirm that the Preview resource points to its own empty database and the Production resource to a different database. Verify project and branch identifiers as well as database names; do not rely on display names alone. Verify that any automated Neon preview branching cannot copy Production candidate data.
+2. Confirm the existing Marketplace-injected `DATABASE_URL` role and ownership. Its name and existence do not establish that it is safe for runtime. Plan an independent, restricted runtime login and password for each environment, and keep each migration-owner credential under separate operator control.
+3. For each database, obtain its **direct, non-pooler owner connection** for the migration operator. `scripts/migrate.ts` takes a session-level PostgreSQL advisory lock; a transaction-pooled connection does not guarantee that later commands use the session holding that lock. Obtain a separate pooled connection for the restricted runtime role after it is created and reviewed. Verify TLS and hostname for both, without displaying connection strings.
+4. Verify the exact environment-specific Vercel settings, including a stable exact authentication origin, independent auth and setup secrets, administrator email, and a working verified email sender. The values must be scoped only to their intended environment. Never put the owner connection in deployed environment variables.
+
+## 2. Migrate one database at a time
+
+1. First review the exact checked-out application revision and the ordered SQL files under `drizzle/`; compare them with the database's `public.recruitment_migrations` ledger if it exists. For any nonempty or previously used database, assess backups and migration compatibility first; the initial-admin migration deliberately closes setup for an existing user or organization.
+2. In a controlled operator environment, provide only that database's direct owner connection as `MIGRATION_DATABASE_URL`. Confirm the existing `.env.local` or `.env` will not silently introduce a different database setting: `scripts/load-env.ts` loads one of these files. Confirm that `DATABASE_MODE` does not select PGlite. Do not copy a production owner credential into a local project file or any deployed environment.
+3. After all prerequisites and the runtime-privilege design are approved, run `npm run db:migrate` once for Preview. The script takes a session advisory lock and records completed migrations in `public.recruitment_migrations`. Each migration runs inside its own transaction; earlier completed files remain applied if a later file fails. Inspect the ledger and actual schema before deciding on recovery; do not reset or rerun blindly.
+4. Check that the expected migrations are recorded, the `auth` and `app` schemas exist, the `auth.initial_admin_claim` singleton and its triggers exist, and the intended `app` tables have row-level security and their expected policies. Check the actual installed revision rather than assuming the current four files will remain the complete list.
+5. Only after Preview passes the role and application tests below, repeat the process against the distinct Production resource. Production migration must never use Preview's connection, or vice versa.
+
+## 3. Runtime access and verification
+
+1. Finalize the reviewed claim-table and trigger privilege design first. Trigger functions currently execute with the caller's privileges, so merely revoking writes to the singleton can break legitimate initialization. If privileged functions are introduced, their ownership, fixed safe search path, execution rights, and direct-call behavior require security review and tests.
+2. Create each restricted login and its credential through an approved secure mechanism. Check Neon-specific role-creation requirements rather than placing a literal password in SQL, shell history, logs, source control, or a shared document. The roles must not own app tables, be superusers, have `BYPASSRLS`, or inherit a role that owns the tables. Grant only the privileges proven necessary by the reviewed implementation. Review new tables and grants on every future migration.
+3. Set each runtime role's pooled connection as that environment's `DATABASE_URL`; ensure that no application runtime setting contains an owner connection. Verify variable names and environment scopes without printing their values. Do not assume that a Vercel integration's initial connection already uses the restricted role.
+4. Before real use, verify with synthetic data and the actual runtime connections: initial-admin creation and verification; interrupted setup and replay; concurrent setup attempts; isolation between two teams; RLS denial without the proper team context; expected access within a team; and inability to alter schema or bypass the protected setup state directly. Verify Preview credentials cannot connect to the Production resource and vice versa. Include multi-connection tests against Neon, because in-memory tests alone cannot prove live concurrency behavior.
+5. Confirm application startup uses the intended runtime roles and that errors, logs, build output, and support reports contain no credentials or candidate contents. Keep both databases isolated and avoid importing real CV data while testing.
+
+Reference: [Neon pooled and direct connections](https://neon.com/blog/prisma-dx-improvements), [Neon PostgreSQL roles](https://neon.com/blog/postgres-roles), and [deployment guidance](deployment.md).

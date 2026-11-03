@@ -1,5 +1,9 @@
 # Validation before deployment
 
+## Update: Blob integrity component
+
+On 3 November 2026, a standalone, unwired Blob integrity component passed six synthetic tests. The complete native storage suite passed 24 tests; 106 Vitest tests passed with one Windows junction test skipped. TypeScript, ESLint and formatting checks also passed. These checks do not establish provider behavior, end-to-end upload or download safety, quota cleanup, or live concurrency. Blob CV storage remains disabled. See [blob-security-design.md](blob-security-design.md).
+
 ## Update: first-admin setup and storage provider guard
 
 On 3 November 2026, the updated code passed TypeScript, ESLint, 106 Vitest tests and 18 native storage tests. One Windows junction test remained skipped because the sandbox could not create its test junction. Initial-admin tests use fictional accounts and an embedded database; they cover the durable claim, authorization, verification, team-owner completion and interrupted delivery. Live Neon multi-connection races and actual email delivery remain staging checks.
