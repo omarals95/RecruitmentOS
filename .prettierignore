@@ -1,0 +1,8 @@
+.next/
+.local/
+tmp/
+node_modules/
+package-lock.json
+next-env.d.ts
+PROJECT_CONTRACT.md
+docs/superpowers/

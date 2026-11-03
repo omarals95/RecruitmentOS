@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VerifyVersioning",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketVersioning"],
+      "Resource": "arn:aws:s3:::REPLACE_PRIVATE_BUCKET"
+    },
+    {
+      "Sid": "PrivateCvObjectsOnly",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::REPLACE_PRIVATE_BUCKET/teams/*"
+    }
+  ]
+}

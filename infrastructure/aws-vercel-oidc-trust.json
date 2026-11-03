@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::REPLACE_ACCOUNT_ID:oidc-provider/oidc.vercel.com/REPLACE_VERCEL_TEAM_SLUG"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.vercel.com/REPLACE_VERCEL_TEAM_SLUG:aud": "https://vercel.com/REPLACE_VERCEL_TEAM_SLUG",
+          "oidc.vercel.com/REPLACE_VERCEL_TEAM_SLUG:sub": "owner:REPLACE_VERCEL_TEAM_SLUG:project:REPLACE_PROJECT_NAME:environment:production"
+        }
+      }
+    }
+  ]
+}

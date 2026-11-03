@@ -1,0 +1,65 @@
+# API access for AI clients and integrations
+
+Create a personal access token under **Settings → API tokens** while signed in. Select the smallest set of scopes required. The token is tied to your user and the selected team. It is displayed once and is never returned by the token list. Store it in your integration's secret store, never in prompts, browser bundles, source control or screenshots.
+
+The token's permissions are checked against your current verified account and live team membership on every request. Removing a member, reducing their role, revoking the token or reaching its expiry removes the corresponding access. Tokens cannot manage users, teams, invitations, roles or other tokens. API token traffic is limited to 60 authenticated requests per minute per token. Retry a 429 response with backoff; do not repeat a failed create without reusing its idempotency key.
+
+Tokens expire after 30 days by default; a shorter or longer duration up to 365 days can be chosen. Owners and admins can revoke team tokens; everyone can revoke their own. Revocation does not delete records already created by that token. Change history identifies API token actions without recording the secret.
+
+| Scope               | Access                                                                   |
+| ------------------- | ------------------------------------------------------------------------ |
+| `candidates:read`   | Read the candidate directory and candidate facts                         |
+| `candidates:write`  | Create or update candidates                                              |
+| `recruitment:read`  | Read vacancies, applications, tasks and recruitment operations           |
+| `recruitment:write` | Create or update recruitment records                                     |
+| `cvs:read`          | List CV metadata and request temporary private download links            |
+| `cvs:write`         | Reserve, upload and complete a CV upload                                 |
+| `imports:write`     | Preserve legacy import identifiers and source metadata; owner/admin only |
+
+Write scopes do not implicitly grant the corresponding read scope. Choose both when an integration needs to read its results. A viewer can create a read-only token. A recruiter cannot request import privileges. AI integrations are explicit clients: RecruitmentOS does not send candidate records to an AI provider automatically.
+
+## Read candidates
+
+Set `RECRUITMENTOS_URL` to the deployed HTTPS origin and `RECRUITMENTOS_TOKEN` through your shell or integration's secret store. The commands below contain no credentials or real candidate data.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/candidates?page=1&pageSize=25&search=engineer" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"
+```
+
+The response contains `data` and `pagination`. Results are limited to the token's team. Supplying another team's `X-Team-Id` is rejected.
+
+## Create a candidate safely
+
+Use one stable, unique `Idempotency-Key` for one logical create. A retry with the same key and body returns the original result; a changed body returns a conflict. Do not infer missing personal facts.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/candidates" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: external-record-12345" \
+  --data '{"data":{"name":"Fictional Example","email":"fictional@example.com","skills":["TypeScript"],"folderCategories":["Engineering"]}}'
+```
+
+For updates, send the record's latest `version` in `PATCH /api/v1/candidates/{id}`. A 409 means someone changed the record; reread and reconcile rather than overwriting their changes.
+
+## Upload a CV
+
+CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private S3 bucket.
+
+1. `POST /api/v1/candidates/{candidateId}/cvs/uploads` with JSON containing `originalName`, `mimeType`, `sizeBytes` and a stable `clientUploadId` UUID. Requires `cvs:write`.
+2. Send a multipart form directly to `upload.url`. Include every value in `upload.fields` unchanged, followed by the file part. Do not forward the RecruitmentOS API token to S3.
+3. `POST /api/v1/cvs/uploads/{data.id}/complete` with the RecruitmentOS token. The server checks the exact S3 object version, format and size before marking it ready.
+4. Read metadata through `GET /api/v1/candidates/{candidateId}/cvs?page=1&pageSize=50`. The response includes `data` and `pagination` with the full candidate file total; page size is capped at 100. Request a short-lived attachment URL through `GET /api/v1/cvs/{cvId}/download` when needed. Requires `cvs:read`.
+
+Uploads are limited to 10 MiB and team storage quotas. The upload form expires within five minutes. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
+
+## Errors
+
+The API uses structured errors with a safe message and code. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
+
+See `/api/openapi.json` for endpoint documentation. Auth and team management use the interactive sign-in session, never a personal API token.
+
+`POST /api/v1/notifications` marks genuine reminder keys read for the token's user. Token clients need both `recruitment:read` and `recruitment:write`; a read-only token cannot change reminder state.
+
+Authentication UI uses [Better Auth organization APIs](https://better-auth.com/docs/plugins/organization), [session controls](https://better-auth.com/docs/concepts/session-management) and [profile/password controls](https://better-auth.com/docs/concepts/users-accounts).

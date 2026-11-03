@@ -1,0 +1,75 @@
+{
+  "name": "recruitment-os",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "node scripts/next.mjs dev --webpack --hostname 127.0.0.1",
+    "build": "node scripts/next.mjs build --webpack",
+    "start": "node scripts/next.mjs start --hostname 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:storage": "node --test tests/storage*.test.ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed-local.ts",
+    "import:legacy": "tsx scripts/import-legacy.ts",
+    "test:local": "tsx scripts/smoke-local.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1161.0",
+    "@aws-sdk/credential-provider-web-identity": "3.972.86",
+    "@aws-sdk/s3-presigned-post": "3.1161.0",
+    "@aws-sdk/s3-request-presigner": "3.1161.0",
+    "@better-auth/core": "1.7.15",
+    "@better-auth/drizzle-adapter": "1.7.15",
+    "@electric-sql/pglite": "0.5.14",
+    "@vercel/functions": "3.10.5",
+    "@vercel/oidc": "4.0.5",
+    "better-auth": "1.7.15",
+    "date-fns-tz": "3.2.0",
+    "drizzle-orm": "0.45.4",
+    "lucide-react": "1.66.0",
+    "next": "16.4.4",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "read-excel-file": "9.3.14",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@next/eslint-plugin-next": "16.4.4",
+    "@types/node": "^24.0.0",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "10.14.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5",
+    "write-excel-file": "^4.0.0"
+  },
+  "type": "module",
+  "overrides": {
+    "@vercel/cli-config": {
+      "zod": "4.6.7"
+    },
+    "eslint": {
+      "minimatch": "11.0.1"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    }
+  }
+}

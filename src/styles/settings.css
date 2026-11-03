@@ -1,0 +1,51 @@
+.settings-nav {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 16px;
+}
+.settings-nav .button {
+  text-decoration: none;
+}
+.settings-nav a[aria-current="page"] {
+  font-weight: 650;
+}
+.settings-page .panel > h2 {
+  margin-bottom: 10px;
+}
+.settings-page .panel > p {
+  margin: 8px 0 18px;
+}
+.settings-page .panel > form {
+  margin-top: 16px;
+}
+.settings-page .settings-table {
+  margin-top: 16px;
+  font-size: 12px;
+}
+.settings-page .settings-table th {
+  font-size: 11px;
+}
+.settings-page .settings-table th:last-child,
+.settings-page .settings-table td:last-child {
+  min-width: 130px;
+  width: auto;
+}
+.settings-page .settings-table .field {
+  min-width: 120px;
+}
+.settings-page pre {
+  font-size: 12px;
+}
+.settings-page code {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .settings-nav {
+    gap: 6px;
+  }
+  .settings-nav .button {
+    flex: 1;
+    justify-content: center;
+    padding-inline: 10px;
+  }
+}

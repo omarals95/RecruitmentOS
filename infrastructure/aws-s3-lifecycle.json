@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "AbortAbandonedMultipartOnly",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "teams/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
