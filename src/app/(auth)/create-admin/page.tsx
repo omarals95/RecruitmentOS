@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getDb } from "@/db";
+import { getIdentityDb } from "@/db";
 import { initialAdminClaim, organization, user } from "@/db/auth-schema";
 import { AuthForm } from "@/components/auth/auth-form";
 import { getAuthOptions } from "@/lib/auth";
@@ -11,7 +11,7 @@ export default async function CreateAdmin() {
     return <AuthForm mode="create-admin" options={options} />;
   let available = false;
   try {
-    const db = await getDb();
+    const db = await getIdentityDb();
     const [claims, users, teams] = await Promise.all([
       db.select({ id: initialAdminClaim.id }).from(initialAdminClaim).limit(1),
       db.select({ id: user.id }).from(user).limit(1),

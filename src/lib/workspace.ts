@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { getSession } from "./auth-session";
 import { getAuthOptions } from "./auth";
-import { getDb } from "@/db";
+import { getIdentityDb } from "@/db";
 import { member, organization } from "@/db/auth-schema";
 import { parseRole, type Role } from "./permissions";
 export interface WorkspaceContext {
@@ -16,7 +16,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
   const identity = await getSession(await headers());
   if (!identity) redirect("/sign-in");
   if (!identity.user.emailVerified) redirect("/verify-email");
-  const db = await getDb();
+  const db = await getIdentityDb();
   const memberships = await db
     .select({ team: organization, role: member.role })
     .from(member)

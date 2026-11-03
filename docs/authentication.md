@@ -1,5 +1,7 @@
 # Authentication and team setup
 
+> **Hosted authentication is currently disabled.** The staged identity and tenant-isolation changes are incomplete. Do not use the setup steps below for a hosted deployment until the gates and verification described in [identity-boundary-plan.md](identity-boundary-plan.md) are complete.
+
 RecruitmentOS uses Better Auth with database-backed sessions, verified email/password sign-in, and team invitations. A team is a Better Auth organization. Candidate data is protected by additional live membership and permission checks on every request.
 
 ## Configuration
@@ -11,6 +13,7 @@ Set these server-only values in the deployment environment:
 | `BETTER_AUTH_URL`       | Exact HTTPS application origin, with no path. Local development accepts localhost/127.0.0.1 HTTP.               |
 | `BETTER_AUTH_SECRET`    | Random secret of at least 32 characters. Keep stable across deployments.                                        |
 | `DATABASE_URL`          | Runtime PostgreSQL connection, using the separate restricted runtime role described in deployment instructions. |
+| `IDENTITY_DATABASE_URL` | Separate restricted identity connection to the same database; the role design is not yet deployment-ready.      |
 | `RESEND_API_KEY`        | Transactional email delivery credential.                                                                        |
 | `EMAIL_FROM`            | Verified sender, for example `RecruitmentOS <recruitment@example.org>`.                                         |
 | `BOOTSTRAP_OWNER_EMAIL` | Email allowed to create the first administrator account without an invitation. It still must be verified.       |
@@ -19,7 +22,7 @@ Set these server-only values in the deployment environment:
 
 The public website remains accessible when configuration is incomplete. Sign-in pages show setup-required state. Private operations fail closed; the app never substitutes fake production users or a local database.
 
-For explicit local development only, use `DATABASE_MODE=pglite`, `ALLOW_LOCAL_DB=true`, and an optional `PGLITE_DATA_DIR`. `DEV_MAIL_MODE=console` prints local verification/reset/invitation messages to the development terminal. Never use this with real accounts or share the terminal output. Console mail is disabled in production. Local and production authentication have the same verification requirements.
+For explicit local development only, use `DATABASE_MODE=pglite`, `ALLOW_LOCAL_DB=true`, and an optional `PGLITE_DATA_DIR`. `DEV_MAIL_MODE=console` prints local verification/reset/invitation messages to the development terminal. Never use this with real accounts or share the terminal output. Console mail is disabled in production and whenever Vercel hosting is detected. Local and production authentication have the same verification requirements.
 
 ## First account and invitations
 

@@ -10,6 +10,7 @@ export default defineConfig([
     "next-env.d.ts",
     "private/**",
     ".local/**",
+    "tmp/**",
   ]),
   {
     files: ["**/*.ts", "**/*.tsx"],

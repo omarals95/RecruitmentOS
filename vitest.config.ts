@@ -6,7 +6,7 @@ export default defineConfig({
     environment: "node",
     testTimeout: 30000,
     hookTimeout: 60000,
-    exclude: ["node_modules/**", ".next/**", "tests/storage*.test.ts"],
+    exclude: ["node_modules/**", ".next/**", "tmp/**", "tests/storage*.test.ts"],
     maxWorkers: 2,
   },
 });

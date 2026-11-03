@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { getDb } from "@/db";
+import { getIdentityDb } from "@/db";
 import { member } from "@/db/auth-schema";
 import { getVerifiedSession } from "./auth-session";
 import { authenticateApiToken } from "./api-tokens";
@@ -58,7 +58,7 @@ export async function requirePrincipal(
         "team_required",
         "Create or select a team first.",
       );
-    const db = await getDb();
+    const db = await getIdentityDb();
     const [membership] = await db
       .select()
       .from(member)

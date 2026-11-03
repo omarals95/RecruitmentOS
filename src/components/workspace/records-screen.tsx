@@ -37,6 +37,7 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { CvUpload } from "@/components/cv-upload";
+import { BulkCvImport } from "./bulk-cv-import";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
@@ -213,6 +214,7 @@ export function RecordsScreen({ section }: { section: string }) {
   } | null>(null);
   const [detail, setDetail] = useState<RecordDto | null>(null);
   const [bulk, setBulk] = useState(false);
+  const [bulkCv, setBulkCv] = useState(false);
   const [settings, setSettings] = useState(false);
   const [saveView, setSaveView] = useState(false);
   const [notice, setNotice] = useState("");
@@ -450,6 +452,16 @@ export function RecordsScreen({ section }: { section: string }) {
           <p>{config.description}</p>
         </div>
         <div className="row">
+          {resource === "candidates" && (
+            <button
+              className="button secondary"
+              disabled={!canWrite}
+              onClick={() => setBulkCv(true)}
+            >
+              <FileText size={17} aria-hidden="true" />
+              Import CVs
+            </button>
+          )}
           {resource === "tasks" && (
             <button
               className="button secondary"
@@ -1075,6 +1087,13 @@ export function RecordsScreen({ section }: { section: string }) {
             setDetail(record);
             refresh();
           }}
+        />
+      )}
+      {bulkCv && (
+        <BulkCvImport
+          key={team.id}
+          onClose={() => setBulkCv(false)}
+          onChanged={refresh}
         />
       )}
       {editor && (

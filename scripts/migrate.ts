@@ -1,6 +1,7 @@
 import "./load-env";
 import { Client } from "pg";
 import { applyMigrations, getDb } from "../src/db";
+import { isLoopbackHost } from "../src/db/connection-boundary";
 async function main() {
   if (process.env.DATABASE_MODE === "pglite") {
     await getDb();
@@ -19,7 +20,7 @@ async function main() {
       "Migration and runtime credentials must be separate in production.",
     );
   const url = new URL(process.env.MIGRATION_DATABASE_URL);
-  if (!["localhost", "127.0.0.1", "::1"].includes(url.hostname))
+  if (!isLoopbackHost(url.hostname))
     url.searchParams.set("sslmode", "verify-full");
   const client = new Client({ connectionString: url.toString() });
   await client.connect();

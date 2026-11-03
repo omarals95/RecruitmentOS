@@ -1,7 +1,6 @@
--- Run as the Neon database owner AFTER migrations, outside the deployed app.
--- Create the limited runtime role using SQL; Neon Console/API/CLI role creation grants neon_superuser.
--- Pick a unique runtime role and provision its password through a reviewed secure process.
--- Do not save a real password in this file or commit it.
+-- LEGACY TEST FIXTURE ONLY: this shared role can read and modify auth data and
+-- forge tenant context. It is unsafe and MUST NOT be used in any deployment.
+-- Retained solely for synthetic regression tests of the legacy vulnerability.
 CREATE ROLE recruitment_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 GRANT CONNECT ON DATABASE neondb TO recruitment_runtime;
 GRANT USAGE ON SCHEMA auth,app TO recruitment_runtime;

@@ -4,6 +4,41 @@ import { applyMigrations } from "../src/db";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role";
 
 describe("database runtime role safety", () => {
+  it("rejects direct, inherited and PUBLIC execution of server-file helpers", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      await pg.exec(`
+        CREATE ROLE file_safe NOLOGIN;
+        CREATE ROLE file_direct NOLOGIN;
+        CREATE ROLE file_parent NOLOGIN;
+        CREATE ROLE file_child NOLOGIN NOINHERIT;
+        CREATE ROLE file_directory NOLOGIN;
+        CREATE ROLE file_public NOLOGIN;
+        GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO file_direct;
+        GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text,bigint,bigint) TO file_parent;
+        GRANT file_parent TO file_child;
+        GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir(text) TO file_directory;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("file_safe")).toBe(false);
+      for (const role of ["file_direct", "file_child", "file_directory"])
+        expect(await unsafe(role), role).toBe(true);
+      await pg.exec(
+        "GRANT EXECUTE ON FUNCTION pg_catalog.lo_import(text) TO PUBLIC",
+      );
+      expect(await unsafe("file_public")).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
   it("rejects direct and inherited privileged roles, schema owners, and create privileges", async () => {
     const pg = new PGlite();
     try {

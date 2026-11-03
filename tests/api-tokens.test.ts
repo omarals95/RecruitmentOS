@@ -61,6 +61,54 @@ describe("team scoped API tokens against actual SQL", () => {
     ).toContainEqual({ action: "token.created" });
   });
 
+  it("rolls back token creation if the corresponding audit entry fails", async () => {
+    await pg.exec(`
+      CREATE FUNCTION app.reject_test_token_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic audit failure'; END $$;
+      CREATE TRIGGER reject_test_token_audit BEFORE INSERT ON app.activity
+        FOR EACH ROW EXECUTE FUNCTION app.reject_test_token_audit();
+    `);
+    try {
+      await expect(
+        createToken(principal(), {
+          name: "Fixture",
+          scopes: ["candidates:read"],
+        }),
+      ).rejects.toThrow();
+      const result = await pg.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM auth.api_tokens",
+      );
+      expect(result.rows[0].count).toBe(0);
+    } finally {
+      await pg.exec(
+        "DROP TRIGGER reject_test_token_audit ON app.activity; DROP FUNCTION app.reject_test_token_audit()",
+      );
+    }
+  });
+
+  it("rolls back token revocation if the corresponding audit entry fails", async () => {
+    const result = await createToken(principal(), {
+      name: "Fixture",
+      scopes: ["candidates:read"],
+    });
+    await pg.exec(`
+      CREATE FUNCTION app.reject_test_token_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Synthetic audit failure'; END $$;
+      CREATE TRIGGER reject_test_token_audit BEFORE INSERT ON app.activity
+        FOR EACH ROW EXECUTE FUNCTION app.reject_test_token_audit();
+    `);
+    try {
+      await expect(revokeToken(principal(), result.data.id)).rejects.toThrow();
+      expect((await authenticateApiToken(result.token)).userId).toBe(
+        "recruiter",
+      );
+    } finally {
+      await pg.exec(
+        "DROP TRIGGER reject_test_token_audit ON app.activity; DROP FUNCTION app.reject_test_token_audit()",
+      );
+    }
+  });
+
   it("rechecks live membership and role instead of trusting a stale principal or token grant", async () => {
     const result = await createToken(principal(), {
       name: "Recruiting",

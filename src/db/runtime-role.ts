@@ -10,6 +10,20 @@ export const runtimeRoleSafetyQuery = `
           OR r.rolname IN ('neon_superuser', 'pg_read_all_data', 'pg_write_all_data',
             'pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program'))
     )
+    -- Defense in depth for known filesystem helpers; this is not a full catalog audit.
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc p
+      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+      CROSS JOIN pg_catalog.pg_roles r
+      WHERE n.nspname = 'pg_catalog'
+        AND p.proname IN ('pg_read_file', 'pg_read_binary_file', 'pg_ls_dir',
+          'pg_stat_file', 'pg_ls_logdir', 'pg_ls_waldir', 'pg_ls_archive_statusdir',
+          'pg_ls_tmpdir', 'pg_ls_logicalmapdir', 'pg_ls_logicalsnapdir',
+          'pg_ls_replslotdir', 'pg_ls_summariesdir', 'pg_rotate_logfile',
+          'lo_import', 'lo_export')
+        AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_function_privilege(r.oid, p.oid, 'EXECUTE')
+    )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_namespace n
       WHERE n.nspname IN ('app', 'auth')

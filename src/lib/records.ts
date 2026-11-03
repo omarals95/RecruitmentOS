@@ -7,6 +7,7 @@ import {
   eq,
   inArray,
   isNull,
+  or,
   sql,
   type SQL,
 } from "drizzle-orm";
@@ -631,6 +632,61 @@ export async function getRecord(
     async (tx) =>
       (await decorate(tx, p, [dto(await find(tx, p, kind, recordId))]))[0],
   );
+}
+
+export const candidateDuplicateQuerySchema = z
+  .object({
+    email: z.string().trim().max(320).optional(),
+    phone: z.string().trim().max(100).optional(),
+  })
+  .strict()
+  .refine(
+    ({ email, phone }) =>
+      Boolean(email || (phone || "").replace(/\D/g, "").length >= 7),
+    "Enter an email or a phone number with at least seven digits.",
+  );
+
+/** Contact matches are possible duplicates for review, never an identity decision. */
+export async function findCandidateDuplicates(p: Principal, input: unknown) {
+  permission(p, "candidates");
+  const query = parse(candidateDuplicateQuerySchema, input);
+  const email = query.email?.toLowerCase() || "";
+  const phone = (query.phone || "").replace(/\D/g, "");
+  const predicates: SQL[] = [];
+  if (email)
+    predicates.push(sql`lower(trim(${records.data}->>'email')) = ${email}`);
+  if (phone.length >= 7)
+    predicates.push(
+      sql`regexp_replace(coalesce(${records.data}->>'phone', ''), '[^0-9]', '', 'g') = ${phone}`,
+    );
+  return withTeam(p, async (tx) => {
+    const rows = await tx
+      .select({ id: records.id, data: records.data })
+      .from(records)
+      .where(and(...owned(p, "candidate"), or(...predicates)))
+      .orderBy(asc(records.id))
+      .limit(20);
+    return rows.map((row) => {
+      const storedEmail =
+        typeof row.data.email === "string" ? row.data.email : "";
+      const storedPhone =
+        typeof row.data.phone === "string" ? row.data.phone : "";
+      return {
+        id: row.id,
+        name: typeof row.data.name === "string" ? row.data.name : "",
+        email: storedEmail,
+        phone: storedPhone,
+        matches: [
+          ...(email && storedEmail.trim().toLowerCase() === email
+            ? ["email"]
+            : []),
+          ...(phone.length >= 7 && storedPhone.replace(/\D/g, "") === phone
+            ? ["phone"]
+            : []),
+        ],
+      };
+    });
+  });
 }
 
 export async function listRecords(

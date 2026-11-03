@@ -1,5 +1,7 @@
 # Deploying RecruitmentOS
 
+> **Deployment is blocked.** The staged identity split and tenant isolation are incomplete. Hosted and production database access are deliberately disabled in code. Do not run the legacy shared-role template, enable Blob, import real candidate data, or remove these gates. Follow [identity-boundary-plan.md](identity-boundary-plan.md) and [neon-database-runbook.md](neon-database-runbook.md) for the outstanding implementation and verification work.
+
 The project is prepared for Vercel. No Neon database, S3 bucket, mail account, OAuth client or Vercel project is created by cloning or building the repository. Deployment uses the services you configure below.
 
 ## 1. Separate environments
@@ -10,11 +12,11 @@ Use separate Neon branches/databases, S3 buckets, email settings and auth secret
 
 Create a PostgreSQL database in the intended region. Keep its owner connection only in the administrator's local `MIGRATION_DATABASE_URL`; do not add that owner connection to the Vercel application's runtime environment.
 
-Install with `npm ci`, set the owner connection in an ignored `.env.local`, then run `npm run db:migrate`. Migrations are transactional and tracked in `public.recruitment_migrations`. They include tenant composite foreign keys, uniqueness rules, append-only audit protection, last-owner protection and row-level security. Back up the database before future schema changes. Changes are forward migrations; do not edit migrations already applied to a deployed database.
+After the deployment blockers are resolved and the exact target, migration state and role plan have been verified, follow the [Neon database runbook](neon-database-runbook.md) using the target database's direct owner connection. Do not run migrations yet. Migrations are transactional and tracked in `public.recruitment_migrations`. They include tenant composite foreign keys, uniqueness rules, append-only audit protection, last-owner protection and row-level security. Back up the database before future schema changes. Changes are forward migrations; do not edit migrations already applied to a deployed database.
 
-After migrations, review and run [postgres-runtime-role.sql](../infrastructure/postgres-runtime-role.sql) as owner. Replace `neondb` if the database has a different name, set the role's password securely, and generate a **pooled Neon connection string for that runtime role**. Put that connection in Vercel's `DATABASE_URL`. Use TLS; the application enforces certificate verification for remote PostgreSQL connections. Do not grant the runtime role membership of the owner role.
+The old [postgres-runtime-role.sql](../infrastructure/postgres-runtime-role.sql) is a legacy synthetic-test fixture and must not be used for deployment. The planned split requires separately restricted data and identity roles, a reviewed grant template and verification against the intended database. No complete deployment-ready role template exists yet. Keep owner credentials out of the application runtime and use TLS with certificate verification for remote connections.
 
-The production application refuses a role that is a superuser, has BYPASSRLS, owns an app table or inherits its ownership. Auth tables are managed through Better Auth; business tables have transaction-scoped team policies as well as explicit server membership checks. Database migrations and runtime credentials serve different purposes.
+The staged startup checks reject several unsafe role privileges, but they are not a complete privilege audit or proof of tenant isolation. Existing team policies trust caller-set transaction context; do not claim isolation against a compromised runtime SQL role until the replacement controls and adversarial live tests pass.
 
 ## 3. Vercel environment
 
@@ -23,6 +25,7 @@ Set server-only environment variables from `.env.example`:
 | Setting                                        | Purpose                                                        |
 | ---------------------------------------------- | -------------------------------------------------------------- |
 | `DATABASE_URL`                                 | Pooled restricted runtime Neon connection                      |
+| `IDENTITY_DATABASE_URL`                        | Separate restricted identity connection to the same database   |
 | `BETTER_AUTH_URL`                              | Exact canonical HTTPS application origin, without a path       |
 | `BETTER_AUTH_SECRET`                           | Unique cryptographically random secret, at least 32 characters |
 | `BOOTSTRAP_OWNER_EMAIL`                        | Email allowed to register the first owner account              |

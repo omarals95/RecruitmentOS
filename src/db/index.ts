@@ -3,17 +3,161 @@ import * as app from "./schema";
 import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
+import {
+  dataRoleBoundaryQuery,
+  identityRoleBoundaryQuery,
+  isLoopbackHost,
+  markerRoleBoundaryQuery,
+  prepareConnectionTargets,
+  verifyPoolPair,
+} from "./connection-boundary";
+import type { Pool } from "pg";
 export const schema = { ...app, ...auth };
 export type AppDb = NodePgDatabase<typeof schema>;
 export type TeamTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0];
 let singleton: Promise<AppDb> | undefined;
+let identityPair: Promise<{ data: AppDb; identity: AppDb }> | undefined;
+let testDatabase: Promise<AppDb> | undefined;
+function hostedOrProduction() {
+  return process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+}
 export function getDb(): Promise<AppDb> {
+  if (testDatabase) return testDatabase;
+  if (hostedOrProduction() || process.env.IDENTITY_DATABASE_URL)
+    return getDbPair().then((pair) => pair.data);
   if (!singleton)
     singleton = createDb().catch((error) => {
       singleton = undefined;
       throw error;
     });
   return singleton;
+}
+export function getIdentityDb(): Promise<AppDb> {
+  if (testDatabase) return testDatabase;
+  if (hostedOrProduction() || process.env.IDENTITY_DATABASE_URL)
+    return getDbPair().then((pair) => pair.identity);
+  return getDb();
+}
+
+function getDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+  if (!identityPair)
+    identityPair = createDbPair().catch((error) => {
+      identityPair = undefined;
+      throw error;
+    });
+  return identityPair;
+}
+
+async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+  if (process.env.DATABASE_MODE === "pglite")
+    throw new ApiError(
+      503,
+      "local_db_disabled",
+      "Local database mode is not available for isolated production pools.",
+    );
+  const dataUrl = process.env.DATABASE_URL;
+  const identityUrl = process.env.IDENTITY_DATABASE_URL;
+  if (!dataUrl || !identityUrl)
+    throw new ApiError(
+      503,
+      "unsafe_database_connections",
+      "Configure separate database connections for recruitment data and identity.",
+    );
+  const targets = prepareConnectionTargets(dataUrl, identityUrl);
+  // Remove only after trusted tenant policies and identity workflows pass end-to-end review.
+  if (hostedOrProduction())
+    throw new ApiError(
+      503,
+      "tenant_isolation_pending",
+      "The database identity boundary is not ready for deployment.",
+    );
+  const { Pool } = await import("pg");
+  const { drizzle } = await import("drizzle-orm/node-postgres");
+  function makePool(connectionString: string) {
+    const url = new URL(connectionString);
+    const local = isLoopbackHost(url.hostname);
+    if (!local) url.searchParams.set("sslmode", "verify-full");
+    return new Pool({
+      connectionString: url.toString(),
+      max: 5,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+      ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
+    });
+  }
+  const dataPool = makePool(targets.dataUrl);
+  const identityPool = makePool(targets.identityUrl);
+  try {
+    async function inspect(pool: Pool, boundaryQuery: string) {
+      const principal = await pool.query<{
+        role: string;
+        sessionRole: string;
+        database: string;
+      }>(
+        'SELECT current_user::text AS role, session_user::text AS "sessionRole", current_database()::text AS database',
+      );
+      if (
+        principal.rows.length !== 1 ||
+        !principal.rows[0].role ||
+        principal.rows[0].role !== principal.rows[0].sessionRole
+      )
+        throw new ApiError(
+          503,
+          "unsafe_database_role",
+          "The session login must match the effective database role.",
+        );
+      for (const query of [
+        runtimeRoleSafetyQuery,
+        markerRoleBoundaryQuery,
+        boundaryQuery,
+      ]) {
+        const safety = await pool.query<{ unsafe: boolean }>(query);
+        if (safety.rows.length !== 1 || safety.rows[0].unsafe !== false)
+          throw new ApiError(
+            503,
+            "unsafe_database_role",
+            "A database role violates the configured identity boundary.",
+          );
+      }
+      const marker = await pool.query<{ marker: string }>(
+        "SELECT id::text AS marker FROM db_boundary.connection_marker",
+      );
+      if (principal.rows.length !== 1 || marker.rows.length !== 1)
+        throw new ApiError(
+          503,
+          "unsafe_database_connections",
+          "The database connection identity marker is unavailable.",
+        );
+      return { ...principal.rows[0], marker: marker.rows[0].marker };
+    }
+    const data = await inspect(dataPool, dataRoleBoundaryQuery);
+    const identity = await inspect(identityPool, identityRoleBoundaryQuery);
+    const dataMembership = await dataPool.query<{ member: boolean }>(
+      "SELECT pg_catalog.pg_has_role(current_user, $1::text, 'MEMBER') AS member",
+      [identity.role],
+    );
+    const identityMembership = await identityPool.query<{ member: boolean }>(
+      "SELECT pg_catalog.pg_has_role(current_user, $1::text, 'MEMBER') AS member",
+      [data.role],
+    );
+    verifyPoolPair(
+      { ...data, canAssumeOther: dataMembership.rows[0]?.member },
+      { ...identity, canAssumeOther: identityMembership.rows[0]?.member },
+    );
+    if (process.env.VERCEL) {
+      const { attachDatabasePool } = await import("@vercel/functions");
+      attachDatabasePool(dataPool);
+      attachDatabasePool(identityPool);
+    }
+    return {
+      data: drizzle(dataPool, { schema }),
+      identity: drizzle(identityPool, { schema }),
+    };
+  } catch (error) {
+    await Promise.allSettled([dataPool.end(), identityPool.end()]);
+    throw error;
+  }
 }
 async function createDb(): Promise<AppDb> {
   if (process.env.DATABASE_MODE === "pglite") {
@@ -44,7 +188,7 @@ async function createDb(): Promise<AppDb> {
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
   const url = new URL(process.env.DATABASE_URL);
-  const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const local = isLoopbackHost(url.hostname);
   if (!local) url.searchParams.set("sslmode", "verify-full");
   const pool = new Pool({
     connectionString: url.toString(),
@@ -98,7 +242,7 @@ export async function applyMigrations(client: {
 }
 /** Test injection is disabled outside Vitest; never used by production entry points. */
 export function setDbForTests(db: AppDb) {
-  if (process.env.VITEST !== "true")
+  if (process.env.VITEST !== "true" || hostedOrProduction())
     throw new Error("Test database injection is disabled");
-  singleton = Promise.resolve(db);
+  testDatabase = Promise.resolve(db);
 }

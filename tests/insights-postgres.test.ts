@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activity, notificationReads, records } from "@/db/schema";
+import { member, user } from "@/db/auth-schema";
 import { withTeam } from "@/lib/db-team";
 import {
   analytics,
@@ -23,6 +24,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
   let owner: Principal,
     colleague: Principal,
+    former: Principal,
     other: Principal,
     viewer: Principal;
   const now = "2030-01-01T22:00:00.000Z"; // January 2 in Dubai.
@@ -30,6 +32,19 @@ describe("bounded, factual PostgreSQL reporting", () => {
     fixture = await createTestDb();
     owner = await seedIdentity(fixture.db);
     colleague = await seedIdentity(fixture.db, { userId: "insight-colleague" });
+    former = await seedIdentity(fixture.db, { userId: "insight-former" });
+    await fixture.db
+      .update(user)
+      .set({ name: "Historical Activity Actor" })
+      .where(eq(user.id, former.userId));
+    await fixture.db
+      .delete(member)
+      .where(
+        and(
+          eq(member.organizationId, former.teamId),
+          eq(member.userId, former.userId),
+        ),
+      );
     other = await seedIdentity(fixture.db, {
       userId: "insight-other",
       teamId: "insight-other",
@@ -341,6 +356,77 @@ describe("bounded, factual PostgreSQL reporting", () => {
         )
       ).pagination.total,
     ).toBe(0);
+  });
+
+  it("searches and paginates historical actor names without exposing other teams' activity", async () => {
+    const firstId = randomUUID(),
+      secondId = randomUUID(),
+      foreignId = randomUUID();
+    await withTeam(owner, (tx) =>
+      tx.insert(activity).values([
+        {
+          id: firstId,
+          teamId: owner.teamId,
+          actorId: former.userId,
+          actorType: "session",
+          kind: "cv",
+          action: "cv.uploaded",
+          summary: "Earlier synthetic event",
+          createdAt: new Date("2029-12-01T00:00:00Z"),
+        },
+        {
+          id: secondId,
+          teamId: owner.teamId,
+          actorId: former.userId,
+          actorType: "session",
+          kind: "cv",
+          action: "cv.uploaded",
+          summary: "Later synthetic event",
+          createdAt: new Date("2029-12-02T00:00:00Z"),
+        },
+      ]),
+    );
+    await withTeam(other, (tx) =>
+      tx.insert(activity).values({
+        id: foreignId,
+        teamId: other.teamId,
+        actorId: former.userId,
+        actorType: "session",
+        kind: "cv",
+        action: "cv.uploaded",
+        summary: "Foreign synthetic event",
+        createdAt: new Date("2029-12-03T00:00:00Z"),
+      }),
+    );
+    const query = {
+      kind: "cv",
+      search: "Historical Activity Actor",
+      pageSize: "1",
+    };
+    const pageOne = await listActivity(
+      owner,
+      new URLSearchParams({ ...query, page: "1" }),
+    );
+    const pageTwo = await listActivity(
+      owner,
+      new URLSearchParams({ ...query, page: "2" }),
+    );
+    expect(pageOne.pagination.total).toBe(2);
+    expect(pageTwo.pagination.total).toBe(2);
+    expect(pageOne.data).toHaveLength(1);
+    expect(pageTwo.data).toHaveLength(1);
+    expect(pageOne.data[0]).toMatchObject({
+      id: secondId,
+      actorName: "Historical Activity Actor",
+    });
+    expect(pageTwo.data[0]).toMatchObject({
+      id: firstId,
+      actorName: "Historical Activity Actor",
+    });
+    expect(JSON.stringify([pageOne, pageTwo])).not.toContain(foreignId);
+    expect(JSON.stringify([pageOne, pageTwo])).not.toContain(
+      "Foreign synthetic event",
+    );
   });
 
   it("derives seven-day Dubai reminders with exact source links and authenticated personal read markers", async () => {

@@ -8,6 +8,7 @@ export function mailConfigured(): boolean {
   return (
     Boolean(process.env.RESEND_API_KEY && process.env.EMAIL_FROM) ||
     (process.env.NODE_ENV !== "production" &&
+      !process.env.VERCEL &&
       process.env.DEV_MAIL_MODE === "console")
   );
 }
@@ -15,6 +16,7 @@ export function mailConfigured(): boolean {
 export async function sendAuthMail(message: AuthMail): Promise<void> {
   if (
     process.env.NODE_ENV !== "production" &&
+    !process.env.VERCEL &&
     process.env.DEV_MAIL_MODE === "console"
   ) {
     console.info("[Local development mail]", message);

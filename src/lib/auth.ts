@@ -12,7 +12,7 @@ import {
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
 import { and, eq } from "drizzle-orm";
-import { getDb, type AppDb } from "@/db";
+import { getIdentityDb, type AppDb } from "@/db";
 import { authTables, member } from "@/db/auth-schema";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
@@ -32,25 +32,32 @@ export type AuthOptions = {
   bootstrapConfigured: boolean;
 };
 export function getAuthOptions(): AuthOptions {
+  const hosted =
+    process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
   let validURL = false;
   try {
     const url = new URL(process.env.BETTER_AUTH_URL ?? "");
     validURL =
       url.origin === url.href.replace(/\/$/, "") &&
       (url.protocol === "https:" ||
-        (process.env.NODE_ENV !== "production" &&
+        (!hosted &&
           url.protocol === "http:" &&
           ["localhost", "127.0.0.1"].includes(url.hostname)));
   } catch {
     /* Public pages remain available before setup. */
   }
   const database =
-    Boolean(process.env.DATABASE_URL) ||
-    (process.env.NODE_ENV !== "production" &&
+    Boolean(
+      process.env.DATABASE_URL &&
+      (!hosted || process.env.IDENTITY_DATABASE_URL),
+    ) ||
+    (!hosted &&
       process.env.DATABASE_MODE === "pglite" &&
       process.env.ALLOW_LOCAL_DB === "true");
   return {
     configured: Boolean(
+      // Keep hosted sign-in unavailable while the database isolation gate is active.
+      !hosted &&
       validURL &&
       database &&
       isUsableAuthSecret(process.env.BETTER_AUTH_SECRET) &&
@@ -403,7 +410,7 @@ export async function getAuth(): Promise<AppAuth> {
       "AUTH_NOT_CONFIGURED",
       "Sign-in is not configured. Ask your administrator to finish database, authentication, and email setup.",
     );
-  instance ??= getDb()
+  instance ??= getIdentityDb()
     .then((db) =>
       createAuth(db, {
         baseURL: process.env.BETTER_AUTH_URL!.replace(/\/$/, ""),

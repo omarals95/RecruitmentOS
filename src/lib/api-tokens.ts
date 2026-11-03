@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
-import { getDb, type TeamTx } from "@/db";
+import { getIdentityDb, type TeamTx } from "@/db";
 import { apiTokens, apiRateLimits, member, user } from "@/db/auth-schema";
 import { activity } from "@/db/schema";
 import { withTeam } from "./db-team";
@@ -76,7 +76,7 @@ export async function authenticateApiToken(raw: string): Promise<Principal> {
       "invalid_token",
       "The API token is invalid or no longer active.",
     );
-  const db = await getDb();
+  const db = await getIdentityDb();
   const result = await db.transaction(async (tx) => {
     const [found] = await tx
       .select({
@@ -222,7 +222,8 @@ export async function listTokens(
   all = false,
 ): Promise<TokenDto[]> {
   human(p);
-  return withTeam(p, async (tx) => {
+  const db = await getIdentityDb();
+  return db.transaction(async (tx) => {
     const role = await liveHuman(tx, p);
     if (all && role !== "owner" && role !== "admin")
       throw new ApiError(

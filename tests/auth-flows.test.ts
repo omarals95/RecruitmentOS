@@ -51,10 +51,39 @@ describe("Better Auth verified invite-only flows", () => {
         (await readFile(
           new URL("../drizzle/0003_initial_admin.sql", import.meta.url),
           "utf8",
-        )),
+        )) +
+        "\n" +
+        (await readFile(
+          new URL(
+            "../drizzle/0004_protect_initial_admin_claim.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        )) +
+        `
+          CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+          GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
+          GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;
+          GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
+          SET ROLE identity_flow_runtime;
+        `,
     ),
   );
   afterAll(async () => pg.close());
+  it("executes the identity flow under a restricted nonowner role", async () => {
+    const result = await pg.query<{
+      role_name: string;
+      owner: boolean;
+      marker_write: boolean;
+    }>(`SELECT current_user AS role_name,
+      pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid='auth.initial_admin_claim'::regclass), 'MEMBER') AS owner,
+      has_table_privilege(current_user, 'auth.initial_admin_claim', 'INSERT,UPDATE,DELETE') AS marker_write`);
+    expect(result.rows[0]).toEqual({
+      role_name: "identity_flow_runtime",
+      owner: false,
+      marker_write: false,
+    });
+  });
   it("rejects an unsolicited signup", async () => {
     const response = await call("sign-up/email", {
       name: "Uninvited",

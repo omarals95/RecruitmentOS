@@ -1,5 +1,21 @@
 # Validation before deployment
 
+## Update: staged connection and workflow review
+
+On 3 November 2026, the local staged revision passed TypeScript, ESLint, formatting, 196 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. The paired-pool connection checks now reject unsupported URI options and unexpected startup options, normalize ports, and check the inspected login and effective roles. They do not establish safe state on every future pool checkout, and the legacy single-pool development path does not have the same checks. Token/audit and activity-name integration remain unfinished. The activity accessor experiments use synthetic data and are not deployed. No live Neon connection, migration, production policy change or Blob-provider verification was performed.
+
+## Update: local audit and activity experiments
+
+On 3 November 2026, the local staged revision passed TypeScript, ESLint, formatting, a production build, 184 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. The new audit, activity-name and rollback experiments use fictional records in PGlite and remain unintegrated. They do not establish real lock contention, revocation, concurrent activity-name changes, safe claim replay, live Neon privileges or Blob provider behavior. A fresh temporary local PostgreSQL instance could not be reached on loopback in the sandbox and was stopped and removed. Hosted access and Blob remain disabled.
+
+## Update: local isolation experiments
+
+On 3 November 2026, the staged revision passed TypeScript, ESLint, formatting, a production build, 159 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. New local tests characterize token-and-audit transaction boundaries and exercise a test-only private-row isolation proof. Hosted sign-in and database access remain blocked, the protected-context proof remains unintegrated, and the known savepoint replay gap remains unresolved. The role check for known PostgreSQL filesystem helpers is defense in depth, not an exhaustive privilege audit. No live Neon or Blob security behavior was established.
+
+## Update: staged identity boundary
+
+On 3 November 2026, the local staged revision passed TypeScript, ESLint, formatting, the production build, 148 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. Better Auth and token routing were exercised with synthetic PGlite roles. The tenant-context fixture is research only: it demonstrates a savepoint replay gap and is not used by the application. Hosted and production database access is deliberately blocked until verified tenant policies, audit and activity workflows, and role provisioning are complete. No cloud migration or live-Neon isolation test was performed.
+
 ## Update: role guard and isolated Blob components
 
 On 3 November 2026, the current revision passed TypeScript, ESLint, formatting, 113 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. Role-safety tests exercise effective inherited, public and column grants and missing schemas against PGlite. Blob ticket creation and chunk assembly tests use synthetic signers and files. These components remain unwired: they do not establish authorized upload, quota enforcement, replay safety, live provider behavior, browser integration or end-to-end download safety. Blob remains disabled; actual Neon role permissions and concurrency must still be verified.
