@@ -62,14 +62,14 @@ Sources: [package.json](https://github.com/omarals95/RecruitmentOS/blob/d67828ed
 
 ### 2.3 Actors and authorization
 
-| Actor | Recruitment records | CV access | Imports | Team administration | Token administration |
-|---|---|---|---|---|---|
-| Owner | Read/write | Read/write when storage enabled | Allowed | Full team control, including ownership with last-owner safeguard | Own tokens and permitted team revocation |
-| Admin | Read/write | Read/write when storage enabled | Allowed | Members/invitations/settings within admin limits; cannot assume ownership | Own tokens and permitted team revocation |
-| Recruiter | Read/write | Read/write when storage enabled | No privileged legacy-import metadata | No ownership or membership administration | Own tokens within current scopes |
-| Viewer | Read only; personal interaction exceptions specified below | Read when storage enabled | No | No | Own read-only tokens |
-| API client | Explicit scopes intersected with creator's current role | Explicit `cvs:read` or `cvs:write` | `imports:write` plus owner/admin | Never through a personal API token | Cannot create/manage other tokens |
-| Operator | No automatic business access | Only approved operational access | Controlled migration execution | Infrastructure provisioning only | Credential operations through approved process |
+| Actor      | Recruitment records                                        | CV access                          | Imports                              | Team administration                                                       | Token administration                           |
+| ---------- | ---------------------------------------------------------- | ---------------------------------- | ------------------------------------ | ------------------------------------------------------------------------- | ---------------------------------------------- |
+| Owner      | Read/write                                                 | Read/write when storage enabled    | Allowed                              | Full team control, including ownership with last-owner safeguard          | Own tokens and permitted team revocation       |
+| Admin      | Read/write                                                 | Read/write when storage enabled    | Allowed                              | Members/invitations/settings within admin limits; cannot assume ownership | Own tokens and permitted team revocation       |
+| Recruiter  | Read/write                                                 | Read/write when storage enabled    | No privileged legacy-import metadata | No ownership or membership administration                                 | Own tokens within current scopes               |
+| Viewer     | Read only; personal interaction exceptions specified below | Read when storage enabled          | No                                   | No                                                                        | Own read-only tokens                           |
+| API client | Explicit scopes intersected with creator's current role    | Explicit `cvs:read` or `cvs:write` | `imports:write` plus owner/admin     | Never through a personal API token                                        | Cannot create/manage other tokens              |
+| Operator   | No automatic business access                               | Only approved operational access   | Controlled migration execution       | Infrastructure provisioning only                                          | Credential operations through approved process |
 
 The business account owner and database migration owner are different concepts. Operators shall not receive candidate access merely because they deploy the application. Human users may maintain their own shortlist, follow-up and read reminders subject to the specific endpoint rules; these do not authorize shared-record mutation. Existing code permission details shall be reconciled with this matrix during acceptance, especially viewer personal-state behavior.
 
@@ -111,17 +111,17 @@ The business account owner and database migration owner are different concepts. 
 
 These are the observed domain enumerations and required baseline vocabulary:
 
-| Record | Values |
-|---|---|
-| Application stage | Sourced; Screening; Interview; Offer; Hired; Rejected; Withdrawn |
-| Vacancy status | Draft; Open; On hold; Filled; Closed |
-| Personal candidate follow-up | New; To contact; Contacted; Interviewing; On hold; Closed |
-| Interview status | Scheduled; Completed; Cancelled; No show |
-| Offer status | Draft; Sent; Accepted; Declined; Withdrawn; Expired |
-| Onboarding status | Planned; In progress; Completed; On hold |
-| Checklist status | Pending; In progress; Complete; Waived |
-| Task priority | Low; Normal; High; Urgent |
-| Custom task field | Text; Number; Date; Dropdown; Checkbox |
+| Record                       | Values                                                           |
+| ---------------------------- | ---------------------------------------------------------------- |
+| Application stage            | Sourced; Screening; Interview; Offer; Hired; Rejected; Withdrawn |
+| Vacancy status               | Draft; Open; On hold; Filled; Closed                             |
+| Personal candidate follow-up | New; To contact; Contacted; Interviewing; On hold; Closed        |
+| Interview status             | Scheduled; Completed; Cancelled; No show                         |
+| Offer status                 | Draft; Sent; Accepted; Declined; Withdrawn; Expired              |
+| Onboarding status            | Planned; In progress; Completed; On hold                         |
+| Checklist status             | Pending; In progress; Complete; Waived                           |
+| Task priority                | Low; Normal; High; Urgent                                        |
+| Custom task field            | Text; Number; Date; Dropdown; Checkbox                           |
 
 These state sets are separate. A terminal-looking label does not authorize hidden side effects. The current baseline permits explicit enum changes rather than a fully restricted transition graph. Adding mandatory stage prerequisites, approvals or restricted reopening is an open product decision, not an existing feature.
 
@@ -231,20 +231,20 @@ The inspected extraction schema accepts only a bounded set of factual fields: na
 
 ### 8.1 Existing logical model
 
-| Entity | Main fields and relationships | Integrity requirements |
-|---|---|---|
-| User | ID, name, unique email, verification state, timestamps | Identity plane only; passwords/tokens never returned in business DTOs |
-| Session/account/verification | Better Auth state linked to user | Provider-managed semantics, revocation and expiry |
-| Organization/member/invitation | Team ID, user, role; invitation email/role/status/expiry | Unique membership; last-owner and recipient binding |
-| API token/rate limit | Token hash, display prefix/name, user/team, scopes, expiry/revocation/last use | Plaintext shown once; effective role intersection; durable rate counters |
-| Recruitment record | UUID, team, kind, JSONB data, version, references, creator, timestamps, archive, import metadata | Strict kind schema; same-team, correct-kind references; optimistic locking |
-| Candidate state | Team, user, candidate, shortlist/status/note, version | Composite private ownership; no cross-user reads |
-| CV upload | UUID, team/candidate, filename/media/size, status, object reference, source metadata, creator/dates | Ready-only reads; provider-specific immutable validation reference |
-| Storage usage | Team byte/file used/reserved/max values | Nonnegative totals; atomic reservations; not by itself a physical billing cap |
-| Activity | Team, record, actor/type/token ID, action/kind/summary/metadata/time | Append-only; transaction-bound record mutation; no note/token secrets |
-| Idempotency | Team, actor key, operation, key, payload hash, result, expiry | Unique logical operation; changed payload conflict |
-| Notification read | Team, user, genuine reminder key, read time | Private state; cannot invent arbitrary reminder IDs |
-| Initial admin/connection marker | Durable setup claim; operator-controlled database marker | Runtime cannot forge/reset ownership or paired-database identity |
+| Entity                          | Main fields and relationships                                                                       | Integrity requirements                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| User                            | ID, name, unique email, verification state, timestamps                                              | Identity plane only; passwords/tokens never returned in business DTOs         |
+| Session/account/verification    | Better Auth state linked to user                                                                    | Provider-managed semantics, revocation and expiry                             |
+| Organization/member/invitation  | Team ID, user, role; invitation email/role/status/expiry                                            | Unique membership; last-owner and recipient binding                           |
+| API token/rate limit            | Token hash, display prefix/name, user/team, scopes, expiry/revocation/last use                      | Plaintext shown once; effective role intersection; durable rate counters      |
+| Recruitment record              | UUID, team, kind, JSONB data, version, references, creator, timestamps, archive, import metadata    | Strict kind schema; same-team, correct-kind references; optimistic locking    |
+| Candidate state                 | Team, user, candidate, shortlist/status/note, version                                               | Composite private ownership; no cross-user reads                              |
+| CV upload                       | UUID, team/candidate, filename/media/size, status, object reference, source metadata, creator/dates | Ready-only reads; provider-specific immutable validation reference            |
+| Storage usage                   | Team byte/file used/reserved/max values                                                             | Nonnegative totals; atomic reservations; not by itself a physical billing cap |
+| Activity                        | Team, record, actor/type/token ID, action/kind/summary/metadata/time                                | Append-only; transaction-bound record mutation; no note/token secrets         |
+| Idempotency                     | Team, actor key, operation, key, payload hash, result, expiry                                       | Unique logical operation; changed payload conflict                            |
+| Notification read               | Team, user, genuine reminder key, read time                                                         | Private state; cannot invent arbitrary reminder IDs                           |
+| Initial admin/connection marker | Durable setup claim; operator-controlled database marker                                            | Runtime cannot forge/reset ownership or paired-database identity              |
 
 Application references: application → candidate + vacancy; vacancy → optional job role; task → bucket plus optional candidate/vacancy; interview/offer/onboarding → application; checklist → onboarding; comment → parent record. Saved views use the generic record table with private owner. Composite team/record constraints shall supplement application validation.
 
@@ -282,24 +282,24 @@ Preserve or explicitly version existing API bounds: candidate name 300 character
 
 ### 9.2 Observed route inventory
 
-| Route | Methods and purpose | Key contract |
-|---|---|---|
-| `/api/auth/*` | Better Auth handlers | Interactive account/session/team flow, guarded by auth policy |
-| `/api/v1/{resource}` | GET list; POST create | Resource is one of the 13 kinds listed below; explicit read/write scope |
-| `/api/v1/{resource}/{id}` | GET; PATCH | Version required for PATCH; archive/restore via fields, not hard delete |
-| `/api/v1/candidates/{id}/state` | Personal follow-up state | Versioned, current user/team only |
-| `/api/v1/candidates/duplicates` | Possible contact matches | Bounded, authorized team; no automatic identity decision |
-| `/api/v1/applications/bulk` | Bulk vacancy assignment | Up to 500 candidate IDs; current permission/parent checks |
-| `/api/v1/candidates/{id}/cvs` | GET CV metadata | `cvs:read`; full pagination; no raw storage keys |
-| `/api/v1/candidates/{id}/cvs/uploads` | POST reservation | `cvs:write`; metadata + clientUploadId; current response is S3-shaped |
-| `/api/v1/cvs/uploads/{id}/complete` | POST validation | Reauthorization; idempotent completion |
-| `/api/v1/cvs/{id}/download` | GET download access | Current S3 response `{url, expiresAt}`; Blob needs an explicit different contract |
-| `/api/v1/cvs/bulk-capabilities` | GET capability | Upload/AI availability; storage readiness must be truthful |
-| `/api/v1/overview`, `/analytics`, `/activity`, `/search` | GET summaries/search | Scope-filtered and team-scoped; private data excluded |
-| `/api/v1/notifications` | GET; POST read state | Genuine current keys; token reads/writes require corresponding recruitment scopes |
-| `/api/v1/teams/bootstrap` | Workspace initialization | Human-session authorization and idempotent setup |
-| `/api/settings/tokens`, `/api/settings/tokens/{id}` | Token lifecycle | Human session; one-time plaintext creation; revocation |
-| `/api/openapi.json` | GET documentation | No secrets, examples use fictional data |
+| Route                                                    | Methods and purpose      | Key contract                                                                      |
+| -------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| `/api/auth/*`                                            | Better Auth handlers     | Interactive account/session/team flow, guarded by auth policy                     |
+| `/api/v1/{resource}`                                     | GET list; POST create    | Resource is one of the 13 kinds listed below; explicit read/write scope           |
+| `/api/v1/{resource}/{id}`                                | GET; PATCH               | Version required for PATCH; archive/restore via fields, not hard delete           |
+| `/api/v1/candidates/{id}/state`                          | Personal follow-up state | Versioned, current user/team only                                                 |
+| `/api/v1/candidates/duplicates`                          | Possible contact matches | Bounded, authorized team; no automatic identity decision                          |
+| `/api/v1/applications/bulk`                              | Bulk vacancy assignment  | Up to 500 candidate IDs; current permission/parent checks                         |
+| `/api/v1/candidates/{id}/cvs`                            | GET CV metadata          | `cvs:read`; full pagination; no raw storage keys                                  |
+| `/api/v1/candidates/{id}/cvs/uploads`                    | POST reservation         | `cvs:write`; metadata + clientUploadId; current response is S3-shaped             |
+| `/api/v1/cvs/uploads/{id}/complete`                      | POST validation          | Reauthorization; idempotent completion                                            |
+| `/api/v1/cvs/{id}/download`                              | GET download access      | Current S3 response `{url, expiresAt}`; Blob needs an explicit different contract |
+| `/api/v1/cvs/bulk-capabilities`                          | GET capability           | Upload/AI availability; storage readiness must be truthful                        |
+| `/api/v1/overview`, `/analytics`, `/activity`, `/search` | GET summaries/search     | Scope-filtered and team-scoped; private data excluded                             |
+| `/api/v1/notifications`                                  | GET; POST read state     | Genuine current keys; token reads/writes require corresponding recruitment scopes |
+| `/api/v1/teams/bootstrap`                                | Workspace initialization | Human-session authorization and idempotent setup                                  |
+| `/api/settings/tokens`, `/api/settings/tokens/{id}`      | Token lifecycle          | Human session; one-time plaintext creation; revocation                            |
+| `/api/openapi.json`                                      | GET documentation        | No secrets, examples use fictional data                                           |
 
 Generic resources: `candidates`, `job-roles`, `vacancies`, `applications`, `buckets`, `task-fields`, `tasks`, `interviews`, `offers`, `onboarding`, `checklist`, `views`, `comments`. Source: [OpenAPI route](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/app/api/openapi.json/route.ts) and repository API route tree. Route presence does not establish hosted availability.
 
@@ -325,35 +325,35 @@ These contracts are requirements for implementation/design approval, not current
 
 ### 9.5 Error and recovery catalog
 
-| Condition | HTTP/state | Required user/client behavior |
-|---|---|---|
-| Invalid schema/query/reference | 400 | Highlight safe field errors; preserve draft; no blind retry |
-| Missing/expired/revoked identity | 401 | Reauthenticate; retain only safe local draft; no automatic repeated writes |
-| Missing role/scope/team/verification or wrong origin | 403 | Explain unavailable action without leaking another tenant's existence |
-| Missing/inaccessible record | 404 | Show unavailable; do not reveal cross-team details |
-| Version, unique, reference or idempotency conflict | 409 | Preserve draft; reread and reconcile; show created-existing result where relevant |
-| Oversized body/file | 413 | Show limit before retransmission |
-| Non-JSON content at JSON endpoint | 415 | Correct content type; no mutation |
-| Rate/budget limit | 429 or defined quota conflict | Respect Retry-After/backoff; show which permitted allowance is exhausted |
-| Missing configuration/security guard | 503 | Disable action and show setup-required state; never fall back to another provider |
-| Provider timeout/unavailable | 503 or asynchronous failed state | Retain reference and accounting; retry/reconcile safely |
-| Unexpected server failure | 500 | Safe generic message plus correlation ID; outcome may be uncertain |
-| Hash/size mismatch, malformed file, unsafe archive | Rejected file/security error | No bytes released; preserve audit and charge; investigate/reupload as appropriate |
-| Cancelled request/job | Cancelled/uncertain per stage | Stop new work; reconcile committed work; do not claim cancellation undid remote effects |
+| Condition                                            | HTTP/state                       | Required user/client behavior                                                           |
+| ---------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
+| Invalid schema/query/reference                       | 400                              | Highlight safe field errors; preserve draft; no blind retry                             |
+| Missing/expired/revoked identity                     | 401                              | Reauthenticate; retain only safe local draft; no automatic repeated writes              |
+| Missing role/scope/team/verification or wrong origin | 403                              | Explain unavailable action without leaking another tenant's existence                   |
+| Missing/inaccessible record                          | 404                              | Show unavailable; do not reveal cross-team details                                      |
+| Version, unique, reference or idempotency conflict   | 409                              | Preserve draft; reread and reconcile; show created-existing result where relevant       |
+| Oversized body/file                                  | 413                              | Show limit before retransmission                                                        |
+| Non-JSON content at JSON endpoint                    | 415                              | Correct content type; no mutation                                                       |
+| Rate/budget limit                                    | 429 or defined quota conflict    | Respect Retry-After/backoff; show which permitted allowance is exhausted                |
+| Missing configuration/security guard                 | 503                              | Disable action and show setup-required state; never fall back to another provider       |
+| Provider timeout/unavailable                         | 503 or asynchronous failed state | Retain reference and accounting; retry/reconcile safely                                 |
+| Unexpected server failure                            | 500                              | Safe generic message plus correlation ID; outcome may be uncertain                      |
+| Hash/size mismatch, malformed file, unsafe archive   | Rejected file/security error     | No bytes released; preserve audit and charge; investigate/reupload as appropriate       |
+| Cancelled request/job                                | Cancelled/uncertain per stage    | Stop new work; reconcile committed work; do not claim cancellation undid remote effects |
 
 Existing CV error codes include uppercase `STORAGE_SETUP_REQUIRED`, `STORAGE_UNAVAILABLE` and `INVALID_CV`, while general errors use lowercase codes. Compatibility shall be preserved or deliberately versioned; clients should not assume uniform casing. Correlation IDs and standardized asynchronous codes are required additions, not claimed current behavior.
 
 ### 9.6 External integration boundaries
 
-| Integration | Allowed data and purpose | Failure and isolation contract |
-|---|---|---|
-| Neon PostgreSQL | Identity/session/team state through the identity connection; recruitment metadata through the restricted data connection | Verified TLS; matching environment/database binding; separate role privileges; transaction timeout; fail closed on unsafe roles or mismatched pools |
-| Private Vercel Blob | Explicitly authorized CV bytes and opaque server-generated paths | Separate Preview/Production stores; transient narrow upload capability; no raw private download URL bypassing integrity checks; retained accounting on uncertain outcomes |
-| Legacy S3 adapter | Existing explicitly bound versioned CV references if retained | Version-specific reads; no automatic fallback from Blob; separate configured credentials/bucket; migration must preserve historical references |
-| Resend | Account verification, password reset and invitation recipient plus required account-link content | No CVs or recruitment records; environment-correct links; distinguish request acceptance from delivered email; safe resend/rate limits and recovery after provider failure |
-| Google/Microsoft | User-chosen optional authentication exchange and minimum identity claims | Separate environment callbacks; no automatic account linking/team grant by email; disabled if missing configuration; actual provider acceptance tests |
-| Optional extraction provider | Only consented validated document content/approved text and bounded extraction instructions | Separate server credentials, recipient/region/retention policy, spend/rate limits, job timeout and human-reviewed output; no automatic provider substitution |
-| Authorized API client | Only records/documents covered by its explicit current scopes and team | Client stores its token securely; revocation/expiry/rate limits; no implicit push of data to the client or to an AI provider |
+| Integration                  | Allowed data and purpose                                                                                                 | Failure and isolation contract                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Neon PostgreSQL              | Identity/session/team state through the identity connection; recruitment metadata through the restricted data connection | Verified TLS; matching environment/database binding; separate role privileges; transaction timeout; fail closed on unsafe roles or mismatched pools                        |
+| Private Vercel Blob          | Explicitly authorized CV bytes and opaque server-generated paths                                                         | Separate Preview/Production stores; transient narrow upload capability; no raw private download URL bypassing integrity checks; retained accounting on uncertain outcomes  |
+| Legacy S3 adapter            | Existing explicitly bound versioned CV references if retained                                                            | Version-specific reads; no automatic fallback from Blob; separate configured credentials/bucket; migration must preserve historical references                             |
+| Resend                       | Account verification, password reset and invitation recipient plus required account-link content                         | No CVs or recruitment records; environment-correct links; distinguish request acceptance from delivered email; safe resend/rate limits and recovery after provider failure |
+| Google/Microsoft             | User-chosen optional authentication exchange and minimum identity claims                                                 | Separate environment callbacks; no automatic account linking/team grant by email; disabled if missing configuration; actual provider acceptance tests                      |
+| Optional extraction provider | Only consented validated document content/approved text and bounded extraction instructions                              | Separate server credentials, recipient/region/retention policy, spend/rate limits, job timeout and human-reviewed output; no automatic provider substitution               |
+| Authorized API client        | Only records/documents covered by its explicit current scopes and team                                                   | Client stores its token securely; revocation/expiry/rate limits; no implicit push of data to the client or to an AI provider                                               |
 
 No email, messaging, calendar, analytics or extraction integration may be inferred from a UI label. New external recipients, provider changes or expanded data use require an updated interface contract, privacy review and the appropriate authorization before enablement.
 
@@ -403,20 +403,20 @@ Protect against unauthorized users, cross-team access, malicious file contents, 
 
 The following numbers are proposed engineering acceptance defaults pending workload and plan approval. They are not current capacity measurements, provider promises or business commitments. Tests shall record environment, region, build SHA, dataset and concurrency.
 
-| ID | Requirement and proposed measurable target | Acceptance method |
-|---|---|---|
-| SRS-NFR-01 | Ordinary list/read p95 ≤1 second and write p95 ≤1.5 seconds at 20 active users against 10,000 candidates, 30,000 applications and 100,000 task/history records; exclude provider transfer and report cold starts separately | Representative load test with query plans, no cross-tenant leaks and no failed invariants |
-| SRS-NFR-02 | Initial authenticated main content p75 ≤3 seconds on documented representative desktop/mobile network; no unbounded full-directory loading | Browser measurement and payload inspection |
-| SRS-NFR-03 | Proposed production service objective 99.5% successful interactive availability per month, excluding approved maintenance; scope and monitoring calculation require owner approval | Synthetic checks and incident ledger; not satisfied by local tests |
-| SRS-NFR-04 | Proposed RPO ≤24 hours and RTO ≤8 hours for pilot; stricter needs require plan review | Timed isolated restore and documented achieved values |
-| SRS-NFR-05 | Every operation has a timeout and bounded bytes/concurrency; proposed API DB deadline 10 seconds and provider processing deadline 60 seconds unless asynchronous | Stalled I/O, memory and cancellation tests; exact configuration documented |
-| SRS-NFR-06 | Critical user journeys keyboard-operable with meaningful labels, visible focus, accessible errors and announced state; target WCAG 2.2 AA | Automated checks plus manual keyboard/screen-reader review; no unverified certification claim |
-| SRS-NFR-07 | Responsive operation at 360 px mobile width and common desktop widths, 200% zoom, latest two supported Chrome/Edge/Firefox/Safari versions selected at release | Visual/interruption tests; no essential function limited to dragging |
-| SRS-NFR-08 | UTC instants, explicit Asia/Dubai baseline display, Unicode-safe names/text and date-only integrity | Boundary tests with multilingual fictional names and timezone/day changes |
-| SRS-NFR-09 | Concurrent edits, idempotent retries and partial failures shall not lose committed records or double-count allocations | Multi-connection race, crash and replay tests |
-| SRS-NFR-10 | Core flows remain usable without AI; configuration/provider outage has safe, understandable degraded states | Disable AI/mail/storage independently and verify supported manual/read-only behavior |
-| SRS-NFR-11 | Maintainability through strict typing, schema/contract tests, lint/build checks, reviewed migrations and dependency lockfile | Required CI checks tied to final commit, documented module ownership and update process |
-| SRS-NFR-12 | Cost/resource safety through approved store/team/provider budgets, transfer/request monitoring and bounded batch/download amplification | Budget exhaustion and reconciliation tests; no claim that app quotas are a hard billing cap |
+| ID         | Requirement and proposed measurable target                                                                                                                                                                                  | Acceptance method                                                                             |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| SRS-NFR-01 | Ordinary list/read p95 ≤1 second and write p95 ≤1.5 seconds at 20 active users against 10,000 candidates, 30,000 applications and 100,000 task/history records; exclude provider transfer and report cold starts separately | Representative load test with query plans, no cross-tenant leaks and no failed invariants     |
+| SRS-NFR-02 | Initial authenticated main content p75 ≤3 seconds on documented representative desktop/mobile network; no unbounded full-directory loading                                                                                  | Browser measurement and payload inspection                                                    |
+| SRS-NFR-03 | Proposed production service objective 99.5% successful interactive availability per month, excluding approved maintenance; scope and monitoring calculation require owner approval                                          | Synthetic checks and incident ledger; not satisfied by local tests                            |
+| SRS-NFR-04 | Proposed RPO ≤24 hours and RTO ≤8 hours for pilot; stricter needs require plan review                                                                                                                                       | Timed isolated restore and documented achieved values                                         |
+| SRS-NFR-05 | Every operation has a timeout and bounded bytes/concurrency; proposed API DB deadline 10 seconds and provider processing deadline 60 seconds unless asynchronous                                                            | Stalled I/O, memory and cancellation tests; exact configuration documented                    |
+| SRS-NFR-06 | Critical user journeys keyboard-operable with meaningful labels, visible focus, accessible errors and announced state; target WCAG 2.2 AA                                                                                   | Automated checks plus manual keyboard/screen-reader review; no unverified certification claim |
+| SRS-NFR-07 | Responsive operation at 360 px mobile width and common desktop widths, 200% zoom, latest two supported Chrome/Edge/Firefox/Safari versions selected at release                                                              | Visual/interruption tests; no essential function limited to dragging                          |
+| SRS-NFR-08 | UTC instants, explicit Asia/Dubai baseline display, Unicode-safe names/text and date-only integrity                                                                                                                         | Boundary tests with multilingual fictional names and timezone/day changes                     |
+| SRS-NFR-09 | Concurrent edits, idempotent retries and partial failures shall not lose committed records or double-count allocations                                                                                                      | Multi-connection race, crash and replay tests                                                 |
+| SRS-NFR-10 | Core flows remain usable without AI; configuration/provider outage has safe, understandable degraded states                                                                                                                 | Disable AI/mail/storage independently and verify supported manual/read-only behavior          |
+| SRS-NFR-11 | Maintainability through strict typing, schema/contract tests, lint/build checks, reviewed migrations and dependency lockfile                                                                                                | Required CI checks tied to final commit, documented module ownership and update process       |
+| SRS-NFR-12 | Cost/resource safety through approved store/team/provider budgets, transfer/request monitoring and bounded batch/download amplification                                                                                     | Budget exhaustion and reconciliation tests; no claim that app quotas are a hard billing cap   |
 
 ## 13 Verification and release acceptance
 
@@ -428,19 +428,19 @@ No test in this specification is marked passed merely because a test file exists
 
 ### 13.2 Test suites and requirement coverage
 
-| Suite ID | Scope and minimum cases | Linked requirements |
-|---|---|---|
-| T-ID | Verified/invitation-only signup, bootstrap races/recovery, reset/resend, session revocation, optional OAuth, invitations and last owner | SRS-ID-01 through 06; SRS-TOK-01 through 04 |
-| T-DOM | All kind schemas, references, dates/money, partial PATCH, unique active records, archive/restore, custom fields/buckets | SRS-CAN-01 through 08; SRS-REC-01 through 09; SRS-TASK-01 through 04; SRS-DATA-02/03 |
-| T-API | Every route/method/scope, origin/body/query limits, errors, list totals, OpenAPI agreement, stale writes and idempotent replay | SRS-API-01 through 05; SRS-TOK-01 through 03 |
-| T-TENANT | At least two teams and two users per team under actual restricted roles; arbitrary GUCs, identity mutation, private rows, joins, claims, savepoint replay, pool reuse and revocation | SRS-ARC-01/02; SRS-DATA-01; SRS-SEC-01 through 04 |
-| T-CV | Real private Preview provider using fictional files, 1 byte/10 MiB boundaries, metadata/signatures, ticket replay, mutation between read/commit/chunks, cancellation and malformed containers | SRS-CV-01 through 10; SRS-ARC-04 |
-| T-QUOTA | Independent concurrent connections, cross-team/store contention, crash before/after issuance, late completion, retained charges, cleanup and reconciliation | SRS-CV-07/08; SRS-DATA-04; SRS-NFR-09/12 |
-| T-BULK | Mixed valid/invalid batch, duplicate contacts/within-batch matches, existing candidate attachment, response loss, retry, close/cancel/navigation and permission changes | SRS-BULK-01 through 06 |
-| T-AI | Consent decline/change/withdrawal, no-provider path, hostile document/output, strict fields, stale response, manual edits, provider timeout/cancel, spend limits and no autonomous decisions | SRS-AI-01 through 07 |
-| T-OPS | Dry-run/apply reconciliation, restored backups, environment mismatch, safe rollback, mail delivery, no-production-data Preview and monitoring alerts | SRS-OPS-01 through 08; SRS-DATA-05/06 |
-| T-UI | All screens and dialogs, repeated clicks, loading/error/empty states, keyboard alternatives, screen-reader checks, dark/light/system theme and phone layout | SRS-NFR-02/06/07/08/10; SRS-REC-09 |
-| T-NFR | Documented load envelope, p95 latency, cold starts, memory/timeouts, recovery, logs/secrets and cost budgets | SRS-NFR-01 through 12; SRS-SEC-05 through 09 |
+| Suite ID | Scope and minimum cases                                                                                                                                                                       | Linked requirements                                                                  |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| T-ID     | Verified/invitation-only signup, bootstrap races/recovery, reset/resend, session revocation, optional OAuth, invitations and last owner                                                       | SRS-ID-01 through 06; SRS-TOK-01 through 04                                          |
+| T-DOM    | All kind schemas, references, dates/money, partial PATCH, unique active records, archive/restore, custom fields/buckets                                                                       | SRS-CAN-01 through 08; SRS-REC-01 through 09; SRS-TASK-01 through 04; SRS-DATA-02/03 |
+| T-API    | Every route/method/scope, origin/body/query limits, errors, list totals, OpenAPI agreement, stale writes and idempotent replay                                                                | SRS-API-01 through 05; SRS-TOK-01 through 03                                         |
+| T-TENANT | At least two teams and two users per team under actual restricted roles; arbitrary GUCs, identity mutation, private rows, joins, claims, savepoint replay, pool reuse and revocation          | SRS-ARC-01/02; SRS-DATA-01; SRS-SEC-01 through 04                                    |
+| T-CV     | Real private Preview provider using fictional files, 1 byte/10 MiB boundaries, metadata/signatures, ticket replay, mutation between read/commit/chunks, cancellation and malformed containers | SRS-CV-01 through 10; SRS-ARC-04                                                     |
+| T-QUOTA  | Independent concurrent connections, cross-team/store contention, crash before/after issuance, late completion, retained charges, cleanup and reconciliation                                   | SRS-CV-07/08; SRS-DATA-04; SRS-NFR-09/12                                             |
+| T-BULK   | Mixed valid/invalid batch, duplicate contacts/within-batch matches, existing candidate attachment, response loss, retry, close/cancel/navigation and permission changes                       | SRS-BULK-01 through 06                                                               |
+| T-AI     | Consent decline/change/withdrawal, no-provider path, hostile document/output, strict fields, stale response, manual edits, provider timeout/cancel, spend limits and no autonomous decisions  | SRS-AI-01 through 07                                                                 |
+| T-OPS    | Dry-run/apply reconciliation, restored backups, environment mismatch, safe rollback, mail delivery, no-production-data Preview and monitoring alerts                                          | SRS-OPS-01 through 08; SRS-DATA-05/06                                                |
+| T-UI     | All screens and dialogs, repeated clicks, loading/error/empty states, keyboard alternatives, screen-reader checks, dark/light/system theme and phone layout                                   | SRS-NFR-02/06/07/08/10; SRS-REC-09                                                   |
+| T-NFR    | Documented load envelope, p95 latency, cold starts, memory/timeouts, recovery, logs/secrets and cost budgets                                                                                  | SRS-NFR-01 through 12; SRS-SEC-05 through 09                                         |
 
 ### 13.3 Release gates
 
@@ -459,74 +459,74 @@ SRS IDs define engineering obligations; BRD IDs define the business need. The [c
 
 ### 14.1 Functional traceability
 
-| BRD requirement | SRS requirements | Test suites |
-|---|---|---|
-| FR-ACC-01 Verified controlled sign-in | SRS-ID-01/02 | T-ID |
-| FR-ACC-02 Team selection and isolation | SRS-ID-05; SRS-DATA-01; SRS-SEC-01/02/03 | T-TENANT, T-UI |
-| FR-ACC-03 Role permissions | SRS-ARC-01; SRS-ID-04; SRS-API-01; SRS-TOK-02 | T-ID, T-API |
-| FR-ACC-04 Account recovery and sessions | SRS-ID-02/06 | T-ID |
-| FR-ACC-05 Optional federated sign-in | SRS-ID-03 | T-ID |
-| FR-CAN-01 Candidate master record | SRS-CAN-01/04; SRS-DATA-02/03 | T-DOM |
-| FR-CAN-02 Factual search and filters | SRS-CAN-02 | T-DOM, T-UI |
-| FR-CAN-03 Evidence and provenance | SRS-CAN-03; SRS-OPS-03/04 | T-DOM, T-OPS |
-| FR-CAN-04 Unknown and sensitive attributes | SRS-CAN-01/03; SRS-AI-03/06 | T-DOM, T-AI |
-| FR-CAN-05 Experience and ambiguity review | SRS-CAN-03; SRS-DATA-03 | T-DOM |
-| FR-CAN-06 Personal follow-up and shared discussion | SRS-CAN-05/07; SRS-DATA-01 | T-DOM, T-TENANT |
-| FR-CAN-07 Saved views and exports | SRS-CAN-08; SRS-TASK-04 | T-DOM, T-UI |
-| FR-CV-01 Multiple private CV references | SRS-CV-01/05/06/09 | T-CV, T-TENANT |
-| FR-CV-02 Format and size validation | SRS-CV-02/04/10 | T-CV |
-| FR-CV-03 Private Blob delivery target | SRS-CV-01/03/04/05; SRS-DATA-04 | T-CV, T-QUOTA |
-| FR-CV-04 Quotas and cleanup | SRS-CV-07/08; SRS-OPS-07; SRS-NFR-12 | T-QUOTA, T-OPS |
-| FR-BULK-01 Multi-file review queue | SRS-BULK-01 | T-BULK |
-| FR-BULK-02 Duplicate review | SRS-CAN-06; SRS-BULK-03 | T-BULK |
-| FR-BULK-03 Human approval of facts | SRS-BULK-02; SRS-AI-04 | T-BULK, T-AI |
-| FR-BULK-04 Per-file progress and outcomes | SRS-BULK-04/05 | T-BULK |
-| FR-BULK-05 Safe retry and cancellation | SRS-BULK-04/05; SRS-ARC-04; SRS-API-04 | T-BULK, T-API |
-| FR-BULK-06 Capability and load limits | SRS-BULK-02/06; SRS-ARC-02; SRS-NFR-05/12 | T-BULK, T-NFR |
-| FR-AI-01 Explicit optional connection | SRS-AI-01/02 | T-AI |
-| FR-AI-02 Limited factual extraction | SRS-AI-03/06 | T-AI |
-| FR-AI-03 Reviewable suggestions | SRS-AI-04; SRS-DATA-05 | T-AI |
-| FR-AI-04 Failures and usage controls | SRS-AI-05; SRS-ARC-04 | T-AI, T-NFR |
-| FR-AI-05 Provider governance and document safety | SRS-AI-01/02/03/07; SRS-SEC-06/08 | T-AI, T-OPS |
-| FR-REC-01 Reusable job roles | SRS-REC-01 | T-DOM |
-| FR-REC-02 Vacancy management | SRS-REC-02 | T-DOM |
-| FR-REC-03 Application relationships | SRS-REC-03/08 | T-DOM |
-| FR-REC-04 Bulk vacancy assignment | SRS-REC-04 | T-DOM, T-API |
-| FR-REC-05 Explicit application pipeline | SRS-REC-03/09; SRS-DATA-02 | T-DOM, T-UI |
-| FR-REC-06 Interviews and calendar | SRS-REC-05; SRS-NFR-08 | T-DOM, T-UI |
-| FR-REC-07 Offer tracking | SRS-REC-06 | T-DOM |
-| FR-REC-08 Onboarding | SRS-REC-07 | T-DOM |
-| FR-REC-09 Onboarding checklist | SRS-REC-07 | T-DOM |
-| FR-TASK-01 Task management | SRS-TASK-01 | T-DOM |
-| FR-TASK-02 Configurable buckets | SRS-TASK-02; SRS-REC-09 | T-DOM, T-UI |
-| FR-TASK-03 Custom task fields | SRS-TASK-03 | T-DOM |
-| FR-TASK-04 Safe editing and collaboration | SRS-DATA-02; SRS-REC-09; SRS-CAN-07 | T-DOM, T-UI |
-| FR-OPS-01 Operational overview | SRS-OPS-05 | T-DOM, T-OPS |
-| FR-OPS-02 Explainable analytics | SRS-OPS-05 | T-DOM, T-OPS |
-| FR-OPS-03 Personal reminders | SRS-OPS-06 | T-DOM, T-API |
-| FR-OPS-04 Recruitment audit history | SRS-DATA-02; SRS-TOK-04; SRS-SEC-07; DEC-15 | T-DOM, T-ID, T-OPS |
-| FR-ADM-01 Team administration | SRS-ID-04/06 | T-ID |
-| FR-ADM-02 Scoped API tokens | SRS-TOK-01/02/03/04; SRS-API-01/05 | T-ID, T-API |
-| FR-ADM-03 Legacy dry run and controlled apply | SRS-OPS-03/04; SRS-DATA-06 | T-OPS |
-| FR-ADM-04 Archive retention and deletion | SRS-REC-08; SRS-SEC-08; SRS-CV-08 | T-DOM, T-OPS |
-| FR-ADM-05 Environment and configuration visibility | SRS-ARC-02; SRS-OPS-01/02; SRS-SEC-05 | T-OPS, T-TENANT |
+| BRD requirement                                    | SRS requirements                              | Test suites        |
+| -------------------------------------------------- | --------------------------------------------- | ------------------ |
+| FR-ACC-01 Verified controlled sign-in              | SRS-ID-01/02                                  | T-ID               |
+| FR-ACC-02 Team selection and isolation             | SRS-ID-05; SRS-DATA-01; SRS-SEC-01/02/03      | T-TENANT, T-UI     |
+| FR-ACC-03 Role permissions                         | SRS-ARC-01; SRS-ID-04; SRS-API-01; SRS-TOK-02 | T-ID, T-API        |
+| FR-ACC-04 Account recovery and sessions            | SRS-ID-02/06                                  | T-ID               |
+| FR-ACC-05 Optional federated sign-in               | SRS-ID-03                                     | T-ID               |
+| FR-CAN-01 Candidate master record                  | SRS-CAN-01/04; SRS-DATA-02/03                 | T-DOM              |
+| FR-CAN-02 Factual search and filters               | SRS-CAN-02                                    | T-DOM, T-UI        |
+| FR-CAN-03 Evidence and provenance                  | SRS-CAN-03; SRS-OPS-03/04                     | T-DOM, T-OPS       |
+| FR-CAN-04 Unknown and sensitive attributes         | SRS-CAN-01/03; SRS-AI-03/06                   | T-DOM, T-AI        |
+| FR-CAN-05 Experience and ambiguity review          | SRS-CAN-03; SRS-DATA-03                       | T-DOM              |
+| FR-CAN-06 Personal follow-up and shared discussion | SRS-CAN-05/07; SRS-DATA-01                    | T-DOM, T-TENANT    |
+| FR-CAN-07 Saved views and exports                  | SRS-CAN-08; SRS-TASK-04                       | T-DOM, T-UI        |
+| FR-CV-01 Multiple private CV references            | SRS-CV-01/05/06/09                            | T-CV, T-TENANT     |
+| FR-CV-02 Format and size validation                | SRS-CV-02/04/10                               | T-CV               |
+| FR-CV-03 Private Blob delivery target              | SRS-CV-01/03/04/05; SRS-DATA-04               | T-CV, T-QUOTA      |
+| FR-CV-04 Quotas and cleanup                        | SRS-CV-07/08; SRS-OPS-07; SRS-NFR-12          | T-QUOTA, T-OPS     |
+| FR-BULK-01 Multi-file review queue                 | SRS-BULK-01                                   | T-BULK             |
+| FR-BULK-02 Duplicate review                        | SRS-CAN-06; SRS-BULK-03                       | T-BULK             |
+| FR-BULK-03 Human approval of facts                 | SRS-BULK-02; SRS-AI-04                        | T-BULK, T-AI       |
+| FR-BULK-04 Per-file progress and outcomes          | SRS-BULK-04/05                                | T-BULK             |
+| FR-BULK-05 Safe retry and cancellation             | SRS-BULK-04/05; SRS-ARC-04; SRS-API-04        | T-BULK, T-API      |
+| FR-BULK-06 Capability and load limits              | SRS-BULK-02/06; SRS-ARC-02; SRS-NFR-05/12     | T-BULK, T-NFR      |
+| FR-AI-01 Explicit optional connection              | SRS-AI-01/02                                  | T-AI               |
+| FR-AI-02 Limited factual extraction                | SRS-AI-03/06                                  | T-AI               |
+| FR-AI-03 Reviewable suggestions                    | SRS-AI-04; SRS-DATA-05                        | T-AI               |
+| FR-AI-04 Failures and usage controls               | SRS-AI-05; SRS-ARC-04                         | T-AI, T-NFR        |
+| FR-AI-05 Provider governance and document safety   | SRS-AI-01/02/03/07; SRS-SEC-06/08             | T-AI, T-OPS        |
+| FR-REC-01 Reusable job roles                       | SRS-REC-01                                    | T-DOM              |
+| FR-REC-02 Vacancy management                       | SRS-REC-02                                    | T-DOM              |
+| FR-REC-03 Application relationships                | SRS-REC-03/08                                 | T-DOM              |
+| FR-REC-04 Bulk vacancy assignment                  | SRS-REC-04                                    | T-DOM, T-API       |
+| FR-REC-05 Explicit application pipeline            | SRS-REC-03/09; SRS-DATA-02                    | T-DOM, T-UI        |
+| FR-REC-06 Interviews and calendar                  | SRS-REC-05; SRS-NFR-08                        | T-DOM, T-UI        |
+| FR-REC-07 Offer tracking                           | SRS-REC-06                                    | T-DOM              |
+| FR-REC-08 Onboarding                               | SRS-REC-07                                    | T-DOM              |
+| FR-REC-09 Onboarding checklist                     | SRS-REC-07                                    | T-DOM              |
+| FR-TASK-01 Task management                         | SRS-TASK-01                                   | T-DOM              |
+| FR-TASK-02 Configurable buckets                    | SRS-TASK-02; SRS-REC-09                       | T-DOM, T-UI        |
+| FR-TASK-03 Custom task fields                      | SRS-TASK-03                                   | T-DOM              |
+| FR-TASK-04 Safe editing and collaboration          | SRS-DATA-02; SRS-REC-09; SRS-CAN-07           | T-DOM, T-UI        |
+| FR-OPS-01 Operational overview                     | SRS-OPS-05                                    | T-DOM, T-OPS       |
+| FR-OPS-02 Explainable analytics                    | SRS-OPS-05                                    | T-DOM, T-OPS       |
+| FR-OPS-03 Personal reminders                       | SRS-OPS-06                                    | T-DOM, T-API       |
+| FR-OPS-04 Recruitment audit history                | SRS-DATA-02; SRS-TOK-04; SRS-SEC-07; DEC-15   | T-DOM, T-ID, T-OPS |
+| FR-ADM-01 Team administration                      | SRS-ID-04/06                                  | T-ID               |
+| FR-ADM-02 Scoped API tokens                        | SRS-TOK-01/02/03/04; SRS-API-01/05            | T-ID, T-API        |
+| FR-ADM-03 Legacy dry run and controlled apply      | SRS-OPS-03/04; SRS-DATA-06                    | T-OPS              |
+| FR-ADM-04 Archive retention and deletion           | SRS-REC-08; SRS-SEC-08; SRS-CV-08             | T-DOM, T-OPS       |
+| FR-ADM-05 Environment and configuration visibility | SRS-ARC-02; SRS-OPS-01/02; SRS-SEC-05         | T-OPS, T-TENANT    |
 
 ### 14.2 Nonfunctional traceability
 
-| BRD requirement | SRS coverage | Test suites |
-|---|---|---|
-| NFR-01 Isolation and least privilege | SRS-SEC-01/02/03/04; SRS-DATA-01; SRS-OPS-01 | T-TENANT, T-OPS |
-| NFR-02 Confidentiality and secret handling | SRS-SEC-05/06/07; SRS-CV-01/05/06; SRS-TOK-01 | T-CV, T-API, T-NFR |
-| NFR-03 Privacy and responsible employment use | SRS-SEC-08; SRS-CAN-03/05; SRS-AI-01/02/06/07 | T-AI, T-OPS |
-| NFR-04 Integrity and recoverability of writes | SRS-DATA-02; SRS-API-04; SRS-TOK-04; SRS-NFR-09 | T-DOM, T-API, T-QUOTA |
-| NFR-05 File safety | SRS-CV-02/04/05/10; SRS-SEC-06 | T-CV |
-| NFR-06 Performance and capacity | SRS-NFR-01/02/05; SRS-BULK-06 | T-NFR, T-BULK |
-| NFR-07 Availability and recovery | SRS-NFR-03/04/10; SRS-OPS-08 | T-NFR, T-OPS |
-| NFR-08 Accessibility and usability | SRS-NFR-06/07/08; SRS-REC-09 | T-UI |
-| NFR-09 Observability and support | SRS-OPS-07; SRS-SEC-07; Section 9.5 error catalog | T-OPS, T-NFR |
-| NFR-10 Cost containment | SRS-NFR-12; SRS-CV-07/08; SRS-AI-05 | T-QUOTA, T-AI, T-NFR |
-| NFR-11 Portability and maintainability | SRS-ARC-03/04; SRS-NFR-11; SRS-DATA-06; SRS-OPS-03/04 | T-DOM, T-OPS |
-| NFR-12 Release quality and truthful readiness | SRS-ARC-02; SRS-NFR-11; Section 13 release gates | All applicable suites |
+| BRD requirement                               | SRS coverage                                          | Test suites           |
+| --------------------------------------------- | ----------------------------------------------------- | --------------------- |
+| NFR-01 Isolation and least privilege          | SRS-SEC-01/02/03/04; SRS-DATA-01; SRS-OPS-01          | T-TENANT, T-OPS       |
+| NFR-02 Confidentiality and secret handling    | SRS-SEC-05/06/07; SRS-CV-01/05/06; SRS-TOK-01         | T-CV, T-API, T-NFR    |
+| NFR-03 Privacy and responsible employment use | SRS-SEC-08; SRS-CAN-03/05; SRS-AI-01/02/06/07         | T-AI, T-OPS           |
+| NFR-04 Integrity and recoverability of writes | SRS-DATA-02; SRS-API-04; SRS-TOK-04; SRS-NFR-09       | T-DOM, T-API, T-QUOTA |
+| NFR-05 File safety                            | SRS-CV-02/04/05/10; SRS-SEC-06                        | T-CV                  |
+| NFR-06 Performance and capacity               | SRS-NFR-01/02/05; SRS-BULK-06                         | T-NFR, T-BULK         |
+| NFR-07 Availability and recovery              | SRS-NFR-03/04/10; SRS-OPS-08                          | T-NFR, T-OPS          |
+| NFR-08 Accessibility and usability            | SRS-NFR-06/07/08; SRS-REC-09                          | T-UI                  |
+| NFR-09 Observability and support              | SRS-OPS-07; SRS-SEC-07; Section 9.5 error catalog     | T-OPS, T-NFR          |
+| NFR-10 Cost containment                       | SRS-NFR-12; SRS-CV-07/08; SRS-AI-05                   | T-QUOTA, T-AI, T-NFR  |
+| NFR-11 Portability and maintainability        | SRS-ARC-03/04; SRS-NFR-11; SRS-DATA-06; SRS-OPS-03/04 | T-DOM, T-OPS          |
+| NFR-12 Release quality and truthful readiness | SRS-ARC-02; SRS-NFR-11; Section 13 release gates      | All applicable suites |
 
 Suggested implementation order: identity/policy boundary → restricted-role verification → Blob reference/accounting schema → storage provider/client/importer integration → core hosted journeys → bulk failure/recovery → optional AI consent/extraction/review → operational acceptance → approved data cutover. Functional work can proceed locally while security gates are closed; closed gates shall not be removed to demonstrate progress.
 
@@ -534,24 +534,24 @@ The implementation register should contain requirement ID, BRD link, priority, o
 
 ## 15 Assumptions and open decisions
 
-| ID | Decision or assumption | Required resolution and impact |
-|---|---|---|
-| DEC-01 | Private Blob is the selected testing storage direction; S3 code still exists | Confirm whether S3 must remain supported long term and whether any actual S3 references need migration. No silent fallback |
-| DEC-02 | Trusted tenant boundary is unfinished | Select and independently review principal-bound DB identities or verifiable assertions; settle replay/savepoint/pool behavior before hosted access |
-| DEC-03 | Token/audit operations cross planned privilege boundaries | Choose same-transaction reviewed helper or transactional outbox with explicit visibility/retry semantics |
-| DEC-04 | Blob physical allocation guarantees remain unresolved | Obtain current provider guarantees for no-overwrite, replay, in-flight expiry, multipart, deletion/recreation and external writers; retain disablement if the required guarantee cannot be established |
+| ID     | Decision or assumption                                                                                                               | Required resolution and impact                                                                                                                                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DEC-01 | Private Blob is the selected testing storage direction; S3 code still exists                                                         | Confirm whether S3 must remain supported long term and whether any actual S3 references need migration. No silent fallback                                                                                  |
+| DEC-02 | Trusted tenant boundary is unfinished                                                                                                | Select and independently review principal-bound DB identities or verifiable assertions; settle replay/savepoint/pool behavior before hosted access                                                          |
+| DEC-03 | Token/audit operations cross planned privilege boundaries                                                                            | Choose same-transaction reviewed helper or transactional outbox with explicit visibility/retry semantics                                                                                                    |
+| DEC-04 | Blob physical allocation guarantees remain unresolved                                                                                | Obtain current provider guarantees for no-overwrite, replay, in-flight expiry, multipart, deletion/recreation and external writers; retain disablement if the required guarantee cannot be established      |
 | DEC-05 | Initial 1 GB planning preference differs from source 10 GiB/10,000-file per-team defaults, and retained charges can exhaust capacity | Confirm units, shared/per-store scope, headroom, file limit and recovery policy. Partition Preview/Production allocation within approved provider budgets; never present application quota as a billing cap |
-| DEC-06 | No live AI provider selected/connected | Select provider/model/region, processing terms, retention, deletion, allowed data, budget and approved document/OCR pipeline |
-| DEC-07 | CV format checks are not malware scanning | Choose scan/quarantine service and release policy before real untrusted intake |
-| DEC-08 | Retention and lawful processing policies are not specified | Organization's responsible privacy/legal owner approves candidate retention, notices, access, export, deletion and legal-hold rules; no default legal conclusion |
-| DEC-09 | Browser bulk queue is not durable | Approve batch size/bytes/concurrency, server recovery lifetime and whether durable drafts are required for pilot |
-| DEC-10 | Stage enums exist but no approved restrictive transition graph | Decide prerequisites, reopening controls and reason requirements without adding automatic employment decisions |
-| DEC-11 | Owner/interviewer labels are currently text in several records | Decide whether to retain labels or introduce validated team-member assignment IDs with deactivated-user history |
-| DEC-12 | Dubai timezone is the current business default | Confirm whether per-user/team timezone or bilingual/RTL UI is required; neither is assumed implemented |
-| DEC-13 | Performance, availability and recovery values are proposed | Approve pilot workload, provider plans, monitoring window, service objective, RPO/RTO and budget |
-| DEC-14 | Notifications are in-app derived reminders | Confirm whether later email/calendar integrations are needed; they require separate recipient/consent and delivery contracts |
-| DEC-15 | Auth/team changes lack equivalent complete business audit feed in baseline | Approve event coverage and retention, then implement without exposing auth secrets |
-| DEC-16 | Test status is local/reported, not deployment acceptance | Record final remote SHA and rerun required checks/Preview acceptance before release claims |
+| DEC-06 | No live AI provider selected/connected                                                                                               | Select provider/model/region, processing terms, retention, deletion, allowed data, budget and approved document/OCR pipeline                                                                                |
+| DEC-07 | CV format checks are not malware scanning                                                                                            | Choose scan/quarantine service and release policy before real untrusted intake                                                                                                                              |
+| DEC-08 | Retention and lawful processing policies are not specified                                                                           | Organization's responsible privacy/legal owner approves candidate retention, notices, access, export, deletion and legal-hold rules; no default legal conclusion                                            |
+| DEC-09 | Browser bulk queue is not durable                                                                                                    | Approve batch size/bytes/concurrency, server recovery lifetime and whether durable drafts are required for pilot                                                                                            |
+| DEC-10 | Stage enums exist but no approved restrictive transition graph                                                                       | Decide prerequisites, reopening controls and reason requirements without adding automatic employment decisions                                                                                              |
+| DEC-11 | Owner/interviewer labels are currently text in several records                                                                       | Decide whether to retain labels or introduce validated team-member assignment IDs with deactivated-user history                                                                                             |
+| DEC-12 | Dubai timezone is the current business default                                                                                       | Confirm whether per-user/team timezone or bilingual/RTL UI is required; neither is assumed implemented                                                                                                      |
+| DEC-13 | Performance, availability and recovery values are proposed                                                                           | Approve pilot workload, provider plans, monitoring window, service objective, RPO/RTO and budget                                                                                                            |
+| DEC-14 | Notifications are in-app derived reminders                                                                                           | Confirm whether later email/calendar integrations are needed; they require separate recipient/consent and delivery contracts                                                                                |
+| DEC-15 | Auth/team changes lack equivalent complete business audit feed in baseline                                                           | Approve event coverage and retention, then implement without exposing auth secrets                                                                                                                          |
+| DEC-16 | Test status is local/reported, not deployment acceptance                                                                             | Record final remote SHA and rerun required checks/Preview acceptance before release claims                                                                                                                  |
 
 Assumptions are limited to a team-based internal recruitment product, PostgreSQL as canonical data, explicit human decisions and fictional data for pre-production validation. No budget, go-live date, legal compliance status or production service level is approved by this document.
 

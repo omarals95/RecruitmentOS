@@ -26,22 +26,22 @@ This BRD separates business needs from the current implementation. It defines th
 
 ### 2.2 Source register
 
-| ID | Evidence | Use in this BRD |
-|---|---|---|
-| E-01 | [Repository README](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/README.md) | Application scope, cloud transition, migration principles |
-| E-02 | [Workspace user guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/user-guide.md) | User journeys and workflow separation |
-| E-03 | [Domain definitions](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/records.ts) | Actual fields, relationships and status values |
-| E-04 | [Security and data flows](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/security.md) | Data boundaries, safeguards and known limits |
-| E-05 | [Validation scope](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/validation.md) | Local evidence versus outstanding live checks |
-| E-06 | [Migration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/migration.md) | Dry run, provenance, reconciliation and recovery |
-| E-07 | [API integration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/api-examples.md) and [permissions](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/lib/permissions.ts) | Scoped integration access and role boundaries |
-| E-08 | [Bulk CV interface](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/components/workspace/bulk-cv-import.tsx) and [capability gate](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/app/api/v1/cvs/bulk-capabilities/route.ts) | Queue, duplicate and review controls; disabled capability |
-| E-09 | [Extraction contract](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/cv-extraction.ts) | Provider-neutral suggestions, bounded schema |
-| E-10 | [Insights implementation](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/lib/insights.ts) | Metric definitions, reminders and historical limitations |
-| E-11 | [Database schema](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/db/schema.ts) | Data entities, private state and quota defaults |
-| E-12 | User conversation, 3 November 2026, 09:39 UTC | Explicit request for bulk CV addition and optional connected AI to extract information into the database |
-| E-13 | User conversation and development status, 3 November 2026 | Private Vercel Blob chosen for testing, separate Preview and Production resources, initial 1 GB planning preference, protected fictional-data deployment direction |
-| E-14 | Latest development-task outcome reviewed on 3 November 2026 | Hosted safeguards incomplete; later local changes unpushed; no real CV transmission; live provider acceptance outstanding |
+| ID   | Evidence                                                                                                                                                                                                                                                                                                                | Use in this BRD                                                                                                                                                    |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| E-01 | [Repository README](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/README.md)                                                                                                                                                                                                 | Application scope, cloud transition, migration principles                                                                                                          |
+| E-02 | [Workspace user guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/user-guide.md)                                                                                                                                                                                     | User journeys and workflow separation                                                                                                                              |
+| E-03 | [Domain definitions](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/records.ts)                                                                                                                                                                                    | Actual fields, relationships and status values                                                                                                                     |
+| E-04 | [Security and data flows](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/security.md)                                                                                                                                                                                    | Data boundaries, safeguards and known limits                                                                                                                       |
+| E-05 | [Validation scope](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/validation.md)                                                                                                                                                                                         | Local evidence versus outstanding live checks                                                                                                                      |
+| E-06 | [Migration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/migration.md)                                                                                                                                                                                           | Dry run, provenance, reconciliation and recovery                                                                                                                   |
+| E-07 | [API integration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/api-examples.md) and [permissions](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/lib/permissions.ts)                                               | Scoped integration access and role boundaries                                                                                                                      |
+| E-08 | [Bulk CV interface](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/components/workspace/bulk-cv-import.tsx) and [capability gate](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/app/api/v1/cvs/bulk-capabilities/route.ts) | Queue, duplicate and review controls; disabled capability                                                                                                          |
+| E-09 | [Extraction contract](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/cv-extraction.ts)                                                                                                                                                                             | Provider-neutral suggestions, bounded schema                                                                                                                       |
+| E-10 | [Insights implementation](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/lib/insights.ts)                                                                                                                                                                                 | Metric definitions, reminders and historical limitations                                                                                                           |
+| E-11 | [Database schema](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/db/schema.ts)                                                                                                                                                                                            | Data entities, private state and quota defaults                                                                                                                    |
+| E-12 | User conversation, 3 November 2026, 09:39 UTC                                                                                                                                                                                                                                                                           | Explicit request for bulk CV addition and optional connected AI to extract information into the database                                                           |
+| E-13 | User conversation and development status, 3 November 2026                                                                                                                                                                                                                                                               | Private Vercel Blob chosen for testing, separate Preview and Production resources, initial 1 GB planning preference, protected fictional-data deployment direction |
+| E-14 | Latest development-task outcome reviewed on 3 November 2026                                                                                                                                                                                                                                                             | Hosted safeguards incomplete; later local changes unpushed; no real CV transmission; live provider acceptance outstanding                                          |
 
 ### 2.3 Requirement labels
 
@@ -62,16 +62,16 @@ A cloud replacement also creates new responsibilities: authenticated access, sep
 
 ### 3.2 Business objectives
 
-| ID | Objective | Success evidence |
-|---|---|---|
-| BR-01 | Establish one authoritative recruitment record | Approved migration reconciles records and documents; users understand that PostgreSQL is canonical and Excel is a transfer format |
-| BR-02 | Reduce time spent locating and transcribing candidate information | Recruiters complete representative search and import tasks; baseline and improvement targets are agreed rather than invented |
-| BR-03 | Make recruitment work visible from vacancy to onboarding | A fictional candidate can be traced through an application, interview, offer and onboarding with clear owners and statuses |
-| BR-04 | Preserve factual accuracy and human accountability | Every imported or AI-assisted fact can be reviewed; unknown facts remain unknown; hiring transitions require an authorized person |
-| BR-05 | Protect candidate and team information | Isolation, role, file-access, export and privacy tests pass in the intended hosted environment |
-| BR-06 | Make reporting explainable | Dashboard counts reconcile to source records; historical measures disclose their population, dates and missing evidence |
-| BR-07 | Operate within a controlled cost and recovery envelope | Storage, extraction budgets, recovery procedures and operating ownership are approved and exercised |
-| BR-08 | Support controlled growth and integrations | Scoped access, revocation, stable imports and environment separation are verified without expanding permissions silently |
+| ID    | Objective                                                         | Success evidence                                                                                                                  |
+| ----- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| BR-01 | Establish one authoritative recruitment record                    | Approved migration reconciles records and documents; users understand that PostgreSQL is canonical and Excel is a transfer format |
+| BR-02 | Reduce time spent locating and transcribing candidate information | Recruiters complete representative search and import tasks; baseline and improvement targets are agreed rather than invented      |
+| BR-03 | Make recruitment work visible from vacancy to onboarding          | A fictional candidate can be traced through an application, interview, offer and onboarding with clear owners and statuses        |
+| BR-04 | Preserve factual accuracy and human accountability                | Every imported or AI-assisted fact can be reviewed; unknown facts remain unknown; hiring transitions require an authorized person |
+| BR-05 | Protect candidate and team information                            | Isolation, role, file-access, export and privacy tests pass in the intended hosted environment                                    |
+| BR-06 | Make reporting explainable                                        | Dashboard counts reconcile to source records; historical measures disclose their population, dates and missing evidence           |
+| BR-07 | Operate within a controlled cost and recovery envelope            | Storage, extraction budgets, recovery procedures and operating ownership are approved and exercised                               |
+| BR-08 | Support controlled growth and integrations                        | Scoped access, revocation, stable imports and environment separation are verified without expanding permissions silently          |
 
 ### 3.3 Measures to establish before rollout
 
@@ -106,33 +106,33 @@ Measure current time to locate a candidate, prepare a usable candidate profile, 
 
 ### 4.3 Current capability assessment
 
-| Area | Evidence-backed position | Remaining business acceptance |
-|---|---|---|
-| Candidate and recruitment workspace | Broad source implementation and local test history | Hosted role-based, browser and end-to-end validation |
-| Identity and team isolation | Local controls and experiments exist; hosted access deliberately blocked | Trusted identity boundary, restricted live roles, concurrency and first-admin verification |
-| Storage | S3 adapter exists; private Blob is the chosen test direction; Blob gateway remains disabled | Safe authorized upload, immutable validated download, quota and live-provider checks |
-| Bulk intake | Browser queue, form review, duplicate checks and retry logic exist | Connected storage and enabled server gate; complete end-to-end flow |
-| AI extraction | Strict provider-neutral field contract and review helpers exist | Provider, consent/data-processing flow, OCR strategy, budget and connected execution |
-| Legacy migration | Dry-run and apply tooling with reconciliation are present | Authorized source selection, backup, real-data approval and final reconciliation |
-| Email | Account email flows are implemented around Resend | Current configuration and delivery tests in the actual environment |
-| Reporting | Source supports inventory and observed-history analytics | Reconciled hosted fixtures, permission checks and acceptance by recruiters |
-| Hosting | GitHub merge and checks reported; latest task reports no accepted deployment | Protected Preview workflow and subsequent production readiness gates |
+| Area                                | Evidence-backed position                                                                    | Remaining business acceptance                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Candidate and recruitment workspace | Broad source implementation and local test history                                          | Hosted role-based, browser and end-to-end validation                                       |
+| Identity and team isolation         | Local controls and experiments exist; hosted access deliberately blocked                    | Trusted identity boundary, restricted live roles, concurrency and first-admin verification |
+| Storage                             | S3 adapter exists; private Blob is the chosen test direction; Blob gateway remains disabled | Safe authorized upload, immutable validated download, quota and live-provider checks       |
+| Bulk intake                         | Browser queue, form review, duplicate checks and retry logic exist                          | Connected storage and enabled server gate; complete end-to-end flow                        |
+| AI extraction                       | Strict provider-neutral field contract and review helpers exist                             | Provider, consent/data-processing flow, OCR strategy, budget and connected execution       |
+| Legacy migration                    | Dry-run and apply tooling with reconciliation are present                                   | Authorized source selection, backup, real-data approval and final reconciliation           |
+| Email                               | Account email flows are implemented around Resend                                           | Current configuration and delivery tests in the actual environment                         |
+| Reporting                           | Source supports inventory and observed-history analytics                                    | Reconciled hosted fixtures, permission checks and acceptance by recruiters                 |
+| Hosting                             | GitHub merge and checks reported; latest task reports no accepted deployment                | Protected Preview workflow and subsequent production readiness gates                       |
 
 ## 5 Stakeholders and actors
 
 The product owner approves scope, policy choices and acceptance. Recruitment representatives validate that the workflows support their daily work. Security and privacy reviewers approve the handling controls within their responsibilities. The operator owns environments, backup, recovery, provider configuration and incident procedures. Named owners and approvers are not yet assigned in this BRD.
 
-| Actor | Intended responsibility | Boundary |
-|---|---|---|
-| Team owner | Team ownership, membership administration and recruitment work | Only an owner changes ownership; at least one owner must remain |
-| Administrator | Manage permitted team settings, invitations, imports and integration access | Does not gain unrestricted cross-team or infrastructure access |
-| Recruiter | Maintain candidate and recruitment records, CVs and personal follow-up | No legacy import scope or ownership management by default |
-| Viewer | Read permitted recruitment records | No ordinary recruitment or CV writes; personal read-state behavior is not general edit permission |
-| Hiring manager or interviewer | Business participant referenced on vacancies, tasks or interviews | Current names can be text labels, not dedicated accounts or additional roles |
-| Candidate | Subject of records and source documents | No candidate-facing account or self-service portal is established |
-| Authorized integration client | Perform explicitly scoped API operations | Bound to an existing user's current role and one team; cannot administer accounts or tokens |
-| Service operator | Configure, monitor and recover the service | Privileged operational access is separate from ordinary application roles |
-| AI extraction service | Return factual suggestions from authorized documents | No independent hiring authority, team administration or direct unreviewed record approval |
+| Actor                         | Intended responsibility                                                     | Boundary                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Team owner                    | Team ownership, membership administration and recruitment work              | Only an owner changes ownership; at least one owner must remain                                   |
+| Administrator                 | Manage permitted team settings, invitations, imports and integration access | Does not gain unrestricted cross-team or infrastructure access                                    |
+| Recruiter                     | Maintain candidate and recruitment records, CVs and personal follow-up      | No legacy import scope or ownership management by default                                         |
+| Viewer                        | Read permitted recruitment records                                          | No ordinary recruitment or CV writes; personal read-state behavior is not general edit permission |
+| Hiring manager or interviewer | Business participant referenced on vacancies, tasks or interviews           | Current names can be text labels, not dedicated accounts or additional roles                      |
+| Candidate                     | Subject of records and source documents                                     | No candidate-facing account or self-service portal is established                                 |
+| Authorized integration client | Perform explicitly scoped API operations                                    | Bound to an existing user's current role and one team; cannot administer accounts or tokens       |
+| Service operator              | Configure, monitor and recover the service                                  | Privileged operational access is separate from ordinary application roles                         |
+| AI extraction service         | Return factual suggestions from authorized documents                        | No independent hiring authority, team administration or direct unreviewed record approval         |
 
 ## 6 End to end business workflows
 
@@ -431,23 +431,23 @@ Operators shall keep local, Preview and Production resources isolated and make d
 
 ### 8.1 Principal information groups
 
-| Data group | Required business meaning | Important rules |
-|---|---|---|
-| Team, user and membership | Who can use which workspace and in what capacity | Live membership governs access; role labels are not interchangeable with hiring responsibility labels |
-| Candidate | One person's recorded factual profile | Unknown is not zero or false; duplicate identity needs human review |
-| Source evidence and review | Where a fact originated and whether ambiguity was resolved | Preserve original wording and distinct stated/estimated values |
-| CV reference | One selected document/version belonging to a candidate | Private object, validated-content identity, original name and status; multiple versions are allowed |
-| Personal candidate state | User's shortlist, follow-up status and private note | Keyed by team, user and candidate; never shared by default |
-| Job role | Reusable description of a role | Copying creates a vacancy draft rather than a live synchronized template |
-| Vacancy | An actual recruitment opening/requisition | Separate status, opening count, target date and responsibility labels |
-| Application | Candidate-vacancy relationship | Holds recruitment stage; does not share its state machine with a task or offer |
-| Task and bucket | Work to be done and its team-defined status | Optional context links; required bucket; custom values tied to definitions |
-| Interview | Scheduled recruitment event against an application | Store a precise instant; display in Asia/Dubai; manual outcome |
-| Offer | Recorded proposed terms and outcome | Explicit amount/currency/pay period; not proof of delivery or signature |
-| Onboarding and checklist | Post-selection preparation and tasks | Progress denominator uses active configured items |
-| Saved view and reminder read | Personal navigation and attention state | User-private; only supported filters and genuine reminder identities |
-| Activity and import provenance | Who changed what, when and through which route | Append-only history; imported timestamps are not observed events |
-| Token and storage usage | Integration access and resource consumption | Secret stored as a hash; quota accounting is separate from provider billing |
+| Data group                     | Required business meaning                                  | Important rules                                                                                       |
+| ------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Team, user and membership      | Who can use which workspace and in what capacity           | Live membership governs access; role labels are not interchangeable with hiring responsibility labels |
+| Candidate                      | One person's recorded factual profile                      | Unknown is not zero or false; duplicate identity needs human review                                   |
+| Source evidence and review     | Where a fact originated and whether ambiguity was resolved | Preserve original wording and distinct stated/estimated values                                        |
+| CV reference                   | One selected document/version belonging to a candidate     | Private object, validated-content identity, original name and status; multiple versions are allowed   |
+| Personal candidate state       | User's shortlist, follow-up status and private note        | Keyed by team, user and candidate; never shared by default                                            |
+| Job role                       | Reusable description of a role                             | Copying creates a vacancy draft rather than a live synchronized template                              |
+| Vacancy                        | An actual recruitment opening/requisition                  | Separate status, opening count, target date and responsibility labels                                 |
+| Application                    | Candidate-vacancy relationship                             | Holds recruitment stage; does not share its state machine with a task or offer                        |
+| Task and bucket                | Work to be done and its team-defined status                | Optional context links; required bucket; custom values tied to definitions                            |
+| Interview                      | Scheduled recruitment event against an application         | Store a precise instant; display in Asia/Dubai; manual outcome                                        |
+| Offer                          | Recorded proposed terms and outcome                        | Explicit amount/currency/pay period; not proof of delivery or signature                               |
+| Onboarding and checklist       | Post-selection preparation and tasks                       | Progress denominator uses active configured items                                                     |
+| Saved view and reminder read   | Personal navigation and attention state                    | User-private; only supported filters and genuine reminder identities                                  |
+| Activity and import provenance | Who changed what, when and through which route             | Append-only history; imported timestamps are not observed events                                      |
+| Token and storage usage        | Integration access and resource consumption                | Secret stored as a hash; quota accounting is separate from provider billing                           |
 
 ### 8.2 Data quality rules
 
@@ -462,34 +462,34 @@ Operators shall keep local, Preview and Production resources isolated and make d
 
 ### 8.3 State definitions
 
-| Object | Source-baseline states |
-|---|---|
-| Personal follow-up | New, To contact, Contacted, Interviewing, On hold, Closed |
-| Vacancy | Draft, Open, On hold, Filled, Closed |
-| Application | Sourced, Screening, Interview, Offer, Hired, Rejected, Withdrawn |
-| Task | Team-configured bucket |
-| Interview | Scheduled, Completed, Cancelled, No show |
-| Offer | Draft, Sent, Accepted, Declined, Withdrawn, Expired |
-| Onboarding | Planned, In progress, Completed, On hold |
-| Checklist item | Pending, In progress, Complete, Waived |
+| Object             | Source-baseline states                                           |
+| ------------------ | ---------------------------------------------------------------- |
+| Personal follow-up | New, To contact, Contacted, Interviewing, On hold, Closed        |
+| Vacancy            | Draft, Open, On hold, Filled, Closed                             |
+| Application        | Sourced, Screening, Interview, Offer, Hired, Rejected, Withdrawn |
+| Task               | Team-configured bucket                                           |
+| Interview          | Scheduled, Completed, Cancelled, No show                         |
+| Offer              | Draft, Sent, Accepted, Declined, Withdrawn, Expired              |
+| Onboarding         | Planned, In progress, Completed, On hold                         |
+| Checklist item     | Pending, In progress, Complete, Waived                           |
 
 These values describe the current implementation, not an approved organizational hiring policy. Required rejection reasons, transition approval, reapplication, reopening and irreversible-final-state rules remain decisions if the organization needs stronger controls.
 
 ## 9 Reports and metric definitions
 
-| ID | Report | Population and interpretation | Acceptance check |
-|---|---|---|---|
-| RPT-01 | Workspace overview | Current active team records, ready CVs, pending files, upcoming and overdue work | Counts match a known fixture and respect role scopes |
-| RPT-02 | Candidate data coverage | Presence of contact and CV-stated experience fields; review-needed indicator | Missing fields are not treated as completed or correct; review labels use documented rules |
-| RPT-03 | Vacancy and pipeline inventory | Current active vacancies and applications grouped by status/stage, department or source | Totals reconcile to current records; distinct candidates and applications are not conflated |
-| RPT-04 | Applications and first hires over time | New application and first-Hired events actually observed by the system | Imported historical records do not create false old events; date boundaries use Dubai time |
-| RPT-05 | Time to hire | Elapsed time from observed application creation to first observed Hired event | Missing starts are excluded; sample count accompanies the average |
-| RPT-06 | Stage duration | Observed, matching entry/exit transition pairs | Missing or invalid transitions do not produce invented durations |
-| RPT-07 | Stage reach rate | Share of distinct observed applications reaching each stage through the end date | Disclose that the current calculation is all observed history through the end date, not necessarily a selected-period cohort funnel |
-| RPT-08 | Offer outcomes and decline reasons | Current offer records grouped by recorded values | No inference of offer delivery or legal acceptance from a chart alone |
-| RPT-09 | Source categories and experience | Factual categories and CV-stated experience bands, including Not recorded | Folder tags are not suitability ratings; multi-tag populations can overlap |
-| RPT-10 | Import and processing reconciliation | Created, updated, skipped, conflicted, failed and document-ready outcomes | Counts sum to the input/result model; incomplete items remain visible |
-| RPT-11 | Storage and optional AI usage | Logical reservations/ready files and provider consumption where measurable | Distinguish application quota from physical versions, requests, transfer and billable provider usage |
+| ID     | Report                                 | Population and interpretation                                                           | Acceptance check                                                                                                                    |
+| ------ | -------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| RPT-01 | Workspace overview                     | Current active team records, ready CVs, pending files, upcoming and overdue work        | Counts match a known fixture and respect role scopes                                                                                |
+| RPT-02 | Candidate data coverage                | Presence of contact and CV-stated experience fields; review-needed indicator            | Missing fields are not treated as completed or correct; review labels use documented rules                                          |
+| RPT-03 | Vacancy and pipeline inventory         | Current active vacancies and applications grouped by status/stage, department or source | Totals reconcile to current records; distinct candidates and applications are not conflated                                         |
+| RPT-04 | Applications and first hires over time | New application and first-Hired events actually observed by the system                  | Imported historical records do not create false old events; date boundaries use Dubai time                                          |
+| RPT-05 | Time to hire                           | Elapsed time from observed application creation to first observed Hired event           | Missing starts are excluded; sample count accompanies the average                                                                   |
+| RPT-06 | Stage duration                         | Observed, matching entry/exit transition pairs                                          | Missing or invalid transitions do not produce invented durations                                                                    |
+| RPT-07 | Stage reach rate                       | Share of distinct observed applications reaching each stage through the end date        | Disclose that the current calculation is all observed history through the end date, not necessarily a selected-period cohort funnel |
+| RPT-08 | Offer outcomes and decline reasons     | Current offer records grouped by recorded values                                        | No inference of offer delivery or legal acceptance from a chart alone                                                               |
+| RPT-09 | Source categories and experience       | Factual categories and CV-stated experience bands, including Not recorded               | Folder tags are not suitability ratings; multi-tag populations can overlap                                                          |
+| RPT-10 | Import and processing reconciliation   | Created, updated, skipped, conflicted, failed and document-ready outcomes               | Counts sum to the input/result model; incomplete items remain visible                                                               |
+| RPT-11 | Storage and optional AI usage          | Logical reservations/ready files and provider consumption where measurable              | Distinguish application quota from physical versions, requests, transfer and billable provider usage                                |
 
 RPT-10 is supported by legacy import reporting and required for the completed bulk workflow. RPT-11 is a target operating requirement, not a claim that a full billing dashboard already exists. Export formats, report scheduling and additional analytical cohorts require confirmation.
 
@@ -555,24 +555,24 @@ These are release decisions, not a legal opinion or a claim that current impleme
 
 ## 12 Exceptions and recovery requirements
 
-| Scenario | Required business outcome |
-|---|---|
-| Hosted service or provider is disabled | Explain unavailability and preserve safe manual work; never imply completion |
-| No email or phone on a CV | Permit a factual draft, disclose duplicate-check limitation and require human review |
-| Shared contact or duplicate match | Present possible matches; do not merge, reject or overwrite automatically |
-| Unsupported or encrypted/unreadable document | Mark the file for attention; keep other files usable; use a reviewed manual path where permitted |
-| Candidate created but CV failed | Identify the created candidate and pending document; attach safely on retry |
-| Browser closes or team changes | Warn about loss of unfinished local drafts; do not claim persistence or reverse completed records |
-| AI output is malformed or unsafe | Reject suggestions, retain human edits and allow manual entry |
-| AI request is slow or cancelled | End bounded work, avoid false completion and expose any uncertain billable outcome for reconciliation |
-| Concurrent edit | Retain the draft, show a version conflict and require reconciliation |
-| Invitation/reset email fails | Do not fabricate delivery; support a safe retry/recovery path without duplicate privileged setup |
-| A membership changes mid-work | Re-evaluate access; disallow new unauthorized operations and explain what completed already |
-| Storage quota is exhausted | Reject new reservations cleanly, preserve accepted documents and report the actionable limit |
-| Legacy import partly succeeds | Preserve a reconciliation report and stable identifiers; do not delete originals or run destructive rollback automatically |
-| Incorrect linkage or immutable relationship | Require an explicit correction process with audit; do not rewrite unrelated history silently |
-| No observed historical events | Show unavailable/insufficient history, not invented conversion or time-to-hire values |
-| Backup or provider restore is incomplete | Keep service gated until record/document references reconcile and the operator accepts recovery |
+| Scenario                                     | Required business outcome                                                                                                  |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Hosted service or provider is disabled       | Explain unavailability and preserve safe manual work; never imply completion                                               |
+| No email or phone on a CV                    | Permit a factual draft, disclose duplicate-check limitation and require human review                                       |
+| Shared contact or duplicate match            | Present possible matches; do not merge, reject or overwrite automatically                                                  |
+| Unsupported or encrypted/unreadable document | Mark the file for attention; keep other files usable; use a reviewed manual path where permitted                           |
+| Candidate created but CV failed              | Identify the created candidate and pending document; attach safely on retry                                                |
+| Browser closes or team changes               | Warn about loss of unfinished local drafts; do not claim persistence or reverse completed records                          |
+| AI output is malformed or unsafe             | Reject suggestions, retain human edits and allow manual entry                                                              |
+| AI request is slow or cancelled              | End bounded work, avoid false completion and expose any uncertain billable outcome for reconciliation                      |
+| Concurrent edit                              | Retain the draft, show a version conflict and require reconciliation                                                       |
+| Invitation/reset email fails                 | Do not fabricate delivery; support a safe retry/recovery path without duplicate privileged setup                           |
+| A membership changes mid-work                | Re-evaluate access; disallow new unauthorized operations and explain what completed already                                |
+| Storage quota is exhausted                   | Reject new reservations cleanly, preserve accepted documents and report the actionable limit                               |
+| Legacy import partly succeeds                | Preserve a reconciliation report and stable identifiers; do not delete originals or run destructive rollback automatically |
+| Incorrect linkage or immutable relationship  | Require an explicit correction process with audit; do not rewrite unrelated history silently                               |
+| No observed historical events                | Show unavailable/insufficient history, not invented conversion or time-to-hire values                                      |
+| Backup or provider restore is incomplete     | Keep service gated until record/document references reconcile and the operator accepts recovery                            |
 
 ## 13 Delivery phases and acceptance gates
 
@@ -616,22 +616,22 @@ Complete privacy, retention, backup, incident and support decisions; review a mi
 
 ## 14 User acceptance scenarios
 
-| ID | Scenario | Expected result | Primary requirement coverage |
-|---|---|---|---|
-| UAT-01 | Owner invites recruiter and viewer | Verified users access only permitted functions; viewer writes fail | FR-ACC-01 to 05, FR-ADM-01 |
-| UAT-02 | Two teams attempt cross-access | Records, private notes, CVs and exports remain isolated | FR-ACC-02, FR-CAN-06, FR-CV-01, NFR-01 |
-| UAT-03 | Recruiter reviews incomplete candidate | Unknown values stay unknown and provenance remains accessible | FR-CAN-01 to 05 |
-| UAT-04 | Two people edit one candidate | Second stale save preserves draft and does not overwrite | FR-TASK-04, NFR-04 |
-| UAT-05 | Candidate moves from vacancy application to onboarding | Every linked object is findable; all state changes are explicit | FR-REC-01 to 09 |
-| UAT-06 | Task buckets and required fields change | Valid work moves safely and historical values survive archival | FR-TASK-01 to 03 |
-| UAT-07 | Mixed bulk batch includes duplicates and invalid files | Only reviewed eligible items import; every outcome is visible | FR-BULK-01 to 06 |
-| UAT-08 | Network fails after candidate creation | Retry attaches the document without duplicate candidate creation | FR-BULK-04 to 05, NFR-04 |
-| UAT-09 | AI suggests wrong or late data | Human edits survive; suggestions require review; no autonomous decision | FR-AI-01 to 05 |
-| UAT-10 | File is replaced or accessed by another team | Validation/download identity holds and unauthorized access fails | FR-CV-01 to 04, NFR-01 to 05 |
-| UAT-11 | Legacy data is imported twice | Unchanged data is skipped; conflicting corrections are preserved | FR-ADM-03, BR-01 |
-| UAT-12 | Analyst reviews imported and new applications | Inventory and observed history remain distinct; samples reconcile | FR-OPS-01 to 04, RPT-01 to 10 |
-| UAT-13 | Token is revoked or owner demoted | Subsequent requests lose access without exposing the secret | FR-ADM-02, FR-ACC-03 |
-| UAT-14 | Operator restores a fictional environment | Data and document references reconcile under approved recovery targets | NFR-07, FR-ADM-05 |
+| ID     | Scenario                                               | Expected result                                                         | Primary requirement coverage           |
+| ------ | ------------------------------------------------------ | ----------------------------------------------------------------------- | -------------------------------------- |
+| UAT-01 | Owner invites recruiter and viewer                     | Verified users access only permitted functions; viewer writes fail      | FR-ACC-01 to 05, FR-ADM-01             |
+| UAT-02 | Two teams attempt cross-access                         | Records, private notes, CVs and exports remain isolated                 | FR-ACC-02, FR-CAN-06, FR-CV-01, NFR-01 |
+| UAT-03 | Recruiter reviews incomplete candidate                 | Unknown values stay unknown and provenance remains accessible           | FR-CAN-01 to 05                        |
+| UAT-04 | Two people edit one candidate                          | Second stale save preserves draft and does not overwrite                | FR-TASK-04, NFR-04                     |
+| UAT-05 | Candidate moves from vacancy application to onboarding | Every linked object is findable; all state changes are explicit         | FR-REC-01 to 09                        |
+| UAT-06 | Task buckets and required fields change                | Valid work moves safely and historical values survive archival          | FR-TASK-01 to 03                       |
+| UAT-07 | Mixed bulk batch includes duplicates and invalid files | Only reviewed eligible items import; every outcome is visible           | FR-BULK-01 to 06                       |
+| UAT-08 | Network fails after candidate creation                 | Retry attaches the document without duplicate candidate creation        | FR-BULK-04 to 05, NFR-04               |
+| UAT-09 | AI suggests wrong or late data                         | Human edits survive; suggestions require review; no autonomous decision | FR-AI-01 to 05                         |
+| UAT-10 | File is replaced or accessed by another team           | Validation/download identity holds and unauthorized access fails        | FR-CV-01 to 04, NFR-01 to 05           |
+| UAT-11 | Legacy data is imported twice                          | Unchanged data is skipped; conflicting corrections are preserved        | FR-ADM-03, BR-01                       |
+| UAT-12 | Analyst reviews imported and new applications          | Inventory and observed history remain distinct; samples reconcile       | FR-OPS-01 to 04, RPT-01 to 10          |
+| UAT-13 | Token is revoked or owner demoted                      | Subsequent requests lose access without exposing the secret             | FR-ADM-02, FR-ACC-03                   |
+| UAT-14 | Operator restores a fictional environment              | Data and document references reconcile under approved recovery targets  | NFR-07, FR-ADM-05                      |
 
 Acceptance records should capture test revision, environment, role, fixture, steps, expected/actual outcome, evidence and reviewer. A failed Must criterion blocks the related gate until fixed or explicitly respecified by authorized stakeholders without weakening required privacy/security controls.
 
@@ -663,54 +663,54 @@ The project depends on Vercel hosting/protection, Neon database access with suit
 
 ## 16 Open decision register
 
-| ID | Decision | Why it matters | Needed before |
-|---|---|---|---|
-| D-01 | Approve first-release scope and business approvers | Separates required core from optional follow-on work | G-00 |
-| D-02 | Complete authorized identity/database review and accept its remediation | Hosted data access is currently blocked | G-01 |
-| D-03 | Confirm canonical Preview/Production origins and initial-owner identity | Email links, authentication and isolation depend on them | G-01 |
-| D-04 | Finalize Blob implementation and reconcile outdated S3 instructions | Provider selection is decided for testing; safe implementation is not complete | G-03 |
-| D-05 | Translate 1 GB preference into logical quotas and provider budgets | Source defaults differ; logical quota is not a hard bill cap | G-03 |
-| D-06 | Set batch size, concurrency, aggregate limit and durable-resume expectations | Prevents misleading bulk experience and unbounded work | G-03 |
-| D-07 | Approve duplicate handling and linking-to-existing behavior | Current bulk flow checks matches but does not establish an automatic merge process | G-03 |
-| D-08 | Choose document scanning/quarantine and unsupported-file policy | Format checks alone do not address malicious content | G-03/G-05 |
-| D-09 | Choose AI provider, region, retention/training terms and budget | No connected provider is approved or evidenced here | G-04 |
-| D-10 | Set extraction quality, evidence and OCR acceptance coverage | Prevents claims of accuracy without a defined test set | G-04 |
-| D-11 | Approve privacy purpose, optional attributes, retention and deletion | Required before handling real candidate data | G-05 |
-| D-12 | Define performance, capacity, availability, backup RPO and RTO | No approved numerical operating targets exist | G-05 |
-| D-13 | Approve accessibility conformance and browser/device matrix | Current automated and HTTP checks are insufficient | G-02/G-05 |
-| D-14 | Decide hiring transition approval, required reasons and reapplication rules | Source states are not a complete HR decision policy | G-02 |
-| D-15 | Decide whether hiring owner labels become actual user assignments | Affects accountability and notification delivery | G-02 or later |
-| D-16 | Decide expanded auth/membership audit coverage and audit retention | Current application audit coverage has known gaps | G-05 |
-| D-17 | Name operations, incident, privacy and cost owners | A hosted service needs accountable support | G-05 |
-| D-18 | Approve migration scope and exception tolerance | Real migration cannot be accepted by counts alone | G-05 |
+| ID   | Decision                                                                     | Why it matters                                                                     | Needed before |
+| ---- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------- |
+| D-01 | Approve first-release scope and business approvers                           | Separates required core from optional follow-on work                               | G-00          |
+| D-02 | Complete authorized identity/database review and accept its remediation      | Hosted data access is currently blocked                                            | G-01          |
+| D-03 | Confirm canonical Preview/Production origins and initial-owner identity      | Email links, authentication and isolation depend on them                           | G-01          |
+| D-04 | Finalize Blob implementation and reconcile outdated S3 instructions          | Provider selection is decided for testing; safe implementation is not complete     | G-03          |
+| D-05 | Translate 1 GB preference into logical quotas and provider budgets           | Source defaults differ; logical quota is not a hard bill cap                       | G-03          |
+| D-06 | Set batch size, concurrency, aggregate limit and durable-resume expectations | Prevents misleading bulk experience and unbounded work                             | G-03          |
+| D-07 | Approve duplicate handling and linking-to-existing behavior                  | Current bulk flow checks matches but does not establish an automatic merge process | G-03          |
+| D-08 | Choose document scanning/quarantine and unsupported-file policy              | Format checks alone do not address malicious content                               | G-03/G-05     |
+| D-09 | Choose AI provider, region, retention/training terms and budget              | No connected provider is approved or evidenced here                                | G-04          |
+| D-10 | Set extraction quality, evidence and OCR acceptance coverage                 | Prevents claims of accuracy without a defined test set                             | G-04          |
+| D-11 | Approve privacy purpose, optional attributes, retention and deletion         | Required before handling real candidate data                                       | G-05          |
+| D-12 | Define performance, capacity, availability, backup RPO and RTO               | No approved numerical operating targets exist                                      | G-05          |
+| D-13 | Approve accessibility conformance and browser/device matrix                  | Current automated and HTTP checks are insufficient                                 | G-02/G-05     |
+| D-14 | Decide hiring transition approval, required reasons and reapplication rules  | Source states are not a complete HR decision policy                                | G-02          |
+| D-15 | Decide whether hiring owner labels become actual user assignments            | Affects accountability and notification delivery                                   | G-02 or later |
+| D-16 | Decide expanded auth/membership audit coverage and audit retention           | Current application audit coverage has known gaps                                  | G-05          |
+| D-17 | Name operations, incident, privacy and cost owners                           | A hosted service needs accountable support                                         | G-05          |
+| D-18 | Approve migration scope and exception tolerance                              | Real migration cannot be accepted by counts alone                                  | G-05          |
 
 ## 17 Business risk register
 
-| Risk | Business consequence | Required response |
-|---|---|---|
-| Treating source-complete as live-ready | Real data enters an unverified service | Enforce gates and distinguish local from hosted evidence |
-| Weak tenant/identity boundary | Unauthorized candidate disclosure or changes | Keep hosted feature disabled until independent live isolation evidence passes |
-| File replacement or unauthorized download | Wrong or exposed CV associated with a candidate | Validate exact content identity and private access end to end |
-| AI errors or instruction-like CV content | False facts or inappropriate automated decisions | Strict extraction schema, isolated processing and mandatory human review |
-| Duplicate or partial imports | Lost confidence and repeated recruiter work | Stable identifiers, per-item outcomes, duplicate review and reconciliation |
-| Uncontrolled storage or extraction usage | Unexpected costs and service disruption | Quotas plus provider budgets, safe cleanup and cost ownership |
-| Excessive personal-data retention | Privacy exposure and difficult deletion | Approved purpose and retention policy across all copies |
-| Misleading historical analytics | Incorrect performance conclusions | Observed-event definitions, sample disclosure and import boundaries |
-| Unclear responsibility labels | Tasks appear assigned but no one acts | Distinguish free text from accounts and agree ownership expectations |
-| Unexercised recovery | Inability to restore CV/record consistency | Reconciled restore exercise before production acceptance |
+| Risk                                      | Business consequence                             | Required response                                                             |
+| ----------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Treating source-complete as live-ready    | Real data enters an unverified service           | Enforce gates and distinguish local from hosted evidence                      |
+| Weak tenant/identity boundary             | Unauthorized candidate disclosure or changes     | Keep hosted feature disabled until independent live isolation evidence passes |
+| File replacement or unauthorized download | Wrong or exposed CV associated with a candidate  | Validate exact content identity and private access end to end                 |
+| AI errors or instruction-like CV content  | False facts or inappropriate automated decisions | Strict extraction schema, isolated processing and mandatory human review      |
+| Duplicate or partial imports              | Lost confidence and repeated recruiter work      | Stable identifiers, per-item outcomes, duplicate review and reconciliation    |
+| Uncontrolled storage or extraction usage  | Unexpected costs and service disruption          | Quotas plus provider budgets, safe cleanup and cost ownership                 |
+| Excessive personal-data retention         | Privacy exposure and difficult deletion          | Approved purpose and retention policy across all copies                       |
+| Misleading historical analytics           | Incorrect performance conclusions                | Observed-event definitions, sample disclosure and import boundaries           |
+| Unclear responsibility labels             | Tasks appear assigned but no one acts            | Distinguish free text from accounts and agree ownership expectations          |
+| Unexercised recovery                      | Inability to restore CV/record consistency       | Reconciled restore exercise before production acceptance                      |
 
 ## 18 Traceability
 
-| Business objective | Requirements | Workflows and reports | Acceptance evidence |
-|---|---|---|---|
-| BR-01 Canonical records | FR-CAN-01/03/05, FR-ADM-03/04 | WF-02/03, RPT-10 | UAT-03/11, G-05 |
-| BR-02 Efficient finding and entry | FR-CAN-02/07, FR-BULK-01 to 06, FR-AI-01 to 04 | WF-03/04 | UAT-07/08/09; measured before/after task baseline |
-| BR-03 Workflow visibility | FR-REC-01 to 09, FR-TASK-01 to 04, FR-OPS-03 | WF-05/06, RPT-01/03 | UAT-05/06, G-02 |
-| BR-04 Accuracy and human control | FR-CAN-03 to 06, FR-BULK-02/03, FR-AI-02/03/05 | WF-03/04 | UAT-03/09, G-04 |
-| BR-05 Privacy and security | FR-ACC-01 to 05, FR-CV-01 to 03, FR-ADM-01/02/04/05, NFR-01 to 05 | WF-01/07 | UAT-01/02/10/13, G-01/G-03/G-05 |
-| BR-06 Explainable reports | FR-OPS-01 to 04, FR-CAN-05 | WF-07, RPT-01 to 10 | UAT-12, G-02 |
-| BR-07 Controlled operation | FR-CV-04, FR-BULK-05/06, FR-AI-04, NFR-06 to 10/12 | WF-07, RPT-11 | UAT-08/14, G-03/G-05 |
-| BR-08 Controlled growth | FR-ADM-02/03/05, FR-AI-01/05, NFR-11/12 | WF-01/02/07 | UAT-11/13/14, G-05 |
+| Business objective                | Requirements                                                      | Workflows and reports | Acceptance evidence                               |
+| --------------------------------- | ----------------------------------------------------------------- | --------------------- | ------------------------------------------------- |
+| BR-01 Canonical records           | FR-CAN-01/03/05, FR-ADM-03/04                                     | WF-02/03, RPT-10      | UAT-03/11, G-05                                   |
+| BR-02 Efficient finding and entry | FR-CAN-02/07, FR-BULK-01 to 06, FR-AI-01 to 04                    | WF-03/04              | UAT-07/08/09; measured before/after task baseline |
+| BR-03 Workflow visibility         | FR-REC-01 to 09, FR-TASK-01 to 04, FR-OPS-03                      | WF-05/06, RPT-01/03   | UAT-05/06, G-02                                   |
+| BR-04 Accuracy and human control  | FR-CAN-03 to 06, FR-BULK-02/03, FR-AI-02/03/05                    | WF-03/04              | UAT-03/09, G-04                                   |
+| BR-05 Privacy and security        | FR-ACC-01 to 05, FR-CV-01 to 03, FR-ADM-01/02/04/05, NFR-01 to 05 | WF-01/07              | UAT-01/02/10/13, G-01/G-03/G-05                   |
+| BR-06 Explainable reports         | FR-OPS-01 to 04, FR-CAN-05                                        | WF-07, RPT-01 to 10   | UAT-12, G-02                                      |
+| BR-07 Controlled operation        | FR-CV-04, FR-BULK-05/06, FR-AI-04, NFR-06 to 10/12                | WF-07, RPT-11         | UAT-08/14, G-03/G-05                              |
+| BR-08 Controlled growth           | FR-ADM-02/03/05, FR-AI-01/05, NFR-11/12                           | WF-01/02/07           | UAT-11/13/14, G-05                                |
 
 The SRS should map its detailed software requirements and tests to these stable business IDs. If a requirement changes, retain its ID, record the reason and affected tests, and update the decision register. New scope should receive a new ID rather than reusing one with a different meaning.
 

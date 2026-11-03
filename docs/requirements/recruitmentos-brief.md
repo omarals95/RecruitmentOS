@@ -67,15 +67,15 @@ Provide a practical recruitment workspace in which authorized team members can f
 
 The following are proposed measures, not measured current results or approved numeric targets:
 
-| Outcome | Measurement | Acceptance direction |
-| --- | --- | --- |
-| Usable recruitment workflow | End-to-end completion of agreed recruiter scenarios | All release-critical scenarios pass with fictional data before pilot |
-| Correct migration | Reconciliation of source candidates, documents, relationships and exceptions | Every difference explained; no silent loss or guessed relationships |
-| Trustworthy facts | Sample review of saved values against source evidence | AI suggestions and source uncertainties remain distinguishable from approved facts |
-| Controlled access | Positive and negative access tests across users, teams and environments | No unauthorized access in the defined test suite; unresolved critical issues block release |
-| Reliable bulk ingestion | Per-file completion, rejection, retry and duplicate-resolution results | Partial failure cannot silently create duplicate or incomplete accepted records |
-| Recoverable operation | Backup restoration and interruption/retry exercises | Recovery procedure demonstrated against an agreed recovery objective |
-| Sustainable cost | Storage, transfer, email and optional AI usage reporting | Limits and alert thresholds agreed before real-data use |
+| Outcome                     | Measurement                                                                  | Acceptance direction                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Usable recruitment workflow | End-to-end completion of agreed recruiter scenarios                          | All release-critical scenarios pass with fictional data before pilot                       |
+| Correct migration           | Reconciliation of source candidates, documents, relationships and exceptions | Every difference explained; no silent loss or guessed relationships                        |
+| Trustworthy facts           | Sample review of saved values against source evidence                        | AI suggestions and source uncertainties remain distinguishable from approved facts         |
+| Controlled access           | Positive and negative access tests across users, teams and environments      | No unauthorized access in the defined test suite; unresolved critical issues block release |
+| Reliable bulk ingestion     | Per-file completion, rejection, retry and duplicate-resolution results       | Partial failure cannot silently create duplicate or incomplete accepted records            |
+| Recoverable operation       | Backup restoration and interruption/retry exercises                          | Recovery procedure demonstrated against an agreed recovery objective                       |
+| Sustainable cost            | Storage, transfer, email and optional AI usage reporting                     | Limits and alert thresholds agreed before real-data use                                    |
 
 Recruiter time saved, adoption, support burden and extraction correction rate should be baselined during the pilot. No percentage improvement is claimed in this brief.
 
@@ -83,18 +83,18 @@ Recruiter time saved, adoption, support burden and extraction correction rate sh
 
 Only the project owner is identified by name in the available context. The following operating responsibilities are proposed role assignments and require confirmation.
 
-| Stakeholder or role | Primary responsibility | Decisions or evidence needed |
-| --- | --- | --- |
-| Project owner and sponsor | Product scope, priorities, budget and release acceptance | Confirm pilot participants, production purpose and spending limits |
-| Recruitment lead | Operational workflow and data quality | Approve field definitions, workflow stages and representative acceptance scenarios |
-| Recruiters | Candidate review and recruitment processing | Test search, record editing, CV review, tasks and candidate-to-vacancy flows |
-| Team owner | Membership and ownership administration | Verify invitations, role changes and last-owner protection |
-| Team administrator | Permitted team administration and data management | Validate admin capabilities without owner-only privileges |
-| Viewer | Read-only operational access | Validate that write and administration actions are denied |
-| Engineering owner | Implementation, testing and release artifacts | Maintain requirements traceability and evidence for each enabled capability |
-| Database and security reviewer | Independent review of identity, privileges and isolation | Assess the incomplete hosted boundary and proposed migration approach |
-| Service operator | Environments, secrets, backups, monitoring and recovery | Approve runbooks and demonstrate recovery and environment separation |
-| Privacy or data owner | Candidate-data handling, retention and external processing | Confirm permitted collection, access, retention and AI processing arrangements |
+| Stakeholder or role            | Primary responsibility                                     | Decisions or evidence needed                                                       |
+| ------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Project owner and sponsor      | Product scope, priorities, budget and release acceptance   | Confirm pilot participants, production purpose and spending limits                 |
+| Recruitment lead               | Operational workflow and data quality                      | Approve field definitions, workflow stages and representative acceptance scenarios |
+| Recruiters                     | Candidate review and recruitment processing                | Test search, record editing, CV review, tasks and candidate-to-vacancy flows       |
+| Team owner                     | Membership and ownership administration                    | Verify invitations, role changes and last-owner protection                         |
+| Team administrator             | Permitted team administration and data management          | Validate admin capabilities without owner-only privileges                          |
+| Viewer                         | Read-only operational access                               | Validate that write and administration actions are denied                          |
+| Engineering owner              | Implementation, testing and release artifacts              | Maintain requirements traceability and evidence for each enabled capability        |
+| Database and security reviewer | Independent review of identity, privileges and isolation   | Assess the incomplete hosted boundary and proposed migration approach              |
+| Service operator               | Environments, secrets, backups, monitoring and recovery    | Approve runbooks and demonstrate recovery and environment separation               |
+| Privacy or data owner          | Candidate-data handling, retention and external processing | Confirm permitted collection, access, retention and AI processing arrangements     |
 
 Application roles already represented in the code are owner, admin, recruiter and viewer. Organizational responsibilities above do not imply that all these roles are staffed today. [Sources S3 and S4]
 
@@ -185,21 +185,21 @@ Migration begins with a private reconciliation report before any application wri
 
 ### 8.1 Evidence summary
 
-| Area | Verified or recorded state | What remains |
-| --- | --- | --- |
-| Source repository | Public repository; PR #1 merged into `main` at `d67828e` | Keep source publication separate from deployment and data migration |
-| Core workspace | Routes, components, domain logic, schema and tests exist | Complete signed-in browser, accessibility and live-provider acceptance tests |
-| Local validation | Repository records synthetic tests and local HTTP workflow checks; post-merge CI was reported passed | Re-run required checks on the exact release revision; validate actual service behavior |
-| Latest local preparation | Implementation task reports bounded CV-read cancellation and extraction timeout/cancellation changes, with 219 application tests and 52 storage tests passed and one application test skipped | These later changes were reported local-only, not pushed or deployed; reconcile before release |
-| Hosted identity and database | Explicit fail-closed guard remains; separate identity/data interfaces are staged | Complete trusted tenant context, atomic token/audit behavior, restricted roles and real Neon tests |
-| First administrator | Page and local setup behavior exist | Independently review database safeguards and verify concurrent/recovery cases in the intended environment |
-| Neon resources | Conversation records separate resources and matching environment scoping; Secrets status was verified in metadata | Reverify actual database contents, roles, privileges and migrations before use |
-| Database credential rotation | User confirmed rotation after reconnection | Treat as user-confirmed history, not a new independent credential-rotation audit |
-| Private Blob | Separate stores reported created; isolated components and designs exist | Authorization, immutable-content verification, quotas, replay/retry behavior and live-provider tests remain incomplete |
-| Bulk CV workflow | Review UI, queue helpers and duplicate-related work exist | Capability endpoint currently returns both uploads and AI unavailable |
-| AI extraction | Provider-neutral adapter contract and validation exist | No selected/live provider integration; document processing, consent and usage limits remain open |
-| Resend | Mail integration code exists; conversation records an installed integration and a Secret API key | Verify sender/domain readiness and actual delivered verification/reset/invitation flows |
-| Deployment | Latest recorded outcome states no deployment | No verified functional live URL or production-readiness claim is made |
+| Area                         | Verified or recorded state                                                                                                                                                                    | What remains                                                                                                           |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Source repository            | Public repository; PR #1 merged into `main` at `d67828e`                                                                                                                                      | Keep source publication separate from deployment and data migration                                                    |
+| Core workspace               | Routes, components, domain logic, schema and tests exist                                                                                                                                      | Complete signed-in browser, accessibility and live-provider acceptance tests                                           |
+| Local validation             | Repository records synthetic tests and local HTTP workflow checks; post-merge CI was reported passed                                                                                          | Re-run required checks on the exact release revision; validate actual service behavior                                 |
+| Latest local preparation     | Implementation task reports bounded CV-read cancellation and extraction timeout/cancellation changes, with 219 application tests and 52 storage tests passed and one application test skipped | These later changes were reported local-only, not pushed or deployed; reconcile before release                         |
+| Hosted identity and database | Explicit fail-closed guard remains; separate identity/data interfaces are staged                                                                                                              | Complete trusted tenant context, atomic token/audit behavior, restricted roles and real Neon tests                     |
+| First administrator          | Page and local setup behavior exist                                                                                                                                                           | Independently review database safeguards and verify concurrent/recovery cases in the intended environment              |
+| Neon resources               | Conversation records separate resources and matching environment scoping; Secrets status was verified in metadata                                                                             | Reverify actual database contents, roles, privileges and migrations before use                                         |
+| Database credential rotation | User confirmed rotation after reconnection                                                                                                                                                    | Treat as user-confirmed history, not a new independent credential-rotation audit                                       |
+| Private Blob                 | Separate stores reported created; isolated components and designs exist                                                                                                                       | Authorization, immutable-content verification, quotas, replay/retry behavior and live-provider tests remain incomplete |
+| Bulk CV workflow             | Review UI, queue helpers and duplicate-related work exist                                                                                                                                     | Capability endpoint currently returns both uploads and AI unavailable                                                  |
+| AI extraction                | Provider-neutral adapter contract and validation exist                                                                                                                                        | No selected/live provider integration; document processing, consent and usage limits remain open                       |
+| Resend                       | Mail integration code exists; conversation records an installed integration and a Secret API key                                                                                              | Verify sender/domain readiness and actual delivered verification/reset/invitation flows                                |
+| Deployment                   | Latest recorded outcome states no deployment                                                                                                                                                  | No verified functional live URL or production-readiness claim is made                                                  |
 
 The latest implementation work is newer than the merged repository baseline. Test totals therefore refer to different revisions and must not be combined into one purported release result. This documentation exercise did not rerun the application test suite or inspect live cloud credentials. [Sources S5 through S7, S9, S10 and C4 through C6]
 
@@ -331,37 +331,37 @@ The project should produce the following controlled artifacts:
 
 ## 12 Dependencies and constraints
 
-| Dependency or constraint | Impact | Required resolution |
-| --- | --- | --- |
-| Incomplete trusted identity boundary | Hosted private operations cannot be considered ready | Finish reviewed implementation and live isolation evidence |
-| Independent database review | Certain database work remains unresolved | Obtain authorized review; do not reclassify deferred review as passed |
-| Blob guarantees and accounting | Secure uploads/downloads and capacity claims remain blocked | Resolve provider behavior and implement verified control path |
-| Resend sender readiness | Initial-admin verification and account recovery depend on mail | Verify sender configuration and delivered messages |
-| AI provider undecided | No live extraction integration can be specified as final | Select provider and agree processing, formats and usage limits |
-| Free/testing-oriented setup | Capacity and intended use may differ from business production needs | Confirm plan suitability and budget before production operation |
-| Legacy data quality and source access | Migration may contain missing files, duplicates or uncertain facts | Reconcile and review exceptions before apply |
-| Local changes after merge | Published source may not include latest fixes | Reconcile, review and validate exact release revision |
-| Browser and live-service testing incomplete | Local test pass does not establish user-facing readiness | Complete acceptance and provider checks |
-| Operational policy not finalized | Retention, deletion, recovery and support obligations unresolved | Assign owners and approve practical policies |
+| Dependency or constraint                    | Impact                                                              | Required resolution                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Incomplete trusted identity boundary        | Hosted private operations cannot be considered ready                | Finish reviewed implementation and live isolation evidence            |
+| Independent database review                 | Certain database work remains unresolved                            | Obtain authorized review; do not reclassify deferred review as passed |
+| Blob guarantees and accounting              | Secure uploads/downloads and capacity claims remain blocked         | Resolve provider behavior and implement verified control path         |
+| Resend sender readiness                     | Initial-admin verification and account recovery depend on mail      | Verify sender configuration and delivered messages                    |
+| AI provider undecided                       | No live extraction integration can be specified as final            | Select provider and agree processing, formats and usage limits        |
+| Free/testing-oriented setup                 | Capacity and intended use may differ from business production needs | Confirm plan suitability and budget before production operation       |
+| Legacy data quality and source access       | Migration may contain missing files, duplicates or uncertain facts  | Reconcile and review exceptions before apply                          |
+| Local changes after merge                   | Published source may not include latest fixes                       | Reconcile, review and validate exact release revision                 |
+| Browser and live-service testing incomplete | Local test pass does not establish user-facing readiness            | Complete acceptance and provider checks                               |
+| Operational policy not finalized            | Retention, deletion, recovery and support obligations unresolved    | Assign owners and approve practical policies                          |
 
 ## 13 Risks and responses
 
-| Risk | Consequence | Planned response |
-| --- | --- | --- |
-| Treating scaffolding as a finished service | Users encounter nonfunctional or unsafe workflows | Maintain capability gates and an explicit readiness matrix |
-| Cross-team access through an untrusted database context | Candidate or identity data exposure | Complete independent boundary review and negative tests before activation |
-| First-admin takeover or unrecoverable setup interruption | Loss of control or inability to access the system | Verify one-time claim, email verification, concurrency and recovery behavior |
-| CV bytes change after validation | A download could differ from reviewed source | Bind trusted content identity to each ready CV and reject mismatches |
-| Replay, abandoned uploads or late completion | Quota exhaustion and orphaned objects | Durable accounting, controlled capabilities and provider-backed cleanup evidence |
-| AI supplies plausible but unsupported facts | Incorrect candidate records | Strict schemas, provenance, visible uncertainty and human approval |
-| CV text contains malicious instructions | Unintended actions or disclosure through processing | Treat documents as data; isolate extraction from operational privileges |
-| Candidate data leaks through exports, logs or public source control | Privacy and reputational harm | Minimize logging, prohibit real data in the public repository and control exports |
-| Migration silently merges the wrong people | Corrupted history and candidate decisions | Stable identifiers, duplicate review and reconciliation reports |
-| Private notes become shared | Breach of recruiter expectations | Preserve user ownership through migration and access tests |
-| Test and production resources are mixed | Unexpected exposure or destructive testing | Verify environment binding, independent secrets and no production-data cloning |
-| Low-cost limits are mistaken for guaranteed headroom | Service interruption or unexpected operating cost | Monitor combined usage, define budgets and verify current provider terms |
+| Risk                                                                   | Consequence                                                     | Planned response                                                                           |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Treating scaffolding as a finished service                             | Users encounter nonfunctional or unsafe workflows               | Maintain capability gates and an explicit readiness matrix                                 |
+| Cross-team access through an untrusted database context                | Candidate or identity data exposure                             | Complete independent boundary review and negative tests before activation                  |
+| First-admin takeover or unrecoverable setup interruption               | Loss of control or inability to access the system               | Verify one-time claim, email verification, concurrency and recovery behavior               |
+| CV bytes change after validation                                       | A download could differ from reviewed source                    | Bind trusted content identity to each ready CV and reject mismatches                       |
+| Replay, abandoned uploads or late completion                           | Quota exhaustion and orphaned objects                           | Durable accounting, controlled capabilities and provider-backed cleanup evidence           |
+| AI supplies plausible but unsupported facts                            | Incorrect candidate records                                     | Strict schemas, provenance, visible uncertainty and human approval                         |
+| CV text contains malicious instructions                                | Unintended actions or disclosure through processing             | Treat documents as data; isolate extraction from operational privileges                    |
+| Candidate data leaks through exports, logs or public source control    | Privacy and reputational harm                                   | Minimize logging, prohibit real data in the public repository and control exports          |
+| Migration silently merges the wrong people                             | Corrupted history and candidate decisions                       | Stable identifiers, duplicate review and reconciliation reports                            |
+| Private notes become shared                                            | Breach of recruiter expectations                                | Preserve user ownership through migration and access tests                                 |
+| Test and production resources are mixed                                | Unexpected exposure or destructive testing                      | Verify environment binding, independent secrets and no production-data cloning             |
+| Low-cost limits are mistaken for guaranteed headroom                   | Service interruption or unexpected operating cost               | Monitor combined usage, define budgets and verify current provider terms                   |
 | Existing 10 GiB per-team default exceeds the expected testing envelope | Application allocations can outgrow the intended total capacity | Reconcile team/store/global budgets before enabling Blob; do not claim a hard physical cap |
-| Operational ownership is unclear | Incidents, failed mail or broken backups remain unresolved | Assign named support and recovery owners before launch |
+| Operational ownership is unclear                                       | Incidents, failed mail or broken backups remain unresolved      | Assign named support and recovery owners before launch                                     |
 
 ## 14 Decisions and open questions
 
@@ -413,24 +413,24 @@ The recommended next planning action is to agree the pilot boundary and assign t
 
 Repository links below are pinned to the inspected commit where practical. They describe this baseline, not every later local change.
 
-| ID | Source | Used for |
-| --- | --- | --- |
-| S1 | [README](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/README.md) | Product modules, local/cloud distinction and validation approach |
-| S2 | [Package manifest](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/package.json) | Technology stack and scripts |
-| S3 | [Workspace user guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/user-guide.md) | Recruitment workflow semantics, privacy and source evidence |
-| S4 | [Authentication and team setup](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/authentication.md) | Hosted guard, setup, roles, invitations and identity providers |
-| S5 | [Identity boundary plan](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/identity-boundary-plan.md) | Incomplete boundary, dependencies and review requirements |
-| S6 | [Blob security design](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/blob-security-design.md) and [quota design](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/blob-quota-design.md) | Proposed storage controls and unresolved provider/accounting issues |
-| S7 | [Bulk capability route](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/app/api/v1/cvs/bulk-capabilities/route.ts) and [extraction contract](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/cv-extraction.ts) | Disabled capabilities and current extraction field schema |
-| S8 | [Legacy migration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/migration.md) | One-way migration, reconciliation and preservation rules |
-| S9 | [Validation record](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/validation.md) | Synthetic/local evidence and outstanding staging tests |
-| S10 | [Merged PR 1](https://github.com/omarals95/RecruitmentOS/pull/1) and [reported post-merge CI](https://github.com/omarals95/RecruitmentOS/actions/runs/41629231131) | Published-source milestone; CI result is also recorded in project history |
-| S11 | [Application schema](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/db/schema.ts) and [initial application migration](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/drizzle/0001_app.sql) | Existing per-team storage defaults and accounting structure |
-| C1 | User conversation, 3 November 2026, 05:18 UTC | Separate environments and initial-admin request |
-| C2 | User conversation, 3 November 2026, 05:19–05:26 UTC | Testing purpose, Blob direction and approximate current capacity need |
-| C3 | User conversation, 3 November 2026, 09:39 UTC | Bulk CV and optional AI request; review-step implementation response |
-| C4 | User conversation, 3 November 2026, 09:21–09:39 UTC | Sending-domain distinction, environment-secret verification and user-confirmed rotation |
-| C5 | User conversation, 3 November 2026, 10:48–11:42 UTC | Deferred database review, merge request and continuing hosted-feature limitations |
-| C6 | Latest completed implementation report inspected on 3 November 2026 | Local-only cancellation preparation, latest test totals, disabled capabilities and no deployment |
+| ID  | Source                                                                                                                                                                                                                                                                                                          | Used for                                                                                         |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| S1  | [README](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/README.md)                                                                                                                                                                                                    | Product modules, local/cloud distinction and validation approach                                 |
+| S2  | [Package manifest](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/package.json)                                                                                                                                                                                       | Technology stack and scripts                                                                     |
+| S3  | [Workspace user guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/user-guide.md)                                                                                                                                                                             | Recruitment workflow semantics, privacy and source evidence                                      |
+| S4  | [Authentication and team setup](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/authentication.md)                                                                                                                                                                | Hosted guard, setup, roles, invitations and identity providers                                   |
+| S5  | [Identity boundary plan](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/identity-boundary-plan.md)                                                                                                                                                               | Incomplete boundary, dependencies and review requirements                                        |
+| S6  | [Blob security design](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/blob-security-design.md) and [quota design](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/blob-quota-design.md)                            | Proposed storage controls and unresolved provider/accounting issues                              |
+| S7  | [Bulk capability route](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/app/api/v1/cvs/bulk-capabilities/route.ts) and [extraction contract](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/domain/cv-extraction.ts) | Disabled capabilities and current extraction field schema                                        |
+| S8  | [Legacy migration guide](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/migration.md)                                                                                                                                                                            | One-way migration, reconciliation and preservation rules                                         |
+| S9  | [Validation record](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/docs/validation.md)                                                                                                                                                                                | Synthetic/local evidence and outstanding staging tests                                           |
+| S10 | [Merged PR 1](https://github.com/omarals95/RecruitmentOS/pull/1) and [reported post-merge CI](https://github.com/omarals95/RecruitmentOS/actions/runs/41629231131)                                                                                                                                              | Published-source milestone; CI result is also recorded in project history                        |
+| S11 | [Application schema](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/src/db/schema.ts) and [initial application migration](https://github.com/omarals95/RecruitmentOS/blob/d67828ed0889849ea0fc431949288f7c10061dda/drizzle/0001_app.sql)                              | Existing per-team storage defaults and accounting structure                                      |
+| C1  | User conversation, 3 November 2026, 05:18 UTC                                                                                                                                                                                                                                                                   | Separate environments and initial-admin request                                                  |
+| C2  | User conversation, 3 November 2026, 05:19–05:26 UTC                                                                                                                                                                                                                                                             | Testing purpose, Blob direction and approximate current capacity need                            |
+| C3  | User conversation, 3 November 2026, 09:39 UTC                                                                                                                                                                                                                                                                   | Bulk CV and optional AI request; review-step implementation response                             |
+| C4  | User conversation, 3 November 2026, 09:21–09:39 UTC                                                                                                                                                                                                                                                             | Sending-domain distinction, environment-secret verification and user-confirmed rotation          |
+| C5  | User conversation, 3 November 2026, 10:48–11:42 UTC                                                                                                                                                                                                                                                             | Deferred database review, merge request and continuing hosted-feature limitations                |
+| C6  | Latest completed implementation report inspected on 3 November 2026                                                                                                                                                                                                                                             | Local-only cancellation preparation, latest test totals, disabled capabilities and no deployment |
 
 **Evidence limitation:** Cloud resource state, credential contents, external email delivery, live tenant isolation and an operational deployment were not independently revalidated while preparing this brief. Existing documentation contains both the older S3 path and the newer Blob direction; where they differ, the intended direction and implementation gap are stated explicitly.

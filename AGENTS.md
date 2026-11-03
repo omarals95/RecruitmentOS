@@ -16,7 +16,7 @@ RecruitmentOS is a team-based recruitment workspace: Next.js App Router, React, 
 
 The product scope and acceptance criteria live in `docs/requirements/`:
 
-- `recruitmentos-brief.md` for context, `recruitmentos-brd.md` for business rules (FR-*, NFR-*), `recruitmentos-srs.md` for engineering requirements (SRS-*) and release gates.
+- `recruitmentos-brief.md` for context, `recruitmentos-brd.md` for business rules (FR-_, NFR-_), `recruitmentos-srs.md` for engineering requirements (SRS-*) and release gates.
 - `docs/requirements/register.md` maps every requirement ID to code, tests and status. Update the rows you touch.
 
 Before touching identity, tenancy, storage or deployment code, also read `docs/security.md`, `docs/identity-boundary-plan.md`, `docs/blob-security-design.md`, `docs/blob-quota-design.md` and `docs/environment-isolation.md`.
