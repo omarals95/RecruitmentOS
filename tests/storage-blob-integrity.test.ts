@@ -111,3 +111,100 @@ test("copies chunks as they arrive so a producer cannot change earlier bytes", a
   const result = await readBlobSnapshot(reused(), 6);
   assert.equal(result.bytes.toString(), "hello!");
 });
+
+test("aborts a stalled snapshot without returning any bytes", async () => {
+  const controller = new AbortController();
+  let closed = false;
+  let nextCalled = false;
+  const stalled: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => {
+          nextCalled = true;
+          return new Promise<IteratorResult<Uint8Array>>(() => {});
+        },
+        return: async () => {
+          closed = true;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  const result = readBlobSnapshot(stalled, document.length, {
+    controller,
+  }).then(
+    () => "returned bytes",
+    () => "aborted",
+  );
+  controller.abort();
+  const outcome = await Promise.race([
+    result,
+    new Promise<string>((resolve) => setTimeout(() => resolve("stalled"), 100)),
+  ]);
+  assert.equal(outcome, "aborted");
+  assert.equal(closed, true);
+  assert.equal(nextCalled, false);
+});
+
+test("deadline aborts the provider's shared controller and closes the iterator", async () => {
+  const controller = new AbortController();
+  let closed = false;
+  let providerAborted = false;
+  controller.signal.addEventListener("abort", () => {
+    providerAborted = true;
+  });
+  const stalled: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+        return: async () => {
+          closed = true;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    readBlobSnapshot(stalled, document.length, { controller, timeoutMs: 10 }),
+    /cancelled/,
+  );
+  assert.equal(providerAborted, true);
+  assert.equal(closed, true);
+});
+
+test("invalid stream data aborts the provider without waiting for stalled cleanup", async () => {
+  const controller = new AbortController();
+  const invalid: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => ({ done: false, value: new Uint8Array() }),
+        return: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+      };
+    },
+  };
+  const outcome = await Promise.race([
+    readBlobSnapshot(invalid, document.length, { controller }).then(
+      () => "returned bytes",
+      () => "rejected",
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("stalled"), 100)),
+  ]);
+  assert.equal(outcome, "rejected");
+  assert.equal(controller.signal.aborted, true);
+});
+
+test("invalid snapshot metadata aborts the provider request before reading", async () => {
+  const controller = new AbortController();
+  await assert.rejects(readBlobSnapshot(chunks(document), 0, { controller }));
+  assert.equal(controller.signal.aborted, true);
+});
+
+test("invalid slice metadata aborts the provider request before reading", async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    readVerifiedBlobSlice(chunks(document), document.length, "bad", 0, 1, {
+      controller,
+    }),
+  );
+  assert.equal(controller.signal.aborted, true);
+});
