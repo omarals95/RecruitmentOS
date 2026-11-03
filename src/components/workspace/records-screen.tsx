@@ -1107,11 +1107,11 @@ export function RecordsScreen({ section }: { section: string }) {
         <BulkAssign
           candidateIds={selected}
           onClose={() => setBulk(false)}
-          onSaved={() => {
+          onSaved={({ created, skipped }) => {
             setBulk(false);
             refresh();
             setNotice(
-              "Candidate assignments saved. Existing active assignments were retained.",
+              `Assignments saved: ${created} created, ${skipped} already had an active application for this vacancy.`,
             );
           }}
         />
@@ -2657,7 +2657,7 @@ function BulkAssign({
 }: {
   candidateIds: string[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (counts: { created: number; skipped: number }) => void;
 }) {
   const { team } = useWorkspace();
   const [vacancy, setVacancy] = useState("");
@@ -2665,22 +2665,34 @@ function BulkAssign({
   const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const idempotency = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!team || saving) return;
     setSaving(true);
     setError("");
     try {
-      await requestJson(team.id, "/api/v1/applications/bulk", {
-        method: "POST",
-        body: JSON.stringify({
-          candidateIds,
-          vacancyId: vacancy,
-          stage,
-          owner,
-        }),
+      const serialized = JSON.stringify({
+        candidateIds,
+        vacancyId: vacancy,
+        stage,
+        owner,
       });
-      onSaved();
+      let key = idempotency.current.get(serialized);
+      if (!key) {
+        key = crypto.randomUUID();
+        idempotency.current.set(serialized, key);
+      }
+      const response = await requestJson<{ created: number; skipped: number }>(
+        team.id,
+        "/api/v1/applications/bulk",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: serialized,
+        },
+      );
+      onSaved({ created: response.created, skipped: response.skipped });
     } catch (e) {
       setError(humanError(e));
     } finally {

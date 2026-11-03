@@ -5,7 +5,11 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   return runApi(req, "recruitment:write", async (p) =>
     json(
-      await bulkApplications(p, await readBody(req, bulkApplicationsSchema)),
+      await bulkApplications(
+        p,
+        await readBody(req, bulkApplicationsSchema),
+        req.headers.get("idempotency-key") ?? undefined,
+      ),
     ),
   );
 }

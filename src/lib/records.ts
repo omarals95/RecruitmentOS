@@ -558,6 +558,11 @@ function canonical(value: unknown): string {
     .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
     .join(",")}}`;
 }
+/**
+ * Keys are never reused for different content, even after expiry. An expired
+ * same-payload retry runs `reconcile` (or `work` when it cannot duplicate) and
+ * renews the stored result in place.
+ */
 async function idempotent<T>(
   tx: TeamTx,
   p: Principal,
@@ -565,6 +570,7 @@ async function idempotent<T>(
   key: string | undefined,
   payload: unknown,
   work: () => Promise<T>,
+  reconcile?: (previous: unknown) => Promise<T>,
 ): Promise<T> {
   if (!key) return work();
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key))
@@ -584,16 +590,26 @@ async function idempotent<T>(
     eq(idempotency.key, key),
   );
   const [previous] = await tx.select().from(idempotency).where(where).limit(1);
-  if (previous && previous.expiresAt > new Date()) {
+  if (previous) {
     if (previous.payloadHash !== payloadHash)
       throw new ApiError(
         409,
         "idempotency_mismatch",
         "This Idempotency-Key was used with different content.",
       );
-    return previous.response as T;
+    if (previous.expiresAt > new Date()) return previous.response as T;
+    const result = reconcile
+      ? await reconcile(previous.response)
+      : await work();
+    await tx
+      .update(idempotency)
+      .set({
+        response: result,
+        expiresAt: new Date(Date.now() + 7 * 86400000),
+      })
+      .where(where);
+    return result;
   }
-  if (previous) await tx.delete(idempotency).where(where);
   const result = await work();
   await tx.insert(idempotency).values({
     teamId: p.teamId,
@@ -1049,6 +1065,24 @@ export async function createRecord(
             await createInside(tx, p, kind, input, imported),
           ])
         )[0],
+      async (previous) => {
+        // Return the record's current state, including archived records; never create again.
+        const recordId = (previous as { id?: unknown } | null)?.id;
+        const [row] = uuidSchema.safeParse(recordId).success
+          ? await tx
+              .select()
+              .from(records)
+              .where(and(...owned(p, kind), eq(records.id, recordId as string)))
+              .limit(1)
+          : [];
+        if (!row)
+          throw new ApiError(
+            409,
+            "idempotency_expired",
+            "This Idempotency-Key has expired and its original record is no longer available. Search for the record before creating it again.",
+          );
+        return (await decorate(tx, p, [dto(row)]))[0];
+      },
     );
   });
 }
@@ -1216,74 +1250,90 @@ export async function updateRecord(
   });
 }
 
-export async function bulkApplications(p: Principal, raw: unknown) {
+export async function bulkApplications(
+  p: Principal,
+  raw: unknown,
+  idempotencyKey?: string,
+) {
   permission(p, "applications", true);
   permission(p, "candidates");
   const input = parse(bulkApplicationsSchema, raw);
   const candidateIds = [...new Set(input.candidateIds)];
   return withTeam(p, async (tx) => {
     await lockTeam(tx, p);
-    const vacancy = await find(tx, p, "vacancy", input.vacancyId);
-    if (vacancy.archivedAt)
-      throw new ApiError(
-        400,
-        "archived_reference",
-        "Choose an active vacancy.",
-      );
-    const candidates = await tx
-      .select()
-      .from(records)
-      .where(
-        and(
-          ...owned(p, "candidate"),
-          inArray(records.id, candidateIds),
-          isNull(records.archivedAt),
-        ),
-      );
-    if (candidates.length !== candidateIds.length)
-      throw new ApiError(
-        400,
-        "invalid_reference",
-        "Every candidate must be active and in this team. No applications were created.",
-      );
-    const existing = await tx
-      .select({ candidateId: records.candidateId })
-      .from(records)
-      .where(
-        and(
-          ...owned(p, "application"),
-          eq(records.vacancyId, input.vacancyId),
-          inArray(records.candidateId, candidateIds),
-          isNull(records.archivedAt),
-        ),
-      );
-    const skip = new Set(existing.map((row) => row.candidateId));
-    const created: RecordDto[] = [];
-    for (const candidateId of candidateIds)
-      if (!skip.has(candidateId))
-        created.push(
-          await createInside(
-            tx,
-            p,
-            "application",
-            {
-              candidateId,
-              vacancyId: input.vacancyId,
-              data: parse(recordDataSchemas.application, {
-                stage: input.stage,
-                owner: input.owner,
-                source: input.source,
-                appliedDate: input.appliedDate,
-              }) as Data,
-            },
-            false,
-          ),
-        );
-    return {
-      data: await decorate(tx, p, created),
-      created: created.length,
-      skipped: skip.size,
-    };
+    // Expired keys re-run: existing active pairs are reported, never duplicated.
+    return idempotent(
+      tx,
+      p,
+      "bulk:applications",
+      idempotencyKey,
+      input,
+      async () => {
+        const vacancy = await find(tx, p, "vacancy", input.vacancyId);
+        if (vacancy.archivedAt)
+          throw new ApiError(
+            400,
+            "archived_reference",
+            "Choose an active vacancy.",
+          );
+        const candidates = await tx
+          .select()
+          .from(records)
+          .where(
+            and(
+              ...owned(p, "candidate"),
+              inArray(records.id, candidateIds),
+              isNull(records.archivedAt),
+            ),
+          );
+        if (candidates.length !== candidateIds.length)
+          throw new ApiError(
+            400,
+            "invalid_reference",
+            "Every candidate must be active and in this team. No applications were created.",
+          );
+        const existing = await tx
+          .select()
+          .from(records)
+          .where(
+            and(
+              ...owned(p, "application"),
+              eq(records.vacancyId, input.vacancyId),
+              inArray(records.candidateId, candidateIds),
+              isNull(records.archivedAt),
+            ),
+          )
+          .orderBy(asc(records.createdAt), asc(records.id));
+        const skip = new Set(existing.map((row) => row.candidateId));
+        const created: RecordDto[] = [];
+        for (const candidateId of candidateIds)
+          if (!skip.has(candidateId))
+            created.push(
+              await createInside(
+                tx,
+                p,
+                "application",
+                {
+                  candidateId,
+                  vacancyId: input.vacancyId,
+                  data: parse(recordDataSchemas.application, {
+                    stage: input.stage,
+                    owner: input.owner,
+                    source: input.source,
+                    appliedDate: input.appliedDate,
+                  }) as Data,
+                },
+                false,
+              ),
+            );
+        return {
+          data: await decorate(tx, p, created),
+          existing: await decorate(tx, p, existing.map(dto)),
+          created: created.length,
+          skipped: existing.length,
+        };
+      },
+    );
   });
 }
 
