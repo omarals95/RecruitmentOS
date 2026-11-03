@@ -102,56 +102,62 @@ export async function readBody<T>(
     );
   return parsed.data;
 }
+/** Every error body and X-Correlation-Id header share one fresh ID for support reports. */
+export function errorJson(
+  status: number,
+  code: string,
+  message: string,
+  headers: Record<string, string> = {},
+): Response {
+  const correlationId = crypto.randomUUID();
+  const response = json({ error: { code, message, correlationId } }, status);
+  response.headers.set("X-Correlation-Id", correlationId);
+  for (const [name, value] of Object.entries(headers))
+    response.headers.set(name, value);
+  return response;
+}
 export function errorResponse(error: unknown): Response {
-  if (error instanceof ApiError) {
-    const response = json(
-      { error: { code: error.code, message: error.message } },
+  if (error instanceof ApiError)
+    return errorJson(
       error.status,
+      error.code,
+      error.message,
+      error.status === 429 ? { "Retry-After": "60" } : {},
     );
-    if (error.status === 429) response.headers.set("Retry-After", "60");
-    return response;
-  }
   const dbError =
     (error as { cause?: { code?: string }; code?: string })?.cause ??
     (error as { code?: string });
   if (dbError?.code === "23505")
-    return json(
-      {
-        error: {
-          code: "duplicate",
-          message: "A record with these unique details already exists.",
-        },
-      },
+    return errorJson(
       409,
+      "duplicate",
+      "A record with these unique details already exists.",
     );
   if (dbError?.code === "23503" || dbError?.code === "23514")
-    return json(
-      {
-        error: {
-          code: "constraint",
-          message:
-            "This change conflicts with a linked record or a required workflow rule.",
-        },
-      },
+    return errorJson(
       409,
+      "constraint",
+      "This change conflicts with a linked record or a required workflow rule.",
     );
   if (error instanceof z.ZodError)
-    return json(
-      {
-        error: { code: "invalid_input", message: "Check the supplied fields." },
-      },
-      400,
-    );
-  return json(
-    {
-      error: {
-        code: "internal_error",
-        message:
-          "The request could not be completed. Refresh the record before retrying a save.",
-      },
-    },
+    return errorJson(400, "invalid_input", "Check the supplied fields.");
+  const response = errorJson(
     500,
+    "internal_error",
+    "The request could not be completed. Refresh the record before retrying a save.",
   );
+  // Log only a safe category; messages, stacks and request data can hold record contents.
+  const sqlState =
+    typeof dbError?.code === "string" && /^[0-9A-Z]{5}$/.test(dbError.code)
+      ? ` sqlstate=${dbError.code}`
+      : "";
+  const category =
+    (error as { constructor?: { name?: string } } | null)?.constructor?.name ||
+    typeof error;
+  console.error(
+    `internal_error correlationId=${response.headers.get("X-Correlation-Id")} category=${category}${sqlState}`,
+  );
+  return response;
 }
 export async function runApi(
   request: Request,

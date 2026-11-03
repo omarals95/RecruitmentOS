@@ -11,6 +11,7 @@ import {
 } from "../src/lib/api-tokens";
 import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
+import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 
 const principal = (
   userId = "recruiter",
@@ -199,6 +200,28 @@ describe("team scoped API tokens against actual SQL", () => {
       "SELECT count FROM auth.api_rate_limits",
     );
     expect(limits.rows[0].count).toBe(61);
+  });
+
+  it("sends Retry-After and a correlation ID on a rate-limited route request", async () => {
+    const result = await createToken(principal(), {
+      name: "Route rate limit",
+      scopes: ["candidates:read", "recruitment:read"],
+    });
+    for (let i = 0; i < 60; i++) await authenticateApiToken(result.token);
+    const response = await overviewRoute(
+      new Request("http://localhost:3000/api/v1/overview", {
+        headers: { authorization: `Bearer ${result.token}` },
+      }),
+    );
+    expect(response.status).toBe(429);
+    const retryAfter = response.headers.get("retry-after");
+    expect(retryAfter).toMatch(/^[1-9]\d*$/);
+    const body = await response.json();
+    expect(body.error.code).toBe("token_rate_limited");
+    expect(body.error.correlationId).toBe(
+      response.headers.get("x-correlation-id"),
+    );
+    expect(body.error.correlationId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("never allows a token principal to create or administer tokens", async () => {
