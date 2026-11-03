@@ -492,6 +492,89 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     expect(expired).toMatchObject({ created: 0, skipped: 2 });
   });
 
+  it("reports only references for existing applications to write tokens without recruitment:read", async () => {
+    const person = await candidate("Fictional Bulk Scope Person");
+    const job = await vacancy("Bulk scope vacancy");
+    const private_ = await createRecord(colleague, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { owner: "Fictional colleague", notes: "Fictional private note" },
+    });
+    const token: Principal = {
+      ...owner,
+      authType: "token",
+      tokenId: randomUUID(),
+      scopes: ["recruitment:write", "candidates:read"],
+    };
+    const result = await bulkApplications(
+      token,
+      { candidateIds: [person.id], vacancyId: job.id },
+      "fictional-bulk-scope",
+    );
+    expect(result).toMatchObject({ created: 0, skipped: 1, data: [] });
+    expect(result.existing).toEqual([
+      {
+        id: private_.id,
+        kind: "application",
+        candidateId: person.id,
+        vacancyId: job.id,
+      },
+    ]);
+    const [stored] = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(idempotency)
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.key, "fictional-bulk-scope"),
+          ),
+        ),
+    );
+    expect(JSON.stringify([result, stored.response])).not.toMatch(
+      /Fictional private note|Fictional colleague/,
+    );
+  });
+
+  it("returns the original snapshot on expired-key retries without the read scope", async () => {
+    const writer: Principal = {
+      ...owner,
+      authType: "token",
+      tokenId: randomUUID(),
+      scopes: ["candidates:write"],
+    };
+    const payload = { data: { name: "Fictional Write Only Person" } };
+    const first = await createRecord(
+      writer,
+      "candidates",
+      payload,
+      "fictional-write-only",
+    );
+    await updateRecord(owner, "candidates", first.id, {
+      version: 1,
+      data: { jobTitle: "Fictional later edit" },
+    });
+    await withTeam(owner, (tx) =>
+      tx
+        .update(idempotency)
+        .set({ expiresAt: new Date(Date.now() - 60000) })
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.key, "fictional-write-only"),
+          ),
+        ),
+    );
+    const retry = await createRecord(
+      writer,
+      "candidates",
+      payload,
+      "fictional-write-only",
+    );
+    expect(retry).toEqual(first);
+    expect(JSON.stringify(retry)).not.toContain("Fictional later edit");
+  });
+
   it("rolls back the business record and retry cache when its audit append fails", async () => {
     await expect(
       createRecord(

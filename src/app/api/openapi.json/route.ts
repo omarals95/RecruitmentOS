@@ -240,7 +240,7 @@ export function GET() {
               required: false,
               schema: { type: "string", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
               description:
-                "Reuse the same key and identical payload after an uncertain result; a different payload returns 409 idempotency_mismatch, even after the key expires. Keys are retained for 7 days. After that, an identical retry returns the existing record's current state instead of creating another; if that record is no longer available it returns 409 idempotency_expired and creates nothing, so search for the record before creating it again.",
+                "Reuse the same key and identical payload after an uncertain result; a different payload returns 409 idempotency_mismatch, even after the key expires. Keys are retained for 7 days. After that, an identical retry returns the existing record's current state (or the original response when the caller lacks the resource's read scope) instead of creating another; if that record is no longer available it returns 409 idempotency_expired and creates nothing, so search for the record before creating it again.",
             },
           ],
         },
@@ -407,9 +407,24 @@ export function GET() {
                   },
                   existing: {
                     type: "array",
-                    items: { $ref: "#/components/schemas/RecordDto" },
+                    items: {
+                      oneOf: [
+                        { $ref: "#/components/schemas/RecordDto" },
+                        {
+                          type: "object",
+                          required: ["id", "kind", "candidateId", "vacancyId"],
+                          additionalProperties: false,
+                          properties: {
+                            id: { type: "string", format: "uuid" },
+                            kind: { type: "string" },
+                            candidateId: { type: "string", format: "uuid" },
+                            vacancyId: { type: "string", format: "uuid" },
+                          },
+                        },
+                      ],
+                    },
                     description:
-                      "Active applications that already existed for the vacancy and requested candidates.",
+                      "Active applications that already existed for the vacancy and requested candidates. Callers without recruitment:read receive references only (id, kind, candidateId, vacancyId).",
                   },
                   created: { type: "integer", description: "data.length" },
                   skipped: {

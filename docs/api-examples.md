@@ -33,7 +33,7 @@ The response contains `data` and `pagination`. Results are limited to the token'
 
 Use one stable, unique `Idempotency-Key` for one logical create. A retry with the same key and body returns the original result; a changed body returns a conflict. Do not infer missing personal facts.
 
-Keys are retained for 7 days. A key is never reused for different content: a changed body under an expired key still returns 409 `idempotency_mismatch`. After expiry, a retry with the same key and body never creates a second record. It returns 201 with the original record's current state, including an archived record. If that record is no longer available, it returns 409 `idempotency_expired` and creates nothing; search for the record (for example by email or legacy ID) before creating it again with a new key.
+Keys are retained for 7 days. A key is never reused for different content: a changed body under an expired key still returns 409 `idempotency_mismatch`. After expiry, a retry with the same key and body never creates a second record. It returns 201 with the original record's current state, including an archived record; a token without the resource's read scope receives the original response instead. If that record is no longer available, it returns 409 `idempotency_expired` and creates nothing; search for the record (for example by email or legacy ID) before creating it again with a new key.
 
 ```bash
 curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/candidates" \
@@ -57,7 +57,7 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/applications/bulk" \
   --data '{"candidateIds":["3f6c1d2e-8a4b-4c7d-9e1f-2a3b4c5d6e7f"],"vacancyId":"7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b","stage":"Sourced"}'
 ```
 
-The response is `{data, existing, created, skipped}`. `data` lists the applications this request created and `created` is its length. `existing` lists the active applications that already existed for the vacancy and requested candidates; `skipped` equals its length. A pair that already has an active application is never duplicated, so a retry after an uncertain result, with or without the key, reports the earlier applications in `existing`.
+The response is `{data, existing, created, skipped}`. `data` lists the applications this request created and `created` is its length. `existing` lists the active applications that already existed for the vacancy and requested candidates; `skipped` equals its length. Without `recruitment:read`, each `existing` entry contains only `id`, `kind`, `candidateId` and `vacancyId`, never another user's application details. A pair that already has an active application is never duplicated, so a retry after an uncertain result, with or without the key, reports the earlier applications in `existing`.
 
 ## Upload a CV
 

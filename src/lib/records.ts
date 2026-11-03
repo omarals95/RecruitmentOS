@@ -1081,6 +1081,13 @@ export async function createRecord(
             "idempotency_expired",
             "This Idempotency-Key has expired and its original record is no longer available. Search for the record before creating it again.",
           );
+        // Without the read scope, return the original snapshot rather than later edits.
+        if (
+          !p.scopes.includes(
+            resource === "candidates" ? "candidates:read" : "recruitment:read",
+          )
+        )
+          return previous as RecordDto;
         return (await decorate(tx, p, [dto(row)]))[0];
       },
     );
@@ -1328,7 +1335,15 @@ export async function bulkApplications(
             );
         return {
           data: await decorate(tx, p, created),
-          existing: await decorate(tx, p, existing.map(dto)),
+          // Other users' application contents require recruitment:read; otherwise report references only.
+          existing: p.scopes.includes("recruitment:read")
+            ? await decorate(tx, p, existing.map(dto))
+            : existing.map((row) => ({
+                id: row.id,
+                kind: row.kind as RecordKind,
+                candidateId: row.candidateId,
+                vacancyId: row.vacancyId,
+              })),
           created: created.length,
           skipped: existing.length,
         };
