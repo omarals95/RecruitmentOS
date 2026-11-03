@@ -1,5 +1,6 @@
 -- Run as the Neon database owner AFTER migrations, outside the deployed app.
--- Pick a unique runtime role and set its password securely in the Neon console.
+-- Create the limited runtime role using SQL; Neon Console/API/CLI role creation grants neon_superuser.
+-- Pick a unique runtime role and provision its password through a reviewed secure process.
 -- Do not save a real password in this file or commit it.
 CREATE ROLE recruitment_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 GRANT CONNECT ON DATABASE neondb TO recruitment_runtime;

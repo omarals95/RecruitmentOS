@@ -2,6 +2,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as app from "./schema";
 import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
+import { runtimeRoleSafetyQuery } from "./runtime-role";
 export const schema = { ...app, ...auth };
 export type AppDb = NodePgDatabase<typeof schema>;
 export type TeamTx = Parameters<Parameters<AppDb["transaction"]>[0]>[0];
@@ -56,13 +57,13 @@ async function createDb(): Promise<AppDb> {
   if (process.env.NODE_ENV === "production") {
     try {
       const result = await pool.query<{ unsafe: boolean }>(
-        `SELECT (r.rolsuper OR r.rolbypassrls OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='app' AND pg_has_role(current_user,c.relowner,'MEMBER'))) AS unsafe FROM pg_roles r WHERE r.rolname=current_user`,
+        runtimeRoleSafetyQuery,
       );
-      if (!result.rows[0] || result.rows[0].unsafe)
+      if (result.rows[0]?.unsafe !== false)
         throw new ApiError(
           503,
           "unsafe_database_role",
-          "Configure a separate database runtime role without table ownership or RLS bypass.",
+          "Configure a restricted database runtime role without ownership or elevated privileges.",
         );
     } catch (error) {
       await pool.end();
