@@ -1,5 +1,9 @@
 # Validation before deployment
 
+## Update: first-admin privileges and Blob validation
+
+On 3 November 2026, the current revision passed TypeScript, ESLint, formatting, 109 Vitest tests and 30 native storage tests; one synthetic Windows junction test was skipped. The new first-admin migration and role grants were exercised with nonowner roles in PGlite, including legacy grants and normal setup. Actual Neon roles and multi-connection behavior have not been verified. The new Blob completion validator is not wired to the application, and Blob CV storage remains disabled. A proposed quota ledger was removed during review because the shared runtime SQL role can forge the team and user context; see [blob-quota-design.md](blob-quota-design.md).
+
 ## Update: Blob integrity component
 
 On 3 November 2026, a standalone, unwired Blob integrity component passed six synthetic tests. The complete native storage suite passed 24 tests; 106 Vitest tests passed with one Windows junction test skipped. TypeScript, ESLint and formatting checks also passed. These checks do not establish provider behavior, end-to-end upload or download safety, quota cleanup, or live concurrency. Blob CV storage remains disabled. See [blob-security-design.md](blob-security-design.md).

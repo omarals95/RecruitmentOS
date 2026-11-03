@@ -30,6 +30,8 @@ A conservative alternative to investigate is to **never release or reuse the res
 
 ## Required evidence before enabling
 
+- Persist each CV's storage provider and store binding alongside its validated reference; explicitly preserve existing S3 references and fail closed if the configured provider or store does not match. The current global provider setting cannot safely distinguish existing S3 version IDs from future Blob digests.
+- Update and test the browser uploader, legacy importer, API contract and narrowly scoped content security policy for any new Blob PUT and chunked-download protocol. Authenticate and authorize every chunk, including token scope checks and revocation, and bound provider read time and concurrency.
 - Unit and integration tests for authorization, team and environment isolation, exact upload path and constraints, retries, signed-ticket replay, concurrent completion, reservation accounting and all rejection paths.
 - Replace, delete, recreate and mutate objects at every boundary between head, read, validation, commit and download. Verify no changed or partial bytes are returned, including across separate chunk requests.
 - Test truncated, oversized and malformed files, invalid callback signatures, chunk bounds, concurrent expiry, interruption, cleanup failures, delayed uploads and orphan reconciliation using only synthetic documents.

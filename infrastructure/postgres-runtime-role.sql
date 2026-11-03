@@ -4,7 +4,9 @@
 CREATE ROLE recruitment_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 GRANT CONNECT ON DATABASE neondb TO recruitment_runtime;
 GRANT USAGE ON SCHEMA auth,app TO recruitment_runtime;
-GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA auth TO recruitment_runtime;
+REVOKE INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON auth.initial_admin_claim FROM recruitment_runtime;
+GRANT SELECT ON auth.initial_admin_claim TO recruitment_runtime;
+GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO recruitment_runtime;
 GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA app TO recruitment_runtime;
 GRANT DELETE ON app.candidate_states,app.notification_reads,app.idempotency TO recruitment_runtime;
 GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA auth,app TO recruitment_runtime;
