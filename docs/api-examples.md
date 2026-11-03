@@ -33,6 +33,8 @@ The response contains `data` and `pagination`. Results are limited to the token'
 
 Use one stable, unique `Idempotency-Key` for one logical create. A retry with the same key and body returns the original result; a changed body returns a conflict. Do not infer missing personal facts.
 
+Keys are retained for 7 days. A key is never reused for different content: a changed body under an expired key still returns 409 `idempotency_mismatch`. After expiry, a retry with the same key and body never creates a second record. It returns 201 with the original record's current state, including an archived record. If that record is no longer available, it returns 409 `idempotency_expired` and creates nothing; search for the record (for example by email or legacy ID) before creating it again with a new key.
+
 ```bash
 curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/candidates" \
   -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
@@ -42,6 +44,20 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/candidates" \
 ```
 
 For updates, send the record's latest `version` in `PATCH /api/v1/candidates/{id}`. A 409 means someone changed the record; reread and reconcile rather than overwriting their changes.
+
+## Assign candidates to a vacancy
+
+`POST /api/v1/applications/bulk` assigns up to 500 active candidates to one active vacancy. Requires `recruitment:write` and `candidates:read`. Validation is all-or-nothing. Send an optional `Idempotency-Key`; a retry with the same key and body replays the stored response, and a changed body returns 409 `idempotency_mismatch`.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/applications/bulk" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: assign-fictional-batch-1" \
+  --data '{"candidateIds":["3f6c1d2e-8a4b-4c7d-9e1f-2a3b4c5d6e7f"],"vacancyId":"7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b","stage":"Sourced"}'
+```
+
+The response is `{data, existing, created, skipped}`. `data` lists the applications this request created and `created` is its length. `existing` lists the active applications that already existed for the vacancy and requested candidates; `skipped` equals its length. A pair that already has an active application is never duplicated, so a retry after an uncertain result, with or without the key, reports the earlier applications in `existing`.
 
 ## Upload a CV
 
@@ -56,9 +72,11 @@ Uploads are limited to 10 MiB and team storage quotas. The upload form expires w
 
 ## Errors
 
-The API uses structured errors with a safe message and code. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
+The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
 
-See `/api/openapi.json` for endpoint documentation. Auth and team management use the interactive sign-in session, never a personal API token.
+Every error response has a fresh `error.correlationId` and an identical `X-Correlation-Id` header. Quote it when reporting a failure: for a 500 the server logs that ID with a safe error category, never the request or record contents.
+
+See `/api/openapi.json` for endpoint documentation. Each operation lists the token scopes it needs in `x-required-scopes`; operations marked `x-session-only` reject API tokens with 403 `session_required`. Auth and team management use the interactive sign-in session, never a personal API token.
 
 `POST /api/v1/notifications` marks genuine reminder keys read for the token's user. Token clients need both `recruitment:read` and `recruitment:write`; a read-only token cannot change reminder state.
 
