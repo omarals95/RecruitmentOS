@@ -1,4 +1,3 @@
-import { sql } from "drizzle-orm";
 import {
   pgSchema,
   text,
@@ -169,4 +168,3 @@ export const notificationReads = appSchema.table(
   },
   (t) => [primaryKey({ columns: [t.teamId, t.userId, t.key] })],
 );
-export const teamPolicyPredicate = sql`team_id = nullif(current_setting('app.team_id', true), '')`;
