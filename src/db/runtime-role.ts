@@ -1,7 +1,8 @@
 /** Reject roles that own protected objects or can assume a broadly privileged role. */
 export const runtimeRoleSafetyQuery = `
   SELECT (
-    (SELECT count(*) FROM pg_catalog.pg_namespace n WHERE n.nspname IN ('app', 'auth')) <> 2
+    (SELECT count(*) FROM pg_catalog.pg_namespace n
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')) <> 5
     OR
     EXISTS (
       SELECT 1 FROM pg_catalog.pg_roles r
@@ -26,20 +27,27 @@ export const runtimeRoleSafetyQuery = `
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_namespace n
-      WHERE n.nspname IN ('app', 'auth')
-        AND (pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')
-          OR pg_catalog.has_schema_privilege(current_user, n.oid, 'CREATE'))
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
+        AND pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')
+    )
+    -- CREATE through any member role, PUBLIC included: NOINHERIT does not stop SET ROLE.
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_namespace n
+      CROSS JOIN pg_catalog.pg_roles r
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
+        AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_class c
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname IN ('app', 'auth')
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
         AND pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_proc p
       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname IN ('app', 'auth')
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
         AND pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')
     )
     OR NOT EXISTS (

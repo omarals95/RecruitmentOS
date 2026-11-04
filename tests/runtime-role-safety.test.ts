@@ -179,4 +179,79 @@ describe("database runtime role safety", () => {
       await pg.close();
     }
   });
+
+  it("rejects owners, CREATE holders and object owners in the tenant_context, db_boundary and storage_ledger schemas", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      await pg.exec("CREATE ROLE schema_guard_safe NOLOGIN");
+      const unsafeRoles: string[] = [];
+      for (const schema of [
+        "tenant_context",
+        "db_boundary",
+        "storage_ledger",
+      ]) {
+        const role = (kind: string) => `${schema}_${kind}`;
+        await pg.exec(`
+          CREATE ROLE ${role("owner")} NOLOGIN;
+          CREATE ROLE ${role("create")} NOLOGIN;
+          GRANT CREATE ON SCHEMA ${schema} TO ${role("create")};
+          CREATE ROLE ${role("parent")} NOLOGIN;
+          GRANT CREATE ON SCHEMA ${schema} TO ${role("parent")};
+          CREATE ROLE ${role("child")} NOLOGIN NOINHERIT;
+          GRANT ${role("parent")} TO ${role("child")};
+          CREATE ROLE ${role("relation")} NOLOGIN;
+          CREATE TABLE ${schema}.runtime_guard_probe (id integer);
+          ALTER TABLE ${schema}.runtime_guard_probe OWNER TO ${role("relation")};
+          CREATE ROLE ${role("function")} NOLOGIN;
+          CREATE FUNCTION ${schema}.runtime_guard_probe() RETURNS integer LANGUAGE SQL AS 'SELECT 1';
+          ALTER FUNCTION ${schema}.runtime_guard_probe() OWNER TO ${role("function")};
+          ALTER SCHEMA ${schema} OWNER TO ${role("owner")};
+        `);
+        unsafeRoles.push(
+          ...["owner", "create", "child", "relation", "function"].map(role),
+        );
+      }
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("schema_guard_safe")).toBe(false);
+      for (const role of unsafeRoles)
+        expect(await unsafe(role), role).toBe(true);
+      await pg.exec("GRANT CREATE ON SCHEMA db_boundary TO PUBLIC");
+      expect(await unsafe("schema_guard_safe")).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("fails closed when any one of the tenant_context, db_boundary or storage_ledger schemas is missing", async () => {
+    const schemas = ["app", "tenant_context", "db_boundary", "storage_ledger"];
+    for (const missing of [null, ...schemas.slice(1)]) {
+      const pg = new PGlite();
+      try {
+        await pg.exec(`
+          CREATE SCHEMA auth;
+          CREATE TABLE auth.initial_admin_claim (id boolean PRIMARY KEY);
+          ${schemas
+            .filter((schema) => schema !== missing)
+            .map((schema) => `CREATE SCHEMA ${schema};`)
+            .join(" ")}
+          CREATE ROLE guard_missing_schema NOLOGIN;
+          SET ROLE guard_missing_schema;
+        `);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        expect(result.rows[0]?.unsafe, String(missing)).toBe(missing !== null);
+      } finally {
+        await pg.close();
+      }
+    }
+  });
 });
