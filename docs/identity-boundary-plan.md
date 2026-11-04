@@ -30,6 +30,7 @@ Synthetic local tests reproduced both team-context forgery and authentication us
    - Reads need a context for the row's team.
    - Writes, including `SELECT … FOR UPDATE`, also need a write scope (see [Coarse write gate](#coarse-write-gate)).
    - Private rows also need the context actor: `candidate_states.user_id`, `notification_reads.user_id`, saved-view `records.private_owner_id`, and `personal_state_updated`/`saved-view` activity. Candidate activity needs `candidates:read`.
+   - A new activity row must name the context actor (`tenant_context.allows_event`). A `session` row carries no token id, a `token` row carries the context's own token id, and an `import` row needs `imports:write`. A caller therefore cannot forge an event under another member's id or plant one to read a user's name through `activity_actor_name`, which only resolves events the context may read.
    - Replay, rollback and pooling rules are below.
 
    A database principal or owner capable of changing policies or functions remains trusted.
