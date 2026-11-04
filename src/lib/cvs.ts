@@ -16,6 +16,8 @@ import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
 import { withTeam } from "@/lib/db-team";
 import type { Principal } from "@/lib/principal";
+import type { BlobGateway } from "@/lib/blob-storage";
+import { MAX_BLOB_DOWNLOAD_SLICE_BYTES } from "@/lib/blob-integrity";
 import {
   CvValidationError,
   cvExtension,
@@ -61,7 +63,14 @@ export const cvUploadSchema = z
   .strict();
 export type CvUploadInput = z.infer<typeof cvUploadSchema>;
 type UploadRow = typeof uploads.$inferSelect;
+type CvStorage = StorageGateway | BlobGateway;
 export type CvDto = ReturnType<typeof cvDto>;
+/** Clients choose the download protocol from the reference, never from a hostname. */
+function downloadProtocol(row: UploadRow) {
+  if (row.status !== "ready") return null;
+  if (row.storageProvider === "blob") return "blob-chunks-v1" as const;
+  return row.storageProvider === "s3" ? ("s3-url-v1" as const) : null;
+}
 function cvDto(row: UploadRow) {
   return {
     id: row.id,
@@ -75,6 +84,7 @@ function cvDto(row: UploadRow) {
     createdAt: row.createdAt.toISOString(),
     completedAt: row.completedAt?.toISOString() ?? null,
     expiresAt: row.expiresAt.toISOString(),
+    downloadProtocol: downloadProtocol(row),
   };
 }
 function validId(id: string) {
@@ -100,7 +110,7 @@ function storageFailure(error: unknown): never {
     "Private storage could not complete this request. Retry shortly; your upload reference is retained.",
   );
 }
-async function storageClient(): Promise<StorageGateway> {
+async function storageClient(): Promise<CvStorage> {
   try {
     return await getStorage();
   } catch (error) {
@@ -108,7 +118,7 @@ async function storageClient(): Promise<StorageGateway> {
   }
 }
 /** The injected gateway's binding, or the configured one; resolving it contacts no provider. */
-function storageBinding(storage?: StorageGateway): StorageBinding {
+function storageBinding(storage?: CvStorage): StorageBinding {
   try {
     return storage ? storage.binding : resolveStorageBinding();
   } catch (error) {
@@ -128,6 +138,33 @@ function assertBinding(row: UploadRow, binding: StorageBinding) {
       "This CV belongs to a different storage configuration. Ask the administrator to review it.",
     );
 }
+/** After assertBinding the gateway must also speak the row's protocol; nothing falls back. */
+function blobGateway(storage: CvStorage): BlobGateway {
+  if (!("readVerifiedSlice" in storage))
+    throw new StorageConfigurationError(
+      "The configured CV storage cannot serve Blob references.",
+    );
+  return storage;
+}
+function s3Gateway(storage: CvStorage): StorageGateway {
+  if ("readVerifiedSlice" in storage)
+    throw new StorageConfigurationError(
+      "The configured CV storage cannot serve S3 references.",
+    );
+  return storage;
+}
+const integrityFailure = () =>
+  new ApiError(
+    409,
+    "CV_INTEGRITY_FAILED",
+    "This CV no longer matches its validated copy. Ask the administrator to review it.",
+  );
+const protocolMismatch = () =>
+  new ApiError(
+    409,
+    "CV_DOWNLOAD_PROTOCOL_MISMATCH",
+    "This CV uses a different download method. Refresh the CV list and try again.",
+  );
 /** Maps ledger refusals by SQLSTATE; database message text never reaches the client. */
 function ledgerFailure(error: unknown): never {
   const cause = error instanceof DrizzleQueryError ? error.cause : error;
@@ -287,6 +324,23 @@ export function parseCvListQuery(query: URLSearchParams) {
   return parsed.data;
 }
 
+/** Exactly one decimal index without leading zeros, and nothing else. */
+export function parseCvChunkQuery(query: URLSearchParams): number {
+  const keys = [...query.keys()];
+  const value = query.get("index") ?? "";
+  if (
+    keys.length !== 1 ||
+    keys[0] !== "index" ||
+    !/^(?:0|[1-9]\d{0,8})$/.test(value)
+  )
+    throw new ApiError(
+      400,
+      "INVALID_CV_CHUNK",
+      "Request one chunk with a single whole decimal index parameter.",
+    );
+  return Number(value);
+}
+
 export async function listCandidateCvsPage(
   p: Principal,
   candidateId: string,
@@ -353,7 +407,7 @@ export async function beginCvUpload(
   p: Principal,
   candidateId: string,
   input: CvUploadInput,
-  storage?: StorageGateway,
+  storage?: CvStorage,
 ) {
   validId(candidateId);
   // Resolve configuration errors before reserving quota, without contacting a provider.
@@ -498,19 +552,37 @@ export async function beginCvUpload(
   });
   if (row.status === "ready") return { data: cvDto(row), upload: null };
   const client = storage ?? (await storageClient());
+  const expired = () =>
+    new ApiError(
+      409,
+      "CV_UPLOAD_EXPIRED",
+      "The upload reservation expired. Select the file again to start a new upload.",
+    );
   try {
-    await client.assertVersioning();
+    if (row.storageProvider === "blob") {
+      if (row.expiresAt.getTime() - Date.now() < 1000) throw expired();
+      // The charge is committed; a failed issuance keeps it and a replay reuses the path.
+      const ticket = await blobGateway(client).issuePutTicket(row);
+      return {
+        data: cvDto(row),
+        upload: {
+          protocol: "blob-put-v1" as const,
+          method: "PUT" as const,
+          url: ticket.url,
+          headers: { "content-type": row.mimeType },
+          expiresAt: new Date(ticket.expiresAt).toISOString(),
+          maxBytes: row.sizeBytes,
+        },
+      };
+    }
+    const s3 = s3Gateway(client);
+    await s3.assertVersioning();
     const expiresSeconds = Math.min(
       300,
       Math.floor((row.expiresAt.getTime() - Date.now()) / 1000),
     );
-    if (expiresSeconds < 1)
-      throw new ApiError(
-        409,
-        "CV_UPLOAD_EXPIRED",
-        "The upload reservation expired. Select the file again to start a new upload.",
-      );
-    const ticket = await client.presignPost(
+    if (expiresSeconds < 1) throw expired();
+    const ticket = await s3.presignPost(
       row.objectKey,
       row.mimeType,
       row.sizeBytes,
@@ -519,8 +591,11 @@ export async function beginCvUpload(
     return {
       data: cvDto(row),
       upload: {
+        protocol: "s3-form-v1" as const,
+        method: "POST" as const,
         ...ticket,
         expiresAt: new Date(Date.now() + expiresSeconds * 1000).toISOString(),
+        maxBytes: row.sizeBytes,
       },
     };
   } catch (error) {
@@ -528,10 +603,12 @@ export async function beginCvUpload(
   }
 }
 
+/** readTimeoutMs is internal (tests); routes never pass it and it is capped at 15 s. */
 export async function completeCvUpload(
   p: Principal,
   id: string,
-  storage?: StorageGateway,
+  storage?: CvStorage,
+  options: { readTimeoutMs?: number } = {},
 ): Promise<CvDto> {
   validId(id);
   const initial = await withTeam(p, async (tx) => {
@@ -558,13 +635,22 @@ export async function completeCvUpload(
       "CV_UPLOAD_REJECTED",
       "This upload was rejected or expired. Start a new upload.",
     );
-  let version: string | undefined, rejection: CvValidationError | undefined;
+  let version: string | undefined,
+    sha256: string | undefined,
+    rejection: CvValidationError | undefined;
   if (initial.expiresAt.getTime() > Date.now()) {
     try {
-      version = await inspectStoredCv(
-        storage ?? (await storageClient()),
-        initial,
-      );
+      const client = storage ?? (await storageClient());
+      if (initial.storageProvider === "blob") {
+        // A missing object or transport failure stays pending: a Blob rejection burns the path.
+        const inspected = await blobGateway(client).inspectUpload(
+          initial,
+          options.readTimeoutMs,
+        );
+        if (!inspected)
+          throw new Error("The uploaded CV is not in private storage yet.");
+        sha256 = inspected.sha256;
+      } else version = await inspectStoredCv(s3Gateway(client), initial);
     } catch (error) {
       if (error instanceof CvValidationError) rejection = error;
       else return storageFailure(error);
@@ -588,14 +674,18 @@ export async function completeCvUpload(
     await assertCandidate(tx, p, row.candidateId);
     const now = new Date(),
       reject = Boolean(
-        rejection || !version || row.expiresAt.getTime() <= now.getTime(),
+        rejection ||
+        !(version || sha256) ||
+        row.expiresAt.getTime() <= now.getTime(),
       );
     // The status trigger settles the insert-time charge exactly once.
     const [updated] = await tx
       .update(uploads)
       .set({
         status: reject ? "rejected" : "ready",
-        s3VersionId: reject ? null : version,
+        s3VersionId: reject ? null : (version ?? null),
+        blobSha256: reject ? null : (sha256 ?? null),
+        blobSizeBytes: reject || !sha256 ? null : row.sizeBytes,
         completedAt: reject ? null : now,
       })
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
@@ -619,13 +709,10 @@ export async function completeCvUpload(
   return cvDto(result.row);
 }
 
-export async function getCvDownload(
-  p: Principal,
-  id: string,
-  storage?: StorageGateway,
-) {
+/** Reauthorizes every download request; archived candidates' CVs stay readable. */
+async function readyCv(p: Principal, id: string) {
   validId(id);
-  const row = await withTeam(p, async (tx) => {
+  return withTeam(p, async (tx) => {
     const [cv] = await tx
       .select()
       .from(uploads)
@@ -640,6 +727,15 @@ export async function getCvDownload(
     await assertCandidate(tx, p, cv.candidateId, true);
     return cv;
   });
+}
+
+export async function getCvDownload(
+  p: Principal,
+  id: string,
+  storage?: CvStorage,
+) {
+  const row = await readyCv(p, id);
+  if (row.storageProvider === "blob") throw protocolMismatch();
   assertBinding(row, storageBinding(storage));
   if (!row.s3VersionId)
     throw new ApiError(
@@ -649,7 +745,7 @@ export async function getCvDownload(
     );
   try {
     return {
-      url: await (storage ?? (await storageClient())).signDownload(
+      url: await s3Gateway(storage ?? (await storageClient())).signDownload(
         row.objectKey,
         row.s3VersionId,
         row.originalName,
@@ -659,4 +755,74 @@ export async function getCvDownload(
   } catch (error) {
     return storageFailure(error);
   }
+}
+
+/** The trusted Blob reference; no provider call, URL or pathname. */
+async function blobReference(p: Principal, id: string, storage?: CvStorage) {
+  const row = await readyCv(p, id);
+  if (row.storageProvider !== "blob") throw protocolMismatch();
+  assertBinding(row, storageBinding(storage));
+  if (!row.blobSha256 || row.blobSizeBytes !== row.sizeBytes)
+    throw integrityFailure();
+  return {
+    row,
+    manifest: {
+      protocol: "blob-chunks-v1" as const,
+      uploadId: row.id,
+      originalName: row.originalName,
+      contentType: row.mimeType,
+      sizeBytes: row.blobSizeBytes,
+      sha256: row.blobSha256,
+      chunkSize: MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+      chunkCount: Math.ceil(row.blobSizeBytes / MAX_BLOB_DOWNLOAD_SLICE_BYTES),
+    },
+  };
+}
+
+/** The manifest grants nothing by itself; every chunk is authorized again. */
+export async function getCvManifest(
+  p: Principal,
+  id: string,
+  storage?: CvStorage,
+) {
+  return (await blobReference(p, id, storage)).manifest;
+}
+
+/** Releases one slice only after the whole object matches its validated digest. */
+export async function getCvChunk(
+  p: Principal,
+  id: string,
+  index: number,
+  storage?: CvStorage,
+  options: { readTimeoutMs?: number } = {},
+) {
+  const { row, manifest } = await blobReference(p, id, storage);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= manifest.chunkCount)
+    throw new ApiError(
+      400,
+      "INVALID_CV_CHUNK",
+      "This CV has no chunk with that index.",
+    );
+  const offset = index * manifest.chunkSize;
+  let bytes: Buffer | null;
+  try {
+    bytes = await blobGateway(
+      storage ?? (await storageClient()),
+    ).readVerifiedSlice(
+      {
+        objectKey: row.objectKey,
+        mimeType: row.mimeType,
+        sizeBytes: manifest.sizeBytes,
+        sha256: manifest.sha256,
+      },
+      offset,
+      Math.min(manifest.chunkSize, manifest.sizeBytes - offset),
+      options.readTimeoutMs,
+    );
+  } catch (error) {
+    if (error instanceof CvValidationError) throw integrityFailure();
+    return storageFailure(error);
+  }
+  if (!bytes) throw integrityFailure();
+  return { ...manifest, index, offset, bytes };
 }

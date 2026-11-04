@@ -538,7 +538,7 @@ export function GET() {
       {
         summary: "List private CV references",
         description:
-          "Requires cvs:read; returns {data,pagination} with the full total. Storage keys and object versions are not exposed.",
+          "Requires cvs:read; returns {data,pagination} with the full total. Each reference has downloadProtocol: s3-url-v1 (use /download), blob-chunks-v1 (use /manifest and /chunks) or null when not ready. Storage keys, object versions, digests and store ids are not exposed.",
       },
       { "200": { description: "{data: CV references, pagination}." } },
       {
@@ -562,9 +562,9 @@ export function GET() {
     post: operation(
       ["cvs:write"],
       {
-        summary: "Reserve a direct private S3 CV upload",
+        summary: "Reserve a direct private CV upload",
         description:
-          "Requires cvs:write. Upload bytes to returned upload.url using multipart form fields plus file, then complete the upload. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API.",
+          "Requires cvs:write. Clients must switch on upload.protocol and never infer it from a hostname: s3-form-v1 is a multipart form POST of the fields plus file; blob-put-v1 is a PUT of the file with exactly the returned headers. Send no credentials, cookies or X-Team-Id to the upload URL, then complete the upload. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API. Blob storage is currently disabled: the server returns 503 STORAGE_SETUP_REQUIRED for it.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -598,7 +598,41 @@ export function GET() {
           },
         ),
       },
-      { "201": { description: "{data: CV reference, upload}." } },
+      {
+        "201": {
+          description: "{data: CV reference, upload}.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["data", "upload"],
+                properties: {
+                  data: { type: "object" },
+                  upload: {
+                    oneOf: [
+                      { type: "null" },
+                      {
+                        oneOf: [
+                          { $ref: "#/components/schemas/S3FormUploadV1" },
+                          { $ref: "#/components/schemas/BlobPutUploadV1" },
+                        ],
+                        discriminator: {
+                          propertyName: "protocol",
+                          mapping: {
+                            "s3-form-v1": "#/components/schemas/S3FormUploadV1",
+                            "blob-put-v1":
+                              "#/components/schemas/BlobPutUploadV1",
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       { params: [idParameter] },
     ),
   };
@@ -606,9 +640,9 @@ export function GET() {
     post: operation(
       ["cvs:write"],
       {
-        summary: "Validate uploaded immutable CV version",
+        summary: "Validate the uploaded immutable CV",
         description:
-          "Requires cvs:write. Idempotent. Returns a ready reference only after size/type/format and version checks.",
+          "Requires cvs:write. Idempotent. Reads the stored object itself and returns a ready reference only after size, type and format checks plus an S3 version, or, for Blob, a SHA-256 of the exact reserved size computed by the server. Any request body is ignored; no client hash, size or type is accepted.",
       },
       { "200": { description: "{data: CV reference}." } },
       { params: [idParameter] },
@@ -620,10 +654,80 @@ export function GET() {
       {
         summary: "Get a short-lived private CV download",
         description:
-          "Requires cvs:read. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
+          "Requires cvs:read. S3 references only (downloadProtocol s3-url-v1); Blob references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
       },
       { "200": { description: "{url, expiresAt}." } },
       { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/cvs/{id}/manifest"] = {
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "Read a Blob CV download manifest",
+        description:
+          "Requires cvs:read. Disabled until Blob CV storage is enabled. For downloadProtocol blob-chunks-v1 only; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.",
+      },
+      {
+        "200": {
+          description: "{data: Blob CV manifest}.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["data"],
+                properties: {
+                  data: { $ref: "#/components/schemas/BlobCvManifestV1" },
+                },
+              },
+            },
+          },
+        },
+      },
+      { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/cvs/{id}/chunks"] = {
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "Read one verified Blob CV chunk",
+        description:
+          "Requires cvs:read. Disabled until Blob CV storage is enabled. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
+      },
+      {
+        "200": {
+          description:
+            "The raw chunk bytes. The X-CV-* headers come from the validated reference.",
+          headers: {
+            "X-CV-Upload-Id": { schema: { type: "string", format: "uuid" } },
+            "X-CV-Chunk-Index": { schema: { type: "integer", minimum: 0 } },
+            "X-CV-Chunk-Offset": { schema: { type: "integer", minimum: 0 } },
+            "X-CV-Size-Bytes": { schema: { type: "integer", minimum: 1 } },
+            "X-CV-SHA256": {
+              schema: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            },
+          },
+          content: {
+            "application/octet-stream": {
+              schema: { type: "string", format: "binary" },
+            },
+          },
+        },
+      },
+      {
+        params: [
+          idParameter,
+          {
+            name: "index",
+            in: "query",
+            required: true,
+            schema: { type: "integer", minimum: 0 },
+            description:
+              "Zero-based chunk index below chunkCount, in decimal without leading zeros.",
+          },
+        ],
+      },
     ),
   };
   paths["/api/v1/overview"] = {
@@ -846,6 +950,79 @@ export function GET() {
         schemas: {
           ...schemas,
           RecordDto: recordDto,
+          S3FormUploadV1: {
+            type: "object",
+            required: [
+              "protocol",
+              "method",
+              "url",
+              "fields",
+              "expiresAt",
+              "maxBytes",
+            ],
+            properties: {
+              protocol: { const: "s3-form-v1" },
+              method: { const: "POST" },
+              url: { type: "string", format: "uri" },
+              fields: {
+                type: "object",
+                additionalProperties: { type: "string" },
+              },
+              expiresAt: { type: "string", format: "date-time" },
+              maxBytes: { type: "integer", minimum: 1, maximum: 10485760 },
+            },
+          },
+          BlobPutUploadV1: {
+            type: "object",
+            required: [
+              "protocol",
+              "method",
+              "url",
+              "headers",
+              "expiresAt",
+              "maxBytes",
+            ],
+            properties: {
+              protocol: { const: "blob-put-v1" },
+              method: { const: "PUT" },
+              url: { type: "string", format: "uri" },
+              headers: {
+                type: "object",
+                required: ["content-type"],
+                additionalProperties: false,
+                properties: { "content-type": { type: "string" } },
+              },
+              expiresAt: { type: "string", format: "date-time" },
+              maxBytes: { type: "integer", minimum: 1, maximum: 10485760 },
+            },
+          },
+          BlobCvManifestV1: {
+            type: "object",
+            required: [
+              "protocol",
+              "uploadId",
+              "originalName",
+              "contentType",
+              "sizeBytes",
+              "sha256",
+              "chunkSize",
+              "chunkCount",
+            ],
+            properties: {
+              protocol: { const: "blob-chunks-v1" },
+              uploadId: { type: "string", format: "uuid" },
+              originalName: { type: "string" },
+              contentType: { type: "string" },
+              sizeBytes: { type: "integer", minimum: 1, maximum: 10485760 },
+              sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+              chunkSize: { const: 4194304 },
+              chunkCount: {
+                type: "integer",
+                minimum: 1,
+                description: "ceil(sizeBytes / chunkSize).",
+              },
+            },
+          },
           Error: {
             type: "object",
             required: ["error"],

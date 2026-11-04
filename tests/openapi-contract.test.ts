@@ -261,6 +261,37 @@ describe("OpenAPI contract", () => {
     }
   });
 
+  it("documents the tagged CV upload and the Blob manifest and chunk reads", () => {
+    const reservation = JSON.stringify(
+      document.paths["/api/v1/candidates/{id}/cvs/uploads"].post.responses[
+        "201"
+      ],
+    );
+    const schemas = JSON.stringify(document.components.schemas);
+    for (const protocol of ["s3-form-v1", "blob-put-v1"]) {
+      expect(reservation).toContain(protocol);
+      expect(schemas).toContain(`{"const":"${protocol}"}`);
+    }
+    expect(reservation).toContain('"propertyName":"protocol"');
+    for (const path of ["/api/v1/cvs/{id}/manifest", "/api/v1/cvs/{id}/chunks"])
+      expect(document.paths[path].get["x-required-scopes"], path).toEqual([
+        "cvs:read",
+      ]);
+    const chunks = document.paths["/api/v1/cvs/{id}/chunks"]
+      .get as Operation & {
+      parameters: { name: string; in: string; required?: boolean }[];
+    };
+    expect(chunks.parameters).toContainEqual(
+      expect.objectContaining({ name: "index", in: "query", required: true }),
+    );
+    expect(Object.keys(chunks.responses)).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503"]),
+    );
+    expect(Object.keys(chunks.responses["200"].content ?? {})).toEqual([
+      "application/octet-stream",
+    ]);
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],

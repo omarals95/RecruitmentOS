@@ -6,7 +6,9 @@ import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
 import {
   beginCvUpload,
   completeCvUpload,
+  getCvChunk,
   getCvDownload,
+  getCvManifest,
   listCandidateCvs,
   listCandidateCvsPage,
   parseCvListQuery,
@@ -220,6 +222,49 @@ describe("private CV lifecycle against PostgreSQL migrations and fake S3", () =>
         gateway,
       ),
     ).rejects.toMatchObject({ status: 409 });
+  });
+  it("tags the S3 reservation as a form POST and the ready reference as an S3 URL download", async () => {
+    const { gateway } = fakeStorage(),
+      ticket = await beginCvUpload(p, candidate, metadata(), gateway);
+    expect(ticket.upload).toEqual({
+      protocol: "s3-form-v1",
+      method: "POST",
+      url: "https://example.invalid/upload",
+      fields: { key: expect.stringMatching(/^teams\/team\/cvs\//) },
+      expiresAt: expect.any(String),
+      maxBytes: pdf.length,
+    });
+    expect(
+      Date.parse(ticket.upload!.expiresAt) - Date.now(),
+    ).toBeLessThanOrEqual(300_000);
+    expect(ticket.data.downloadProtocol).toBeNull();
+    const ready = await completeCvUpload(p, ticket.data.id, gateway);
+    expect(ready.downloadProtocol).toBe("s3-url-v1");
+    expect((await listCandidateCvs(p, candidate))[0].downloadProtocol).toBe(
+      "s3-url-v1",
+    );
+  });
+  it("refuses Blob manifest and chunk reads of an S3 CV before any storage call", async () => {
+    const { gateway, observed } = fakeStorage(),
+      ticket = await beginCvUpload(p, candidate, metadata(), gateway);
+    await completeCvUpload(p, ticket.data.id, gateway);
+    const calls = observed.calls.length;
+    await expect(
+      getCvManifest(p, ticket.data.id, gateway),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CV_DOWNLOAD_PROTOCOL_MISMATCH",
+    });
+    await expect(
+      getCvChunk(p, ticket.data.id, 0, gateway),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CV_DOWNLOAD_PROTOCOL_MISMATCH",
+    });
+    expect(observed.calls).toHaveLength(calls);
+    expect((await getCvDownload(p, ticket.data.id, gateway)).url).toBe(
+      "https://example.invalid/download",
+    );
   });
   it("records a validated version once and always downloads that version after a replay", async () => {
     const { gateway, observed } = fakeStorage(),
