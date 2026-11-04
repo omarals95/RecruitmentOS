@@ -196,13 +196,28 @@ BEGIN
   RETURN NULL;
 END $$;
 
--- Takes the store lock, then the context team's lock, before any upload row is touched. The
--- first lock of a store fixes its environment; a later mismatch is refused.
+-- Owner-only access to every team's upload and usage rows, so the lock helper can release
+-- expired S3 reservations store-wide. A runtime role is never the owner, so its access is unchanged.
+DO $owner_policies$ DECLARE tbl text; BEGIN
+ FOREACH tbl IN ARRAY ARRAY['uploads','storage_usage'] LOOP
+  EXECUTE format('CREATE POLICY ledger_owner_read ON app.%I FOR SELECT USING (%s)', tbl,
+    'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')');
+  EXECUTE format('CREATE POLICY ledger_owner_update ON app.%I FOR UPDATE USING (%s) WITH CHECK (%s)', tbl,
+    'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')',
+    'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')');
+ END LOOP;
+END $owner_policies$;
+
+-- Takes the store lock, then team locks, before any upload row is touched. The first lock of a
+-- store fixes its environment; a later mismatch is refused. Expired S3 reservations on the store
+-- are then released for every team, so abandoned tickets of one team cannot hold the shared budget;
+-- the store budget bounds how many there can be. Blob tickets keep their charge.
 CREATE FUNCTION tenant_context.lock_storage_allocation(binding_provider text, binding_environment text, binding_store text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   ctx tenant_context.contexts%ROWTYPE;
   fixed_environment text;
+  cutoff timestamptz := clock_timestamp();
 BEGIN
   SELECT * INTO ctx FROM tenant_context.contexts c
     WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
@@ -224,9 +239,19 @@ BEGIN
     RAISE EXCEPTION 'Storage binding rejected' USING ERRCODE = 'RQ002';
   END IF;
   INSERT INTO app.storage_usage(team_id) VALUES (ctx.team_id) ON CONFLICT (team_id) DO NOTHING;
-  PERFORM 1 FROM app.storage_usage u WHERE u.team_id = ctx.team_id FOR UPDATE;
+  PERFORM 1 FROM app.storage_usage u WHERE u.team_id = ctx.team_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Storage allocation rejected' USING ERRCODE = '42501';
+  END IF;
+  -- Team rows are locked in team order, then the expired tickets; the settle trigger releases each.
+  PERFORM 1 FROM app.storage_usage u WHERE u.team_id = ctx.team_id OR (binding_provider = 's3'
+      AND u.team_id IN (SELECT x.team_id FROM app.uploads x WHERE x.storage_provider = 's3'
+        AND x.storage_store = binding_store AND x.status = 'pending' AND x.expires_at <= cutoff))
+    ORDER BY u.team_id FOR UPDATE;
+  IF binding_provider = 's3' THEN
+    UPDATE app.uploads x SET status = 'rejected'
+      WHERE x.storage_provider = 's3' AND x.storage_store = binding_store
+        AND x.status = 'pending' AND x.expires_at <= cutoff;
   END IF;
 END $$;
 

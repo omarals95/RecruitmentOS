@@ -195,8 +195,9 @@ async function audit(
 }
 
 /**
- * Locks the store ledger row, then the context team's row, before any upload row, so reservation,
- * completion and expiry share one lock order: store, then team, then ticket.
+ * Locks the store ledger row, then team rows, before any upload row, so reservation, completion
+ * and expiry share one lock order: store, then team, then ticket. The helper also releases the
+ * store's expired S3 reservations for every team before any new charge is checked.
  */
 async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
   try {

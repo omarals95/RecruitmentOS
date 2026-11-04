@@ -349,6 +349,87 @@ describe("store-wide CV allocation ledger under the split data role", () => {
     ]);
   });
 
+  it("releases another team's expired S3 reservations on the store before refusing", async () => {
+    const a = await team("abandoned-a");
+    const b = await team("abandoned-b");
+    const binding = s3("fictional-abandoned");
+    const blob: StorageBinding = {
+      provider: "blob",
+      environment: "preview",
+      store: "store_fictionalabandoned",
+    };
+    const live = s3("fictional-abandoned-live");
+    // Team A also holds a live S3 ticket on another bucket and a Blob ticket; its own limit is raised
+    // so only the shared bucket's budget decides team B's reservation.
+    await beginCvUpload(
+      a.p,
+      a.candidateId,
+      metadata(),
+      fakeStorage(live).gateway,
+    );
+    await withTeam(a.p, async (tx) => {
+      await lock(tx, blob);
+      await insertUpload(tx, a, blob);
+    });
+    await asOwner(
+      "UPDATE app.storage_usage SET max_files=10 WHERE team_id=$1",
+      [a.p.teamId],
+    );
+    const reserved = await withBudget(
+      "development",
+      { bytes: 200000000, files: 2 },
+      async () => {
+        for (let i = 0; i < 2; i++)
+          await beginCvUpload(
+            a.p,
+            a.candidateId,
+            metadata(),
+            fakeStorage(binding).gateway,
+          );
+        // The bucket is now full; team A abandons its tickets here and on Blob and never calls again.
+        await asOwner(
+          "UPDATE app.uploads SET expires_at = now() - interval '1 minute' WHERE team_id=$1 AND storage_store IN ($2,$3)",
+          [a.p.teamId, binding.store, blob.store],
+        );
+        const admitted = fakeStorage(binding);
+        const ticket = await beginCvUpload(
+          b.p,
+          b.candidateId,
+          metadata(),
+          admitted.gateway,
+        );
+        expect(admitted.calls).toEqual(["presignPost"]);
+        return { ticket: ticket.data.id };
+      },
+    );
+    expect(
+      await inspect(
+        "SELECT storage_store, status, count(*)::int AS count FROM app.uploads WHERE team_id IN ($1,$2) GROUP BY 1,2 ORDER BY 1,2",
+        [a.p.teamId, b.p.teamId],
+      ),
+    ).toEqual([
+      { storage_store: binding.store, status: "pending", count: 1 },
+      { storage_store: binding.store, status: "rejected", count: 2 },
+      { storage_store: live.store, status: "pending", count: 1 },
+      { storage_store: blob.store, status: "pending", count: 1 },
+    ]);
+    expect(
+      await inspect("SELECT team_id FROM app.uploads WHERE id=$1", [
+        reserved.ticket,
+      ]),
+    ).toEqual([{ team_id: b.p.teamId }]);
+    expect(await storeCounters("s3", binding.store)).toEqual([
+      { ...empty, reserved_bytes: pdf.length, reserved_files: 1 },
+    ]);
+    // Team A keeps only its live S3 ticket and its Blob ticket, which no other team releases.
+    expect(await teamCounters(a)).toEqual([
+      { ...empty, reserved_bytes: pdf.length + 1000, reserved_files: 2 },
+    ]);
+    expect(await teamCounters(b)).toEqual([
+      { ...empty, reserved_bytes: pdf.length, reserved_files: 1 },
+    ]);
+  });
+
   it("retains a rejected Blob charge on store and team, but releases a rejected S3 charge", async () => {
     const t = await team("retained");
     const blob: StorageBinding = {
