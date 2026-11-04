@@ -309,7 +309,7 @@ describe("real @vercel/blob client only", () => {
     expect((failure as Error).cause).toBeUndefined();
   });
 
-  it("refuses a bad store id, a token for another store, a non-read-write token and an API endpoint override", () => {
+  it("refuses a bad store id, a token for another store, a non-read-write token, an API endpoint override and the proxy flag", () => {
     const otherStoreToken = "vercel_blob_rw_other_1111111111111111";
     const clientToken = "vercel_blob_client_fictional_2222222222222222";
     const refusals: [string, () => unknown][] = [
@@ -352,6 +352,19 @@ describe("real @vercel/blob client only", () => {
           return createVercelBlobClient({ storeId: "store_fictional", token });
         },
       ],
+      ...(
+        [
+          ["VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API", "1"],
+          ["VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API", ""],
+          ["NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API", "1"],
+        ] as const
+      ).map(([name, value]): [string, () => unknown] => [
+        `proxy flag ${name}=${JSON.stringify(value)}`,
+        () => {
+          vi.stubEnv(name, value);
+          return createVercelBlobClient({ storeId: "store_fictional", token });
+        },
+      ]),
     ];
     for (const [label, create] of refusals) {
       let failure: unknown;
@@ -359,6 +372,9 @@ describe("real @vercel/blob client only", () => {
         create();
       } catch (error) {
         failure = error;
+      } finally {
+        // Each case refuses on its own setting, never on one left by an earlier case.
+        vi.unstubAllEnvs();
       }
       expect(failure, label).toBeInstanceOf(StorageConfigurationError);
       for (const secret of [token, otherStoreToken, clientToken, "fictional"])

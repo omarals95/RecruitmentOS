@@ -16,7 +16,8 @@ export function createVercelBlobClient({
   token: string;
 }): BlobClient {
   // The SDK reaches whichever store the read-write token names, so the token must name
-  // exactly this store; otherwise the store id would be a check in name only.
+  // exactly this store; otherwise the store id would be a check in name only. The SDK sends
+  // its proxy header whenever either proxy variable is present, even empty, so presence refuses.
   if (
     typeof storeId !== "string" ||
     !/^store_[A-Za-z0-9]{1,128}$/.test(storeId) ||
@@ -24,7 +25,10 @@ export function createVercelBlobClient({
     !token.startsWith("vercel_blob_rw_") ||
     token.split("_")[3] !== storeId.slice("store_".length) ||
     process.env.VERCEL_BLOB_API_URL ||
-    process.env.NEXT_PUBLIC_VERCEL_BLOB_API_URL
+    process.env.NEXT_PUBLIC_VERCEL_BLOB_API_URL ||
+    process.env.VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API !== undefined ||
+    process.env.NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API !==
+      undefined
   )
     throw new StorageConfigurationError(
       "The storage client needs a valid store id, a read-write token for that store and the standard endpoint.",
