@@ -10,33 +10,50 @@ import {
 } from "vitest";
 
 // The evidence script must refuse before it ever builds a database client. When a PGlite is
-// bridged in, each client runs as the login named in its URL, one client at a time.
+// bridged in, each client runs as the login named in its URL, one client at a time. The
+// database in the URL picks the PGlite: fictional_db is the bridged one, any other name a
+// fictional database registered for the test; an unregistered name cannot be connected to.
 const bridge = vi.hoisted(() => ({
   constructed: vi.fn(),
   pg: null as PGlite | null,
-  user: null as string | null,
+  databases: new Map<string, PGlite>(),
+  users: new Map<PGlite, string>(),
 }));
 const constructed = bridge.constructed;
 vi.mock("pg", () => ({
   Client: class {
     user: string;
+    database: string;
     constructor({ connectionString }: { connectionString: string }) {
       bridge.constructed();
       if (!bridge.pg)
         throw new Error(
           "fictional driver failure for postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55432/fictional_db",
         );
-      this.user = new URL(connectionString).username;
+      const url = new URL(connectionString);
+      this.user = url.username;
+      this.database = decodeURIComponent(url.pathname.slice(1));
+    }
+    get target() {
+      return this.database === "fictional_db"
+        ? bridge.pg
+        : bridge.databases.get(this.database);
     }
     on() {}
-    async connect() {}
+    async connect() {
+      if (!this.target)
+        throw new Error(
+          `fictional driver failure for postgresql://${this.user}:fictional-data-secret@127.0.0.1:55432/${this.database}`,
+        );
+    }
     async end() {}
     async query(text: string, params?: unknown[]) {
-      if (bridge.user !== this.user) {
-        await bridge.pg!.exec(`SET SESSION AUTHORIZATION ${this.user}`);
-        bridge.user = this.user;
+      const pg = this.target!;
+      if (bridge.users.get(pg) !== this.user) {
+        await pg.exec(`SET SESSION AUTHORIZATION ${this.user}`);
+        bridge.users.set(pg, this.user);
       }
-      return bridge.pg!.query(text, params);
+      return pg.query(text, params);
     }
   },
 }));
@@ -54,6 +71,7 @@ import {
   checkRolePair,
   collectRoleEvidence,
   main,
+  platformDatabaseReason,
 } from "../scripts/db-role-evidence";
 import { templateGrantMatrix } from "../scripts/runtime-role-template";
 import {
@@ -186,7 +204,8 @@ describe("split runtime role template", () => {
 
   async function collect(kind: "data" | "identity") {
     await harness[kind === "data" ? "dataDb" : "identityDb"]();
-    return collectRoleEvidence(harness.client, kind);
+    // The harness closes every other database, so nothing is ever inspected here.
+    return collectRoleEvidence(harness.client, kind, async () => false);
   }
   async function applyAsOwner() {
     await harness.asOwner();
@@ -615,7 +634,7 @@ async function run(
   const capture = (...args: unknown[]) => void output.push(args.join(" "));
   vi.spyOn(console, "log").mockImplementation(capture);
   vi.spyOn(console, "error").mockImplementation(capture);
-  bridge.user = null;
+  bridge.users.clear();
   const code = await main(env);
   vi.restoreAllMocks();
   const text = output.join("\n");
@@ -694,21 +713,30 @@ describe("db-role-evidence template drift", () => {
     await harness?.close();
   });
 
-  async function evidence() {
+  type Accepted = { name: string; owner: string; reason: string }[];
+  async function report() {
     const { code, text } = await run(
       { DATABASE_URL: data, IDENTITY_DATABASE_URL: identity },
       [marker],
     );
     const report = JSON.parse(text) as {
-      data: { drift: string[] };
-      identity: { drift: string[] };
+      data: { drift: string[]; accepted_platform_databases: Accepted };
+      identity: { drift: string[]; accepted_platform_databases: Accepted };
       pass: boolean;
     };
     return {
       code,
       pass: report.pass,
       drift: { data: report.data.drift, identity: report.identity.drift },
+      accepted: {
+        data: report.data.accepted_platform_databases,
+        identity: report.identity.accepted_platform_databases,
+      },
     };
+  }
+  async function evidence() {
+    const { code, pass, drift } = await report();
+    return { code, pass, drift };
   }
   async function rerunTemplate() {
     await harness.asOwner();
@@ -718,10 +746,11 @@ describe("db-role-evidence template drift", () => {
     `DO $$ BEGIN EXECUTE format('${statement}', current_database()); END $$`;
 
   it("exits 0 when both roles match the template exactly", async () => {
-    expect(await evidence()).toEqual({
+    expect(await report()).toEqual({
       code: 0,
       pass: true,
       drift: { data: [], identity: [] },
+      accepted: { data: [], identity: [] },
     });
   });
 
@@ -1064,5 +1093,135 @@ describe("db-role-evidence template drift", () => {
     await harness.client.exec(`ALTER SCHEMA public OWNER TO ${owner}`);
     await rerunTemplate();
     expect((await evidence()).code).toBe(0);
+  });
+
+  describe("platform-owned databases", () => {
+    const platform = "fictional_platform";
+    const platformOwner = "fictional_platform_owner";
+    const accepted = [
+      { name: platform, owner: platformOwner, reason: platformDatabaseReason },
+    ];
+    const connectDrift = [`can connect to database ${platform}`];
+    // A separate fictional cluster database for the inspection connection, as the data role.
+    let platformDataDir: Blob;
+    beforeAll(async () => {
+      const pg = new PGlite();
+      await pg.exec(`CREATE ROLE ${splitRoles.data} LOGIN`);
+      await pg.exec(`CREATE DATABASE ${platform}`);
+      platformDataDir = await pg.dumpDataDir("none");
+      await pg.close();
+    });
+
+    const cases: {
+      name: string;
+      owner?: string;
+      grant?: string;
+      /** SQL run in the inspected database; null leaves it unreachable. */
+      contents: string | null;
+      clients: number;
+      expected: Awaited<ReturnType<typeof report>>;
+    }[] = [
+      {
+        name: "accepts and reports a database owned by another role with no application schema",
+        contents: "",
+        clients: 3,
+        expected: {
+          code: 0,
+          pass: true,
+          drift: { data: [], identity: [] },
+          accepted: { data: accepted, identity: accepted },
+        },
+      },
+      {
+        name: "rejects that database when it holds the app schema",
+        contents: "CREATE SCHEMA app",
+        clients: 3,
+        expected: {
+          code: 1,
+          pass: false,
+          drift: { data: connectDrift, identity: connectDrift },
+          accepted: { data: [], identity: [] },
+        },
+      },
+      {
+        name: "rejects that database when it holds a migration ledger",
+        contents:
+          "CREATE TABLE public.recruitment_migrations (id integer PRIMARY KEY)",
+        clients: 3,
+        expected: {
+          code: 1,
+          pass: false,
+          drift: { data: connectDrift, identity: connectDrift },
+          accepted: { data: [], identity: [] },
+        },
+      },
+      {
+        name: "rejects a database owned by the application owner without inspecting it",
+        owner: splitRoles.owner,
+        contents: "",
+        clients: 2,
+        expected: {
+          code: 1,
+          pass: false,
+          drift: { data: connectDrift, identity: connectDrift },
+          accepted: { data: [], identity: [] },
+        },
+      },
+      {
+        name: "rejects it only for the data role when the data role holds CREATE there",
+        grant: `GRANT CREATE ON DATABASE ${platform} TO ${splitRoles.data}`,
+        contents: "",
+        clients: 3,
+        expected: {
+          code: 1,
+          pass: false,
+          drift: { data: connectDrift, identity: [] },
+          accepted: { data: [], identity: accepted },
+        },
+      },
+      {
+        name: "rejects it and still prints the report when it cannot be inspected",
+        contents: null,
+        clients: 3,
+        expected: {
+          code: 1,
+          pass: false,
+          drift: { data: connectDrift, identity: connectDrift },
+          accepted: { data: [], identity: [] },
+        },
+      },
+    ];
+    for (const platformCase of cases)
+      it(`${platformCase.name}, then exits 0 once it is dropped`, async () => {
+        await harness.asSuperuser();
+        await harness.client.exec(`CREATE ROLE ${platformOwner} NOLOGIN`);
+        await harness.client.exec(
+          `CREATE DATABASE ${platform} OWNER ${platformCase.owner ?? platformOwner}`,
+        );
+        if (platformCase.grant) await harness.client.exec(platformCase.grant);
+        if (platformCase.contents !== null) {
+          const inspected = new PGlite({
+            loadDataDir: platformDataDir,
+            database: platform,
+          });
+          if (platformCase.contents)
+            await inspected.exec(platformCase.contents);
+          bridge.databases.set(platform, inspected);
+        }
+        try {
+          constructed.mockClear();
+          expect(await report()).toEqual(platformCase.expected);
+          // Two runtime clients plus at most one inspection, shared by both roles.
+          expect(constructed).toHaveBeenCalledTimes(platformCase.clients);
+        } finally {
+          await bridge.databases.get(platform)?.close();
+          bridge.databases.delete(platform);
+          await harness.asSuperuser();
+          await harness.client.exec(`DROP DATABASE ${platform}`);
+          await harness.client.exec(`DROP ROLE ${platformOwner}`);
+          await rerunTemplate();
+        }
+        expect((await evidence()).code).toBe(0);
+      });
   });
 });

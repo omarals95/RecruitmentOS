@@ -9,6 +9,13 @@
  * - It compares each role's effective privileges with the grants the template declares and
  *   lists every difference as drift. Grant options, parameter, type, language, foreign-data
  *   wrapper and server grants, per-role settings and CONNECT on any other database also drift.
+ * - The one exception is a platform-owned database such as Neon's postgres and template1 (owner
+ *   cloud_admin, PUBLIC CONNECT the app owner cannot revoke). It is accepted, and listed under
+ *   accepted_platform_databases, only when its owner is neither the application database owner
+ *   nor a runtime role, it is not the application database, the role holds only the PUBLIC
+ *   CONNECT and TEMPORARY defaults there, and a read-only connection to it as the data role finds
+ *   no protected schema and no migration ledger. A database that cannot be inspected keeps its
+ *   drift.
  * - It prints one JSON document and never a password, URL, host, port, the marker value, row
  *   data or driver error text.
  * - Exit codes: 0 every check passes and nothing drifts; 1 a check fails, a privilege drifts, or
@@ -65,6 +72,12 @@ export type RoleEvidence = {
   publicPrivileges: Record<string, boolean>;
   /** Every database in the cluster: whether this role holds CONNECT and whether it accepts connections. */
   databases: Record<string, { connect: boolean; acceptsConnections: boolean }>;
+  /** Other databases this role can connect to that meet every platform-database condition; they add no drift. */
+  accepted_platform_databases: {
+    name: string;
+    owner: string;
+    reason: string;
+  }[];
   /** Table, column, sequence, function, schema and database privileges held WITH GRANT OPTION. */
   grantOptions: string[];
   /** Parameter, type, language, foreign-data wrapper and server grants beyond the PostgreSQL defaults. */
@@ -88,6 +101,12 @@ const listedSchemas = [
   "storage_ledger",
   "public",
 ];
+const protectedSchemas = listedSchemas.filter((schema) => schema !== "public");
+export const platformDatabaseReason =
+  "owned by a role that is not the application database owner or a runtime role; not the application database; " +
+  "only the PUBLIC CONNECT and TEMPORARY defaults held; inspected read-only as the data role: no application schema or migration ledger found";
+/** Whether a database holds no application data; it is read only as the data role and fails closed. */
+type Inspect = (database: string) => Promise<boolean>;
 
 function privilegeMap(rows: Record<string, unknown>[]) {
   return Object.fromEntries(
@@ -174,10 +193,18 @@ function templateDrift(
   );
   for (const [privilege, held] of Object.entries(evidence.publicPrivileges))
     if (held) drift.push(`PUBLIC holds ${privilege}`);
+  const accepted = new Set(
+    evidence.accepted_platform_databases.map(({ name }) => name),
+  );
   for (const [name, { connect, acceptsConnections }] of Object.entries(
     evidence.databases,
   ))
-    if (name !== evidence.database && connect && acceptsConnections)
+    if (
+      name !== evidence.database &&
+      connect &&
+      acceptsConnections &&
+      !accepted.has(name)
+    )
       drift.push(`can connect to database ${name}`);
   drift.push(...evidence.grantOptions.map((entry) => `extra ${entry}`));
   drift.push(...evidence.otherPrivileges.map((entry) => `extra ${entry}`));
@@ -209,6 +236,7 @@ async function attempt<T>(
 export async function collectRoleEvidence(
   client: Queryable,
   kind: Kind,
+  inspect: Inspect,
 ): Promise<CollectedRole> {
   await client.query("BEGIN TRANSACTION READ ONLY");
   try {
@@ -328,14 +356,28 @@ export async function collectRoleEvidence(
               WHERE d.defaclnamespace = 0 AND d.defaclobjtype = 'f'), true) AS "futureFunctionExecute"`,
       )
     ).rows[0] as Record<string, boolean>;
-    const databases = Object.fromEntries(
-      (
-        await client.query(
-          `SELECT d.datname::text AS name, pg_catalog.has_database_privilege(current_user, d.oid, 'CONNECT') AS connect,
-            d.datallowconn AS "acceptsConnections"
+    // A platform candidate is another database whose owner is neither the application database
+    // owner nor a runtime role, where the role has no ACL entry of its own or through a role it
+    // belongs to, no CREATE, TEMPORARY only if PUBLIC has it, and CONNECT through PUBLIC.
+    const databaseRows = (
+      await client.query(
+        `SELECT d.datname::text AS name, pg_catalog.has_database_privilege(current_user, d.oid, 'CONNECT') AS connect,
+            d.datallowconn AS "acceptsConnections", pg_catalog.pg_get_userbyid(d.datdba)::text AS owner,
+            d.datname <> pg_catalog.current_database()
+              AND d.datdba <> (SELECT a.datdba FROM pg_catalog.pg_database a WHERE a.datname = pg_catalog.current_database())
+              AND pg_catalog.pg_get_userbyid(d.datdba)::text <> ALL ($1::text[])
+              AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba))) a
+                WHERE a.grantee <> 0 AND pg_catalog.pg_has_role(current_user, a.grantee, 'MEMBER'))
+              AND NOT pg_catalog.has_database_privilege(current_user, d.oid, 'CREATE')
+              AND (NOT pg_catalog.has_database_privilege(current_user, d.oid, 'TEMPORARY')
+                OR pg_catalog.has_database_privilege('public', d.oid, 'TEMPORARY'))
+              AND pg_catalog.has_database_privilege('public', d.oid, 'CONNECT') AS "platformCandidate"
           FROM pg_catalog.pg_database d ORDER BY 1`,
-        )
-      ).rows.map((row) => [
+        [[runtimeRoleNames.data, runtimeRoleNames.identity]],
+      )
+    ).rows;
+    const databases = Object.fromEntries(
+      databaseRows.map((row) => [
         row.name as string,
         {
           connect: row.connect as boolean,
@@ -343,6 +385,21 @@ export async function collectRoleEvidence(
         },
       ]),
     );
+    const acceptedPlatformDatabases: RoleEvidence["accepted_platform_databases"] =
+      [];
+    for (const row of databaseRows)
+      if (
+        row.name !== principal.database &&
+        row.connect === true &&
+        row.acceptsConnections === true &&
+        row.platformCandidate === true &&
+        (await inspect(row.name as string))
+      )
+        acceptedPlatformDatabases.push({
+          name: row.name as string,
+          owner: row.owner as string,
+          reason: platformDatabaseReason,
+        });
     // PUBLIC cannot hold a grant option, so only the role and the roles it is a member of count.
     const grantOptions = (
       await client.query(
@@ -438,6 +495,7 @@ export async function collectRoleEvidence(
       defaultPrivileges,
       publicPrivileges,
       databases,
+      accepted_platform_databases: acceptedPlatformDatabases,
       grantOptions,
       otherPrivileges,
       roleSettings,
@@ -528,6 +586,36 @@ function connect(connectionString: string) {
   return client;
 }
 
+/**
+ * Read another database as the data role, from the prepared data URL with only the database
+ * name changed. Any failure, including a name the driver resolves differently, means not clean.
+ */
+async function inspectDatabase(dataUrl: string, database: string) {
+  let client: Client | undefined;
+  try {
+    const url = new URL(dataUrl);
+    url.pathname = `/${encodeURIComponent(database)}`;
+    client = connect(url.toString());
+    await client.connect();
+    await client.query("BEGIN TRANSACTION READ ONLY");
+    try {
+      const { rows } = await client.query(
+        `SELECT current_user::text = $1 AND pg_catalog.current_database()::text = $2
+            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = ANY ($3::text[]))
+            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relname = 'recruitment_migrations') AS clean`,
+        [runtimeRoleNames.data, database, protectedSchemas],
+      );
+      return rows.length === 1 && rows[0].clean === true;
+    } finally {
+      await client.query("ROLLBACK");
+    }
+  } catch {
+    return false;
+  } finally {
+    await Promise.allSettled([client?.end()]);
+  }
+}
+
 export async function main(
   env: Record<string, string | undefined> = process.env,
 ): Promise<number> {
@@ -551,8 +639,22 @@ export async function main(
     clients.push(identityClient);
     await dataClient.connect();
     await identityClient.connect();
-    const data = await collectRoleEvidence(dataClient, "data");
-    const identity = await collectRoleEvidence(identityClient, "identity");
+    // Each database is inspected at most once per run; both roles share the result.
+    const inspections = new Map<string, Promise<boolean>>();
+    const inspect: Inspect = (database) => {
+      let inspection = inspections.get(database);
+      if (!inspection) {
+        inspection = inspectDatabase(targets.dataUrl, database);
+        inspections.set(database, inspection);
+      }
+      return inspection;
+    };
+    const data = await collectRoleEvidence(dataClient, "data", inspect);
+    const identity = await collectRoleEvidence(
+      identityClient,
+      "identity",
+      inspect,
+    );
     const pair = checkRolePair(data, identity);
     const pass = data.evidence.pass && identity.evidence.pass && pair.pass;
     console.log(
