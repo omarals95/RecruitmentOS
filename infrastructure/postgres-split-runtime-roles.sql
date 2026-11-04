@@ -8,6 +8,9 @@
 --   protected schemas and grants the matrix below again, so a rerun removes any extra privilege.
 --   Update it whenever a migration adds a table, sequence or function: new owner objects are
 --   unusable by both runtime roles and PUBLIC until they are listed here.
+-- - It closes this database to PUBLIC (no CONNECT or TEMPORARY) and the public schema to PUBLIC
+--   and both runtime roles. Only the two runtime roles get CONNECT; the owner keeps its access.
+--   scripts/db-role-evidence.ts compares each role's effective privileges with the grants below.
 -- - It never sets passwords. The operator sets each password separately, for example with
 --   \password recruitmentos_data in psql, never in this file, shell history or logs.
 -- - It has been verified only on PGlite and a throwaway local PostgreSQL. It has not been run on
@@ -46,7 +49,8 @@ BEGIN
   END IF;
 END $preflight$;
 
--- Converge: drop every privilege the runtime roles and PUBLIC hold in the protected schemas.
+-- Converge: drop every privilege the runtime roles and PUBLIC hold in the protected schemas, the
+-- public schema and this database.
 REVOKE ALL ON SCHEMA auth, app, tenant_context, db_boundary, storage_ledger
   FROM PUBLIC, recruitmentos_data, recruitmentos_identity CASCADE;
 REVOKE ALL ON ALL TABLES IN SCHEMA auth, app, tenant_context, db_boundary, storage_ledger
@@ -55,9 +59,10 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA auth, app, tenant_context, db_boundary, st
   FROM PUBLIC, recruitmentos_data, recruitmentos_identity CASCADE;
 REVOKE ALL ON ALL ROUTINES IN SCHEMA auth, app, tenant_context, db_boundary, storage_ledger
   FROM PUBLIC, recruitmentos_data, recruitmentos_identity CASCADE;
+REVOKE ALL ON SCHEMA public FROM PUBLIC, recruitmentos_data, recruitmentos_identity CASCADE;
 DO $database$
 BEGIN
-  EXECUTE pg_catalog.format('REVOKE CREATE ON DATABASE %I FROM recruitmentos_data, recruitmentos_identity CASCADE',
+  EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC, recruitmentos_data, recruitmentos_identity CASCADE',
     pg_catalog.current_database());
 END $database$;
 
@@ -125,5 +130,15 @@ GRANT SELECT ON TABLE auth.initial_admin_claim TO recruitmentos_identity;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text, text) TO recruitmentos_identity;
+
+-- A revoke by a role that does not own the database or the public schema only warns; refuse instead.
+DO $closed$
+BEGIN
+  IF pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT, TEMPORARY')
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n
+      WHERE n.nspname = 'public' AND pg_catalog.has_schema_privilege('public', n.oid, 'USAGE, CREATE')) THEN
+    RAISE EXCEPTION 'PUBLIC still has database or public schema access; run the runtime role template as the database owner.';
+  END IF;
+END $closed$;
 
 COMMIT;

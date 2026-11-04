@@ -67,5 +67,19 @@ export const runtimeRoleSafetyQuery = `
           OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE,REFERENCES'))
     )
     OR pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
+    -- The runtime template closes the database and the public schema to PUBLIC.
+    OR pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT')
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_roles r
+      WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'TEMPORARY')
+    )
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_namespace n
+      CROSS JOIN pg_catalog.pg_roles r
+      WHERE n.nspname = 'public'
+        AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'USAGE, CREATE')
+    )
   ) AS unsafe
 `;
