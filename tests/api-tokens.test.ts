@@ -11,6 +11,7 @@ import {
 } from "../src/lib/api-tokens";
 import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
+import { installTenantContextKey } from "../src/lib/tenant-context";
 import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 
 const principal = (
@@ -29,6 +30,7 @@ describe("team scoped API tokens against actual SQL", () => {
   const pg = new PGlite();
   beforeAll(async () => {
     await applyMigrations(pg);
+    await installTenantContextKey(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
     await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES('owner','Owner','owner@example.test',true,true);
       INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner');

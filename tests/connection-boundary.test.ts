@@ -11,6 +11,7 @@ import {
   verifyConnectionTargets,
   verifyPoolPair,
 } from "../src/db/connection-boundary";
+import { createSplitRoleDb, splitRoles } from "./helpers/db";
 
 describe("database identity separation", () => {
   it("recognizes parsed IPv6 and IPv4 loopback hosts without trusting lookalike hosts", () => {
@@ -129,6 +130,45 @@ describe("database identity separation", () => {
       await pg.exec("RESET ROLE");
     } finally {
       await pg.close();
+    }
+  });
+
+  it("allows only the exact tenant-context helpers each split role needs", async () => {
+    const harness = await createSplitRoleDb();
+    try {
+      async function unsafe(role: "data" | "identity") {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        const result = await harness.client.query<{ unsafe: boolean }>(
+          role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+        );
+        return result.rows[0].unsafe;
+      }
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(`
+        CREATE FUNCTION tenant_context.extra_helper() RETURNS text LANGUAGE sql
+          SECURITY DEFINER SET search_path = pg_catalog AS $$ SELECT 'extra' $$;
+        REVOKE ALL ON FUNCTION tenant_context.extra_helper() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION tenant_context.extra_helper() TO ${splitRoles.data};`);
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec("DROP FUNCTION tenant_context.extra_helper()");
+      expect(await unsafe("data")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text,text) TO ${splitRoles.data}`,
+      );
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION tenant_context.audit_token(text,text) FROM ${splitRoles.data};
+        GRANT EXECUTE ON FUNCTION tenant_context.allows(text,text,text) TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(true);
+    } finally {
+      await harness.close();
     }
   });
 

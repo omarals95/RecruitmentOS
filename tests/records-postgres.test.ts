@@ -14,7 +14,12 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -500,12 +505,10 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       vacancyId: job.id,
       data: { owner: "Fictional colleague", notes: "Fictional private note" },
     });
-    const token: Principal = {
-      ...owner,
-      authType: "token",
-      tokenId: randomUUID(),
-      scopes: ["recruitment:write", "candidates:read"],
-    };
+    const token = await seedApiToken(fixture.db, owner, [
+      "recruitment:write",
+      "candidates:read",
+    ]);
     const result = await bulkApplications(
       token,
       { candidateIds: [person.id], vacancyId: job.id },
@@ -537,12 +540,7 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   });
 
   it("returns the original snapshot on expired-key retries without the read scope", async () => {
-    const writer: Principal = {
-      ...owner,
-      authType: "token",
-      tokenId: randomUUID(),
-      scopes: ["candidates:write"],
-    };
+    const writer = await seedApiToken(fixture.db, owner, ["candidates:write"]);
     const payload = { data: { name: "Fictional Write Only Person" } };
     const first = await createRecord(
       writer,

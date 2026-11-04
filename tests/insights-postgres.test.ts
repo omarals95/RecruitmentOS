@@ -18,7 +18,12 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 describe("bounded, factual PostgreSQL reporting", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -498,11 +503,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
   });
 
   it("keeps personal audit and candidate inventory outside recruitment-only token results", async () => {
-    const token = {
-      ...owner,
-      authType: "token" as const,
-      scopes: ["recruitment:read"] as Principal["scopes"],
-    };
+    const token = await seedApiToken(fixture.db, owner, ["recruitment:read"]);
     await expect(overview(token)).rejects.toMatchObject({ status: 403 });
     const events = await listActivity(
       token,
@@ -596,11 +597,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
   it("requires a write scope for token read markers while allowing a signed-in viewer to mark their own reminders", async () => {
     const reminder = (await notifications(viewer)).data[0];
     expect(reminder.read).toBe(false);
-    const token = {
-      ...viewer,
-      authType: "token" as const,
-      scopes: ["recruitment:read"] as Principal["scopes"],
-    };
+    const token = await seedApiToken(fixture.db, viewer, ["recruitment:read"]);
     await expect(
       markNotifications(token, [reminder.key]),
     ).rejects.toMatchObject({ status: 403 });
@@ -632,15 +629,11 @@ describe("bounded, factual PostgreSQL reporting", () => {
         ),
     );
     expect(saved).toHaveLength(1);
-    const importToken = {
-      ...colleague,
-      authType: "token" as const,
-      scopes: [
-        "recruitment:read",
-        "recruitment:write",
-        "imports:write",
-      ] as Principal["scopes"],
-    };
+    const importToken = await seedApiToken(fixture.db, colleague, [
+      "recruitment:read",
+      "recruitment:write",
+      "imports:write",
+    ]);
     expect(await markNotifications(importToken, [reminder.key])).toEqual({
       updated: 1,
     });
