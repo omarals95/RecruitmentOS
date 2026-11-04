@@ -140,6 +140,45 @@ function awsTicket(urlValue: unknown): string {
     );
   return url.href;
 }
+/** Only an exact private Vercel Blob PUT for this file; the server's tag, never the host, decides. */
+function blobTicket(
+  ticket: Row,
+  mimeType: string | undefined,
+  sizeBytes: number | undefined,
+): { url: string; contentType: string } {
+  const invalid = () =>
+    new ImportError(
+      "INVALID_UPLOAD_TICKET",
+      "Upload target is not a Vercel Blob PUT ticket for this exact file.",
+    );
+  if (typeof ticket.url !== "string") throw invalid();
+  let url: URL;
+  try {
+    url = new URL(ticket.url);
+  } catch {
+    throw invalid();
+  }
+  const headers = ticket.headers;
+  if (
+    typeof mimeType !== "string" ||
+    url.protocol !== "https:" ||
+    url.origin !== "https://vercel.com" ||
+    url.pathname !== "/api/blob/" ||
+    url.username ||
+    url.password ||
+    ticket.url.includes("#") ||
+    ticket.method !== "PUT" ||
+    !headers ||
+    typeof headers !== "object" ||
+    Array.isArray(headers) ||
+    Object.keys(headers).length !== 1 ||
+    (headers as Row)["content-type"] !== mimeType ||
+    !Number.isSafeInteger(sizeBytes) ||
+    ticket.maxBytes !== sizeBytes
+  )
+    throw invalid();
+  return { url: ticket.url, contentType: mimeType };
+}
 
 export async function applyPlan(
   plan: MigrationPlan,
@@ -579,43 +618,82 @@ export async function applyPlan(
             "Server returned no upload ticket for a CV that is not ready.",
           );
       } else {
-        const ticket = object(upload),
-          url = awsTicket(ticket.url),
-          fields = object(ticket.fields),
-          bytes = await readSourceBytes(plan, source),
-          form = new FormData();
-        for (const [name, value] of Object.entries(fields)) {
-          if (typeof value !== "string")
+        const ticket = object(upload);
+        if (ticket.protocol === "s3-form-v1") {
+          if (ticket.method !== "POST")
             throw new ImportError(
               "INVALID_UPLOAD_TICKET",
-              "S3 form fields must be strings.",
+              "S3 upload tickets must use a form POST.",
             );
-          form.append(name, value);
-        }
-        form.append(
-          "file",
-          new Blob([new Uint8Array(bytes)], { type: source.mimeType }),
-          metadata.originalName,
-        );
-        let uploaded: Response;
-        try {
-          uploaded = await fetcher(url, {
-            method: "POST",
-            body: form,
-            redirect: "error",
-            credentials: "omit",
-            signal: AbortSignal.timeout(60000),
-          });
-        } catch {
-          throw new ImportError(
-            "UPLOAD_OUTCOME_UNCERTAIN",
-            "S3 upload did not finish. Rerun to reuse its reservation and complete validation.",
+          const url = awsTicket(ticket.url),
+            fields = object(ticket.fields),
+            bytes = await readSourceBytes(plan, source),
+            form = new FormData();
+          for (const [name, value] of Object.entries(fields)) {
+            if (typeof value !== "string")
+              throw new ImportError(
+                "INVALID_UPLOAD_TICKET",
+                "S3 form fields must be strings.",
+              );
+            form.append(name, value);
+          }
+          form.append(
+            "file",
+            new Blob([new Uint8Array(bytes)], { type: source.mimeType }),
+            metadata.originalName,
           );
-        }
-        if (!uploaded.ok)
+          let uploaded: Response;
+          try {
+            uploaded = await fetcher(url, {
+              method: "POST",
+              body: form,
+              redirect: "error",
+              credentials: "omit",
+              signal: AbortSignal.timeout(60000),
+            });
+          } catch {
+            throw new ImportError(
+              "UPLOAD_OUTCOME_UNCERTAIN",
+              "S3 upload did not finish. Rerun to reuse its reservation and complete validation.",
+            );
+          }
+          if (!uploaded.ok)
+            throw new ImportError(
+              "S3_UPLOAD_FAILED",
+              `S3 returned HTTP ${uploaded.status}; no API token was sent to S3.`,
+            );
+        } else if (ticket.protocol === "blob-put-v1") {
+          const target = blobTicket(
+              ticket,
+              source.mimeType,
+              metadata.sizeBytes,
+            ),
+            bytes = await readSourceBytes(plan, source);
+          let uploaded: Response;
+          try {
+            uploaded = await fetcher(target.url, {
+              method: "PUT",
+              body: new Uint8Array(bytes),
+              headers: { "content-type": target.contentType },
+              redirect: "error",
+              credentials: "omit",
+              signal: AbortSignal.timeout(60000),
+            });
+          } catch {
+            throw new ImportError(
+              "UPLOAD_OUTCOME_UNCERTAIN",
+              "Blob upload did not finish. Rerun to reuse its reservation and complete validation.",
+            );
+          }
+          if (!uploaded.ok)
+            throw new ImportError(
+              "BLOB_UPLOAD_FAILED",
+              `Private Blob storage returned HTTP ${uploaded.status}; no API token was sent to it.`,
+            );
+        } else
           throw new ImportError(
-            "S3_UPLOAD_FAILED",
-            `S3 returned HTTP ${uploaded.status}; no API token was sent to S3.`,
+            "UNSUPPORTED_UPLOAD_PROTOCOL",
+            "The server returned an upload protocol this importer does not support. No CV bytes were sent.",
           );
         const completed = object(
           (await request(`/api/v1/cvs/uploads/${cvId}/complete`, "POST", {}))
