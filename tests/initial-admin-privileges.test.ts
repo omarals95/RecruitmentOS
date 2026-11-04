@@ -2,32 +2,23 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
 import { applyMigrations } from "../src/db";
+import { readRuntimeRoleTemplate } from "./helpers/db";
 
 describe("initial administrator runtime privileges", () => {
   it("never grants direct marker write privileges while applying the runtime template", async () => {
     const pg = new PGlite();
     try {
       await applyMigrations(pg);
-      const source = await readFile(
-        new URL("../infrastructure/postgres-runtime-role.sql", import.meta.url),
-        "utf8",
-      );
-      const statements = source
-        .replace(/^--.*$/gm, "")
-        .split(";")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      for (const statement of statements) {
-        if (/^GRANT CONNECT ON DATABASE/i.test(statement)) continue;
-        await pg.exec(`${statement};`);
-        const exists = await pg.query(
-          `SELECT 1 FROM pg_roles WHERE rolname='recruitment_runtime'`,
-        );
-        if (exists.rows.length) {
+      const template = await readRuntimeRoleTemplate();
+      for (let run = 0; run < 2; run++) {
+        await pg.exec(template);
+        for (const role of ["recruitmentos_data", "recruitmentos_identity"]) {
           const result = await pg.query<{ can_write: boolean }>(
-            `SELECT has_table_privilege('recruitment_runtime','auth.initial_admin_claim','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS can_write`,
+            `SELECT has_table_privilege($1,'auth.initial_admin_claim','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+              OR has_any_column_privilege($1,'auth.initial_admin_claim','INSERT,UPDATE,REFERENCES') AS can_write`,
+            [role],
           );
-          expect(result.rows[0].can_write).toBe(false);
+          expect(result.rows[0].can_write, role).toBe(false);
         }
       }
     } finally {
@@ -99,13 +90,8 @@ describe("initial administrator runtime privileges", () => {
     const pg = new PGlite();
     try {
       await applyMigrations(pg);
-      const roleSql = await readFile(
-        new URL("../infrastructure/postgres-runtime-role.sql", import.meta.url),
-        "utf8",
-      );
-      // PGlite uses its own database name; database CONNECT is not under test.
-      await pg.exec(roleSql.replace(/^GRANT CONNECT ON DATABASE.*;$/m, ""));
-      await pg.exec("SET ROLE recruitment_runtime");
+      await pg.exec(await readRuntimeRoleTemplate());
+      await pg.exec("SET ROLE recruitmentos_identity");
       await pg.query(
         `INSERT INTO auth."user" (id,name,email,initial_admin) VALUES ('owner','Owner','owner@example.test',true)`,
       );

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
@@ -106,36 +107,34 @@ export async function enforceTestRls(db: AppDb) {
 
 export const splitRoles = {
   owner: "tenant_test_owner",
-  data: "tenant_test_data",
-  identity: "tenant_test_identity",
+  data: "recruitmentos_data",
+  identity: "recruitmentos_identity",
 } as const;
+/** The reviewed split runtime role template, read unmodified. */
+export function readRuntimeRoleTemplate(): Promise<string> {
+  return readFile(
+    new URL(
+      "../../infrastructure/postgres-split-runtime-roles.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+}
 /**
- * One PGlite with a nonsuperuser, non-BYPASSRLS migration owner and separate data and
- * identity roles that cannot assume each other. Route pools with dataDb/identityDb.
+ * One PGlite with a nonsuperuser, non-BYPASSRLS migration owner and the data and identity
+ * roles provisioned by the runtime role template. Route pools with dataDb/identityDb.
  */
 export async function createSplitRoleDb() {
   const client = new PGlite();
+  // Only what Neon's database owner has: CREATEROLE and the database itself.
   await client.exec(`
-    CREATE ROLE ${splitRoles.owner} NOLOGIN NOSUPERUSER NOBYPASSRLS;
-    CREATE ROLE ${splitRoles.data} NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
-    CREATE ROLE ${splitRoles.identity} NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
-    DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO ${splitRoles.owner}', current_database()); END $$;
-    GRANT CREATE ON SCHEMA public TO ${splitRoles.owner};
+    CREATE ROLE ${splitRoles.owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+    DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${splitRoles.owner}', current_database()); END $$;
     SET SESSION AUTHORIZATION ${splitRoles.owner};
   `);
   await applyMigrations(client);
   await installTenantContextKey(client);
-  await client.exec(`
-    GRANT USAGE ON SCHEMA db_boundary,tenant_context TO ${splitRoles.data},${splitRoles.identity};
-    GRANT SELECT ON db_boundary.connection_marker,db_boundary.storage_schema TO ${splitRoles.data},${splitRoles.identity};
-    GRANT USAGE ON SCHEMA app TO ${splitRoles.data};
-    GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA app TO ${splitRoles.data};
-    GRANT EXECUTE ON FUNCTION ${dataRoleHelpers.join(",")} TO ${splitRoles.data};
-    GRANT USAGE ON SCHEMA auth TO ${splitRoles.identity};
-    GRANT SELECT ON auth.initial_admin_claim TO ${splitRoles.identity};
-    GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO ${splitRoles.identity};
-    GRANT EXECUTE ON FUNCTION ${identityRoleHelpers.join(",")} TO ${splitRoles.identity};
-  `);
+  await client.exec(await readRuntimeRoleTemplate());
   const db = drizzle(client, { schema }) as unknown as AppDb;
   const as = async (role: keyof typeof splitRoles) => {
     await client.exec(`SET SESSION AUTHORIZATION ${splitRoles[role]}`);
