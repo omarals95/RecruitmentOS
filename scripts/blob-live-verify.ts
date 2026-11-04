@@ -6,7 +6,8 @@
  * - It uploads only generated fictional bytes under live-verification/<random-uuid>/ and
  *   accepts no file path; it reads nothing from disk.
  * - It refuses to start without --confirm-live-preview-blob, a valid --store, a
- *   BLOB_READ_WRITE_TOKEN and a non-production VERCEL_ENV.
+ *   BLOB_READ_WRITE_TOKEN that is a read-write token for that same store, and a
+ *   non-production VERCEL_ENV. Do not run it with DEBUG=blob: the SDK then logs responses.
  * - It never prints a token, signed URL, delegation token, signature or provider error.
  *   Each check prints one line: PASS|FAIL|OBSERVED <check-id> <short description>.
  */
@@ -26,6 +27,7 @@ const HELP = `Usage: BLOB_READ_WRITE_TOKEN=<Preview token> npx tsx scripts/blob-
 Verifies no-overwrite, replay, constraints, late completion, multipart and deletion
 behaviour of the PREVIEW Vercel Blob store only, using generated fictional bytes.
 It reads no file from disk and deletes everything it created under its run prefix.
+The token must be a read-write token for the --store store. Do not set DEBUG=blob.
 Only the owner runs it. Agents must never run it.`;
 const STORE_ID = /^store_[A-Za-z0-9]{1,128}$/;
 const MIME = "application/pdf";
@@ -82,6 +84,14 @@ export async function main(
   if (env.VERCEL_ENV === "production")
     return refuse(
       "VERCEL_ENV is production; this script targets Preview only.",
+    );
+  // The SDK reaches the store the token names; --store must be that store.
+  if (
+    !token.startsWith("vercel_blob_rw_") ||
+    token.split("_")[3] !== storeId.slice("store_".length)
+  )
+    return refuse(
+      "BLOB_READ_WRITE_TOKEN must be a read-write token for the --store store.",
     );
 
   let failures = 0;

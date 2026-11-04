@@ -14,21 +14,60 @@ import { main } from "../scripts/blob-live-verify";
 
 const flag = "--confirm-live-preview-blob";
 const store = ["--store", "store_fictional0001"];
-const token = { BLOB_READ_WRITE_TOKEN: "fictional-preview-token" };
+const token = {
+  BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_fictional0001_fictionalPreviewSecret",
+};
 
 describe("blob-live-verify refusals", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  const cases: [string, string[], Record<string, string | undefined>][] = [
-    ["no arguments", [], token],
-    ["only the confirmation flag", [flag], token],
-    ["no token", [flag, ...store], {}],
-    ["production", [flag, ...store], { ...token, VERCEL_ENV: "production" }],
-    ["an invalid store id", [flag, "--store", "store_bad/id"], token],
-    ["a store id without the prefix", [flag, "--store", "fictional"], token],
-    ["an unknown option", [flag, ...store, "--file", "cv.pdf"], token],
+  const cases: [
+    string,
+    string[],
+    Record<string, string | undefined>,
+    RegExp,
+  ][] = [
+    ["no arguments", [], token, /--confirm-live-preview-blob/],
+    ["only the confirmation flag", [flag], token, /--store/],
+    ["no token", [flag, ...store], {}, /must be set/],
+    [
+      "production",
+      [flag, ...store],
+      { ...token, VERCEL_ENV: "production" },
+      /production/,
+    ],
+    [
+      "an invalid store id",
+      [flag, "--store", "store_bad/id"],
+      token,
+      /--store/,
+    ],
+    [
+      "a store id without the prefix",
+      [flag, "--store", "fictional"],
+      token,
+      /--store/,
+    ],
+    [
+      "a token for another store",
+      [flag, "--store", "store_other0002"],
+      token,
+      /read-write token for the --store/,
+    ],
+    [
+      "a token that is not a read-write token",
+      [flag, ...store],
+      { BLOB_READ_WRITE_TOKEN: "vercel_blob_client_fictional0001_secret" },
+      /read-write token for the --store/,
+    ],
+    [
+      "an unknown option",
+      [flag, ...store, "--file", "cv.pdf"],
+      token,
+      /arguments/,
+    ],
   ];
-  for (const [label, args, env] of cases)
+  for (const [label, args, env, reason] of cases)
     it(`refuses ${label} before any SDK or network call`, async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch");
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -45,6 +84,7 @@ describe("blob-live-verify refusals", () => {
         expect(vi.mocked(call)).not.toHaveBeenCalled();
       expect(errors).toHaveBeenCalledTimes(1);
       expect(String(errors.mock.calls[0][0])).toMatch(/^Refused:/);
+      expect(String(errors.mock.calls[0][0])).toMatch(reason);
       expect(String(errors.mock.calls[0][0])).not.toContain(
         token.BLOB_READ_WRITE_TOKEN,
       );

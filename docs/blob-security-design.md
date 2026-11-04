@@ -58,7 +58,7 @@ A conservative alternative to investigate is to **never release or reuse the res
 - `multipart`: whether `/mpu` accepts the PUT ticket, and whether the size limit holds.
 - `deletion`: a deleted object reads as missing, and whether the still-valid ticket can recreate it.
 
-Only the owner runs it, against the Preview store with a Preview read-write token. Agents never run it. It refuses to start without the confirmation flag, a valid store id, a token, or when `VERCEL_ENV` is `production`:
+Only the owner runs it, against the Preview store with a Preview read-write token. Agents never run it. It refuses to start without the confirmation flag, a valid store id, and a read-write token for that same store (the SDK reaches whichever store the token names, so `createVercelBlobClient` refuses a mismatch too), or when `VERCEL_ENV` is `production`. Do not run it with `DEBUG=blob`, which makes the SDK log responses:
 
 ```
 BLOB_READ_WRITE_TOKEN=<Preview token> npx tsx scripts/blob-live-verify.ts --confirm-live-preview-blob --store store_<id>

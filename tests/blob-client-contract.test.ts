@@ -309,7 +309,9 @@ describe("real @vercel/blob client only", () => {
     expect((failure as Error).cause).toBeUndefined();
   });
 
-  it("refuses a bad store id, an empty token and an API endpoint override", () => {
+  it("refuses a bad store id, a token for another store, a non-read-write token and an API endpoint override", () => {
+    const otherStoreToken = "vercel_blob_rw_other_1111111111111111";
+    const clientToken = "vercel_blob_client_fictional_2222222222222222";
     const refusals: [string, () => unknown][] = [
       [
         "store id",
@@ -322,6 +324,26 @@ describe("real @vercel/blob client only", () => {
       [
         "token",
         () => createVercelBlobClient({ storeId: "store_fictional", token: "" }),
+      ],
+      [
+        "token for another store",
+        () =>
+          createVercelBlobClient({
+            storeId: "store_fictional",
+            token: otherStoreToken,
+          }),
+      ],
+      [
+        "store id of another token",
+        () => createVercelBlobClient({ storeId: "store_other", token }),
+      ],
+      [
+        "non-read-write token",
+        () =>
+          createVercelBlobClient({
+            storeId: "store_fictional",
+            token: clientToken,
+          }),
       ],
       [
         "override",
@@ -339,7 +361,8 @@ describe("real @vercel/blob client only", () => {
         failure = error;
       }
       expect(failure, label).toBeInstanceOf(StorageConfigurationError);
-      expect(String((failure as Error).message), label).not.toContain(token);
+      for (const secret of [token, otherStoreToken, clientToken, "fictional"])
+        expect(String((failure as Error).message), label).not.toContain(secret);
     }
     expect(vi.mocked(issueSignedToken)).not.toHaveBeenCalled();
     expect(vi.mocked(get)).not.toHaveBeenCalled();

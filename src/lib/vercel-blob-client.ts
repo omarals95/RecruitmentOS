@@ -15,16 +15,19 @@ export function createVercelBlobClient({
   storeId: string;
   token: string;
 }): BlobClient {
+  // The SDK reaches whichever store the read-write token names, so the token must name
+  // exactly this store; otherwise the store id would be a check in name only.
   if (
     typeof storeId !== "string" ||
     !/^store_[A-Za-z0-9]{1,128}$/.test(storeId) ||
     typeof token !== "string" ||
-    !token ||
+    !token.startsWith("vercel_blob_rw_") ||
+    token.split("_")[3] !== storeId.slice("store_".length) ||
     process.env.VERCEL_BLOB_API_URL ||
     process.env.NEXT_PUBLIC_VERCEL_BLOB_API_URL
   )
     throw new StorageConfigurationError(
-      "The Vercel Blob client needs a valid store id, a token and the standard API endpoint.",
+      "The storage client needs a valid store id, a read-write token for that store and the standard endpoint.",
     );
   return {
     signer: {
