@@ -457,11 +457,12 @@ export function GET() {
       {
         summary: "Read bulk CV import availability",
         description:
-          "Requires cvs:write and candidates:write. Currently always reports uploads and AI as unavailable.",
+          "Requires cvs:write and candidates:write. Currently always reports uploads and AI as unavailable. storageConfigured reports whether private CV storage is set up in the server environment; it is read from configuration only and contacts no storage provider.",
       },
       {
         "200": {
-          description: "{data:{uploadsAvailable:false, aiAvailable:false}}.",
+          description:
+            "{data:{uploadsAvailable:false, aiAvailable:false, storageConfigured:boolean}}.",
         },
       },
     ),

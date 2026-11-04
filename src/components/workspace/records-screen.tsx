@@ -2115,6 +2115,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       totalPages: number;
     };
   }>(`/api/v1/candidates/${candidateId}/cvs?page=${page}&pageSize=${pageSize}`);
+  const canUpload = Boolean(team) && role !== "viewer";
+  // Environment-only readiness; a failed check keeps the controls and the server still refuses.
+  const capability = useApi<{ data: { storageConfigured: boolean } }>(
+    canUpload ? "/api/v1/cvs/bulk-capabilities" : null,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const setPage = (next: number) => setPagination({ candidateId, page: next });
@@ -2257,10 +2262,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           </div>
         </nav>
       )}
-      {team && role !== "viewer" && (
+      {team && canUpload && !capability.loading && (
         <CvUpload
           teamId={team.id}
           candidateId={candidateId}
+          storageConfigured={capability.data?.data.storageConfigured !== false}
           onComplete={() => {
             setPage(1);
             result.refresh();

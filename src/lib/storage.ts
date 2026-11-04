@@ -76,7 +76,7 @@ export function resolveStorageBinding(
   const store = env.S3_BUCKET_NAME?.trim();
   if (!store)
     throw new StorageConfigurationError(
-      "Private CV storage is not configured. Set S3_BUCKET_NAME in the server environment.",
+      "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
     );
   return { provider, environment, store };
 }
@@ -181,7 +181,7 @@ export async function getStorage(): Promise<StorageGateway> {
   if (provider !== "s3") throw providerDisabled(provider);
   if (!storageConfigured())
     throw new StorageConfigurationError(
-      "Private CV storage is not configured. Set S3_BUCKET_NAME, AWS_REGION and AWS_ROLE_ARN in the server environment.",
+      "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
     );
   let credentials;
   if (process.env.AWS_ROLE_ARN) {

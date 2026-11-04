@@ -92,8 +92,13 @@ export function BulkCvImport({
 }) {
   const { team } = useWorkspace();
   const capability = useApi<{
-    data: { uploadsAvailable: boolean; aiAvailable: boolean };
+    data: {
+      uploadsAvailable: boolean;
+      aiAvailable: boolean;
+      storageConfigured: boolean;
+    };
   }>("/api/v1/cvs/bulk-capabilities");
+  const storageMissing = capability.data?.data.storageConfigured === false;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
@@ -324,12 +329,23 @@ export function BulkCvImport({
           Drafts stay in this browser until you close this window or switch
           teams.
         </p>
-        {!capability.data?.data.uploadsAvailable && (
-          <p className="notice error" role="status">
-            CV import is unavailable while private storage safeguards are being
-            verified. You can prepare a review draft, but candidates cannot be
-            imported yet.
-          </p>
+        {storageMissing ? (
+          <div className="notice" role="status">
+            <strong>CV uploads are not set up yet.</strong>
+            <p>
+              Importing CV files needs file storage that an administrator has to
+              finish setting up. You can still add and edit candidate details in
+              the candidate directory.
+            </p>
+          </div>
+        ) : (
+          !capability.data?.data.uploadsAvailable && (
+            <p className="notice error" role="status">
+              CV import is unavailable while private storage safeguards are
+              being verified. You can prepare a review draft, but candidates
+              cannot be imported yet.
+            </p>
+          )
         )}
         {capability.error && (
           <p className="notice error" role="alert">
@@ -345,21 +361,23 @@ export function BulkCvImport({
           team and show up to 20 matches. They do not check names or guarantee
           that a candidate is unique.
         </p>
-        <div className="field">
-          <label htmlFor="bulk-cv-files">Choose CV files</label>
-          <input
-            id="bulk-cv-files"
-            type="file"
-            multiple
-            accept=".pdf,.doc,.docx,.pages,.jpg,.jpeg,.jfif,.png"
-            disabled={busy}
-            onChange={(event) => {
-              selectFiles(event.target.files);
-              event.currentTarget.value = "";
-            }}
-          />
-          <small>PDF, Word, Pages, JPG or PNG; up to 10 MiB per file.</small>
-        </div>
+        {!storageMissing && (
+          <div className="field">
+            <label htmlFor="bulk-cv-files">Choose CV files</label>
+            <input
+              id="bulk-cv-files"
+              type="file"
+              multiple
+              accept=".pdf,.doc,.docx,.pages,.jpg,.jpeg,.jfif,.png"
+              disabled={busy}
+              onChange={(event) => {
+                selectFiles(event.target.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            <small>PDF, Word, Pages, JPG or PNG; up to 10 MiB per file.</small>
+          </div>
+        )}
         {entries.length > 0 && (
           <div className="related-list" aria-label="Selected CVs">
             {entries.map((item) => (
