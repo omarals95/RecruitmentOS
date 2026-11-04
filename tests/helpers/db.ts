@@ -97,7 +97,7 @@ export async function enforceTestRls(db: AppDb) {
     "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA app,auth TO recruitment_test_runtime",
     "REVOKE INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON auth.initial_admin_claim FROM recruitment_test_runtime",
     "GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA app,auth TO recruitment_test_runtime",
-    "GRANT SELECT ON db_boundary.connection_marker TO recruitment_test_runtime",
+    "GRANT SELECT ON db_boundary.connection_marker,db_boundary.storage_schema TO recruitment_test_runtime",
     `GRANT EXECUTE ON FUNCTION ${[...new Set([...dataRoleHelpers, ...identityRoleHelpers])].join(",")} TO recruitment_test_runtime`,
     "SET ROLE recruitment_test_runtime",
   ])
@@ -127,7 +127,7 @@ export async function createSplitRoleDb() {
   await installTenantContextKey(client);
   await client.exec(`
     GRANT USAGE ON SCHEMA db_boundary,tenant_context TO ${splitRoles.data},${splitRoles.identity};
-    GRANT SELECT ON db_boundary.connection_marker TO ${splitRoles.data},${splitRoles.identity};
+    GRANT SELECT ON db_boundary.connection_marker,db_boundary.storage_schema TO ${splitRoles.data},${splitRoles.identity};
     GRANT USAGE ON SCHEMA app TO ${splitRoles.data};
     GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA app TO ${splitRoles.data};
     GRANT EXECUTE ON FUNCTION ${dataRoleHelpers.join(",")} TO ${splitRoles.data};

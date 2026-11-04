@@ -197,6 +197,10 @@ describe("signed tenant context under separate nonowner data and identity roles"
           candidateId: person.id,
           note: `Fictional ${label} private note`,
         });
+        // Usage rows are owner-only; the lock helper creates the team row before the charge.
+        await tx.execute(
+          sql`SELECT tenant_context.lock_storage_allocation('s3','development','fictional-tenant-bucket')`,
+        );
         await tx.insert(uploads).values({
           teamId: p.teamId,
           candidateId: person.id,
@@ -204,14 +208,13 @@ describe("signed tenant context under separate nonowner data and identity roles"
           mimeType: "application/pdf",
           sizeBytes: 10,
           objectKey: `teams/${p.teamId}/cvs/fictional-${label}`,
+          storageProvider: "s3",
+          storageEnvironment: "development",
+          storageStore: "fictional-tenant-bucket",
           legacySourceId: `fictional-legacy-${label}`,
           createdBy: p.userId,
           expiresAt: new Date(Date.now() + 3_600_000),
         });
-        await tx
-          .insert(storageUsage)
-          .values({ teamId: p.teamId })
-          .onConflictDoNothing();
         await tx.insert(idempotency).values({
           teamId: p.teamId,
           actorKey: `${p.userId}:session:session`,
@@ -476,6 +479,9 @@ describe("signed tenant context under separate nonowner data and identity roles"
           mimeType: "application/pdf",
           sizeBytes: 1,
           objectKey: "forged",
+          storageProvider: "s3",
+          storageEnvironment: "development",
+          storageStore: "fictional-tenant-bucket",
           createdBy: ownerA.userId,
           expiresAt: later,
         }),

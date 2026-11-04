@@ -7,7 +7,14 @@ import {
 } from "./storage-format.ts";
 
 export class StorageConfigurationError extends Error {}
+/** The provider, environment and store every CV reference is bound to. */
+export type StorageBinding = {
+  provider: "s3" | "blob";
+  environment: "development" | "preview" | "production";
+  store: string;
+};
 export interface StorageGateway {
+  readonly binding: StorageBinding;
   assertVersioning(): Promise<void>;
   presignPost(
     key: string,
@@ -39,6 +46,39 @@ export function storageConfigured(
     (env.AWS_ROLE_ARN?.trim() ||
       (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim())),
   );
+}
+
+function providerDisabled(provider: string) {
+  return new StorageConfigurationError(
+    provider === "blob" || provider === "vercel-blob"
+      ? "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed."
+      : "The configured CV storage provider is not supported.",
+  );
+}
+
+/** Reads only the environment; it never contacts a provider. Off Vercel is development. */
+export function resolveStorageBinding(
+  env: Record<string, string | undefined> = process.env,
+): StorageBinding {
+  let environment: StorageBinding["environment"] = "development";
+  if (env.VERCEL) {
+    if (
+      env.VERCEL !== "1" ||
+      (env.VERCEL_ENV !== "production" && env.VERCEL_ENV !== "preview")
+    )
+      throw new StorageConfigurationError(
+        "Hosted CV storage needs VERCEL_ENV set to production or preview.",
+      );
+    environment = env.VERCEL_ENV;
+  }
+  const provider = env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
+  if (provider !== "s3") throw providerDisabled(provider);
+  const store = env.S3_BUCKET_NAME?.trim();
+  if (!store)
+    throw new StorageConfigurationError(
+      "Private CV storage is not configured. Set S3_BUCKET_NAME in the server environment.",
+    );
+  return { provider, environment, store };
 }
 
 /** This is a freshness gate only. AWS STS verifies the token signature and IAM trust. */
@@ -138,12 +178,7 @@ export async function inspectStoredCv(
 export async function getStorage(): Promise<StorageGateway> {
   const provider =
     process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
-  if (provider !== "s3")
-    throw new StorageConfigurationError(
-      provider === "blob" || provider === "vercel-blob"
-        ? "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed."
-        : "The configured CV storage provider is not supported.",
-    );
+  if (provider !== "s3") throw providerDisabled(provider);
   if (!storageConfigured())
     throw new StorageConfigurationError(
       "Private CV storage is not configured. Set S3_BUCKET_NAME, AWS_REGION and AWS_ROLE_ARN in the server environment.",
@@ -190,13 +225,15 @@ export async function getStorage(): Promise<StorageGateway> {
   } = await import("@aws-sdk/client-s3");
   const { createPresignedPost } = await import("@aws-sdk/s3-presigned-post");
   const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
-  const bucket = process.env.S3_BUCKET_NAME!;
+  const binding = resolveStorageBinding();
+  const bucket = binding.store;
   const client = new S3Client({
     region: process.env.AWS_REGION,
     credentials,
     maxAttempts: 2,
   });
   return {
+    binding,
     async assertVersioning() {
       const result = await client.send(
         new GetBucketVersioningCommand({ Bucket: bucket }),

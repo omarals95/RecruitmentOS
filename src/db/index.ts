@@ -4,6 +4,7 @@ import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
 import { installTenantContextKey } from "../lib/tenant-context";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
+import { assertStorageSchema } from "./storage-schema";
 import {
   dataRoleBoundaryQuery,
   identityRoleBoundaryQuery,
@@ -146,6 +147,7 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       { ...data, canAssumeOther: dataMembership.rows[0]?.member },
       { ...identity, canAssumeOther: identityMembership.rows[0]?.member },
     );
+    await assertStorageSchema(dataPool);
     if (process.env.VERCEL) {
       const { attachDatabasePool } = await import("@vercel/functions");
       attachDatabasePool(dataPool);
@@ -180,6 +182,7 @@ async function createDb(): Promise<AppDb> {
     await applyMigrations(client);
     // The PGlite process is the owner here; other databases get the key from db:migrate.
     await installTenantContextKey(client);
+    await assertStorageSchema(client);
     return drizzle(client, { schema }) as unknown as AppDb;
   }
   if (!process.env.DATABASE_URL)
@@ -201,8 +204,8 @@ async function createDb(): Promise<AppDb> {
     allowExitOnIdle: true,
     ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
   });
-  if (process.env.NODE_ENV === "production") {
-    try {
+  try {
+    if (process.env.NODE_ENV === "production") {
       const result = await pool.query<{ unsafe: boolean }>(
         runtimeRoleSafetyQuery,
       );
@@ -212,10 +215,11 @@ async function createDb(): Promise<AppDb> {
           "unsafe_database_role",
           "Configure a restricted database runtime role without ownership or elevated privileges.",
         );
-    } catch (error) {
-      await pool.end();
-      throw error;
     }
+    await assertStorageSchema(pool);
+  } catch (error) {
+    await pool.end();
+    throw error;
   }
   if (process.env.VERCEL) {
     const { attachDatabasePool } = await import("@vercel/functions");
@@ -223,17 +227,25 @@ async function createDb(): Promise<AppDb> {
   }
   return drizzle(pool, { schema });
 }
-export async function applyMigrations(client: {
-  exec: (query: string) => Promise<unknown>;
-}) {
+/** `through` (tests only) stops after the named file; production callers apply every file. */
+export async function applyMigrations(
+  client: {
+    exec: (query: string) => Promise<unknown>;
+  },
+  through?: string,
+) {
   const { readFile, readdir } = await import("node:fs/promises");
   const { join } = await import("node:path");
   await client.exec(
     "CREATE TABLE IF NOT EXISTS public.recruitment_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
   );
-  const files = (await readdir(join(process.cwd(), "drizzle")))
+  const all = (await readdir(join(process.cwd(), "drizzle")))
     .filter((f) => /^\d{4}.*\.sql$/.test(f))
     .sort();
+  if (through !== undefined && !all.includes(through))
+    throw new Error("Unknown migration file.");
+  const files =
+    through === undefined ? all : all.slice(0, all.indexOf(through) + 1);
   // The adapter only needs exec; a transactional DO block avoids applying an already tracked migration.
   for (const file of files) {
     const body = await readFile(join(process.cwd(), "drizzle", file), "utf8");

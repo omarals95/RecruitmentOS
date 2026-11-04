@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, count, desc, eq, lte, sql } from "drizzle-orm";
-import { z } from "zod";
 import {
-  activity,
-  idempotency,
-  records,
-  storageUsage,
-  uploads,
-} from "@/db/schema";
+  and,
+  count,
+  desc,
+  DrizzleQueryError,
+  eq,
+  isNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
+import { z } from "zod";
+import { activity, idempotency, records, uploads } from "@/db/schema";
 import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
 import { withTeam } from "@/lib/db-team";
@@ -21,8 +25,10 @@ import {
 import {
   getStorage,
   inspectStoredCv,
+  resolveStorageBinding,
   storageConfigured,
   StorageConfigurationError,
+  type StorageBinding,
   type StorageGateway,
 } from "@/lib/storage";
 
@@ -101,6 +107,45 @@ async function storageClient(): Promise<StorageGateway> {
     return storageFailure(error);
   }
 }
+/** The injected gateway's binding, or the configured one; resolving it contacts no provider. */
+function storageBinding(storage?: StorageGateway): StorageBinding {
+  try {
+    return storage ? storage.binding : resolveStorageBinding();
+  } catch (error) {
+    return storageFailure(error);
+  }
+}
+/** Legacy unbound references never match, so they are refused until re-bound. */
+function assertBinding(row: UploadRow, binding: StorageBinding) {
+  if (
+    row.storageProvider !== binding.provider ||
+    row.storageEnvironment !== binding.environment ||
+    row.storageStore !== binding.store
+  )
+    throw new ApiError(
+      409,
+      "CV_STORAGE_BINDING_MISMATCH",
+      "This CV belongs to a different storage configuration. Ask the administrator to review it.",
+    );
+}
+/** Maps ledger refusals by SQLSTATE; database message text never reaches the client. */
+function ledgerFailure(error: unknown): never {
+  const cause = error instanceof DrizzleQueryError ? error.cause : error;
+  const code = (cause as { code?: unknown } | undefined)?.code;
+  if (code === "RQ001")
+    throw new ApiError(
+      409,
+      "STORAGE_QUOTA_EXCEEDED",
+      "The CV storage allowance has been reached, including pending uploads.",
+    );
+  if (code === "RQ002")
+    throw new ApiError(
+      503,
+      "STORAGE_SETUP_REQUIRED",
+      "The configured CV storage does not match its recorded environment or budget.",
+    );
+  throw error;
+}
 async function assertCandidate(
   tx: TeamTx,
   p: Principal,
@@ -149,29 +194,31 @@ async function audit(
   });
 }
 
-/** Always lock usage before upload rows, so completion and expiry have a consistent lock order. */
-async function lockUsage(tx: TeamTx, teamId: string) {
-  await tx.insert(storageUsage).values({ teamId }).onConflictDoNothing();
-  const [usage] = await tx
-    .select()
-    .from(storageUsage)
-    .where(eq(storageUsage.teamId, teamId))
-    .for("update");
-  if (!usage)
-    throw new ApiError(
-      503,
-      "STORAGE_QUOTA_UNAVAILABLE",
-      "Storage quota information is unavailable.",
+/**
+ * Locks the store ledger row, then the context team's row, before any upload row, so reservation,
+ * completion and expiry share one lock order: store, then team, then ticket.
+ */
+async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
+  try {
+    await tx.execute(
+      sql`select tenant_context.lock_storage_allocation(${binding.provider}, ${binding.environment}, ${binding.store})`,
     );
-  return usage;
+  } catch (error) {
+    return ledgerFailure(error);
+  }
 }
 
-/** Bounded cleanup releases database reservations; S3 version cleanup is a separate DB-aware operation. */
+/**
+ * Bounded cleanup of expired tickets for the current binding and legacy unbound rows. The database
+ * settles each charge: S3 and legacy rows release it, Blob rows keep it as retained.
+ */
 export async function expireCvReservations(
   tx: TeamTx,
   teamId: string,
+  binding: StorageBinding,
   now: Date,
 ) {
+  await lockAllocation(tx, binding);
   const expired = await tx
     .select()
     .from(uploads)
@@ -180,13 +227,19 @@ export async function expireCvReservations(
         eq(uploads.teamId, teamId),
         eq(uploads.status, "pending"),
         lte(uploads.expiresAt, now),
+        or(
+          and(
+            eq(uploads.storageProvider, binding.provider),
+            eq(uploads.storageEnvironment, binding.environment),
+            eq(uploads.storageStore, binding.store),
+          ),
+          isNull(uploads.storageStore),
+        ),
       ),
     )
     .limit(100)
     .for("update");
-  if (!expired.length) return;
-  let bytes = 0;
-  for (const row of expired) {
+  for (const row of expired)
     await tx
       .update(uploads)
       .set({ status: "rejected" })
@@ -197,16 +250,6 @@ export async function expireCvReservations(
           eq(uploads.status, "pending"),
         ),
       );
-    bytes += row.sizeBytes;
-  }
-  await tx
-    .update(storageUsage)
-    .set({
-      reservedBytes: sql`${storageUsage.reservedBytes} - ${bytes}`,
-      reservedFiles: sql`${storageUsage.reservedFiles} - ${expired.length}`,
-      updatedAt: now,
-    })
-    .where(eq(storageUsage.teamId, teamId));
 }
 
 const cvPaginationSchema = z
@@ -314,6 +357,7 @@ export async function beginCvUpload(
   validId(candidateId);
   // Resolve configuration errors before reserving quota, without contacting a provider.
   if (!storage && !storageConfigured()) await storageClient();
+  const binding = storageBinding(storage);
   if (
     (input.legacySourceId || input.sourcePath) &&
     !p.scopes.includes("imports:write")
@@ -348,12 +392,11 @@ export async function beginCvUpload(
   // Expiry commits independently, even if the following reservation is refused or a retry conflicts.
   await withTeam(p, async (tx) => {
     await assertCandidate(tx, p, candidateId);
-    await lockUsage(tx, p.teamId);
-    await expireCvReservations(tx, p.teamId, now);
+    await expireCvReservations(tx, p.teamId, binding, now);
   });
   const row = await withTeam(p, async (tx) => {
     await assertCandidate(tx, p, candidateId);
-    await lockUsage(tx, p.teamId);
+    await lockAllocation(tx, binding);
     const [previous] = await tx
       .select()
       .from(idempotency)
@@ -409,6 +452,7 @@ export async function beginCvUpload(
           "CV_SOURCE_CONFLICT",
           "This legacy source or upload identifier already refers to a different CV.",
         );
+      assertBinding(existing, binding);
       if (existing.status === "ready" || existing.status === "pending")
         return existing;
       throw new ApiError(
@@ -417,21 +461,8 @@ export async function beginCvUpload(
         "This CV upload was rejected or expired. Select the file again to create a new upload; imported rejected sources require review.",
       );
     }
-    const [usage] = await tx
-      .select()
-      .from(storageUsage)
-      .where(eq(storageUsage.teamId, p.teamId));
-    if (
-      usage.usedBytes + usage.reservedBytes + metadata.sizeBytes >
-        usage.maxBytes ||
-      usage.usedFiles + usage.reservedFiles + 1 > usage.maxFiles
-    )
-      throw new ApiError(
-        409,
-        "STORAGE_QUOTA_EXCEEDED",
-        "This team has reached its CV storage allowance, including pending uploads.",
-      );
     const id = randomUUID();
+    // The insert trigger charges the store and team ledgers or refuses over either budget.
     const [created] = await tx
       .insert(uploads)
       .values({
@@ -441,21 +472,17 @@ export async function beginCvUpload(
         ...metadata,
         status: "pending",
         objectKey: `teams/${p.teamId}/cvs/${candidateId}/${id}/${randomUUID()}.${cvExtension(metadata.originalName)}`,
+        storageProvider: binding.provider,
+        storageEnvironment: binding.environment,
+        storageStore: binding.store,
         createdBy: p.userId,
         legacySourceId: input.legacySourceId ?? null,
         sourcePath: input.sourcePath ?? null,
         createdAt: now,
         expiresAt: new Date(now.getTime() + reservationMs),
       })
-      .returning();
-    await tx
-      .update(storageUsage)
-      .set({
-        reservedBytes: sql`${storageUsage.reservedBytes} + ${metadata.sizeBytes}`,
-        reservedFiles: sql`${storageUsage.reservedFiles} + 1`,
-        updatedAt: now,
-      })
-      .where(eq(storageUsage.teamId, p.teamId));
+      .returning()
+      .catch(ledgerFailure);
     await tx.insert(idempotency).values({
       teamId: p.teamId,
       actorKey: actorKey(p),
@@ -521,6 +548,8 @@ export async function completeCvUpload(
     await assertCandidate(tx, p, row.candidateId);
     return row;
   });
+  const binding = storageBinding(storage);
+  assertBinding(initial, binding);
   if (initial.status === "ready") return cvDto(initial);
   if (initial.status === "rejected")
     throw new ApiError(
@@ -541,7 +570,7 @@ export async function completeCvUpload(
     }
   }
   const result = await withTeam(p, async (tx) => {
-    await lockUsage(tx, p.teamId);
+    await lockAllocation(tx, binding);
     const [row] = await tx
       .select()
       .from(uploads)
@@ -560,25 +589,16 @@ export async function completeCvUpload(
       reject = Boolean(
         rejection || !version || row.expiresAt.getTime() <= now.getTime(),
       );
+    // The status trigger settles the insert-time charge exactly once.
     const [updated] = await tx
       .update(uploads)
       .set({
         status: reject ? "rejected" : "ready",
-        objectVersion: reject ? null : version,
+        s3VersionId: reject ? null : version,
         completedAt: reject ? null : now,
       })
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .returning();
-    await tx
-      .update(storageUsage)
-      .set({
-        reservedBytes: sql`${storageUsage.reservedBytes} - ${row.sizeBytes}`,
-        reservedFiles: sql`${storageUsage.reservedFiles} - 1`,
-        usedBytes: sql`${storageUsage.usedBytes} + ${reject ? 0 : row.sizeBytes}`,
-        usedFiles: sql`${storageUsage.usedFiles} + ${reject ? 0 : 1}`,
-        updatedAt: now,
-      })
-      .where(eq(storageUsage.teamId, p.teamId));
     await audit(
       tx,
       p,
@@ -619,7 +639,8 @@ export async function getCvDownload(
     await assertCandidate(tx, p, cv.candidateId, true);
     return cv;
   });
-  if (!row.objectVersion)
+  assertBinding(row, storageBinding(storage));
+  if (!row.s3VersionId)
     throw new ApiError(
       409,
       "CV_VERSION_MISSING",
@@ -629,7 +650,7 @@ export async function getCvDownload(
     return {
       url: await (storage ?? (await storageClient())).signDownload(
         row.objectKey,
-        row.objectVersion,
+        row.s3VersionId,
         row.originalName,
       ),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),

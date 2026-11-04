@@ -10,6 +10,7 @@ import {
   primaryKey,
   unique,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { organization, user } from "./auth-schema";
 export const appSchema = pgSchema("app");
@@ -110,7 +111,7 @@ export const uploads = appSchema.table(
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     status: text("status").notNull().default("pending"),
     objectKey: text("object_key").notNull(),
-    objectVersion: text("object_version"),
+    s3VersionId: text("s3_version_id"),
     legacySourceId: text("legacy_source_id"),
     sourcePath: text("source_path"),
     createdBy: text("created_by")
@@ -119,8 +120,19 @@ export const uploads = appSchema.table(
     createdAt: time("created_at").notNull().defaultNow(),
     completedAt: time("completed_at"),
     expiresAt: time("expires_at").notNull(),
+    storageProvider: text("storage_provider").notNull(),
+    storageEnvironment: text("storage_environment"),
+    storageStore: text("storage_store"),
+    blobSha256: text("blob_sha256"),
+    blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
   },
-  (t) => [index("uploads_team_candidate_idx").on(t.teamId, t.candidateId)],
+  (t) => [
+    index("uploads_team_candidate_idx").on(t.teamId, t.candidateId),
+    uniqueIndex("uploads_provider_object_key_unique").on(
+      t.storageProvider,
+      t.objectKey,
+    ),
+  ],
 );
 export const storageUsage = appSchema.table("storage_usage", {
   teamId: text("team_id")
@@ -132,11 +144,13 @@ export const storageUsage = appSchema.table("storage_usage", {
     .default(0),
   usedFiles: integer("used_files").notNull().default(0),
   reservedFiles: integer("reserved_files").notNull().default(0),
-  maxBytes: bigint("max_bytes", { mode: "number" })
-    .notNull()
-    .default(10737418240),
-  maxFiles: integer("max_files").notNull().default(10000),
+  maxBytes: bigint("max_bytes", { mode: "number" }),
+  maxFiles: integer("max_files"),
   updatedAt: time("updated_at").notNull().defaultNow(),
+  retainedBytes: bigint("retained_bytes", { mode: "number" })
+    .notNull()
+    .default(0),
+  retainedFiles: integer("retained_files").notNull().default(0),
 });
 export const idempotency = appSchema.table(
   "idempotency",
