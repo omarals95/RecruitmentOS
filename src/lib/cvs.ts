@@ -30,6 +30,7 @@ import {
   resolveStorageBinding,
   storageConfigured,
   StorageConfigurationError,
+  STORAGE_SETUP_REQUIRED_MESSAGE,
   type StorageBinding,
   type StorageGateway,
 } from "@/lib/storage";
@@ -98,10 +99,15 @@ function validId(id: string) {
 function actorKey(p: Principal) {
   return `${p.authType}:${p.tokenId ?? p.userId}`;
 }
+/** Setup refusals all show one plain message; their own text can name a provider or setting. */
 function storageFailure(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof StorageConfigurationError)
-    throw new ApiError(503, "STORAGE_SETUP_REQUIRED", error.message);
+    throw new ApiError(
+      503,
+      "STORAGE_SETUP_REQUIRED",
+      STORAGE_SETUP_REQUIRED_MESSAGE,
+    );
   if (error instanceof CvValidationError)
     throw new ApiError(400, "INVALID_CV", error.message);
   throw new ApiError(
@@ -243,6 +249,39 @@ async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
     );
   } catch (error) {
     return ledgerFailure(error);
+  }
+}
+
+/**
+ * Caps Blob provider reads across server instances (2 per team, 8 per store, fixed in the database
+ * helper). The lease commits before the read and fails fast over a cap instead of queueing. Release
+ * is best effort: a lease left behind by a crash or a failed release expires on its own after 30 s.
+ */
+async function withBlobReadLease<T>(
+  p: Principal,
+  store: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  const lease = await withTeam(p, async (tx) => {
+    try {
+      const { rows } = await tx.execute<{ lease: string | null }>(
+        sql`select tenant_context.acquire_blob_read(${store}) as lease`,
+      );
+      return rows[0]?.lease ?? null;
+    } catch (error) {
+      return ledgerFailure(error);
+    }
+  });
+  if (!lease)
+    return storageFailure(
+      new Error("Too many private Blob reads are in progress."),
+    );
+  try {
+    return await read();
+  } finally {
+    await withTeam(p, (tx) =>
+      tx.execute(sql`select tenant_context.release_blob_read(${lease})`),
+    ).catch(() => {});
   }
 }
 
@@ -642,10 +681,10 @@ export async function completeCvUpload(
     try {
       const client = storage ?? (await storageClient());
       if (initial.storageProvider === "blob") {
+        const gateway = blobGateway(client);
         // A missing object or transport failure stays pending: a Blob rejection burns the path.
-        const inspected = await blobGateway(client).inspectUpload(
-          initial,
-          options.readTimeoutMs,
+        const inspected = await withBlobReadLease(p, binding.store, () =>
+          gateway.inspectUpload(initial, options.readTimeoutMs),
         );
         if (!inspected)
           throw new Error("The uploaded CV is not in private storage yet.");
@@ -761,11 +800,13 @@ export async function getCvDownload(
 async function blobReference(p: Principal, id: string, storage?: CvStorage) {
   const row = await readyCv(p, id);
   if (row.storageProvider !== "blob") throw protocolMismatch();
-  assertBinding(row, storageBinding(storage));
+  const binding = storageBinding(storage);
+  assertBinding(row, binding);
   if (!row.blobSha256 || row.blobSizeBytes !== row.sizeBytes)
     throw integrityFailure();
   return {
     row,
+    store: binding.store,
     manifest: {
       protocol: "blob-chunks-v1" as const,
       uploadId: row.id,
@@ -796,7 +837,7 @@ export async function getCvChunk(
   storage?: CvStorage,
   options: { readTimeoutMs?: number } = {},
 ) {
-  const { row, manifest } = await blobReference(p, id, storage);
+  const { row, store, manifest } = await blobReference(p, id, storage);
   if (!Number.isSafeInteger(index) || index < 0 || index >= manifest.chunkCount)
     throw new ApiError(
       400,
@@ -806,19 +847,20 @@ export async function getCvChunk(
   const offset = index * manifest.chunkSize;
   let bytes: Buffer | null;
   try {
-    bytes = await blobGateway(
-      storage ?? (await storageClient()),
-    ).readVerifiedSlice(
-      {
-        teamId: row.teamId,
-        objectKey: row.objectKey,
-        mimeType: row.mimeType,
-        sizeBytes: manifest.sizeBytes,
-        sha256: manifest.sha256,
-      },
-      offset,
-      Math.min(manifest.chunkSize, manifest.sizeBytes - offset),
-      options.readTimeoutMs,
+    const gateway = blobGateway(storage ?? (await storageClient()));
+    bytes = await withBlobReadLease(p, store, () =>
+      gateway.readVerifiedSlice(
+        {
+          teamId: row.teamId,
+          objectKey: row.objectKey,
+          mimeType: row.mimeType,
+          sizeBytes: manifest.sizeBytes,
+          sha256: manifest.sha256,
+        },
+        offset,
+        Math.min(manifest.chunkSize, manifest.sizeBytes - offset),
+        options.readTimeoutMs,
+      ),
     );
   } catch (error) {
     if (error instanceof CvValidationError) throw integrityFailure();

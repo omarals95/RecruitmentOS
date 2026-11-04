@@ -800,10 +800,74 @@ describe("store-wide CV allocation ledger under the split data role", () => {
     ).toEqual([{ environment: "preview" }]);
   });
 
-  it("allowlists only the reviewed lock helper and keeps every new definer function owner-only", async () => {
+  it("keeps Blob read leases owner-only and refuses the lease helper without a CV scope or a recorded Blob store", async () => {
+    const t = await team("leases");
+    const store = "store_fictionalleases";
+    await withTeam(t.p, (tx) =>
+      lock(tx, { provider: "blob", environment: "development", store }),
+    );
+    const direct: Array<[string, (tx: TeamTx) => Promise<unknown>]> = [
+      [
+        "select",
+        (tx) => tx.execute(sql`SELECT * FROM storage_ledger.blob_read_leases`),
+      ],
+      [
+        "insert",
+        (tx) =>
+          tx.execute(
+            sql`INSERT INTO storage_ledger.blob_read_leases(store, team_id, expires_at) VALUES (${store}, ${t.p.teamId}, now() + interval '30 seconds')`,
+          ),
+      ],
+      [
+        "delete",
+        (tx) => tx.execute(sql`DELETE FROM storage_ledger.blob_read_leases`),
+      ],
+    ];
+    for (const [label, attempt] of direct)
+      await expect(withTeam(t.p, attempt), label).rejects.toMatchObject({
+        cause: { code: "42501" },
+      });
+    const acquire = (tx: TeamTx, name: string) =>
+      tx.execute<{ lease: string | null }>(
+        sql`SELECT tenant_context.acquire_blob_read(${name}) AS lease`,
+      );
+    await harness.dataDb();
+    await expect(
+      harness.client.query(
+        `SELECT tenant_context.acquire_blob_read('${store}')`,
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTeam({ ...t.p, scopes: ["candidates:read"] }, (tx) =>
+        acquire(tx, store),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    for (const name of ["store_fictionalunrecorded", "fictional-bucket"])
+      await expect(
+        withTeam(t.p, (tx) => acquire(tx, name)),
+        name,
+      ).rejects.toMatchObject({ cause: { code: "RQ002" } });
+    // The same team and store take a lease once the context and store row are in place.
+    const { rows } = await withTeam(t.p, (tx) => acquire(tx, store));
+    expect(rows[0].lease).toEqual(expect.any(String));
+    await withTeam(t.p, (tx) =>
+      tx.execute(
+        sql`SELECT tenant_context.release_blob_read(${rows[0].lease})`,
+      ),
+    );
+    expect(
+      await inspect(
+        "SELECT count(*)::int AS count FROM storage_ledger.blob_read_leases",
+      ),
+    ).toEqual([{ count: 0 }]);
+  });
+
+  it("allowlists only the reviewed lock and read-lease helpers and keeps every new definer function owner-only", async () => {
     expect(dataRoleHelpers).toContain(
       "tenant_context.lock_storage_allocation(text,text,text)",
     );
+    expect(dataRoleHelpers).toContain("tenant_context.acquire_blob_read(text)");
+    expect(dataRoleHelpers).toContain("tenant_context.release_blob_read(uuid)");
     const client = await harness.dataDb().then(() => harness.client);
     expect(
       (await client.query<{ unsafe: boolean }>(dataRoleBoundaryQuery)).rows[0]
@@ -815,13 +879,15 @@ describe("store-wide CV allocation ledger under the split data role", () => {
            EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0) AS public
          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          WHERE p.prosecdef AND n.nspname IN ('storage_ledger','tenant_context')
-           AND p.proname IN ('charge_upload','settle_upload','lock_storage_allocation') ORDER BY 1`,
+           AND p.proname IN ('charge_upload','settle_upload','lock_storage_allocation','acquire_blob_read','release_blob_read') ORDER BY 1`,
       ),
     ).toEqual(
       [
         "storage_ledger.charge_upload",
         "storage_ledger.settle_upload",
+        "tenant_context.acquire_blob_read",
         "tenant_context.lock_storage_allocation",
+        "tenant_context.release_blob_read",
       ].map((name) => ({
         name,
         owner: splitRoles.owner,

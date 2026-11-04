@@ -37,14 +37,35 @@ A conservative alternative to investigate is to **never release or reuse the res
   - OpenAPI documents both upload variants, `downloadProtocol`, and `GET /api/v1/cvs/{id}/manifest` and `/chunks?index=N`.
   - Every chunk request reauthorizes through `runApi` and `withTeam`, reads the whole object under one 15 s deadline that also bounds opening it, and releases at most 4 MiB only after the full digest matches. Tests cover replacement and deletion between chunks and token revocation mid-download.
   - Chunk reads stream-hash the whole object and keep only the requested slice (`readVerifiedBlobSlice` in `src/lib/blob-integrity.ts`), so a chunk request holds at most 4 MiB instead of the full 10 MiB object; completion still reads the full object once for format validation (`tests/storage-blob-integrity.test.ts`).
-  - Provider reads are capped per server instance at 2 per team (`MAX_BLOB_READS_PER_TEAM`) and 8 per store (`MAX_BLOB_READS_PER_STORE`) in `src/lib/blob-storage.ts`. A read over either cap fails at once with 503 `STORAGE_UNAVAILABLE` and makes no provider call, and a refused completion stays pending (`tests/cv-blob-transfer.test.ts`, "bounded provider reads"). The caps are placeholders until hosted measurement and do not coordinate across instances.
+  - Provider reads are limited **across server instances** by database leases: 2 per team and 8 per store, through `tenant_context.acquire_blob_read` and `tenant_context.release_blob_read` (migration `0009_blob_read_leases.sql`), called from `src/lib/cvs.ts` around completion and every chunk read. A lease commits before the provider call, is released afterwards whatever the outcome, and expires on its own after 30 s, so a crashed instance frees its slot within one request lifetime. A read over either cap fails at once with 503 `STORAGE_UNAVAILABLE` and makes no provider call, and a refused completion stays pending (`tests/cv-blob-transfer.test.ts`, "bounded provider reads", including leases held by another instance; `tests/cv-allocation-ledger.test.ts` for the role boundary). The caps are fixed in the owner-run helper and are placeholders until hosted measurement.
   - Every stream the provider opens is read to the end or closed, including one that opens after the deadline and one refused for a size or MIME mismatch before it is read.
+  - `createVercelBlobClient` refuses to start, before any SDK call, when `VERCEL_BLOB_API_URL` or `NEXT_PUBLIC_VERCEL_BLOB_API_URL` is set, or when `VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API` or `NEXT_PUBLIC_VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API` is present at all, even empty, because the SDK then adds an `x-proxy-through-alternative-api` header to every request (`tests/blob-client-contract.test.ts`).
+  - Every storage setup refusal reaches users as the same plain message, "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again." (`STORAGE_SETUP_REQUIRED_MESSAGE`, 503 `STORAGE_SETUP_REQUIRED`). The specific reason, which can name a provider or setting, stays in the code and is not shown (`tests/cvs.test.ts`).
   - Live provider evidence is outstanding (see below).
 - Unit and integration tests for authorization, team and environment isolation, exact upload path and constraints, retries, signed-ticket replay, concurrent completion, reservation accounting and all rejection paths.
 - Replace, delete, recreate and mutate objects at every boundary between head, read, validation, commit and download. Verify no changed or partial bytes are returned, including across separate chunk requests.
 - Test truncated, oversized and malformed files, invalid callback signatures, chunk bounds, concurrent expiry, interruption, cleanup failures, delayed uploads and orphan reconciliation using only synthetic documents.
-- Verify the actual private Blob signed-upload constraints, OIDC and static-token behavior, consistency, cache bypass and Function payload limits in an isolated protected deployment. A local mock cannot prove provider behavior.
+- Verify the actual private Blob signed-upload constraints, OIDC and static-token behavior (see [Credentials](#credentials-vercel-oidc-versus-read-write-token) for the chosen credential and what is unverified), consistency, cache bypass and Function payload limits in an isolated protected deployment. A local mock cannot prove provider behavior.
 - Review browser and API-token download flows, test files up to 10 MiB, and independently review the implementation. Keep the existing fail-closed provider guard until every requirement and remaining quota race is resolved.
+
+## Credentials: Vercel OIDC versus read-write token
+
+This section records a decision; no OIDC client code exists yet. `createVercelBlobClient` still takes an explicit read-write token.
+
+- **Read-write token.** It is long-lived and store-wide: it can read, write, delete and list every object in its store. It sits in an environment variable and has no expiry unless someone rotates it manually. Its store is fixed by the token itself, so `createVercelBlobClient` can check that the token names `storeId`.
+- **OIDC.**
+  - `@vercel/blob` 2.8.2 supports it through explicit `oidcToken` and `storeId` options (`resolveBlobAuth` in `node_modules/@vercel/blob/dist/chunk-MITTIJDE.cjs`).
+  - The token is request-scoped and short-lived, and no Blob secret is stored. This matches how `getStorage` already handles AWS: it reads the request-context `x-vercel-oidc-token`, checks it with `assertHostedOidcToken`, and never calls the async refresh helper.
+  - With OIDC, the store is chosen by the `storeId` option, not by the token. Separating Preview and Production stores therefore depends on the provider's project and environment scoping.
+  - If the client passes neither `token` nor `oidcToken`, the SDK falls back to its own `getVercelOidcToken()`, which has a refresh path, and then to `BLOB_READ_WRITE_TOKEN`. The client must therefore always pass one explicit credential.
+- **Choice.**
+  - The hosted credential for enablement is **Vercel OIDC**: the request-context token, an explicit `storeId` equal to `binding.store`, and no `BLOB_READ_WRITE_TOKEN` in any hosted environment.
+  - The current explicit read-write token is used only by tests and by the owner's `scripts/blob-live-verify.ts` against the Preview store, because that script runs outside a Vercel request and has no request OIDC token.
+  - The OIDC client mode is built at enablement, not now.
+- **Unverified before enablement.** These need a protected hosted Preview deployment:
+  - signed-token issuance (`issueSignedToken`) and private uncached `get` both accept an OIDC token;
+  - a Preview deployment's token is refused by the Production store, and by a store not connected to the project;
+  - token expiry within a 30 s request is handled.
 
 ## Live provider verification
 

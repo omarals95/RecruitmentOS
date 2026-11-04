@@ -9,11 +9,6 @@ import type { StorageBinding } from "./storage.ts";
 
 const BLOB_API_ORIGIN = "https://vercel.com";
 const MAX_BLOB_READ_MS = 15_000;
-/** Per server instance; placeholders until hosted measurement. */
-export const MAX_BLOB_READS_PER_TEAM = 2;
-export const MAX_BLOB_READS_PER_STORE = 8;
-const activeTeamReads = new Map<string, number>();
-const activeStoreReads = new Map<string, number>();
 
 export type BlobObject = {
   sizeBytes: number;
@@ -47,6 +42,7 @@ type BlobReference = {
 /**
  * Missing objects resolve null. Content failures throw CvValidationError; a deadline or
  * provider failure throws a plain Error, so callers can keep the reference retryable.
+ * The gateway does not limit reads; callers take a cross-instance read lease first.
  */
 export interface BlobGateway {
   readonly binding: StorageBinding;
@@ -63,24 +59,6 @@ export interface BlobGateway {
     length: number,
     timeoutMs?: number,
   ): Promise<Buffer | null>;
-}
-
-/** Fails fast instead of queueing; the caller keeps its reference retryable. */
-function reserveRead(store: string, teamId: string): () => void {
-  const team = activeTeamReads.get(teamId) ?? 0;
-  const total = activeStoreReads.get(store) ?? 0;
-  if (team >= MAX_BLOB_READS_PER_TEAM || total >= MAX_BLOB_READS_PER_STORE)
-    throw new Error("Too many private Blob reads are in progress.");
-  activeTeamReads.set(teamId, team + 1);
-  activeStoreReads.set(store, total + 1);
-  return () => {
-    const teamLeft = (activeTeamReads.get(teamId) ?? 1) - 1;
-    const storeLeft = (activeStoreReads.get(store) ?? 1) - 1;
-    if (teamLeft > 0) activeTeamReads.set(teamId, teamLeft);
-    else activeTeamReads.delete(teamId);
-    if (storeLeft > 0) activeStoreReads.set(store, storeLeft);
-    else activeStoreReads.delete(store);
-  };
 }
 
 /** Fire-and-forget: a provider that ignores cancellation is never awaited. */
@@ -193,58 +171,43 @@ export function createBlobGateway(
         throw new Error("Private Blob upload ticket could not be issued.");
       }
     },
-    async inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
-      const release = reserveRead(binding.store, reservation.teamId);
-      try {
-        return await withObject(
-          client,
-          reservation.objectKey,
-          timeoutMs,
-          (object, controller) =>
-            inspectBlobUpload(
-              reservation,
-              { mimeType: object.mimeType, sizeBytes: object.sizeBytes },
-              object.stream,
-              { controller, timeoutMs },
-            ),
-        );
-      } finally {
-        release();
-      }
+    inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
+      return withObject(
+        client,
+        reservation.objectKey,
+        timeoutMs,
+        (object, controller) =>
+          inspectBlobUpload(
+            reservation,
+            { mimeType: object.mimeType, sizeBytes: object.sizeBytes },
+            object.stream,
+            { controller, timeoutMs },
+          ),
+      );
     },
-    async readVerifiedSlice(
-      reference,
-      offset,
-      length,
-      timeoutMs = MAX_BLOB_READ_MS,
-    ) {
-      const release = reserveRead(binding.store, reference.teamId);
-      try {
-        return await withObject(
-          client,
-          reference.objectKey,
-          timeoutMs,
-          async (object, controller) => {
-            if (
-              object.sizeBytes !== reference.sizeBytes ||
-              object.mimeType !== reference.mimeType
-            )
-              throw new CvValidationError(
-                "Stored document differs from its validated reference.",
-              );
-            return readVerifiedBlobSlice(
-              object.stream,
-              reference.sizeBytes,
-              reference.sha256,
-              offset,
-              length,
-              { controller, timeoutMs },
+    readVerifiedSlice(reference, offset, length, timeoutMs = MAX_BLOB_READ_MS) {
+      return withObject(
+        client,
+        reference.objectKey,
+        timeoutMs,
+        async (object, controller) => {
+          if (
+            object.sizeBytes !== reference.sizeBytes ||
+            object.mimeType !== reference.mimeType
+          )
+            throw new CvValidationError(
+              "Stored document differs from its validated reference.",
             );
-          },
-        );
-      } finally {
-        release();
-      }
+          return readVerifiedBlobSlice(
+            object.stream,
+            reference.sizeBytes,
+            reference.sha256,
+            offset,
+            length,
+            { controller, timeoutMs },
+          );
+        },
+      );
     },
   };
 }

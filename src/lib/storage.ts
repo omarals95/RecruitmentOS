@@ -7,6 +7,9 @@ import {
 } from "./storage-format.ts";
 
 export class StorageConfigurationError extends Error {}
+/** The only text users see for any storage setup refusal; it names no provider or setting. */
+export const STORAGE_SETUP_REQUIRED_MESSAGE =
+  "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.";
 /** The provider, environment and store every CV reference is bound to. */
 export type StorageBinding = {
   provider: "s3" | "blob";
@@ -75,9 +78,7 @@ export function resolveStorageBinding(
   if (provider !== "s3") throw providerDisabled(provider);
   const store = env.S3_BUCKET_NAME?.trim();
   if (!store)
-    throw new StorageConfigurationError(
-      "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
-    );
+    throw new StorageConfigurationError(STORAGE_SETUP_REQUIRED_MESSAGE);
   return { provider, environment, store };
 }
 
@@ -180,9 +181,7 @@ export async function getStorage(): Promise<StorageGateway> {
     process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
   if (provider !== "s3") throw providerDisabled(provider);
   if (!storageConfigured())
-    throw new StorageConfigurationError(
-      "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
-    );
+    throw new StorageConfigurationError(STORAGE_SETUP_REQUIRED_MESSAGE);
   let credentials;
   if (process.env.AWS_ROLE_ARN) {
     if (process.env.VERCEL !== "1")

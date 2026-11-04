@@ -15,7 +15,12 @@ import {
 } from "../src/lib/cvs";
 import type { Principal } from "../src/lib/principal";
 import { installTenantContextKey } from "../src/lib/tenant-context";
-import type { StorageBinding, StorageGateway } from "../src/lib/storage";
+import {
+  StorageConfigurationError,
+  STORAGE_SETUP_REQUIRED_MESSAGE,
+  type StorageBinding,
+  type StorageGateway,
+} from "../src/lib/storage";
 
 const candidate = randomUUID(),
   otherCandidate = randomUUID(),
@@ -90,7 +95,7 @@ it("rejects Blob upload before creating a reservation or contacting storage", as
       {
         status: 503,
         code: "STORAGE_SETUP_REQUIRED",
-        message: expect.stringMatching(/Blob CV storage is disabled/i),
+        message: STORAGE_SETUP_REQUIRED_MESSAGE,
       },
     );
   } finally {
@@ -498,6 +503,27 @@ describe("private CV lifecycle against PostgreSQL migrations and fake S3", () =>
       "head",
       "readRange",
     ]);
+  });
+  it("shows only the plain setup message when the storage refusal names a provider or setting", async () => {
+    const { gateway } = fakeStorage();
+    gateway.assertVersioning = async () => {
+      throw new StorageConfigurationError(
+        "Enable versioning on fictional S3_BUCKET_NAME",
+      );
+    };
+    const failure = await beginCvUpload(p, candidate, metadata(), gateway).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      status: 503,
+      code: "STORAGE_SETUP_REQUIRED",
+      message:
+        "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
+    });
+    expect((failure as Error).message).not.toMatch(
+      /S3|AWS|Blob|Vercel|_NAME|versioning/i,
+    );
   });
   it("refuses a switch to Blob with STORAGE_SETUP_REQUIRED before reserving or calling storage", async () => {
     const a = fakeStorage();
