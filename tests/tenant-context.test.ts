@@ -216,13 +216,11 @@ describe("signed tenant context under separate nonowner data and identity roles"
           response: {},
           expiresAt: new Date(Date.now() + 3_600_000),
         });
-        await tx
-          .insert(notificationReads)
-          .values({
-            teamId: p.teamId,
-            userId: p.userId,
-            key: `fictional-${label}`,
-          });
+        await tx.insert(notificationReads).values({
+          teamId: p.teamId,
+          userId: p.userId,
+          key: `fictional-${label}`,
+        });
         await tx.insert(activity).values([
           {
             teamId: p.teamId,
@@ -443,20 +441,20 @@ describe("signed tenant context under separate nonowner data and identity roles"
     });
     const later = new Date(Date.now() + 3_600_000);
     const inserts = [
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(records).values({
           teamId: ownerB.teamId,
           kind: "candidate",
           data: { name: "Forged" },
           createdBy: ownerA.userId,
         }),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(candidateStates).values({
           teamId: ownerB.teamId,
           userId: ownerA.userId,
           candidateId: candidateB,
         }),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(activity).values({
           teamId: ownerB.teamId,
           actorId: ownerA.userId,
@@ -465,7 +463,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
           kind: "task",
           summary: "Forged",
         }),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(uploads).values({
           teamId: ownerB.teamId,
           candidateId: candidateB,
@@ -476,12 +474,12 @@ describe("signed tenant context under separate nonowner data and identity roles"
           createdBy: ownerA.userId,
           expiresAt: later,
         }),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx
           .insert(storageUsage)
           .values({ teamId: ownerB.teamId })
           .onConflictDoNothing(),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(idempotency).values({
           teamId: ownerB.teamId,
           actorKey: "forged",
@@ -491,7 +489,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
           response: {},
           expiresAt: later,
         }),
-      (tx: Parameters<Parameters<typeof withTeam>[1]>[0]) =>
+      (tx: TeamTx) =>
         tx.insert(notificationReads).values({
           teamId: ownerB.teamId,
           userId: ownerA.userId,
