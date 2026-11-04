@@ -66,6 +66,21 @@ export const runtimeRoleSafetyQuery = `
         AND (pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE,REFERENCES'))
     )
+    -- No table, column, sequence, function, schema or database privilege WITH GRANT OPTION,
+    -- held directly or through any member role (PUBLIC cannot hold one).
+    OR EXISTS (
+      SELECT 1 FROM (
+        SELECT c.relacl AS acl FROM pg_catalog.pg_class c
+        UNION ALL SELECT a.attacl FROM pg_catalog.pg_attribute a WHERE a.attacl IS NOT NULL
+        UNION ALL SELECT p.proacl FROM pg_catalog.pg_proc p
+        UNION ALL SELECT n.nspacl FROM pg_catalog.pg_namespace n
+        UNION ALL SELECT d.datacl FROM pg_catalog.pg_database d
+      ) o
+      CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) x
+      WHERE x.is_grantable
+        AND CASE WHEN x.grantee = 0 THEN false
+          ELSE pg_catalog.pg_has_role(current_user, x.grantee, 'MEMBER') END
+    )
     OR pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
     -- The runtime template closes the database and the public schema to PUBLIC.
     OR pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT')

@@ -331,4 +331,63 @@ describe("database runtime role safety", () => {
       await pg.close();
     }
   });
+
+  it("rejects any table, column, sequence, function, schema or database privilege held WITH GRANT OPTION, directly or through a member role", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      const name = await pg.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      );
+      const database = '"' + name.rows[0].name.replaceAll('"', '""') + '"';
+      await pg.exec(`
+        ${closedToPublic}
+        CREATE SEQUENCE app.grant_option_probe;
+        CREATE ROLE grant_option_plain NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_plain;
+        GRANT SELECT (id) ON app.activity TO grant_option_plain;
+        GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_plain;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_plain;
+        GRANT USAGE ON SCHEMA app TO grant_option_plain;
+        GRANT CONNECT ON DATABASE ${database} TO grant_option_plain;
+        CREATE ROLE grant_option_table NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_table WITH GRANT OPTION;
+        CREATE ROLE grant_option_column NOLOGIN;
+        GRANT SELECT (id) ON app.activity TO grant_option_column WITH GRANT OPTION;
+        CREATE ROLE grant_option_sequence NOLOGIN;
+        GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_sequence WITH GRANT OPTION;
+        CREATE ROLE grant_option_function NOLOGIN;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_function WITH GRANT OPTION;
+        CREATE ROLE grant_option_schema NOLOGIN;
+        GRANT USAGE ON SCHEMA app TO grant_option_schema WITH GRANT OPTION;
+        CREATE ROLE grant_option_database NOLOGIN;
+        GRANT CONNECT ON DATABASE ${database} TO grant_option_database WITH GRANT OPTION;
+        CREATE ROLE grant_option_parent NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_parent WITH GRANT OPTION;
+        CREATE ROLE grant_option_child NOLOGIN NOINHERIT;
+        GRANT grant_option_parent TO grant_option_child;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("grant_option_plain")).toBe(false);
+      for (const role of [
+        "grant_option_table",
+        "grant_option_column",
+        "grant_option_sequence",
+        "grant_option_function",
+        "grant_option_schema",
+        "grant_option_database",
+        "grant_option_child",
+      ])
+        expect(await unsafe(role), role).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
 });
