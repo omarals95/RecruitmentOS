@@ -1,5 +1,9 @@
 # Validation before deployment
 
+## Update: signed tenant context
+
+On 4 November 2026, the local revision passed TypeScript, ESLint, formatting of the changed files, a production build, 205 Vitest tests in 32 files and 52 native storage tests. Migration `0006_trusted_tenant_context.sql` replaces the GUC tenant policies with a signed per-transaction context, token create/revoke now audits in one identity-role transaction, and activity names come from a context-checked accessor. The five research tests and four SQL fixtures were removed, and their relevant cases were moved into `tests/tenant-context.test.ts`. That file and the rewritten role-boundary tests run the real migrations under synthetic split roles: a nonsuperuser, non-BYPASSRLS owner and separate data and identity roles that cannot assume each other. This is PGlite-only evidence on one connection. It does not establish live Neon privileges, concurrent revocation, pooler behaviour or lock contention, and the design has not been independently reviewed. The hosted `tenant_isolation_pending` guard remains closed.
+
 ## Update: staged connection and workflow review
 
 On 3 November 2026, the local staged revision passed TypeScript, ESLint, formatting, 196 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. The paired-pool connection checks now reject unsupported URI options and unexpected startup options, normalize ports, and check the inspected login and effective roles. They do not establish safe state on every future pool checkout, and the legacy single-pool development path does not have the same checks. Token/audit and activity-name integration remain unfinished. The activity accessor experiments use synthetic data and are not deployed. No live Neon connection, migration, production policy change or Blob-provider verification was performed.
