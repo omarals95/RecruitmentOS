@@ -17,7 +17,6 @@ import {
   records,
   uploads,
 } from "@/db/schema";
-import { user } from "@/db/auth-schema";
 import type { TeamTx } from "@/db";
 import { withTeam } from "./db-team";
 import type { Principal } from "./principal";
@@ -370,10 +369,14 @@ export async function listActivity(p: Principal, params: URLSearchParams) {
   )
     invalid("Unsupported activity record type.");
   return withTeam(p, async (tx) => {
+    // The accessor resolves names only for events the signed context may read.
+    const actorName = sql<
+      string | null
+    >`tenant_context.activity_actor_name(${activity.id})`;
     const searchFilter: SQL[] = [];
     if (search) {
       searchFilter.push(
-        sql`strpos(lower(concat_ws(' ',${activity.summary},${activity.action},${user.name})),lower(${search}))>0`,
+        sql`strpos(lower(concat_ws(' ',${activity.summary},${activity.action},${actorName})),lower(${search}))>0`,
       );
     }
     const filter = and(
@@ -390,14 +393,13 @@ export async function listActivity(p: Principal, params: URLSearchParams) {
     const [total] = await tx
       .select({ count: count() })
       .from(activity)
-      .leftJoin(user, eq(activity.actorId, user.id))
       .where(filter);
     const data = await tx
       .select({
         id: activity.id,
         recordId: activity.recordId,
         actorId: activity.actorId,
-        actorName: user.name,
+        actorName,
         actorType: activity.actorType,
         action: activity.action,
         kind: activity.kind,
@@ -406,7 +408,6 @@ export async function listActivity(p: Principal, params: URLSearchParams) {
         createdAt: activity.createdAt,
       })
       .from(activity)
-      .leftJoin(user, eq(activity.actorId, user.id))
       .where(filter)
       .orderBy(desc(activity.createdAt), desc(activity.id))
       .limit(pageSize)
