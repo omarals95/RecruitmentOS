@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   downloadVerifiedCv,
+  saveCvBytes,
   sendCvBytes,
   type UploadTicket,
 } from "../src/components/cv-transfer";
@@ -278,4 +279,56 @@ describe("downloadVerifiedCv client-side checks", () => {
       ).rejects.toThrow();
       expect(returned).toBeUndefined();
     });
+});
+
+describe("saveCvBytes", () => {
+  it("clicks an attached anchor and revokes the object URL only after the delay", async () => {
+    const events: string[] = [];
+    const blobs: Blob[] = [];
+    const revoked: string[] = [];
+    const scheduled: { callback: () => void; ms: number }[] = [];
+    const anchor = {
+      href: "",
+      download: "",
+      click: () => events.push("click"),
+      remove: () => events.push("remove"),
+    };
+    const env: NonNullable<Parameters<typeof saveCvBytes>[2]> = {
+      document: {
+        createElement: ((tag: string) => {
+          expect(tag).toBe("a");
+          return anchor;
+        }) as unknown as Document["createElement"],
+        body: {
+          append: (node: HTMLElement) => {
+            expect(node).toBe(anchor);
+            events.push("append");
+          },
+        },
+      },
+      URL: {
+        createObjectURL: (blob: Blob) => {
+          blobs.push(blob);
+          return "blob:http://localhost/fictional-1";
+        },
+        revokeObjectURL: (url: string) => {
+          revoked.push(url);
+        },
+      },
+      setTimeout: (callback: () => void, ms: number) =>
+        scheduled.push({ callback, ms }),
+    };
+    const bytes = new TextEncoder().encode("%PDF-1.7\nfictional saved CV");
+    saveCvBytes(bytes, "fictional-cv.pdf", env);
+    expect(events).toEqual(["append", "click", "remove"]);
+    expect(anchor.download).toBe("fictional-cv.pdf");
+    expect(anchor.href).toBe("blob:http://localhost/fictional-1");
+    expect(blobs).toHaveLength(1);
+    expect(blobs[0].type).toBe("application/octet-stream");
+    expect(new Uint8Array(await blobs[0].arrayBuffer())).toEqual(bytes);
+    expect(revoked).toEqual([]);
+    expect(scheduled.map(({ ms }) => ms)).toEqual([40_000]);
+    scheduled[0].callback();
+    expect(revoked).toEqual(["blob:http://localhost/fictional-1"]);
+  });
 });
