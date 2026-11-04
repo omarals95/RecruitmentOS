@@ -30,6 +30,7 @@ import {
   resolveStorageBinding,
   storageConfigured,
   StorageConfigurationError,
+  STORAGE_SETUP_REQUIRED_MESSAGE,
   type StorageBinding,
   type StorageGateway,
 } from "@/lib/storage";
@@ -98,10 +99,15 @@ function validId(id: string) {
 function actorKey(p: Principal) {
   return `${p.authType}:${p.tokenId ?? p.userId}`;
 }
+/** Setup refusals all show one plain message; their own text can name a provider or setting. */
 function storageFailure(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof StorageConfigurationError)
-    throw new ApiError(503, "STORAGE_SETUP_REQUIRED", error.message);
+    throw new ApiError(
+      503,
+      "STORAGE_SETUP_REQUIRED",
+      STORAGE_SETUP_REQUIRED_MESSAGE,
+    );
   if (error instanceof CvValidationError)
     throw new ApiError(400, "INVALID_CV", error.message);
   throw new ApiError(
