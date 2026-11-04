@@ -8,6 +8,7 @@ import {
   it,
   vi,
 } from "vitest";
+import { sql } from "drizzle-orm";
 
 // Route handlers get the fake gateway through the storage module; nothing else builds one.
 const configured = vi.hoisted(() => ({
@@ -35,6 +36,7 @@ import {
   getCvDownload,
   getCvManifest,
 } from "@/lib/cvs";
+import { withTeam } from "@/lib/db-team";
 import { createRecord } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { StorageBinding, StorageGateway } from "@/lib/storage";
@@ -260,7 +262,7 @@ describe("private Blob CV transfer behind a fake client", () => {
   beforeEach(async () => {
     configured.current = undefined;
     await fixture.client.exec(
-      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
+      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
     );
   });
   afterAll(async () => fixture?.close());
@@ -1001,6 +1003,131 @@ describe("private Blob CV transfer behind a fake client", () => {
       expect(fake.state.streams).toEqual([
         { pathname: await objectKey(id), closed: true },
       ]);
+    });
+
+    describe("leases held by another server instance", () => {
+      // Taken straight through the database helper in committed transactions, with no gateway
+      // or in-process state, so they stand for reads running on another instance.
+      async function takeLease(who: Principal) {
+        const { rows: taken } = await withTeam(who, (tx) =>
+          tx.execute<{ lease: string | null }>(
+            sql`select tenant_context.acquire_blob_read(${blobBinding.store}) as lease`,
+          ),
+        );
+        expect(taken[0].lease).toEqual(expect.any(String));
+        return taken[0].lease!;
+      }
+      const dropLease = (who: Principal, lease: string) =>
+        withTeam(who, (tx) =>
+          tx.execute(sql`select tenant_context.release_blob_read(${lease})`),
+        );
+      const leaseCount = async () =>
+        (
+          (await rows(
+            "SELECT count(*)::int AS count FROM storage_ledger.blob_read_leases",
+          )) as { count: number }[]
+        )[0].count;
+
+      it("refuses a team holding two leases elsewhere until they are released, while another team reads", async () => {
+        const fake = fakeBlob();
+        const id = await readyBlobCv(fake, small);
+        const otherId = await readyBlobCv(fake, small, other, otherCandidateId);
+        const held = [await takeLease(owner), await takeLease(owner)];
+        const reads = fake.state.reads;
+        await expect(
+          getCvChunk(owner, id, 0, fake.gateway),
+        ).rejects.toMatchObject(unavailable);
+        expect(fake.state.reads).toBe(reads);
+        const otherTeam = await getCvChunk(other, otherId, 0, fake.gateway);
+        expect(otherTeam.bytes.equals(small)).toBe(true);
+        for (const lease of held) await dropLease(owner, lease);
+        const after = await getCvChunk(owner, id, 0, fake.gateway);
+        expect(after.bytes.equals(small)).toBe(true);
+      });
+
+      it("refuses a fifth team once four teams hold eight leases elsewhere", async () => {
+        const fake = fakeBlob();
+        const last = teams[2];
+        const lastId = await readyBlobCv(
+          fake,
+          small,
+          last.principal,
+          last.candidateId,
+        );
+        const holders = [
+          owner,
+          other,
+          ...teams.slice(0, 2).map((t) => t.principal),
+        ];
+        for (const holder of holders)
+          for (let n = 0; n < 2; n++) await takeLease(holder);
+        expect(await leaseCount()).toBe(8);
+        const reads = fake.state.reads;
+        await expect(
+          getCvChunk(last.principal, lastId, 0, fake.gateway),
+        ).rejects.toMatchObject(unavailable);
+        expect(fake.state.reads).toBe(reads);
+      });
+
+      it("keeps a completion refused by leases held elsewhere pending", async () => {
+        const fake = fakeBlob();
+        const pendingId = await pendingWithObject(fake);
+        await takeLease(owner);
+        await takeLease(owner);
+        const reads = fake.state.reads;
+        await expect(
+          completeCvUpload(owner, pendingId, fake.gateway),
+        ).rejects.toMatchObject(unavailable);
+        expect(fake.state.reads).toBe(reads);
+        expect(await status(pendingId)).toBe("pending");
+      });
+
+      it("no longer counts a lease whose expiry has passed", async () => {
+        const fake = fakeBlob();
+        const id = await readyBlobCv(fake, small);
+        const expired = await takeLease(owner);
+        await takeLease(owner);
+        await rows(
+          "UPDATE storage_ledger.blob_read_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+          [expired],
+        );
+        const chunk = await getCvChunk(owner, id, 0, fake.gateway);
+        expect(chunk.bytes.equals(small)).toBe(true);
+      });
+
+      it("ignores another team's attempt to release a lease", async () => {
+        const fake = fakeBlob();
+        const id = await readyBlobCv(fake, small);
+        const held = [await takeLease(owner), await takeLease(owner)];
+        for (const lease of held) await dropLease(other, lease);
+        expect(
+          await rows(
+            "SELECT id FROM storage_ledger.blob_read_leases ORDER BY id",
+          ),
+        ).toEqual(held.sort().map((lease) => ({ id: lease })));
+        const reads = fake.state.reads;
+        await expect(
+          getCvChunk(owner, id, 0, fake.gateway),
+        ).rejects.toMatchObject(unavailable);
+        expect(fake.state.reads).toBe(reads);
+      });
+
+      it("releases the lease after a successful read and after an integrity failure", async () => {
+        const fake = fakeBlob();
+        const id = await readyBlobCv(fake, small);
+        expect(await leaseCount()).toBe(0);
+        const chunk = await getCvChunk(owner, id, 0, fake.gateway);
+        expect(chunk.bytes.equals(small)).toBe(true);
+        expect(await leaseCount()).toBe(0);
+        fake.objects.set(await objectKey(id), {
+          bytes: fictionalPdf(small.length, 9),
+          mimeType: "application/pdf",
+        });
+        await expect(
+          getCvChunk(owner, id, 0, fake.gateway),
+        ).rejects.toMatchObject({ status: 409, code: "CV_INTEGRITY_FAILED" });
+        expect(await leaseCount()).toBe(0);
+      });
     });
   });
 

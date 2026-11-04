@@ -77,19 +77,34 @@ describe("storage reference migration and startup check", () => {
       status: 503,
       code: "storage_schema_mismatch",
     });
-    expect(STORAGE_SCHEMA_VERSION).toBe(1);
+    expect(STORAGE_SCHEMA_VERSION).toBe(2);
     await expect(assertStorageSchema(pg)).resolves.toBeUndefined();
   });
 
+  it("refuses a database migrated only through 0008 and accepts the full set", async () => {
+    const through0008 = new PGlite();
+    try {
+      await applyMigrations(through0008, "0008_pending_s3_upload_index.sql");
+      await expect(assertStorageSchema(through0008)).rejects.toMatchObject({
+        status: 503,
+        code: "storage_schema_mismatch",
+      });
+      await applyMigrations(through0008);
+      await expect(assertStorageSchema(through0008)).resolves.toBeUndefined();
+    } finally {
+      await through0008.close();
+    }
+  });
+
   it("refuses a marker the owner changed to another version", async () => {
-    await pg.exec("UPDATE db_boundary.storage_schema SET version=2");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version=3");
     try {
       await expect(assertStorageSchema(pg)).rejects.toMatchObject({
         status: 503,
         code: "storage_schema_mismatch",
       });
     } finally {
-      await pg.exec("UPDATE db_boundary.storage_schema SET version=1");
+      await pg.exec("UPDATE db_boundary.storage_schema SET version=2");
     }
   });
 

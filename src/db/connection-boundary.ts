@@ -15,6 +15,8 @@ export const dataRoleHelpers = [
   "tenant_context.allows_event(text,text,text,uuid)",
   "tenant_context.activity_actor_name(uuid)",
   "tenant_context.lock_storage_allocation(text,text,text)",
+  "tenant_context.acquire_blob_read(text)",
+  "tenant_context.release_blob_read(uuid)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",
