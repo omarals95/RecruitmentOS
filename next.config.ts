@@ -7,6 +7,15 @@ const config: NextConfig = {
     "@electric-sql/pglite-socket",
   ],
   async headers() {
+    // Same normalisation as storage.ts; headers() is evaluated at build time.
+    const provider =
+      process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
+    const uploadHosts =
+      provider === "s3"
+        ? " https://*.s3.amazonaws.com https://*.s3.*.amazonaws.com https://s3.*.amazonaws.com"
+        : provider === "blob" || provider === "vercel-blob"
+          ? " https://vercel.com/api/blob/"
+          : "";
     return [
       {
         source: "/(.*)",
@@ -20,8 +29,9 @@ const config: NextConfig = {
           },
           {
             key: "Content-Security-Policy",
-            // The path-scoped Blob API origin stays unused while Blob CV storage is disabled.
-            value: `default-src 'self'; script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://*.s3.amazonaws.com https://*.s3.*.amazonaws.com https://s3.*.amazonaws.com https://vercel.com/api/blob/${process.env.NODE_ENV === "development" ? " ws://localhost:* ws://127.0.0.1:*" : ""}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'${process.env.NODE_ENV === "production" ? "; upgrade-insecure-requests" : ""}`,
+            // connect-src lists only the configured provider's upload hosts. The path-scoped
+            // Blob API entry exists only when Blob is configured, and Blob CV storage stays disabled.
+            value: `default-src 'self'; script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'${uploadHosts}${process.env.NODE_ENV === "development" ? " ws://localhost:* ws://127.0.0.1:*" : ""}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'${process.env.NODE_ENV === "production" ? "; upgrade-insecure-requests" : ""}`,
           },
         ],
       },
