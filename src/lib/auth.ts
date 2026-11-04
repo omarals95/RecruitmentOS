@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type AuthContext } from "better-auth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   APIError,
@@ -9,11 +9,12 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { organization as organizationPlugin } from "better-auth/plugins";
 import {
   getCurrentAdapter,
+  runWithTransaction,
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
 import { and, eq } from "drizzle-orm";
 import { getIdentityDb, type AppDb } from "@/db";
-import { authTables, member } from "@/db/auth-schema";
+import { authTables, member, user } from "@/db/auth-schema";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
 import {
@@ -152,6 +153,15 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       },
     },
   });
+  // The plugin writes the team, its owner and the active team separately; commit them together.
+  const createOrganization = plugin.endpoints.createOrganization;
+  plugin.endpoints.createOrganization = Object.assign(
+    (input: Parameters<typeof createOrganization>[0] & { context: object }) =>
+      runWithTransaction((input.context as AuthContext).adapter, () =>
+        createOrganization(input),
+      ),
+    { path: createOrganization.path, options: createOrganization.options },
+  ) as unknown as typeof createOrganization;
   return betterAuth({
     appName: "RecruitmentOS",
     baseURL: config.baseURL,
@@ -168,7 +178,11 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       schema: authTables,
       transaction: true,
     }),
-    advanced: { database: { generateId: "uuid" } },
+    advanced: {
+      database: { generateId: "uuid" },
+      // Better Auth skips callback and redirect origin checks when NODE_ENV=test or TEST is set; keep them on everywhere.
+      disableOriginCheck: false,
+    },
     user: {
       deleteUser: { enabled: false },
       changeEmail: { enabled: false },
@@ -337,16 +351,19 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
           [
             "/organization/invite-member",
             "/organization/update-member-role",
+            "/organization/remove-member",
           ].includes(ctx.path)
         ) {
           const body = ctx.body as {
             role?: unknown;
             organizationId?: string;
-            memberId?: string;
+            memberId?: unknown;
+            memberIdOrEmail?: unknown;
           };
-          const role = validateRole(
-            typeof body?.role === "string" ? body.role : "",
-          );
+          const role =
+            ctx.path === "/organization/remove-member"
+              ? undefined
+              : validateRole(typeof body?.role === "string" ? body.role : "");
           const organizationId =
             body?.organizationId ?? identity.session.activeOrganizationId;
           if (!organizationId)
@@ -363,20 +380,26 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               )
               .limit(1)
           )[0];
-          const target = body.memberId
-            ? (
-                await db
-                  .select()
-                  .from(member)
-                  .where(
-                    and(
-                      eq(member.id, body.memberId),
-                      eq(member.organizationId, organizationId),
-                    ),
-                  )
-                  .limit(1)
-              )[0]
-            : undefined;
+          // Removal names the member by id or email; resolve both so an owner cannot be removed by a non-owner.
+          const targetKey = body?.memberId ?? body?.memberIdOrEmail;
+          const target =
+            typeof targetKey === "string"
+              ? (
+                  await db
+                    .select({ role: member.role })
+                    .from(member)
+                    .innerJoin(user, eq(user.id, member.userId))
+                    .where(
+                      and(
+                        targetKey.includes("@")
+                          ? eq(user.email, targetKey.trim().toLowerCase())
+                          : eq(member.id, targetKey),
+                        eq(member.organizationId, organizationId),
+                      ),
+                    )
+                    .limit(1)
+                )[0]
+              : undefined;
           if (
             (role === "owner" || target?.role === "owner") &&
             actor?.role !== "owner"

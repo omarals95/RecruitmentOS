@@ -51,4 +51,18 @@ Authentication writes require the exact app Origin; OAuth callback routes retain
 
 Auth HTTP rate limits persist in PostgreSQL. Direct server `auth.api` calls do not receive those HTTP limits, so do not add custom unauthenticated sign-in proxy endpoints without their own throttling. API bearer tokens have a separate durable limiter.
 
-Local tests exercise the real SQL migration and Better Auth handler using fictional accounts, a disposable PGlite database, and an in-memory mail sink. They verify invite-only registration, email verification, password reset revocation, invitation email matching, role restrictions, cross-origin rejection, creator spoof prevention, team caps, and last-owner database guards. No actual mail, OAuth provider, or cloud credential is used. External delivery, Neon pool behavior, OAuth redirects, HTTPS cookies, and multi-connection PostgreSQL races require deployment-stage verification.
+Local tests exercise the real SQL migration and Better Auth handler using fictional accounts, a disposable PGlite database, a restricted identity role, and an in-memory mail sink. They verify invite-only registration, email verification, password reset revocation, invitation email matching, role restrictions, cross-origin rejection, creator spoof prevention, team caps, and last-owner database guards. `tests/auth-lifecycle.test.ts` and `tests/auth-oauth.test.ts` add:
+
+- atomic team creation: a failed owner-member insert leaves no team, slug or used team allowance, keeps initial setup pending, and a retry creates exactly one owned team;
+- simultaneous bootstrap sign-ups create one administrator and one claim, and no other account while setup is pending;
+- the sign-in, sign-up, password-reset and verification-resend rate limits (429 per client address, no mail for refused requests);
+- expired and tampered verification links, a reused verification link, and reused or expired reset tokens;
+- reset links and callback URLs bound to each environment's origin;
+- identical responses for existing and unknown accounts on reset, verification resend, sign-up and sign-in;
+- sign-out, single-session revocation, revoking other sessions, and password change with session revocation;
+- cancelled and expired invitations, which can neither be accepted nor used to register;
+- admins cannot promote themselves or others to owner, demote or remove an owner, or invite an owner;
+- simultaneous mutual removal or demotion of two owners keeps an owner;
+- provider buttons only when both credentials are set, and Google/Microsoft callbacks (with a stubbed provider endpoint) that never link an existing account by email, never register an uninvited email, and never let an unverified provider email accept an invitation.
+
+No actual mail, OAuth provider, or cloud credential is used, and the races run on a single PGlite connection. External delivery, Neon pool behavior, live OAuth clients and redirects, HTTPS cookies, hosted client-IP resolution for rate limits, and multi-connection PostgreSQL races require deployment-stage verification.
