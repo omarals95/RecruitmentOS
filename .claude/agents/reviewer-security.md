@@ -62,3 +62,7 @@ Non-blocking observations. Optional.
   Don't block on pre-existing issues the change didn't make worse; mention
   them under Notes.
 - Under Findings, write "None." when there are none.
+
+## Before you reply
+
+Your review only counts if the file exists. As your last action, write `<job folder>/round-<N>/review-security.md` with the Write tool using the absolute path, then read it back to confirm its first line is the verdict. Never only state the verdict in your reply.

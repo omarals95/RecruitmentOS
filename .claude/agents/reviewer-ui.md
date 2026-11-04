@@ -68,3 +68,7 @@ Non-blocking observations. Optional.
 - Use CHANGES only for visible inconsistencies or breakage. Put matters of
   taste under Notes.
 - Under Findings, write "None." when there are none.
+
+## Before you reply
+
+Your review only counts if the file exists. As your last action, write `<job folder>/round-<N>/review-ui.md` with the Write tool using the absolute path, then read it back to confirm its first line is the verdict. Never only state the verdict in your reply.

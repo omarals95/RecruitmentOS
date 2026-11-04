@@ -66,3 +66,7 @@ Non-blocking observations. Optional.
 - A failing check is always CHANGES. Otherwise use CHANGES only for bugs, spec
   gaps or clear convention breaks. Put style preferences under Notes.
 - Under Findings, write "None." when there are none.
+
+## Before you reply
+
+Your review only counts if the file exists. As your last action, write `<job folder>/round-<N>/review-code.md` with the Write tool using the absolute path, then read it back to confirm its first line is the verdict. Never only state the verdict in your reply.
