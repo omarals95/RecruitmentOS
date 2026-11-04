@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activity, notificationReads, records } from "@/db/schema";
 import { member, user } from "@/db/auth-schema";
@@ -284,17 +284,23 @@ describe("bounded, factual PostgreSQL reporting", () => {
           action: "cv.uploaded",
           summary: "Fictional 1000 upload",
         },
-        {
-          id: randomUUID(),
-          teamId: owner.teamId,
-          actorId: owner.userId,
-          actorType: "session",
-          kind: "api-token",
-          action: "token.created",
-          summary: "Issued token fixture",
-        },
       ]),
     );
+    // Only the owner-run audit helper may write token events, so seed this one as the superuser.
+    await fixture.db.execute(sql`reset role`);
+    try {
+      await fixture.db.insert(activity).values({
+        id: randomUUID(),
+        teamId: owner.teamId,
+        actorId: owner.userId,
+        actorType: "session",
+        kind: "api-token",
+        action: "token.created",
+        summary: "Issued token fixture",
+      });
+    } finally {
+      await fixture.db.execute(sql`set role recruitment_test_runtime`);
+    }
     const initial = await listActivity(
       owner,
       new URLSearchParams({ page: "1", pageSize: "50", search: "", kind: "" }),

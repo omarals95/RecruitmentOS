@@ -27,7 +27,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA tenant_context FROM PUBLIC;
 
 -- Every rejection uses one generic error; the payload, signature and pads never appear in it.
 CREATE FUNCTION tenant_context.install(payload text, signature text) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   known constant text[] := ARRAY['candidates:read','candidates:write','recruitment:read','recruitment:write','cvs:read','cvs:write','imports:write'];
   claim jsonb;
@@ -117,7 +117,7 @@ END $$;
 
 -- Policy predicates. A null owner means a shared row; write needs any write scope.
 CREATE FUNCTION tenant_context.allows(row_team text, row_owner text, access text) RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM tenant_context.contexts c
     WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
       AND c.expires_at > clock_timestamp() AND c.team_id = row_team
@@ -127,7 +127,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
         ELSE false END)
 $$;
 CREATE FUNCTION tenant_context.allows_activity(row_team text, row_actor text, row_action text, row_kind text) RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM tenant_context.contexts c
     WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
       AND c.expires_at > clock_timestamp() AND c.team_id = row_team
@@ -151,7 +151,7 @@ DO $$ DECLARE spec text[]; BEGIN
   ['records', 'tenant_context.allows(team_id, private_owner_id, ''read'')', 'tenant_context.allows(team_id, private_owner_id, ''write'')', 'tenant_context.allows(team_id, private_owner_id, ''write'')'],
   ['candidate_states', 'tenant_context.allows(team_id, user_id, ''read'')', 'tenant_context.allows(team_id, user_id, ''write'')', 'tenant_context.allows(team_id, user_id, ''write'')'],
   ['activity', 'tenant_context.allows_activity(team_id, actor_id, action, kind)', 'tenant_context.allows(team_id, NULL, ''write'')',
-   'tenant_context.allows(team_id, NULL, ''write'') OR (kind = ''api-token'' AND action IN (''token.created'', ''token.revoked'') AND tenant_context.allows(team_id, actor_id, ''read'') AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context''))'],
+   '(kind <> ''api-token'' AND tenant_context.allows(team_id, NULL, ''write'')) OR (kind = ''api-token'' AND action IN (''token.created'', ''token.revoked'') AND tenant_context.allows(team_id, actor_id, ''read'') AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context''))'],
   ['uploads', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
   ['storage_usage', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
   ['idempotency', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
@@ -166,14 +166,14 @@ END $$;
 
 -- Resolves a name only for an event the current context may read; former members still resolve.
 CREATE FUNCTION tenant_context.activity_actor_name(event_id uuid) RETURNS text
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   SELECT u.name FROM app.activity a JOIN auth."user" u ON u.id = a.actor_id
   WHERE a.id = event_id AND tenant_context.allows_activity(a.team_id, a.actor_id, a.action, a.kind)
 $$;
 
 -- Identity-side token audit in the caller's transaction; content comes from the token row.
 CREATE FUNCTION tenant_context.audit_token(token_id text, event text) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   ctx tenant_context.contexts%ROWTYPE;
   tok auth.api_tokens%ROWTYPE;

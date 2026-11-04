@@ -738,6 +738,44 @@ describe("signed tenant context under separate nonowner data and identity roles"
     ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
   });
 
+  it("keeps token audit rows out of the data role's reach so revocation cannot be blocked", async () => {
+    const created = await createToken(ownerA, {
+      name: "Fictional unblockable token",
+      scopes: ["candidates:read"],
+    });
+    for (const action of ["token.revoked", "token.created"])
+      await expect(
+        withTeam(ownerA, (tx) =>
+          tx.insert(activity).values({
+            teamId: ownerA.teamId,
+            actorId: memberA.userId,
+            actorType: "session",
+            action,
+            kind: "api-token",
+            summary: "Forged token event",
+            metadata: { tokenId: created.data.id },
+          }),
+        ),
+        action,
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+    await revokeToken(ownerA, created.data.id);
+    await expect(authenticateApiToken(created.token)).rejects.toMatchObject({
+      status: 401,
+    });
+    const events = await withTeam(ownerA, (tx) =>
+      tx.select().from(activity).where(eq(activity.kind, "api-token")),
+    );
+    expect(
+      events
+        .filter((row) => row.metadata.tokenId === created.data.id)
+        .map((row) => [row.action, row.actorId])
+        .sort(),
+    ).toEqual([
+      ["token.created", ownerA.userId],
+      ["token.revoked", ownerA.userId],
+    ]);
+  });
+
   it("denies the data role the key, context and identity tables and the identity role", async () => {
     const client = await asData();
     for (const statement of [
