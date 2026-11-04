@@ -1,6 +1,127 @@
 import { z } from "zod";
-import { recordDataSchemas, resourceToKind } from "@/domain/records";
+import {
+  recordDataSchemas,
+  resourceToKind,
+  type RecordKind,
+} from "@/domain/records";
+import type { Scope } from "@/lib/permissions";
 export const runtime = "nodejs";
+
+// Fictional identifiers and values used only as documentation examples.
+const exampleIds = {
+  candidate: "3f6c1d2e-8a4b-4c7d-9e1f-2a3b4c5d6e7f",
+  second: "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d",
+  vacancy: "7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b",
+  parent: "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f",
+};
+const createExamples: Record<RecordKind, Record<string, unknown>> = {
+  candidate: {
+    data: {
+      name: "Amira Fictional",
+      email: "amira.fictional@example.test",
+      jobTitle: "Payroll Analyst",
+    },
+  },
+  "job-role": {
+    data: { title: "Fictional Payroll Analyst", department: "Finance" },
+  },
+  vacancy: {
+    data: { title: "Fictional Payroll Analyst", status: "Open", openings: 1 },
+  },
+  application: {
+    candidateId: exampleIds.candidate,
+    vacancyId: exampleIds.vacancy,
+    data: { stage: "Screening" },
+  },
+  bucket: { data: { name: "Fictional review", color: "#4338CA", position: 4 } },
+  "task-field": { data: { name: "Fictional notice period", type: "Text" } },
+  task: {
+    bucketId: exampleIds.parent,
+    data: { title: "Call fictional candidate", priority: "Normal" },
+  },
+  interview: {
+    applicationId: exampleIds.parent,
+    data: {
+      title: "Fictional first interview",
+      startAt: "2026-12-01T09:00:00+04:00",
+    },
+  },
+  offer: {
+    applicationId: exampleIds.parent,
+    data: { title: "Fictional offer", amount: "15000", currency: "AED" },
+  },
+  onboarding: {
+    applicationId: exampleIds.parent,
+    data: { startDate: "2027-01-04", status: "Planned" },
+  },
+  checklist: {
+    onboardingId: exampleIds.parent,
+    data: { title: "Fictional ID copy", category: "Document" },
+  },
+  "saved-view": {
+    data: {
+      name: "Fictional finance shortlist",
+      area: "directory",
+      query: { search: "payroll" },
+    },
+  },
+  comment: {
+    parentRecordId: exampleIds.parent,
+    data: { body: "Fictional follow-up note." },
+  },
+};
+const jsonBody = (schema: unknown, example: unknown) => ({
+  required: true,
+  content: { "application/json": { schema, example } },
+});
+const errorResponse = (description: string, retry = false) => ({
+  description,
+  headers: {
+    "X-Correlation-Id": { $ref: "#/components/headers/X-Correlation-Id" },
+    ...(retry
+      ? { "Retry-After": { $ref: "#/components/headers/Retry-After" } }
+      : {}),
+  },
+  content: {
+    "application/json": { schema: { $ref: "#/components/schemas/Error" } },
+  },
+});
+const errors = {
+  "400": errorResponse("Invalid fields, references, query or JSON."),
+  "401": errorResponse("Missing, invalid, expired or revoked credentials."),
+  "403": errorResponse(
+    "Scope, role, verification, origin or team access denied.",
+  ),
+  "404": errorResponse("Record, resource or CV not found in this team."),
+  "409": errorResponse(
+    "Version, duplicate or idempotency conflict; preserve your draft and re-read.",
+  ),
+  "413": errorResponse("The request body is too large."),
+  "415": errorResponse("Send application/json."),
+  "429": errorResponse("Rate limit; wait for Retry-After seconds.", true),
+  "500": errorResponse(
+    "Unexpected failure; quote error.correlationId when reporting it.",
+  ),
+  "503": errorResponse("Required service configuration is unavailable."),
+};
+const idParameter = {
+  name: "id",
+  in: "path",
+  required: true,
+  schema: { type: "string", format: "uuid" },
+};
+const recordDto = {
+  type: "object",
+  required: ["id", "kind", "data", "version"],
+  properties: {
+    id: { type: "string", format: "uuid" },
+    kind: { type: "string" },
+    data: { type: "object" },
+    version: { type: "integer", minimum: 1 },
+    label: { type: "string" },
+    archivedAt: { type: ["string", "null"], format: "date-time" },
+  },
+};
 export function GET() {
   const parameters = [
     {
@@ -12,19 +133,21 @@ export function GET() {
         "Optional for sessions. A Bearer token always belongs to its fixed team; a conflicting header is rejected.",
     },
   ];
-  const responses = {
-    "200": { description: "Success; JSON data, with pagination for lists." },
-    "400": { description: "Invalid fields or references." },
-    "401": { description: "Missing, invalid, expired or revoked credentials." },
-    "403": { description: "Scope, role, verification or team access denied." },
-    "409": {
-      description:
-        "Version, duplicate or idempotency conflict; preserve your draft and re-read.",
-    },
-    "429": { description: "Rate limit; respect Retry-After." },
-    "503": { description: "Required service configuration is unavailable." },
-  };
-  const paths: Record<string, unknown> = {};
+  const operation = (
+    scopes: Scope[],
+    details: Record<string, unknown>,
+    success: Record<string, unknown>,
+    options: { sessionOnly?: boolean; params?: unknown[] } = {},
+  ) => ({
+    ...details,
+    parameters: [...parameters, ...(options.params ?? [])],
+    "x-required-scopes": scopes,
+    ...(options.sessionOnly
+      ? { "x-session-only": true, security: [{ sessionCookie: [] }] }
+      : {}),
+    responses: { ...success, ...errors },
+  });
+  const paths: Record<string, Record<string, unknown>> = {};
   const schemas: Record<string, unknown> = {};
   for (const [resource, kind] of Object.entries(resourceToKind)) {
     const schemaName = resource.replace(/-/g, "_");
@@ -66,12 +189,19 @@ export function GET() {
     };
     const scope = resource === "candidates" ? "candidates" : "recruitment";
     paths[`/api/v1/${resource}`] = {
-      get: {
-        summary: `List ${resource}`,
-        description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.`,
-        parameters: [
-          ...parameters,
-          ...[
+      get: operation(
+        [`${scope}:read`],
+        {
+          summary: `List ${resource}`,
+          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.`,
+        },
+        {
+          "200": {
+            description: "{data: record[], pagination}.",
+          },
+        },
+        {
+          params: [
             "page",
             "pageSize",
             "search",
@@ -87,248 +217,592 @@ export function GET() {
             "sort",
             "direction",
           ].map((name) => ({ name, in: "query", schema: { type: "string" } })),
-        ],
-        responses,
-      },
-      post: {
-        summary: `Create ${kind}`,
-        description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.`,
-        parameters: [
-          ...parameters,
-          {
-            name: "Idempotency-Key",
-            in: "header",
-            required: false,
-            schema: { type: "string", maxLength: 200 },
-            description:
-              "Reuse the same key and identical payload after an uncertain result; a different payload returns 409.",
-          },
-        ],
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: input } },
         },
-        responses: {
-          ...responses,
+      ),
+      post: operation(
+        [`${scope}:write`],
+        {
+          summary: `Create ${kind}`,
+          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.`,
+          requestBody: jsonBody(input, createExamples[kind]),
+        },
+        {
           "201": {
-            description: "Created or idempotently replayed; {data:record}.",
+            description:
+              "Created, idempotently replayed, or reconciled to the existing record after key expiry; {data:record}.",
           },
         },
-      },
+        {
+          params: [
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+              description:
+                "Reuse the same key and identical payload after an uncertain result; a different payload returns 409 idempotency_mismatch, even after the key expires. Keys are retained for 7 days. After that, an identical retry returns the existing record's current state (or the original response when the caller lacks the resource's read scope) instead of creating another; if that record is no longer available it returns 409 idempotency_expired and creates nothing, so search for the record before creating it again.",
+            },
+          ],
+        },
+      ),
     };
     paths[`/api/v1/${resource}/{id}`] = {
-      get: {
-        summary: `Get ${kind}`,
-        parameters: [
-          ...parameters,
-          {
-            name: "id",
-            in: "path",
-            required: true,
-            schema: { type: "string", format: "uuid" },
-          },
-        ],
-        responses,
+      get: operation(
+        [`${scope}:read`],
+        { summary: `Get ${kind}` },
+        { "200": { description: "{data:record}." } },
+        { params: [idParameter] },
+      ),
+      patch: operation(
+        [`${scope}:write`],
+        {
+          summary: `Update or archive ${kind}`,
+          description: `Requires ${scope}:write. Send the latest version and only changed data fields. Parent references for applications/interviews/offers/onboarding/checklists are immutable. Comments are append-only. Bucket archive requires moveToBucketId when tasks exist.`,
+          requestBody: jsonBody(
+            {
+              type: "object",
+              required: ["version"],
+              additionalProperties: false,
+              properties: {
+                version: { type: "integer", minimum: 1 },
+                data: {
+                  type: "object",
+                  description:
+                    "Partial fields from the resource data schema; server validates strictly.",
+                },
+                ...refs,
+                archived: { type: "boolean" },
+                moveToBucketId: { type: "string", format: "uuid" },
+                importMeta: { type: "object" },
+              },
+            },
+            { version: 1, data: createExamples[kind].data },
+          ),
+        },
+        {
+          "200": { description: "{data:record}." },
+          ...(kind === "comment"
+            ? {
+                "405": errorResponse(
+                  "Comments are append-only; add a new comment instead.",
+                ),
+              }
+            : {}),
+        },
+        { params: [idParameter] },
+      ),
+    };
+  }
+  paths["/api/v1/candidates/{id}/state"] = {
+    get: operation(
+      ["candidates:read"],
+      {
+        summary: "Read your personal candidate state",
+        description:
+          "Requires candidates:read. Shortlist, follow-up status and note are private to the caller; version 0 means nothing is saved yet.",
       },
-      patch: {
-        summary: `Update or archive ${kind}`,
-        description: `Requires ${scope}:write. Send the latest version and only changed data fields. Parent references for applications/interviews/offers/onboarding/checklists are immutable. Comments are append-only. Bucket archive requires moveToBucketId when tasks exist.`,
-        parameters: [
-          ...parameters,
+      { "200": { description: "{data: personal state}." } },
+      { params: [idParameter] },
+    ),
+    patch: operation(
+      ["candidates:write"],
+      {
+        summary: "Update your personal candidate state",
+        description:
+          "Requires candidates:write. Send the version you read; a stale version returns 409 version_conflict. importMeta requires imports:write.",
+        requestBody: jsonBody(
           {
-            name: "id",
-            in: "path",
-            required: true,
-            schema: { type: "string", format: "uuid" },
+            type: "object",
+            required: ["version"],
+            additionalProperties: false,
+            properties: {
+              version: { type: "integer", minimum: 0 },
+              shortlisted: { type: "boolean" },
+              status: { type: "string" },
+              note: { type: "string", maxLength: 10000 },
+              importMeta: { type: "object" },
+            },
           },
-        ],
-        requestBody: {
-          required: true,
+          { version: 0, shortlisted: true, note: "Fictional private note." },
+        ),
+      },
+      { "200": { description: "{data: personal state}." } },
+      { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/candidates/duplicates"] = {
+    post: operation(
+      ["candidates:read"],
+      {
+        summary: "Find possible duplicate candidates",
+        description:
+          "Requires candidates:read. Returns exact normalized email or phone matches in the selected team as possible matches for review, at most 20 results. An empty result is not proof of uniqueness.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              email: { type: "string", maxLength: 320 },
+              phone: { type: "string", maxLength: 100 },
+            },
+          },
+          { email: "amira.fictional@example.test" },
+        ),
+      },
+      {
+        "200": {
+          description: "{data: [{id,name,email,phone,matches}]}; at most 20.",
+        },
+      },
+    ),
+  };
+  paths["/api/v1/applications/bulk"] = {
+    post: operation(
+      ["recruitment:write", "candidates:read"],
+      {
+        summary: "Assign candidates to one vacancy",
+        description:
+          "Requires recruitment:write and candidates:read. Up to 500 active candidates in the selected team; the vacancy must be active. All-or-nothing validation. Candidates that already have an active application for the vacancy are reported in existing, never duplicated.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["candidateIds", "vacancyId"],
+            additionalProperties: false,
+            properties: {
+              candidateIds: {
+                type: "array",
+                minItems: 1,
+                maxItems: 500,
+                items: { type: "string", format: "uuid" },
+              },
+              vacancyId: { type: "string", format: "uuid" },
+              stage: { type: "string" },
+              owner: { type: "string" },
+              source: { type: "string" },
+              appliedDate: { type: "string", format: "date" },
+            },
+          },
+          {
+            candidateIds: [exampleIds.candidate, exampleIds.second],
+            vacancyId: exampleIds.vacancy,
+            stage: "Sourced",
+            owner: "Fictional Recruiter",
+          },
+        ),
+      },
+      {
+        "200": {
+          description:
+            "Created and already-existing active applications for the requested pairs.",
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["version"],
-                additionalProperties: false,
+                required: ["data", "existing", "created", "skipped"],
                 properties: {
-                  version: { type: "integer", minimum: 1 },
                   data: {
-                    type: "object",
-                    description:
-                      "Partial fields from the resource data schema; server validates strictly.",
+                    type: "array",
+                    items: { $ref: "#/components/schemas/RecordDto" },
+                    description: "Applications created by this request.",
                   },
-                  ...refs,
-                  archived: { type: "boolean" },
-                  moveToBucketId: { type: "string", format: "uuid" },
-                  importMeta: { type: "object" },
+                  existing: {
+                    type: "array",
+                    items: {
+                      oneOf: [
+                        { $ref: "#/components/schemas/RecordDto" },
+                        {
+                          type: "object",
+                          required: ["id", "kind", "candidateId", "vacancyId"],
+                          additionalProperties: false,
+                          properties: {
+                            id: { type: "string", format: "uuid" },
+                            kind: { type: "string" },
+                            candidateId: { type: "string", format: "uuid" },
+                            vacancyId: { type: "string", format: "uuid" },
+                          },
+                        },
+                      ],
+                    },
+                    description:
+                      "Active applications that already existed for the vacancy and requested candidates. Callers without recruitment:read receive references only (id, kind, candidateId, vacancyId).",
+                  },
+                  created: { type: "integer", description: "data.length" },
+                  skipped: {
+                    type: "integer",
+                    description: "existing.length; kept for compatibility.",
+                  },
                 },
               },
             },
           },
         },
-        responses,
       },
-    };
-  }
+      {
+        params: [
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            schema: { type: "string", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+            description:
+              "Reuse the same key and identical body after an uncertain result to replay the stored response; a different body returns 409 idempotency_mismatch. After the 7-day retention an identical retry re-runs the assignment, which reports earlier applications in existing.",
+          },
+        ],
+      },
+    ),
+  };
+  paths["/api/v1/cvs/bulk-capabilities"] = {
+    get: operation(
+      ["cvs:write", "candidates:write"],
+      {
+        summary: "Read bulk CV import availability",
+        description:
+          "Requires cvs:write and candidates:write. Currently always reports uploads and AI as unavailable.",
+      },
+      {
+        "200": {
+          description: "{data:{uploadsAvailable:false, aiAvailable:false}}.",
+        },
+      },
+    ),
+  };
+  paths["/api/v1/teams/bootstrap"] = {
+    post: operation(
+      ["recruitment:write"],
+      {
+        summary: "Initialize the team's default task workflow",
+        description:
+          "Session only: a signed-in team owner or admin. Creates the default buckets once; later calls return the existing buckets with created 0.",
+      },
+      { "200": { description: "{data: buckets, created}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/settings/tokens"] = {
+    get: operation(
+      [],
+      {
+        summary: "List API tokens",
+        description:
+          "Session only. Lists safe token metadata; secrets are never returned again. all=true lists the team's tokens for owners and admins.",
+      },
+      { "200": { description: "{data: token metadata[]}." } },
+      {
+        sessionOnly: true,
+        params: [{ name: "all", in: "query", schema: { type: "string" } }],
+      },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create an API token",
+        description:
+          "Session only. Scopes are limited to the creator's role. The secret is returned once.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["name", "scopes"],
+            additionalProperties: false,
+            properties: {
+              name: { type: "string", maxLength: 100 },
+              scopes: { type: "array", items: { type: "string" } },
+              expiresInDays: { type: "integer", minimum: 1, maximum: 365 },
+            },
+          },
+          {
+            name: "Fictional ATS sync",
+            scopes: ["candidates:read"],
+            expiresInDays: 30,
+          },
+        ),
+      },
+      { "201": { description: "{data: token metadata, token}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/settings/tokens/{id}"] = {
+    delete: operation(
+      [],
+      {
+        summary: "Revoke an API token",
+        description:
+          "Session only. Owners and admins can revoke team tokens; others only their own.",
+      },
+      { "200": { description: "{data:{revoked:true}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
   paths["/api/v1/candidates/{id}/cvs"] = {
-    get: {
-      summary: "List private CV references",
-      description:
-        "Requires cvs:read; returns {data,pagination} with the full total. Storage keys and object versions are not exposed.",
-      parameters: [
-        ...parameters,
-        {
-          name: "id",
-          in: "path",
-          required: true,
-          schema: { type: "string", format: "uuid" },
-        },
-        {
-          name: "page",
-          in: "query",
-          schema: { type: "integer", minimum: 1, default: 1 },
-        },
-        {
-          name: "pageSize",
-          in: "query",
-          schema: { type: "integer", minimum: 1, maximum: 100, default: 30 },
-        },
-      ],
-      responses,
-    },
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "List private CV references",
+        description:
+          "Requires cvs:read; returns {data,pagination} with the full total. Storage keys and object versions are not exposed.",
+      },
+      { "200": { description: "{data: CV references, pagination}." } },
+      {
+        params: [
+          idParameter,
+          {
+            name: "page",
+            in: "query",
+            schema: { type: "integer", minimum: 1, default: 1 },
+          },
+          {
+            name: "pageSize",
+            in: "query",
+            schema: { type: "integer", minimum: 1, maximum: 100, default: 30 },
+          },
+        ],
+      },
+    ),
   };
   paths["/api/v1/candidates/{id}/cvs/uploads"] = {
-    post: {
-      summary: "Reserve a direct private S3 CV upload",
-      description:
-        "Requires cvs:write. Upload bytes to returned upload.url using multipart form fields plus file, then complete the upload. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API.",
-      parameters: [
-        ...parameters,
-        {
-          name: "id",
-          in: "path",
-          required: true,
-          schema: { type: "string", format: "uuid" },
-        },
-      ],
-      requestBody: {
-        required: true,
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              required: [
-                "originalName",
-                "mimeType",
-                "sizeBytes",
-                "clientUploadId",
-              ],
-              properties: {
-                originalName: { type: "string", maxLength: 180 },
-                mimeType: { type: "string", maxLength: 150 },
-                sizeBytes: { type: "integer", minimum: 1, maximum: 10485760 },
-                clientUploadId: { type: "string", format: "uuid" },
-                legacySourceId: {
-                  type: "string",
-                  description: "Imports only.",
-                },
-                sourcePath: {
-                  type: "string",
-                  description:
-                    "Imports only; original relative source metadata.",
-                },
+    post: operation(
+      ["cvs:write"],
+      {
+        summary: "Reserve a direct private S3 CV upload",
+        description:
+          "Requires cvs:write. Upload bytes to returned upload.url using multipart form fields plus file, then complete the upload. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "originalName",
+              "mimeType",
+              "sizeBytes",
+              "clientUploadId",
+            ],
+            properties: {
+              originalName: { type: "string", maxLength: 180 },
+              mimeType: { type: "string", maxLength: 150 },
+              sizeBytes: { type: "integer", minimum: 1, maximum: 10485760 },
+              clientUploadId: { type: "string", format: "uuid" },
+              legacySourceId: {
+                type: "string",
+                description: "Imports only.",
+              },
+              sourcePath: {
+                type: "string",
+                description: "Imports only; original relative source metadata.",
               },
             },
           },
-        },
+          {
+            originalName: "fictional-cv.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 48213,
+            clientUploadId: exampleIds.parent,
+          },
+        ),
       },
-      responses,
-    },
+      { "201": { description: "{data: CV reference, upload}." } },
+      { params: [idParameter] },
+    ),
   };
   paths["/api/v1/cvs/uploads/{id}/complete"] = {
-    post: {
-      summary: "Validate uploaded immutable CV version",
-      description:
-        "Requires cvs:write. Idempotent. Returns a ready reference only after size/type/format and version checks.",
-      parameters: [
-        ...parameters,
-        {
-          name: "id",
-          in: "path",
-          required: true,
-          schema: { type: "string", format: "uuid" },
-        },
-      ],
-      responses,
-    },
+    post: operation(
+      ["cvs:write"],
+      {
+        summary: "Validate uploaded immutable CV version",
+        description:
+          "Requires cvs:write. Idempotent. Returns a ready reference only after size/type/format and version checks.",
+      },
+      { "200": { description: "{data: CV reference}." } },
+      { params: [idParameter] },
+    ),
   };
   paths["/api/v1/cvs/{id}/download"] = {
-    get: {
-      summary: "Get a short-lived private CV download",
-      description:
-        "Requires cvs:read. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
-      parameters: [
-        ...parameters,
-        {
-          name: "id",
-          in: "path",
-          required: true,
-          schema: { type: "string", format: "uuid" },
-        },
-      ],
-      responses,
-    },
-  };
-  for (const name of [
-    "overview",
-    "analytics",
-    "activity",
-    "notifications",
-    "search",
-  ])
-    paths[`/api/v1/${name}`] = {
-      get: {
-        summary: `Read ${name}`,
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "Get a short-lived private CV download",
         description:
-          "Team-scoped factual data; analytics documents observed-history limits.",
-        parameters,
-        responses,
+          "Requires cvs:read. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
       },
-    };
+      { "200": { description: "{url, expiresAt}." } },
+      { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/overview"] = {
+    get: operation(
+      ["candidates:read", "recruitment:read"],
+      {
+        summary: "Read the team overview",
+        description:
+          "Requires candidates:read and recruitment:read. Team-scoped factual counts.",
+      },
+      { "200": { description: "Overview counts and lists." } },
+    ),
+  };
+  paths["/api/v1/analytics"] = {
+    get: operation(
+      ["candidates:read", "recruitment:read"],
+      {
+        summary: "Read analytics",
+        description:
+          "Requires candidates:read and recruitment:read. Documents observed-history limits.",
+      },
+      { "200": { description: "Analytics for the date range." } },
+      {
+        params: ["from", "to"].map((name) => ({
+          name,
+          in: "query",
+          schema: { type: "string", format: "date" },
+        })),
+      },
+    ),
+  };
+  paths["/api/v1/activity"] = {
+    get: operation(
+      ["recruitment:read"],
+      {
+        summary: "Read team activity",
+        description:
+          "Requires recruitment:read. Candidate activity is limited to callers with candidates:read.",
+      },
+      { "200": { description: "{data, pagination}." } },
+      {
+        params: ["page", "pageSize", "recordId", "search", "kind"].map(
+          (name) => ({ name, in: "query", schema: { type: "string" } }),
+        ),
+      },
+    ),
+  };
+  paths["/api/v1/search"] = {
+    get: operation(
+      [],
+      {
+        summary: "Search the workspace",
+        description:
+          "No fixed scope: each group is included only when the caller can read it (candidates:read or recruitment:read).",
+      },
+      { "200": { description: "{groups, total, limited, data}." } },
+      { params: [{ name: "q", in: "query", schema: { type: "string" } }] },
+    ),
+  };
   paths["/api/v1/notifications"] = {
-    get: {
-      summary: "Read personal reminders",
-      description:
-        "Requires recruitment:read. Returns bounded unread-first reminders, full total and unread count.",
-      parameters,
-      responses,
-    },
-    post: {
-      summary: "Mark visible genuine reminders read",
-      description:
-        "Token clients need recruitment:read and recruitment:write. Human viewers can mark their own reminders. Keys must identify current genuine reminders for the selected team.",
-      parameters,
-      requestBody: {
-        required: true,
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              required: ["keys"],
-              additionalProperties: false,
-              properties: {
-                keys: {
-                  type: "array",
-                  maxItems: 500,
-                  items: { type: "string", maxLength: 300 },
+    get: operation(
+      ["recruitment:read"],
+      {
+        summary: "Read personal reminders",
+        description:
+          "Requires recruitment:read. Returns bounded unread-first reminders, full total and unread count.",
+      },
+      {
+        "200": {
+          description: "Up to 500 reminders, unread first.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["data", "total", "limited", "unread", "unreadCount"],
+                properties: {
+                  data: { type: "array", items: { type: "object" } },
+                  total: { type: "integer" },
+                  limited: {
+                    type: "boolean",
+                    description: "True when total exceeds data.length.",
+                  },
+                  unread: { type: "integer" },
+                  unreadCount: {
+                    type: "integer",
+                    description: "Same as unread.",
+                  },
                 },
               },
             },
           },
         },
       },
-      responses,
+    ),
+    post: operation(
+      ["recruitment:read", "recruitment:write"],
+      {
+        summary: "Mark visible genuine reminders read",
+        description:
+          "Token clients need recruitment:read and recruitment:write. Human viewers can mark their own reminders. Keys must identify current genuine reminders for the selected team.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["keys"],
+            additionalProperties: false,
+            properties: {
+              keys: {
+                type: "array",
+                maxItems: 500,
+                items: { type: "string", maxLength: 300 },
+              },
+            },
+          },
+          { keys: [`task:${exampleIds.parent}:2026-12-01`] },
+        ),
+      },
+      {
+        "200": {
+          description: "Number of reminders newly marked read.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["updated"],
+                properties: { updated: { type: "integer" } },
+              },
+            },
+          },
+        },
+      },
+    ),
+  };
+  paths["/api/openapi.json"] = {
+    get: {
+      summary: "Read this OpenAPI document",
+      security: [],
+      "x-required-scopes": [],
+      responses: { "200": { description: "OpenAPI 3.1 document." } },
+    },
+  };
+  const authDetails = {
+    security: [],
+    "x-required-scopes": [],
+    description:
+      "Better Auth interactive sign-in and session flows for the web application; not part of the token API. Responses generated by Better Auth itself use its own format.",
+    parameters: [
+      {
+        name: "path",
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+        description: "Better Auth endpoint path, for example sign-in/email.",
+      },
+    ],
+  };
+  paths["/api/auth/{path}"] = {
+    get: {
+      summary: "Better Auth session flows",
+      ...authDetails,
+      responses: {
+        "200": { description: "Better Auth response." },
+        "503": errors["503"],
+      },
+    },
+    post: {
+      summary: "Better Auth sign-in flows",
+      ...authDetails,
+      requestBody: jsonBody(
+        { type: "object" },
+        {
+          email: "recruiter@example.test",
+          password: "fictional-example-password",
+        },
+      ),
+      responses: {
+        "200": { description: "Better Auth response." },
+        "413": errors["413"],
+        "503": errors["503"],
+      },
     },
   };
   return Response.json(
@@ -338,7 +812,7 @@ export function GET() {
         title: "RecruitmentOS API",
         version: "1.0.0",
         description:
-          "Scoped API for authorised integrations. Token creation and team administration require human sign-in and are not exposed to API tokens.",
+          "Scoped API for authorised integrations. Token creation and team administration require human sign-in and are not exposed to API tokens. x-required-scopes lists the scopes a caller must hold; x-session-only operations reject Bearer tokens with 403 session_required. Every error carries error.correlationId and an identical X-Correlation-Id header.",
       },
       servers: [{ url: "/" }],
       security: [{ bearerAuth: [] }],
@@ -351,8 +825,43 @@ export function GET() {
             description:
               "A user/team-scoped token created in Team & settings → API tokens.",
           },
+          sessionCookie: {
+            type: "apiKey",
+            in: "cookie",
+            name: "better-auth.session_token",
+            description: "Interactive web session from signing in.",
+          },
         },
-        schemas,
+        headers: {
+          "X-Correlation-Id": {
+            description:
+              "Unique ID for this error response; equals error.correlationId. Quote it when reporting a failure.",
+            schema: { type: "string", format: "uuid" },
+          },
+          "Retry-After": {
+            description: "Seconds to wait before retrying.",
+            schema: { type: "integer", minimum: 1 },
+          },
+        },
+        schemas: {
+          ...schemas,
+          RecordDto: recordDto,
+          Error: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message", "correlationId"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  correlationId: { type: "string", format: "uuid" },
+                },
+              },
+            },
+          },
+        },
       },
     },
     {

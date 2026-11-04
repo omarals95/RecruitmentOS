@@ -360,6 +360,221 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     expect(concurrent[0].id).toBe(concurrent[1].id);
   });
 
+  it("reconciles expired create keys with the existing record and never re-creates", async () => {
+    const payload = { data: { name: "Fictional Expired Key Person" } };
+    const first = await createRecord(
+      owner,
+      "candidates",
+      payload,
+      "fictional-expired-1",
+    );
+    const where = and(
+      eq(idempotency.teamId, owner.teamId),
+      eq(idempotency.operation, "create:candidates"),
+      eq(idempotency.key, "fictional-expired-1"),
+    );
+    const expire = () =>
+      withTeam(owner, (tx) =>
+        tx
+          .update(idempotency)
+          .set({ expiresAt: new Date(Date.now() - 60000) })
+          .where(where),
+      );
+    const candidates = async () =>
+      (
+        await withTeam(owner, (tx) =>
+          tx
+            .select({ total: count() })
+            .from(records)
+            .where(
+              and(
+                eq(records.teamId, owner.teamId),
+                eq(records.kind, "candidate"),
+              ),
+            ),
+        )
+      )[0].total;
+    const audits = async (recordId: string) =>
+      (
+        await withTeam(owner, (tx) =>
+          tx
+            .select({ total: count() })
+            .from(activity)
+            .where(
+              and(
+                eq(activity.teamId, owner.teamId),
+                eq(activity.recordId, recordId),
+              ),
+            ),
+        )
+      )[0].total;
+    await expire();
+    const before = await candidates();
+    const retry = await createRecord(
+      owner,
+      "candidates",
+      payload,
+      "fictional-expired-1",
+    );
+    expect(retry.id).toBe(first.id);
+    expect(await candidates()).toBe(before);
+    expect(await audits(first.id)).toBe(1);
+    const [renewed] = await withTeam(owner, (tx) =>
+      tx.select().from(idempotency).where(where),
+    );
+    expect(renewed.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(renewed.response).toMatchObject({ id: first.id });
+    await expire();
+    await expect(
+      createRecord(
+        owner,
+        "candidates",
+        { data: { name: "Fictional Different Person" } },
+        "fictional-expired-1",
+      ),
+    ).rejects.toMatchObject({ status: 409, code: "idempotency_mismatch" });
+    await withTeam(owner, (tx) =>
+      tx
+        .update(idempotency)
+        .set({
+          response: sql`jsonb_set(response, '{id}', ${JSON.stringify(randomUUID())}::jsonb)`,
+        })
+        .where(where),
+    );
+    await expect(
+      createRecord(owner, "candidates", payload, "fictional-expired-1"),
+    ).rejects.toMatchObject({ status: 409, code: "idempotency_expired" });
+    expect(await candidates()).toBe(before);
+  });
+
+  it("replays bulk assignment keys and reports created versus existing applications", async () => {
+    const first = await candidate("Fictional Bulk Key First");
+    const second = await candidate("Fictional Bulk Key Second");
+    const job = await vacancy("Bulk key vacancy");
+    const earlier = await createRecord(owner, "applications", {
+      candidateId: first.id,
+      vacancyId: job.id,
+      data: {},
+    });
+    const body = { candidateIds: [first.id, second.id], vacancyId: job.id };
+    const result = await bulkApplications(owner, body, "fictional-bulk-1");
+    expect(result).toMatchObject({ created: 1, skipped: 1 });
+    expect(result.data.map((row) => row.candidateId)).toEqual([second.id]);
+    expect(result.existing.map((row) => row.id)).toEqual([earlier.id]);
+    expect(await bulkApplications(owner, body, "fictional-bulk-1")).toEqual(
+      result,
+    );
+    await expect(
+      bulkApplications(
+        owner,
+        { ...body, candidateIds: [second.id] },
+        "fictional-bulk-1",
+      ),
+    ).rejects.toMatchObject({ status: 409, code: "idempotency_mismatch" });
+    const retry = await bulkApplications(owner, body);
+    expect(retry).toMatchObject({ created: 0, skipped: 2, data: [] });
+    expect(retry.existing.map((row) => row.id).sort()).toEqual(
+      [earlier.id, result.data[0].id].sort(),
+    );
+    await withTeam(owner, (tx) =>
+      tx
+        .update(idempotency)
+        .set({ expiresAt: new Date(Date.now() - 60000) })
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.operation, "bulk:applications"),
+            eq(idempotency.key, "fictional-bulk-1"),
+          ),
+        ),
+    );
+    const expired = await bulkApplications(owner, body, "fictional-bulk-1");
+    expect(expired).toMatchObject({ created: 0, skipped: 2 });
+  });
+
+  it("reports only references for existing applications to write tokens without recruitment:read", async () => {
+    const person = await candidate("Fictional Bulk Scope Person");
+    const job = await vacancy("Bulk scope vacancy");
+    const private_ = await createRecord(colleague, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { owner: "Fictional colleague", notes: "Fictional private note" },
+    });
+    const token: Principal = {
+      ...owner,
+      authType: "token",
+      tokenId: randomUUID(),
+      scopes: ["recruitment:write", "candidates:read"],
+    };
+    const result = await bulkApplications(
+      token,
+      { candidateIds: [person.id], vacancyId: job.id },
+      "fictional-bulk-scope",
+    );
+    expect(result).toMatchObject({ created: 0, skipped: 1, data: [] });
+    expect(result.existing).toEqual([
+      {
+        id: private_.id,
+        kind: "application",
+        candidateId: person.id,
+        vacancyId: job.id,
+      },
+    ]);
+    const [stored] = await withTeam(owner, (tx) =>
+      tx
+        .select()
+        .from(idempotency)
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.key, "fictional-bulk-scope"),
+          ),
+        ),
+    );
+    expect(JSON.stringify([result, stored.response])).not.toMatch(
+      /Fictional private note|Fictional colleague/,
+    );
+  });
+
+  it("returns the original snapshot on expired-key retries without the read scope", async () => {
+    const writer: Principal = {
+      ...owner,
+      authType: "token",
+      tokenId: randomUUID(),
+      scopes: ["candidates:write"],
+    };
+    const payload = { data: { name: "Fictional Write Only Person" } };
+    const first = await createRecord(
+      writer,
+      "candidates",
+      payload,
+      "fictional-write-only",
+    );
+    await updateRecord(owner, "candidates", first.id, {
+      version: 1,
+      data: { jobTitle: "Fictional later edit" },
+    });
+    await withTeam(owner, (tx) =>
+      tx
+        .update(idempotency)
+        .set({ expiresAt: new Date(Date.now() - 60000) })
+        .where(
+          and(
+            eq(idempotency.teamId, owner.teamId),
+            eq(idempotency.key, "fictional-write-only"),
+          ),
+        ),
+    );
+    const retry = await createRecord(
+      writer,
+      "candidates",
+      payload,
+      "fictional-write-only",
+    );
+    expect(retry).toEqual(first);
+    expect(JSON.stringify(retry)).not.toContain("Fictional later edit");
+  });
+
   it("rolls back the business record and retry cache when its audit append fails", async () => {
     await expect(
       createRecord(

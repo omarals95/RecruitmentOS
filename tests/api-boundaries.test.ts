@@ -75,4 +75,45 @@ describe("request boundaries", () => {
     expect(await response.text()).not.toContain("secret-password");
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
+  it("adds a fresh correlation ID to every error and logs only a safe 500 category", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ids: string[] = [];
+    try {
+      for (const [error, status] of [
+        [new ApiError(404, "not_found", "Record not found in this team."), 404],
+        [
+          Object.assign(new Error("fictional unique detail"), {
+            code: "23505",
+          }),
+          409,
+        ],
+        [new Error("secret-password database-connection-string"), 500],
+      ] as const) {
+        const response = errorResponse(error);
+        expect(response.status).toBe(status);
+        const header = response.headers.get("x-correlation-id");
+        expect(header).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        const body = await response.json();
+        expect(Object.keys(body.error).sort()).toEqual([
+          "code",
+          "correlationId",
+          "message",
+        ]);
+        expect(body.error.correlationId).toBe(header);
+        ids.push(header!);
+      }
+      expect(new Set(ids).size).toBe(3);
+      expect(logged).toHaveBeenCalledTimes(1);
+      const line = logged.mock.calls[0].join(" ");
+      expect(line).toContain(ids[2]);
+      expect(line).toContain("Error");
+      expect(line).not.toContain("secret-password");
+      expect(line).not.toContain("connection-string");
+      expect(line).not.toContain("fictional unique detail");
+    } finally {
+      logged.mockRestore();
+    }
+  });
 });
