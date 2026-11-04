@@ -1,7 +1,8 @@
 /** Reject roles that own protected objects or can assume a broadly privileged role. */
 export const runtimeRoleSafetyQuery = `
   SELECT (
-    (SELECT count(*) FROM pg_catalog.pg_namespace n WHERE n.nspname IN ('app', 'auth')) <> 2
+    (SELECT count(*) FROM pg_catalog.pg_namespace n
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')) <> 5
     OR
     EXISTS (
       SELECT 1 FROM pg_catalog.pg_roles r
@@ -26,20 +27,27 @@ export const runtimeRoleSafetyQuery = `
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_namespace n
-      WHERE n.nspname IN ('app', 'auth')
-        AND (pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')
-          OR pg_catalog.has_schema_privilege(current_user, n.oid, 'CREATE'))
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
+        AND pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')
+    )
+    -- CREATE through any member role, PUBLIC included: NOINHERIT does not stop SET ROLE.
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_namespace n
+      CROSS JOIN pg_catalog.pg_roles r
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
+        AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_class c
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname IN ('app', 'auth')
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
         AND pg_catalog.pg_has_role(current_user, c.relowner, 'MEMBER')
     )
     OR EXISTS (
       SELECT 1 FROM pg_catalog.pg_proc p
       JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname IN ('app', 'auth')
+      WHERE n.nspname IN ('app', 'auth', 'tenant_context', 'db_boundary', 'storage_ledger')
         AND pg_catalog.pg_has_role(current_user, p.proowner, 'MEMBER')
     )
     OR NOT EXISTS (
@@ -58,6 +66,35 @@ export const runtimeRoleSafetyQuery = `
         AND (pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE,REFERENCES'))
     )
+    -- No table, column, sequence, function, schema or database privilege WITH GRANT OPTION,
+    -- held directly or through any member role (PUBLIC cannot hold one).
+    OR EXISTS (
+      SELECT 1 FROM (
+        SELECT c.relacl AS acl FROM pg_catalog.pg_class c
+        UNION ALL SELECT a.attacl FROM pg_catalog.pg_attribute a WHERE a.attacl IS NOT NULL
+        UNION ALL SELECT p.proacl FROM pg_catalog.pg_proc p
+        UNION ALL SELECT n.nspacl FROM pg_catalog.pg_namespace n
+        UNION ALL SELECT d.datacl FROM pg_catalog.pg_database d
+      ) o
+      CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) x
+      WHERE x.is_grantable
+        AND CASE WHEN x.grantee = 0 THEN false
+          ELSE pg_catalog.pg_has_role(current_user, x.grantee, 'MEMBER') END
+    )
     OR pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
+    -- The runtime template closes the database and the public schema to PUBLIC.
+    OR pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT')
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_roles r
+      WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'TEMPORARY')
+    )
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_namespace n
+      CROSS JOIN pg_catalog.pg_roles r
+      WHERE n.nspname = 'public'
+        AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+        AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'USAGE, CREATE')
+    )
   ) AS unsafe
 `;
