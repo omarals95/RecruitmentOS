@@ -122,6 +122,8 @@ export async function createSplitRoleDb() {
   await client.exec(`
     CREATE ROLE ${splitRoles.owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
     DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${splitRoles.owner}', current_database()); END $$;
+    -- The runbook's operator step: no other database is open to PUBLIC.
+    REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;
     SET SESSION AUTHORIZATION ${splitRoles.owner};
   `);
   await applyMigrations(client);

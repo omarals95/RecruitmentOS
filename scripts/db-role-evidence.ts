@@ -7,7 +7,8 @@
  * - It opens one connection per URL with the runtime TLS rule and runs every query inside a
  *   READ ONLY transaction that is rolled back.
  * - It compares each role's effective privileges with the grants the template declares and
- *   lists every difference as drift.
+ *   lists every difference as drift. Grant options, parameter, type, language, foreign-data
+ *   wrapper and server grants, per-role settings and CONNECT on any other database also drift.
  * - It prints one JSON document and never a password, URL, host, port, the marker value, row
  *   data or driver error text.
  * - Exit codes: 0 every check passes and nothing drifts; 1 a check fails, a privilege drifts, or
@@ -62,6 +63,14 @@ export type RoleEvidence = {
   defaultPrivileges: string[];
   /** What PUBLIC holds that the template revokes; every value should be false. */
   publicPrivileges: Record<string, boolean>;
+  /** Every database in the cluster: whether this role holds CONNECT and whether it accepts connections. */
+  databases: Record<string, { connect: boolean; acceptsConnections: boolean }>;
+  /** Table, column, sequence, function, schema and database privileges held WITH GRANT OPTION. */
+  grantOptions: string[];
+  /** Parameter, type, language, foreign-data wrapper and server grants beyond the PostgreSQL defaults. */
+  otherPrivileges: string[];
+  /** Settings stored for this role (pg_db_role_setting), by name only. */
+  roleSettings: string[];
   /** Every difference from the template's grant matrix. */
   drift: string[];
   checks: Record<string, boolean>;
@@ -165,6 +174,14 @@ function templateDrift(
   );
   for (const [privilege, held] of Object.entries(evidence.publicPrivileges))
     if (held) drift.push(`PUBLIC holds ${privilege}`);
+  for (const [name, { connect, acceptsConnections }] of Object.entries(
+    evidence.databases,
+  ))
+    if (name !== evidence.database && connect && acceptsConnections)
+      drift.push(`can connect to database ${name}`);
+  drift.push(...evidence.grantOptions.map((entry) => `extra ${entry}`));
+  drift.push(...evidence.otherPrivileges.map((entry) => `extra ${entry}`));
+  drift.push(...evidence.roleSettings.map((entry) => `role setting ${entry}`));
   return drift;
 }
 
@@ -311,6 +328,89 @@ export async function collectRoleEvidence(
               WHERE d.defaclnamespace = 0 AND d.defaclobjtype = 'f'), true) AS "futureFunctionExecute"`,
       )
     ).rows[0] as Record<string, boolean>;
+    const databases = Object.fromEntries(
+      (
+        await client.query(
+          `SELECT d.datname::text AS name, pg_catalog.has_database_privilege(current_user, d.oid, 'CONNECT') AS connect,
+            d.datallowconn AS "acceptsConnections"
+          FROM pg_catalog.pg_database d ORDER BY 1`,
+        )
+      ).rows.map((row) => [
+        row.name as string,
+        {
+          connect: row.connect as boolean,
+          acceptsConnections: row.acceptsConnections as boolean,
+        },
+      ]),
+    );
+    // PUBLIC cannot hold a grant option, so only the role and the roles it is a member of count.
+    const grantOptions = (
+      await client.query(
+        `SELECT DISTINCT a.privilege_type || ' WITH GRANT OPTION on '
+            || pg_catalog.pg_describe_object(o.classid, o.objid, o.objsubid) AS entry
+          FROM (SELECT 'pg_catalog.pg_class'::pg_catalog.regclass AS classid, c.oid AS objid, 0 AS objsubid, c.relacl AS acl
+              FROM pg_catalog.pg_class c
+            UNION ALL SELECT 'pg_catalog.pg_class'::pg_catalog.regclass, a.attrelid, a.attnum, a.attacl
+              FROM pg_catalog.pg_attribute a WHERE a.attacl IS NOT NULL
+            UNION ALL SELECT 'pg_catalog.pg_proc'::pg_catalog.regclass, p.oid, 0, p.proacl FROM pg_catalog.pg_proc p
+            UNION ALL SELECT 'pg_catalog.pg_namespace'::pg_catalog.regclass, n.oid, 0, n.nspacl FROM pg_catalog.pg_namespace n
+            UNION ALL SELECT 'pg_catalog.pg_database'::pg_catalog.regclass, d.oid, 0, d.datacl FROM pg_catalog.pg_database d) o
+          CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) a
+          WHERE a.is_grantable
+            AND CASE WHEN a.grantee = 0 THEN false ELSE pg_catalog.pg_has_role(current_user, a.grantee, 'MEMBER') END
+          ORDER BY 1`,
+      )
+    ).rows.map((row) => row.entry as string);
+    // Every type and trusted language grants USAGE to PUBLIC by default; nothing else is granted by default.
+    const grantee = `CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END`;
+    const otherPrivileges = (
+      await client.query(
+        `SELECT DISTINCT a.privilege_type || ' on ' || pg_catalog.pg_describe_object(o.classid, o.oid, 0)
+            || ' to ' || ${grantee} AS entry
+          FROM (SELECT 'pg_catalog.pg_type'::pg_catalog.regclass AS classid, t.oid, t.typacl AS acl, true AS public_default
+              FROM pg_catalog.pg_type t
+            UNION ALL SELECT 'pg_catalog.pg_language'::pg_catalog.regclass, l.oid, l.lanacl, true FROM pg_catalog.pg_language l
+            UNION ALL SELECT 'pg_catalog.pg_foreign_data_wrapper'::pg_catalog.regclass, w.oid, w.fdwacl, false
+              FROM pg_catalog.pg_foreign_data_wrapper w
+            UNION ALL SELECT 'pg_catalog.pg_foreign_server'::pg_catalog.regclass, s.oid, s.srvacl, false
+              FROM pg_catalog.pg_foreign_server s) o
+          CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) a
+          WHERE CASE WHEN a.grantee = 0 THEN NOT o.public_default
+            ELSE pg_catalog.pg_has_role(current_user, a.grantee, 'MEMBER') END
+          ORDER BY 1`,
+      )
+    ).rows.map((row) => row.entry as string);
+    // Parameter privileges exist from PostgreSQL 15; by default nobody but a superuser holds any.
+    if (
+      (
+        await client.query(
+          "SELECT pg_catalog.to_regclass('pg_catalog.pg_parameter_acl') IS NOT NULL AS present",
+        )
+      ).rows[0].present === true
+    )
+      otherPrivileges.push(
+        ...(
+          await client.query(
+            `SELECT DISTINCT a.privilege_type || ' on parameter ' || p.parname || ' to ' || ${grantee} AS entry
+              FROM pg_catalog.pg_parameter_acl p
+              CROSS JOIN LATERAL pg_catalog.aclexplode(p.paracl) a
+              WHERE CASE WHEN a.grantee = 0 THEN true
+                ELSE pg_catalog.pg_has_role(current_user, a.grantee, 'MEMBER') END
+              ORDER BY 1`,
+          )
+        ).rows.map((row) => row.entry as string),
+      );
+    const roleSettings = (
+      await client.query(
+        `SELECT pg_catalog.split_part(c.setting, '=', 1) || ' in '
+            || CASE WHEN s.setdatabase = 0 THEN 'every database' ELSE 'database ' || d.datname::text END AS entry
+          FROM pg_catalog.pg_db_role_setting s
+          CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) c(setting)
+          LEFT JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase
+          WHERE s.setrole = (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user)
+          ORDER BY 1`,
+      )
+    ).rows.map((row) => row.entry as string);
     const collected = {
       kind,
       currentUser: principal.current as string,
@@ -337,6 +437,10 @@ export async function collectRoleEvidence(
       execute,
       defaultPrivileges,
       publicPrivileges,
+      databases,
+      grantOptions,
+      otherPrivileges,
+      roleSettings,
     };
     const role = runtimeRoleNames[kind];
     const drift = templateDrift(

@@ -246,6 +246,12 @@ describe("split runtime role template", () => {
       "GRANT SELECT ON TABLE app.records TO fictional_other_role;",
       "GRANT USAGE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_data;",
       "GRANT recruitmentos_identity TO recruitmentos_data;",
+      "GRANT SELECT ON TABLE app.records TO recruitmentos_data WITH GRANT OPTION;",
+      "GRANT SET ON PARAMETER session_replication_role TO recruitmentos_data;",
+      "GRANT USAGE ON TYPE app.fictional_type TO recruitmentos_data;",
+      "GRANT USAGE ON LANGUAGE plpgsql TO recruitmentos_identity;",
+      "GRANT USAGE ON FOREIGN SERVER fictional_server TO recruitmentos_data;",
+      "ALTER ROLE recruitmentos_data SET work_mem = '8MB';",
     ])
       expect(
         () => templateGrantMatrix(template.replace("COMMIT;", unreadable)),
@@ -271,6 +277,15 @@ describe("split runtime role template", () => {
       });
       expect(evidence.defaultPrivileges, kind).toEqual([]);
       expect(evidence.publicPrivileges, kind).toEqual(closedToPublic);
+      // template0 keeps PUBLIC CONNECT but accepts no connections.
+      expect(evidence.databases, kind).toEqual({
+        postgres: { connect: true, acceptsConnections: true },
+        template0: { connect: true, acceptsConnections: false },
+        template1: { connect: false, acceptsConnections: true },
+      });
+      expect(evidence.grantOptions, kind).toEqual([]);
+      expect(evidence.otherPrivileges, kind).toEqual([]);
+      expect(evidence.roleSettings, kind).toEqual([]);
       expect(evidence.tablePrivileges, kind).toEqual(expected.tablePrivileges);
       expect(evidence.sequencePrivileges, kind).toEqual({});
       expect(evidence.columnPrivileges, kind).toEqual({});
@@ -868,6 +883,145 @@ describe("db-role-evidence template drift", () => {
       setup: "ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC",
       data: ["PUBLIC holds futureFunctionExecute"],
       identity: ["PUBLIC holds futureFunctionExecute"],
+    },
+    {
+      name: "a table privilege WITH GRANT OPTION",
+      as: "owner",
+      setup:
+        "GRANT SELECT ON app.records TO recruitmentos_data WITH GRANT OPTION",
+      data: ["extra SELECT WITH GRANT OPTION on table app.records"],
+    },
+    {
+      name: "a column privilege WITH GRANT OPTION",
+      as: "owner",
+      setup:
+        "GRANT SELECT (id) ON app.records TO recruitmentos_data WITH GRANT OPTION",
+      data: [
+        "extra SELECT WITH GRANT OPTION on column id of table app.records",
+      ],
+    },
+    {
+      name: "a sequence privilege WITH GRANT OPTION",
+      as: "owner",
+      setup: `CREATE SEQUENCE app.drift_probe;
+        GRANT USAGE ON SEQUENCE app.drift_probe TO recruitmentos_data WITH GRANT OPTION`,
+      cleanup: "DROP SEQUENCE app.drift_probe",
+      data: [
+        "extra USAGE on sequence app.drift_probe",
+        "extra USAGE WITH GRANT OPTION on sequence app.drift_probe",
+      ],
+    },
+    {
+      name: "a function privilege WITH GRANT OPTION",
+      as: "owner",
+      setup:
+        "GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO recruitmentos_identity WITH GRANT OPTION",
+      identity: [
+        "extra EXECUTE WITH GRANT OPTION on function tenant_context.install(text,text)",
+      ],
+    },
+    {
+      name: "a schema privilege WITH GRANT OPTION",
+      as: "owner",
+      setup:
+        "GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_data WITH GRANT OPTION",
+      data: ["extra USAGE WITH GRANT OPTION on schema db_boundary"],
+    },
+    {
+      name: "a database privilege WITH GRANT OPTION",
+      as: "owner",
+      setup: onDatabase(
+        "GRANT CONNECT ON DATABASE %I TO recruitmentos_identity WITH GRANT OPTION",
+      ),
+      identity: ["extra CONNECT WITH GRANT OPTION on database postgres"],
+    },
+    {
+      name: "SET on session_replication_role",
+      as: "superuser",
+      setup:
+        "GRANT SET ON PARAMETER session_replication_role TO recruitmentos_data",
+      cleanup:
+        "REVOKE SET ON PARAMETER session_replication_role FROM recruitmentos_data",
+      data: [
+        "extra SET on parameter session_replication_role to recruitmentos_data",
+      ],
+    },
+    {
+      name: "ALTER SYSTEM on a parameter for PUBLIC",
+      as: "superuser",
+      setup: "GRANT ALTER SYSTEM ON PARAMETER work_mem TO PUBLIC",
+      cleanup: "REVOKE ALTER SYSTEM ON PARAMETER work_mem FROM PUBLIC",
+      data: ["extra ALTER SYSTEM on parameter work_mem to PUBLIC"],
+      identity: ["extra ALTER SYSTEM on parameter work_mem to PUBLIC"],
+    },
+    {
+      name: "a per-role setting",
+      as: "superuser",
+      setup: "ALTER ROLE recruitmentos_identity SET statement_timeout TO 5000",
+      cleanup: "ALTER ROLE recruitmentos_identity RESET ALL",
+      identity: ["role setting statement_timeout in every database"],
+    },
+    {
+      name: "a per-role setting in this database",
+      as: "superuser",
+      setup: onDatabase(
+        "ALTER ROLE recruitmentos_data IN DATABASE %I SET search_path TO app",
+      ),
+      cleanup: onDatabase(
+        "ALTER ROLE recruitmentos_data IN DATABASE %I RESET ALL",
+      ),
+      data: ["role setting search_path in database postgres"],
+    },
+    {
+      name: "USAGE on a type",
+      as: "owner",
+      setup: `CREATE TYPE app.drift_type AS ENUM ('fictional');
+        GRANT USAGE ON TYPE app.drift_type TO recruitmentos_data`,
+      cleanup: "DROP TYPE app.drift_type",
+      data: ["extra USAGE on type app.drift_type to recruitmentos_data"],
+    },
+    {
+      name: "USAGE on a language",
+      as: "superuser",
+      setup: "GRANT USAGE ON LANGUAGE plpgsql TO recruitmentos_identity",
+      cleanup: "REVOKE USAGE ON LANGUAGE plpgsql FROM recruitmentos_identity",
+      identity: ["extra USAGE on language plpgsql to recruitmentos_identity"],
+    },
+    {
+      name: "USAGE on a foreign-data wrapper",
+      as: "superuser",
+      setup: `CREATE FOREIGN DATA WRAPPER drift_fdw;
+        GRANT USAGE ON FOREIGN DATA WRAPPER drift_fdw TO recruitmentos_data`,
+      cleanup: "DROP FOREIGN DATA WRAPPER drift_fdw",
+      data: [
+        "extra USAGE on foreign-data wrapper drift_fdw to recruitmentos_data",
+      ],
+    },
+    {
+      name: "PUBLIC USAGE on a foreign server",
+      as: "superuser",
+      setup: `CREATE FOREIGN DATA WRAPPER drift_fdw;
+        CREATE SERVER drift_server FOREIGN DATA WRAPPER drift_fdw;
+        GRANT USAGE ON FOREIGN SERVER drift_server TO PUBLIC`,
+      cleanup: "DROP FOREIGN DATA WRAPPER drift_fdw CASCADE",
+      data: ["extra USAGE on server drift_server to PUBLIC"],
+      identity: ["extra USAGE on server drift_server to PUBLIC"],
+    },
+    {
+      name: "PUBLIC CONNECT on another database",
+      as: "superuser",
+      setup: "GRANT CONNECT ON DATABASE template1 TO PUBLIC",
+      cleanup: "REVOKE CONNECT ON DATABASE template1 FROM PUBLIC",
+      data: ["can connect to database template1"],
+      identity: ["can connect to database template1"],
+    },
+    {
+      name: "a runtime role's CONNECT on another database",
+      as: "superuser",
+      setup: "GRANT CONNECT ON DATABASE template1 TO recruitmentos_identity",
+      cleanup:
+        "REVOKE CONNECT ON DATABASE template1 FROM recruitmentos_identity",
+      identity: ["can connect to database template1"],
     },
   ];
   for (const drift of cases)

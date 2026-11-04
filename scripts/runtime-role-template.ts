@@ -51,12 +51,15 @@ function unreadable(reason: string): never {
 
 /**
  * Every role the template creates, with the attributes it creates them with and every privilege it
- * grants them. A GRANT or CREATE ROLE this parser cannot read is an error, never skipped.
+ * grants them. A GRANT or CREATE ROLE this parser cannot read, such as WITH GRANT OPTION or a
+ * parameter, type or language grant, is an error, never skipped; so is ALTER ROLE or DATABASE.
  */
 export function templateGrantMatrix(
   template: string,
 ): Record<string, RoleMatrix> {
   const sql = template.replace(/--[^\n]*/g, "");
+  if (/\bALTER (ROLE|USER|DATABASE)\b/.test(sql))
+    unreadable("a role or database setting");
   const matrix: Record<string, RoleMatrix> = {};
   const roles = [...sql.matchAll(/\bCREATE ROLE (\w+) ([A-Z ]+);/g)];
   if (roles.length !== (sql.match(/\bCREATE ROLE\b/g) ?? []).length)
