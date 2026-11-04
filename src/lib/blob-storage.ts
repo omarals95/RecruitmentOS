@@ -9,13 +9,18 @@ import type { StorageBinding } from "./storage.ts";
 
 const BLOB_API_ORIGIN = "https://vercel.com";
 const MAX_BLOB_READ_MS = 15_000;
+/** Per server instance; placeholders until hosted measurement. */
+export const MAX_BLOB_READS_PER_TEAM = 2;
+export const MAX_BLOB_READS_PER_STORE = 8;
+const activeTeamReads = new Map<string, number>();
+const activeStoreReads = new Map<string, number>();
 
 export type BlobObject = {
   sizeBytes: number;
   mimeType: string;
   stream: AsyncIterable<Uint8Array>;
 };
-/** Provider-neutral seam. No real client exists until live provider tests pass. */
+/** Provider-neutral seam; only tests and the live verification script build a real client. */
 export interface BlobClient {
   readonly signer: BlobTicketSigner;
   /** Opens a private object by pathname, uncached; resolves null when it does not exist. */
@@ -25,6 +30,7 @@ export interface BlobClient {
   ): Promise<BlobObject | null>;
 }
 type BlobReservation = {
+  teamId: string;
   objectKey: string;
   originalName: string;
   mimeType: string;
@@ -32,6 +38,7 @@ type BlobReservation = {
   expiresAt: Date;
 };
 type BlobReference = {
+  teamId: string;
   objectKey: string;
   mimeType: string;
   sizeBytes: number;
@@ -58,7 +65,39 @@ export interface BlobGateway {
   ): Promise<Buffer | null>;
 }
 
-/** One request-scoped controller and deadline cover opening the object and reading it. */
+/** Fails fast instead of queueing; the caller keeps its reference retryable. */
+function reserveRead(store: string, teamId: string): () => void {
+  const team = activeTeamReads.get(teamId) ?? 0;
+  const total = activeStoreReads.get(store) ?? 0;
+  if (team >= MAX_BLOB_READS_PER_TEAM || total >= MAX_BLOB_READS_PER_STORE)
+    throw new Error("Too many private Blob reads are in progress.");
+  activeTeamReads.set(teamId, team + 1);
+  activeStoreReads.set(store, total + 1);
+  return () => {
+    const teamLeft = (activeTeamReads.get(teamId) ?? 1) - 1;
+    const storeLeft = (activeStoreReads.get(store) ?? 1) - 1;
+    if (teamLeft > 0) activeTeamReads.set(teamId, teamLeft);
+    else activeTeamReads.delete(teamId);
+    if (storeLeft > 0) activeStoreReads.set(store, storeLeft);
+    else activeStoreReads.delete(store);
+  };
+}
+
+/** Fire-and-forget: a provider that ignores cancellation is never awaited. */
+function closeObject(object: BlobObject): void {
+  try {
+    void Promise.resolve(
+      object.stream[Symbol.asyncIterator]().return?.(),
+    ).catch(() => {});
+  } catch {
+    // A stream that is already locked or closed needs nothing more.
+  }
+}
+
+/**
+ * One request-scoped controller and deadline cover opening the object and reading it.
+ * Every opened stream is read to the end or closed, including one that opens late.
+ */
 async function withObject<T>(
   client: BlobClient,
   pathname: string,
@@ -93,6 +132,8 @@ async function withObject<T>(
         .then(
           (value) => {
             controller.signal.removeEventListener("abort", onAbort);
+            // The deadline already rejected this read; nobody will consume the stream.
+            if (value && controller.signal.aborted) closeObject(value);
             resolve(value);
           },
           () => {
@@ -103,8 +144,14 @@ async function withObject<T>(
         );
     });
     if (!object) return null;
-    // The read gets the full deadline; the outer timer always fires first and marks expiry.
-    return await read(object, controller);
+    try {
+      // The read gets the full deadline; the outer timer always fires first and marks expiry.
+      return await read(object, controller);
+    } catch (error) {
+      // Covers metadata mismatches that throw before the stream is read.
+      closeObject(object);
+      throw error;
+    }
   } catch (error) {
     controller.abort();
     // A cancelled read is a transport failure, never a content rejection.
@@ -118,7 +165,7 @@ async function withObject<T>(
   }
 }
 
-/** Built only by tests with a fake client; getStorage never returns a Blob gateway. */
+/** Built only by tests and the live verification script; getStorage never returns a Blob gateway. */
 export function createBlobGateway(
   binding: StorageBinding,
   client: BlobClient,
@@ -146,43 +193,58 @@ export function createBlobGateway(
         throw new Error("Private Blob upload ticket could not be issued.");
       }
     },
-    inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
-      return withObject(
-        client,
-        reservation.objectKey,
-        timeoutMs,
-        (object, controller) =>
-          inspectBlobUpload(
-            reservation,
-            { mimeType: object.mimeType, sizeBytes: object.sizeBytes },
-            object.stream,
-            { controller, timeoutMs },
-          ),
-      );
+    async inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
+      const release = reserveRead(binding.store, reservation.teamId);
+      try {
+        return await withObject(
+          client,
+          reservation.objectKey,
+          timeoutMs,
+          (object, controller) =>
+            inspectBlobUpload(
+              reservation,
+              { mimeType: object.mimeType, sizeBytes: object.sizeBytes },
+              object.stream,
+              { controller, timeoutMs },
+            ),
+        );
+      } finally {
+        release();
+      }
     },
-    readVerifiedSlice(reference, offset, length, timeoutMs = MAX_BLOB_READ_MS) {
-      return withObject(
-        client,
-        reference.objectKey,
-        timeoutMs,
-        async (object, controller) => {
-          if (
-            object.sizeBytes !== reference.sizeBytes ||
-            object.mimeType !== reference.mimeType
-          )
-            throw new CvValidationError(
-              "Stored document differs from its validated reference.",
+    async readVerifiedSlice(
+      reference,
+      offset,
+      length,
+      timeoutMs = MAX_BLOB_READ_MS,
+    ) {
+      const release = reserveRead(binding.store, reference.teamId);
+      try {
+        return await withObject(
+          client,
+          reference.objectKey,
+          timeoutMs,
+          async (object, controller) => {
+            if (
+              object.sizeBytes !== reference.sizeBytes ||
+              object.mimeType !== reference.mimeType
+            )
+              throw new CvValidationError(
+                "Stored document differs from its validated reference.",
+              );
+            return readVerifiedBlobSlice(
+              object.stream,
+              reference.sizeBytes,
+              reference.sha256,
+              offset,
+              length,
+              { controller, timeoutMs },
             );
-          return readVerifiedBlobSlice(
-            object.stream,
-            reference.sizeBytes,
-            reference.sha256,
-            offset,
-            length,
-            { controller, timeoutMs },
-          );
-        },
-      );
+          },
+        );
+      } finally {
+        release();
+      }
     },
   };
 }

@@ -810,6 +810,7 @@ export async function getCvChunk(
       storage ?? (await storageClient()),
     ).readVerifiedSlice(
       {
+        teamId: row.teamId,
         objectKey: row.objectKey,
         mimeType: row.mimeType,
         sizeBytes: manifest.sizeBytes,

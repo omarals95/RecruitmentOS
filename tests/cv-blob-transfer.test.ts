@@ -28,8 +28,6 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 });
 
 import { createToken, revokeToken } from "@/lib/api-tokens";
-import { createBlobGateway, type BlobClient } from "@/lib/blob-storage";
-import type { BlobTicketSigner } from "@/lib/blob-put-ticket";
 import {
   beginCvUpload,
   completeCvUpload,
@@ -47,19 +45,19 @@ import { GET as downloadRoute } from "@/app/api/v1/cvs/[id]/download/route";
 import { GET as manifestRoute } from "@/app/api/v1/cvs/[id]/manifest/route";
 import { GET as chunkRoute } from "@/app/api/v1/cvs/[id]/chunks/route";
 import { createTestDb, seedIdentity } from "./helpers/db";
+import {
+  blobBinding,
+  fakeBlob,
+  signingSecret,
+  type StoredObject,
+} from "./helpers/fake-blob";
 
-// Fictional data only: synthetic PDFs, a synthetic signer and an in-memory object map.
-const blobBinding: StorageBinding = {
-  provider: "blob",
-  environment: "development",
-  store: "store_fictional",
-};
+// Fictional data only: synthetic PDFs and the shared fake Blob client.
 const s3Binding: StorageBinding = {
   provider: "s3",
   environment: "development",
   store: "fictional-s3",
 };
-const signingSecret = "fictional-client-signing-secret";
 const MiB = 1024 * 1024;
 function fictionalPdf(size: number, seed = 7) {
   const bytes = Buffer.alloc(size);
@@ -70,79 +68,6 @@ function fictionalPdf(size: number, seed = 7) {
 const sha256 = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
 
-type StoredObject = {
-  bytes: Buffer;
-  mimeType: string;
-  reportedSize?: number;
-  stall?: boolean;
-};
-function fakeBlob(binding: StorageBinding = blobBinding) {
-  const objects = new Map<string, StoredObject>();
-  const state = {
-    signs: 0,
-    reads: 0,
-    signals: [] as AbortSignal[],
-    failSigner: false,
-    hangOpen: false,
-  };
-  const signer: BlobTicketSigner = {
-    async issueSignedToken(options) {
-      state.signs++;
-      if (state.failSigner)
-        throw new Error(`provider refused ${signingSecret}`);
-      const scope = {
-        storeId: binding.store.slice(6),
-        pathname: options.pathname,
-        operations: options.operations,
-        validUntil: options.validUntil,
-        maximumSizeInBytes: options.maximumSizeInBytes,
-        allowedContentTypes: options.allowedContentTypes,
-      };
-      return {
-        delegationToken: `${Buffer.from(JSON.stringify(scope)).toString("base64url")}.fictional_hmac`,
-        clientSigningToken: signingSecret,
-        validUntil: options.validUntil,
-      };
-    },
-    async presignUrl(token, options) {
-      const url = new URL("https://vercel.com/api/blob/");
-      for (const [key, value] of Object.entries({
-        pathname: options.pathname,
-        "vercel-blob-delegation": token.delegationToken,
-        "vercel-blob-signature": "fictional_signature_0001",
-        "vercel-blob-allowed-content-types": options.allowedContentTypes[0],
-        "vercel-blob-maximum-size-in-bytes": String(options.maximumSizeInBytes),
-        "vercel-blob-add-random-suffix": "false",
-        "vercel-blob-allow-overwrite": "false",
-        "vercel-blob-valid-until": String(options.validUntil),
-      }))
-        url.searchParams.set(key, value);
-      return { presignedUrl: url.toString() };
-    },
-  };
-  const client: BlobClient = {
-    signer,
-    async open(pathname, { cache, signal }) {
-      state.reads++;
-      state.signals.push(signal);
-      expect(cache).toBe("no-store");
-      if (state.hangOpen) return new Promise(() => {});
-      const object = objects.get(pathname);
-      if (!object) return null;
-      const bytes = object.bytes;
-      return {
-        sizeBytes: object.reportedSize ?? bytes.length,
-        mimeType: object.mimeType,
-        stream: (async function* () {
-          if (object.stall) await new Promise(() => {});
-          for (let i = 0; i < bytes.length; i += 65536)
-            yield new Uint8Array(bytes.subarray(i, i + 65536));
-        })(),
-      };
-    },
-  };
-  return { gateway: createBlobGateway(binding, client), objects, state };
-}
 function fakeS3(binding: StorageBinding = s3Binding) {
   const calls: string[] = [];
   const pdf = fictionalPdf(200);
@@ -191,6 +116,8 @@ describe("private Blob CV transfer behind a fake client", () => {
   let candidateId: string;
   let otherCandidateId: string;
   let archivedCandidateId: string;
+  /** Further fictional teams, each with one candidate, for the store-wide read cap. */
+  const teams: { principal: Principal; candidateId: string }[] = [];
   const rows = async (query: string, params: unknown[] = []) =>
     (await fixture.client.query(query, params)).rows;
   const objectKey = async (id: string) =>
@@ -248,10 +175,15 @@ describe("private Blob CV transfer behind a fake client", () => {
     });
   const params = (id: string) => ({ params: Promise.resolve({ id }) });
   /** A ready Blob CV whose validated bytes sit in the fake store. */
-  async function readyBlobCv(fake: ReturnType<typeof fakeBlob>, bytes: Buffer) {
+  async function readyBlobCv(
+    fake: ReturnType<typeof fakeBlob>,
+    bytes: Buffer,
+    who: Principal = owner,
+    candidate: string = candidateId,
+  ) {
     const reserved = await beginCvUpload(
-      owner,
-      candidateId,
+      who,
+      candidate,
       metadata(bytes.length),
       fake.gateway,
     );
@@ -259,7 +191,7 @@ describe("private Blob CV transfer behind a fake client", () => {
       bytes,
       mimeType: "application/pdf",
     });
-    const ready = await completeCvUpload(owner, reserved.data.id, fake.gateway);
+    const ready = await completeCvUpload(who, reserved.data.id, fake.gateway);
     expect(ready.status).toBe("ready");
     return ready.id;
   }
@@ -314,6 +246,16 @@ describe("private Blob CV transfer behind a fake client", () => {
         data: { name: "Fictional Other Candidate" },
       })
     ).id;
+    for (const n of [3, 4, 5]) {
+      const principal = await seedIdentity(fixture.db, {
+        userId: `blob-user-${n}`,
+        teamId: `blob-team-${n}`,
+      });
+      const created = await createRecord(principal, "candidates", {
+        data: { name: `Fictional Candidate ${n}` },
+      });
+      teams.push({ principal, candidateId: created.id });
+    }
   });
   beforeEach(async () => {
     configured.current = undefined;
@@ -902,6 +844,163 @@ describe("private Blob CV transfer behind a fake client", () => {
         ).then((value) => (returned = value)),
       ).rejects.toThrow();
       expect(returned).toBeUndefined();
+    });
+  });
+
+  describe("bounded provider reads", () => {
+    const small = fictionalPdf(1000);
+    const unavailable = { status: 503, code: "STORAGE_UNAVAILABLE" };
+    async function pendingWithObject(
+      fake: ReturnType<typeof fakeBlob>,
+      stored: Partial<StoredObject> = {},
+    ) {
+      const reserved = await beginCvUpload(
+        owner,
+        candidateId,
+        metadata(small.length),
+        fake.gateway,
+      );
+      const id = reserved.data.id;
+      fake.objects.set(await objectKey(id), {
+        bytes: small,
+        mimeType: "application/pdf",
+        ...stored,
+      });
+      return id;
+    }
+
+    it("refuses a third concurrent read for one team before opening it, while other teams still read", async () => {
+      const fake = fakeBlob();
+      const id = await readyBlobCv(fake, small);
+      const otherId = await readyBlobCv(fake, small, other, otherCandidateId);
+      const key = await objectKey(id);
+      const release = fake.hold((pathname) => pathname === key);
+      const reads = fake.state.reads;
+      const inFlight = [0, 1].map(() => getCvChunk(owner, id, 0, fake.gateway));
+      await vi.waitFor(() => expect(fake.state.reads).toBe(reads + 2));
+      await expect(
+        getCvChunk(owner, id, 0, fake.gateway),
+      ).rejects.toMatchObject(unavailable);
+      expect(fake.state.reads).toBe(reads + 2);
+      const otherTeam = await getCvChunk(other, otherId, 0, fake.gateway);
+      expect(otherTeam.bytes.equals(small)).toBe(true);
+      release();
+      for (const chunk of await Promise.all(inFlight))
+        expect(chunk.bytes.equals(small)).toBe(true);
+      const after = await getCvChunk(owner, id, 0, fake.gateway);
+      expect(after.bytes.equals(small)).toBe(true);
+    });
+
+    it("refuses a read for a new team once eight reads hold the store", async () => {
+      const fake = fakeBlob();
+      const holders = [
+        { principal: owner, candidateId },
+        { principal: other, candidateId: otherCandidateId },
+        ...teams.slice(0, 2),
+      ];
+      const ready: { principal: Principal; id: string }[] = [];
+      for (const holder of holders)
+        ready.push({
+          principal: holder.principal,
+          id: await readyBlobCv(
+            fake,
+            small,
+            holder.principal,
+            holder.candidateId,
+          ),
+        });
+      const last = teams[2];
+      const lastId = await readyBlobCv(
+        fake,
+        small,
+        last.principal,
+        last.candidateId,
+      );
+      const release = fake.hold();
+      const reads = fake.state.reads;
+      const inFlight = ready.flatMap(({ principal, id }) =>
+        [0, 1].map(() => getCvChunk(principal, id, 0, fake.gateway)),
+      );
+      await vi.waitFor(() => expect(fake.state.reads).toBe(reads + 8));
+      await expect(
+        getCvChunk(last.principal, lastId, 0, fake.gateway),
+      ).rejects.toMatchObject(unavailable);
+      expect(fake.state.reads).toBe(reads + 8);
+      release();
+      expect(await Promise.all(inFlight)).toHaveLength(8);
+      const after = await getCvChunk(last.principal, lastId, 0, fake.gateway);
+      expect(after.bytes.equals(small)).toBe(true);
+    });
+
+    it("keeps a completion refused by the read cap pending", async () => {
+      const fake = fakeBlob();
+      const readyId = await readyBlobCv(fake, small);
+      const pendingId = await pendingWithObject(fake);
+      const readyKey = await objectKey(readyId);
+      const release = fake.hold((pathname) => pathname === readyKey);
+      const reads = fake.state.reads;
+      const inFlight = [0, 1].map(() =>
+        getCvChunk(owner, readyId, 0, fake.gateway),
+      );
+      await vi.waitFor(() => expect(fake.state.reads).toBe(reads + 2));
+      await expect(
+        completeCvUpload(owner, pendingId, fake.gateway),
+      ).rejects.toMatchObject(unavailable);
+      expect(fake.state.reads).toBe(reads + 2);
+      expect(await status(pendingId)).toBe("pending");
+      expect(await counters()).toEqual(ledger(1, 1, 0));
+      release();
+      await Promise.all(inFlight);
+      expect(
+        (await completeCvUpload(owner, pendingId, fake.gateway)).status,
+      ).toBe("ready");
+    });
+
+    it("closes a stream that opens after the deadline and keeps the upload pending", async () => {
+      const fake = fakeBlob();
+      const id = await pendingWithObject(fake);
+      fake.state.openDelayMs = 150;
+      const started = Date.now();
+      await expect(
+        completeCvUpload(owner, id, fake.gateway, { readTimeoutMs: 50 }),
+      ).rejects.toMatchObject(unavailable);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(await status(id)).toBe("pending");
+      await vi.waitFor(() =>
+        expect(fake.state.streams).toEqual([
+          { pathname: expect.any(String), closed: true },
+        ]),
+      );
+      expect(fake.state.signals.at(-1)?.aborted).toBe(true);
+    });
+
+    it("closes the unread stream when a chunk read finds a different size", async () => {
+      const fake = fakeBlob();
+      const id = await readyBlobCv(fake, small);
+      fake.objects.set(await objectKey(id), {
+        bytes: small,
+        mimeType: "application/pdf",
+        reportedSize: small.length + 1,
+      });
+      const opened = fake.state.streams.length;
+      await expect(
+        getCvChunk(owner, id, 0, fake.gateway),
+      ).rejects.toMatchObject({ status: 409, code: "CV_INTEGRITY_FAILED" });
+      expect(fake.state.streams.slice(opened)).toEqual([
+        { pathname: await objectKey(id), closed: true },
+      ]);
+    });
+
+    it("closes the unread stream when a completion finds a different MIME type", async () => {
+      const fake = fakeBlob();
+      const id = await pendingWithObject(fake, { mimeType: "image/png" });
+      await expect(
+        completeCvUpload(owner, id, fake.gateway),
+      ).rejects.toMatchObject({ status: 400, code: "INVALID_CV" });
+      expect(await status(id)).toBe("rejected");
+      expect(fake.state.streams).toEqual([
+        { pathname: await objectKey(id), closed: true },
+      ]);
     });
   });
 
