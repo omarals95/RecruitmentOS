@@ -12,6 +12,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { organization, user } from "./auth-schema";
 export const appSchema = pgSchema("app");
 const time = (name: string) =>
@@ -132,6 +133,9 @@ export const uploads = appSchema.table(
       t.storageProvider,
       t.objectKey,
     ),
+    index("uploads_pending_s3_expiry_idx")
+      .on(t.storageStore, t.expiresAt)
+      .where(sql`${t.storageProvider} = 's3' AND ${t.status} = 'pending'`),
   ],
 );
 export const storageUsage = appSchema.table("storage_usage", {

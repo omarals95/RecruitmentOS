@@ -173,6 +173,30 @@ describe("store-wide CV allocation ledger under the split data role", () => {
   });
   afterAll(async () => harness?.close());
 
+  it("indexes the store-wide scan of pending S3 reservations", async () => {
+    const [index] = (await inspect(
+      "SELECT indexdef FROM pg_indexes WHERE schemaname='app' AND indexname='uploads_pending_s3_expiry_idx'",
+    )) as { indexdef: string }[];
+    expect(index.indexdef).toContain("(storage_store, expires_at)");
+    expect(index.indexdef).toMatch(
+      /WHERE \(\(storage_provider = 's3'::text\) AND \(status = 'pending'::text\)\)/,
+    );
+    await harness.asSuperuser();
+    await harness.client.exec("SET enable_seqscan = off");
+    try {
+      const plan = (
+        await harness.client.query<{ "QUERY PLAN": string }>(
+          "EXPLAIN SELECT 1 FROM app.uploads x WHERE x.storage_provider='s3' AND x.storage_store='fictional-a' AND x.status='pending' AND x.expires_at <= now()",
+        )
+      ).rows
+        .map((row) => row["QUERY PLAN"])
+        .join("\n");
+      expect(plan).toContain("uploads_pending_s3_expiry_idx");
+    } finally {
+      await harness.client.exec("RESET enable_seqscan");
+    }
+  });
+
   it("seeds exactly the approved budgets, readable only by the owner", async () => {
     expect(
       await asOwner(

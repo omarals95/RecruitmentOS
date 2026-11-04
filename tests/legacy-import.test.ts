@@ -702,9 +702,12 @@ describe("legacy API apply", () => {
             status: "pending",
           },
           upload: {
+            protocol: "s3-form-v1",
+            method: "POST",
             url: "https://bucket.s3.eu-west-1.amazonaws.com/",
             fields: { policy: "fictional-policy" },
             expiresAt: "2030-01-01",
+            maxBytes: info.size,
           },
         });
       if (options?.method === "POST")
@@ -756,7 +759,12 @@ describe("legacy API apply", () => {
             ...JSON.parse(String(options?.body)),
             status: "pending",
           },
-          upload: { url: "https://untrusted.example.test/", fields: {} },
+          upload: {
+            protocol: "s3-form-v1",
+            method: "POST",
+            url: "https://untrusted.example.test/",
+            fields: {},
+          },
         });
       if (options?.method === "POST")
         return Response.json({ data: { id: candidateId } });
@@ -772,5 +780,163 @@ describe("legacy API apply", () => {
       expect.objectContaining({ code: "INVALID_UPLOAD_TICKET" }),
     );
     expect(offsiteCalls).toBe(0);
+  });
+
+  /** One fictional CV source and an API that answers its reservation with the given ticket. */
+  async function importWithTicket(upload: (size: number) => unknown) {
+    const root = await temp();
+    await writeFile(join(root, "fictional.pdf"), "%PDF-1.7\nfictional blob");
+    const { stat } = await import("node:fs/promises");
+    const info = await stat(join(root, "fictional.pdf"));
+    const plan = buildPlan(input());
+    plan.root = root;
+    plan.records = plan.records.filter((r) => r.resource === "candidates");
+    plan.states = [];
+    plan.notificationReads = [];
+    plan.sources = [
+      {
+        id: "s_1",
+        row: {},
+        candidateIds: ["c_1"],
+        relativePath: "fictional.pdf",
+        sizeBytes: info.size,
+        mtimeMs: info.mtimeMs,
+        uploadable: true,
+        mimeType: "application/pdf",
+      },
+    ];
+    const candidateId = "00000000-0000-4000-8000-000000000001",
+      cvId = "00000000-0000-4000-8000-000000000002";
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fakeFetch: typeof fetch = async (url, options) => {
+      const parsed = new URL(String(url));
+      calls.push({ url: String(url), init: options });
+      if (parsed.hostname !== "recruit.example.test")
+        return new Response(null, { status: 200 });
+      if (parsed.pathname.endsWith("/complete"))
+        return Response.json({ data: { id: cvId, status: "ready" } });
+      if (parsed.pathname.endsWith("/cvs/uploads"))
+        return Response.json({
+          data: {
+            id: cvId,
+            candidateId,
+            ...JSON.parse(String(options?.body)),
+            status: "pending",
+          },
+          upload: upload(info.size),
+        });
+      if (options?.method === "POST")
+        return Response.json({ data: { id: candidateId } });
+      return Response.json({ data: [], pagination: { totalPages: 1 } });
+    };
+    const result = await applyPlan(plan, {
+      apiUrl: "https://recruit.example.test",
+      teamId: "team",
+      token: "never-send-this-to-blob",
+      fetchImpl: fakeFetch,
+    });
+    const offsite = calls.filter(
+      (call) => new URL(call.url).hostname !== "recruit.example.test",
+    );
+    const completions = calls.filter((call) => call.url.endsWith("/complete"));
+    return { result, offsite, completions, calls };
+  }
+  const blobUrl =
+    "https://vercel.com/api/blob/?pathname=teams%2Ft%2Fcvs%2Fc%2Fu%2Ffictional.pdf&vercel-blob-signature=fictional_signature_0001";
+  const blobUpload = (size: number, extra: Record<string, unknown> = {}) => ({
+    protocol: "blob-put-v1",
+    method: "PUT",
+    url: blobUrl,
+    headers: { "content-type": "application/pdf" },
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    maxBytes: size,
+    ...extra,
+  });
+
+  it("PUTs fictional CV bytes to a tagged Blob ticket without the API token, then completes", async () => {
+    const { result, offsite, completions, calls } = await importWithTicket(
+      (size) => blobUpload(size),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.uploadsReady).toBe(1);
+    expect(offsite).toHaveLength(1);
+    const [put] = offsite;
+    expect(put.url).toBe(blobUrl);
+    expect(put.url.startsWith("https://vercel.com/api/blob/?")).toBe(true);
+    expect(put.init?.method).toBe("PUT");
+    expect(put.init?.redirect).toBe("error");
+    expect(put.init?.credentials).toBe("omit");
+    const headers = new Headers(put.init?.headers);
+    expect([...headers.keys()]).toEqual(["content-type"]);
+    expect(headers.get("content-type")).toBe("application/pdf");
+    expect(new TextDecoder().decode(put.init?.body as Uint8Array)).toBe(
+      "%PDF-1.7\nfictional blob",
+    );
+    expect(completions).toHaveLength(1);
+    expect(calls.indexOf(completions[0])).toBeGreaterThan(calls.indexOf(put));
+  });
+
+  it("records an error and sends no CV bytes for an unsupported or unsafe upload ticket", async () => {
+    const cases: [string, (size: number) => unknown][] = [
+      [
+        "UNSUPPORTED_UPLOAD_PROTOCOL",
+        (size) => blobUpload(size, { protocol: "ftp-v1" }),
+      ],
+      [
+        "UNSUPPORTED_UPLOAD_PROTOCOL",
+        () => ({
+          url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          fields: { policy: "fictional-policy" },
+        }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            url: blobUrl.replace("vercel.com", "blob.example.test"),
+          }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) => blobUpload(size, { maxBytes: size + 1 }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          }),
+      ],
+      ["INVALID_UPLOAD_TICKET", (size) => blobUpload(size, { method: "POST" })],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            headers: {
+              "content-type": "application/pdf",
+              authorization: "Bearer fictional",
+            },
+          }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) => ({
+          ...blobUpload(size),
+          protocol: "s3-form-v1",
+          method: "PUT",
+          url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          fields: {},
+        }),
+      ],
+    ];
+    for (const [code, upload] of cases) {
+      const { result, offsite, completions } = await importWithTicket(upload);
+      expect(result.errors, code).toEqual([
+        expect.objectContaining({ location: "CV:s_1", code }),
+      ]);
+      expect(result.uploadsReady).toBe(0);
+      expect(offsite).toHaveLength(0);
+      expect(completions).toHaveLength(0);
+    }
   });
 });

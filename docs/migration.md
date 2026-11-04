@@ -83,7 +83,7 @@ The API argument must be a clean HTTPS origin, without credentials, a path, quer
 
 Applying first enumerates target records, then creates records in dependency order. Legacy IDs map to new server-generated UUIDs. The script stays below the API token's 60 requests/minute limit, so a large directory can take a substantial time. Keep the computer awake and do not change source files during the run.
 
-CV bytes are read only in apply mode and only beneath the explicitly selected source root. The API issues a short-lived upload form; bytes go directly to an HTTPS AWS S3 endpoint. The RecruitmentOS API token is sent only to the chosen application origin. The server validates and pins an S3 version before a CV becomes ready.
+CV bytes are read only in apply mode and only beneath the explicitly selected source root. The API issues a short-lived upload ticket tagged with its protocol, and the importer follows that tag, never the hostname: an `s3-form-v1` form POST to an HTTPS AWS S3 endpoint, or a `blob-put-v1` PUT to exactly `https://vercel.com/api/blob/` (Blob storage is currently disabled). Any other protocol is reported as `UNSUPPORTED_UPLOAD_PROTOCOL` and no bytes are sent. The RecruitmentOS API token is sent only to the chosen application origin. The server validates the stored bytes and pins an S3 version or a Blob SHA-256 before a CV becomes ready.
 
 ## What is preserved
 

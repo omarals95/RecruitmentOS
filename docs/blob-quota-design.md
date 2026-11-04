@@ -12,6 +12,8 @@ Implemented locally:
 - **Charges.** Each upload is charged its declared size plus one file on insert and settled once on its status change. `ready` moves the charge to used. A rejected or expired **Blob** ticket keeps it as retained, so store and team totals never decrease. A rejected or expired S3 reservation is still released, as before. Status may only move from `pending`, references are immutable, uploads cannot be deleted, and a pathname is never reused.
 - **Store-wide S3 expiry.** Before any reservation, completion or cleanup on a bucket, the lock helper releases that bucket's expired S3 reservations for every team, so one team's abandoned tickets cannot hold the shared budget. It reads and updates other teams' rows through owner-only `ledger_owner_read` and `ledger_owner_update` policies, which never match a runtime role.
 - **Owner-only accounting.** Neither runtime role can read or write `storage_ledger`, or insert, update or delete `app.storage_usage`; teams can still read their own usage row.
+- **Blob upload, completion and download wiring**, behind a fake client only (WP-05). A failed ticket issuance keeps the committed charge and a replay reuses the same pathname. A missing object or a provider timeout at completion leaves the ticket pending; a content failure rejects it and retains the charge.
+- **Pending S3 index.** Migration `0008_pending_s3_upload_index.sql` adds the partial index `uploads_pending_s3_expiry_idx` on `(storage_store, expires_at)` for the store-wide expiry scan.
 
 Known limit for both S3 and Blob, a hosted-release blocker:
 
@@ -21,7 +23,7 @@ Remaining before Blob can be enabled:
 
 - Cleanup, deletion and reconciliation of retained charges and stored objects. Retained charges are currently permanent, so abandoned Blob tickets are never released, by any team.
 - Provider guarantees for one-shot, exact-path, no-overwrite capabilities and for late in-flight uploads (below).
-- Blob upload, completion and download wiring.
+- A real Blob client and live provider tests of the wired upload, completion and download protocol.
 - Live Neon, multi-connection race and effective-privilege tests.
 
 ## Budget boundaries

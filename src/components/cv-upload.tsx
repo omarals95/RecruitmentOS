@@ -1,14 +1,11 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { sendCvBytes, type UploadTicket } from "./cv-transfer";
 
 type UploadResponse = {
   data: { id: string; status: string };
-  upload: {
-    url: string;
-    fields: Record<string, string>;
-    expiresAt: string;
-  } | null;
+  upload: UploadTicket | null;
 };
 async function responseJson<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
@@ -66,16 +63,7 @@ export function CvUpload({
       );
       if (ticket.upload) {
         setPhase("Uploading CV…");
-        const form = new FormData();
-        for (const [key, value] of Object.entries(ticket.upload.fields))
-          form.append(key, value);
-        form.append("file", file);
-        const sent = await fetch(ticket.upload.url, {
-          method: "POST",
-          body: form,
-          credentials: "omit",
-          referrerPolicy: "no-referrer",
-        });
+        const sent = await sendCvBytes(ticket.upload, file);
         if (!sent.ok)
           throw new Error(
             `Private storage did not accept the upload (HTTP ${sent.status}). Check your connection and try again.`,
