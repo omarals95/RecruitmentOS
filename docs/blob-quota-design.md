@@ -8,17 +8,21 @@ Implemented locally:
 
 - **Store-wide ledger.** The owner-only `storage_ledger.stores` table has one row per `(provider, store)` and covers every team's uploads. Its environment is fixed the first time the store is locked; a later lock with another environment is refused.
 - **Approved budgets.** `storage_ledger.budgets` holds Production 600,000,000 bytes / 2,000 files and Preview 200,000,000 bytes / 500 files. Local development uses the Preview figures. Team limits in `app.storage_usage` are null by default and then inherit the budget of the store being charged. The old 10 GiB / 10,000-file defaults are gone.
-- **Lock order.** `tenant_context.lock_storage_allocation` locks the store row and then the context team's row before any upload row is touched. Charges are taken by owner-run triggers on `app.uploads` from the row's own size, never from caller arguments.
+- **Lock order.** `tenant_context.lock_storage_allocation` locks the store row, then team rows in team order, before any upload row is touched. Charges are taken by owner-run triggers on `app.uploads` from the row's own size, never from caller arguments.
 - **Charges.** Each upload is charged its declared size plus one file on insert and settled once on its status change. `ready` moves the charge to used. A rejected or expired **Blob** ticket keeps it as retained, so store and team totals never decrease. A rejected or expired S3 reservation is still released, as before. Status may only move from `pending`, references are immutable, uploads cannot be deleted, and a pathname is never reused.
+- **Store-wide S3 expiry.** Before any reservation, completion or cleanup on a bucket, the lock helper releases that bucket's expired S3 reservations for every team, so one team's abandoned tickets cannot hold the shared budget. It reads and updates other teams' rows through owner-only `ledger_owner_read` and `ledger_owner_update` policies, which never match a runtime role.
 - **Owner-only accounting.** Neither runtime role can read or write `storage_ledger`, or insert, update or delete `app.storage_usage`; teams can still read their own usage row.
+
+Known limit for both S3 and Blob, a hosted-release blocker:
+
+- Team limits default to the whole store budget, so one team can fill a shared store with live reservations (for up to an hour each on S3) or with completed CVs, and lock other teams out. Issuance is not rate limited. This already applies to the S3 path.
 
 Remaining before Blob can be enabled:
 
-- Cleanup, deletion and reconciliation of retained charges and stored objects. Retained charges are currently permanent.
+- Cleanup, deletion and reconciliation of retained charges and stored objects. Retained charges are currently permanent, so abandoned Blob tickets are never released, by any team.
 - Provider guarantees for one-shot, exact-path, no-overwrite capabilities and for late in-flight uploads (below).
 - Blob upload, completion and download wiring.
 - Live Neon, multi-connection race and effective-privilege tests.
-- Team limits default to the whole store budget, so one team can exhaust a shared store; issuance rate limits are not implemented.
 
 ## Budget boundaries
 
