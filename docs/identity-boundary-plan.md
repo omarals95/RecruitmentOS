@@ -4,7 +4,7 @@
 
 The first staged code introduces separate data and identity pool interfaces and migration `0005_database_connection_marker.sql`, which creates an owner-controlled per-database marker. The two runtime roles would need read-only access to that marker; neither may alter it. Matching the endpoint and marker helps detect mismatched pools but does not prove environment separation when a database has been cloned or incorrectly configured. No complete production role-grant template exists yet: `infrastructure/postgres-runtime-role.sql` is a legacy synthetic-test fixture and must not be deployed.
 
-Hosted and `NODE_ENV=production` database access is deliberately blocked in code, with no environment-variable override, until trusted tenant policies and all dependent identity/audit workflows pass independent end-to-end review. The role-boundary checks forbid callable non-system security-definer functions and accessible views/foreign tables, except an exact per-role allowlist of `tenant_context` helpers (`src/db/connection-boundary.ts`). A helper is allowlisted only when the `tenant_context` schema owner owns it and it has a fixed `search_path`. Local synthetic tests do not establish a completed SQL-compromise boundary.
+Hosted and `NODE_ENV=production` database access is deliberately blocked in code, with no environment-variable override, until trusted tenant policies and all dependent identity/audit workflows pass independent end-to-end review. The role-boundary checks forbid callable non-system security-definer functions and accessible views/foreign tables, except an exact per-role allowlist of `tenant_context` helpers (`src/db/connection-boundary.ts`). A helper is allowlisted only when the `tenant_context` schema owner owns it and its `search_path` is fixed to exactly `pg_catalog, pg_temp` (temporary objects last). Local synthetic tests do not establish a completed SQL-compromise boundary.
 
 ## Security objective and limit
 
@@ -119,7 +119,7 @@ Database writes need any one of `candidates:write`, `recruitment:write`, `cvs:wr
 - Create needs the token owner. Revoke needs the token owner or a current team owner or admin.
 - The summary and metadata match the earlier application inserts.
 
-Only this owner-run helper may insert token audit rows for a context without a write scope, such as a viewer's read-only token. A transactional outbox was not chosen because it would delay audit visibility and need delivery and retry semantics.
+Only this owner-run helper may insert `api-token` activity rows: the general write policy excludes that kind for every context, write scope or not. A data-role caller therefore cannot forge token events or pre-insert a `token.revoked` row that would make the helper reject a later real revocation. The helper also covers contexts without a write scope, such as a viewer's read-only token. A transactional outbox was not chosen because it would delay audit visibility and need delivery and retry semantics.
 
 ### Open items
 

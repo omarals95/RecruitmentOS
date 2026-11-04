@@ -19,7 +19,8 @@ export const identityRoleHelpers = [
   "tenant_context.audit_token(text,text)",
 ];
 
-// Indirect privileged access is forbidden except the allowlisted, owner-controlled helpers.
+// Indirect privileged access is forbidden except the allowlisted, owner-controlled helpers
+// with the exact fixed search_path (pg_temp last).
 function indirectPrivilegeQuery(allowed: readonly string[]) {
   // Match catalog columns; name lookups would fail without schema USAGE.
   const signatures = allowed
@@ -40,7 +41,7 @@ function indirectPrivilegeQuery(allowed: readonly string[]) {
       AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
       AND NOT COALESCE(n.nspname='tenant_context' AND p.proowner=n.nspowner
         AND (p.proname::text, pg_catalog.oidvectortypes(p.proargtypes)) IN (${signatures})
-        AND EXISTS (SELECT 1 FROM pg_catalog.unnest(p.proconfig) setting WHERE setting LIKE 'search\\_path=%' ESCAPE '\\'), false))
+        AND 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig), false))
   OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     CROSS JOIN pg_catalog.pg_roles r
