@@ -1,6 +1,24 @@
 # Blob quota design: proposed invariants
 
-**Design only. None of these controls is implemented or verified. Blob CV storage remains disabled.** The current `app.storage_usage` ledger is per team, defaults to 10 GiB, and releases reservations when uploads expire or are rejected. It does not enforce a store-wide allowance or account for uploads that arrive after expiry. Do not use that cleanup path as a physical Blob quota control.
+**Ledger implemented locally; Blob CV storage remains disabled.** Migration `0007_blob_allocation_schema.sql` implements the database side of these invariants. It has been tested only on PGlite with fictional data and synthetic roles, and has not been independently reviewed or run on Neon.
+
+## Implementation status
+
+Implemented locally:
+
+- **Store-wide ledger.** The owner-only `storage_ledger.stores` table has one row per `(provider, store)` and covers every team's uploads. Its environment is fixed the first time the store is locked; a later lock with another environment is refused.
+- **Approved budgets.** `storage_ledger.budgets` holds Production 600,000,000 bytes / 2,000 files and Preview 200,000,000 bytes / 500 files. Local development uses the Preview figures. Team limits in `app.storage_usage` are null by default and then inherit the budget of the store being charged. The old 10 GiB / 10,000-file defaults are gone.
+- **Lock order.** `tenant_context.lock_storage_allocation` locks the store row and then the context team's row before any upload row is touched. Charges are taken by owner-run triggers on `app.uploads` from the row's own size, never from caller arguments.
+- **Charges.** Each upload is charged its declared size plus one file on insert and settled once on its status change. `ready` moves the charge to used. A rejected or expired **Blob** ticket keeps it as retained, so store and team totals never decrease. A rejected or expired S3 reservation is still released, as before. Status may only move from `pending`, references are immutable, uploads cannot be deleted, and a pathname is never reused.
+- **Owner-only accounting.** Neither runtime role can read or write `storage_ledger`, or insert, update or delete `app.storage_usage`; teams can still read their own usage row.
+
+Remaining before Blob can be enabled:
+
+- Cleanup, deletion and reconciliation of retained charges and stored objects. Retained charges are currently permanent.
+- Provider guarantees for one-shot, exact-path, no-overwrite capabilities and for late in-flight uploads (below).
+- Blob upload, completion and download wiring.
+- Live Neon, multi-connection race and effective-privilege tests.
+- Team limits default to the whole store budget, so one team can exhaust a shared store; issuance rate limits are not implemented.
 
 ## Budget boundaries
 
@@ -33,7 +51,7 @@ Any privileged verifier requires a controlled non-runtime owner, a fixed safe se
 
 ## Reclamation and unresolved races
 
-A SQL caller on the runtime role can still set `app.team_id` and `app.user_id` to another identity; the application no longer relies on them, and membership checks against such supplied values do not prove who made the request. An isolated security-definer ledger based only on that context would let a runtime SQL attacker consume another team's quota. Do not grant or deploy such a function without an independently verified identity binding or a different access model. Token-scoped API requests must also enforce their scopes before any allocation; team membership alone is insufficient.
+A SQL caller on the runtime role can still set `app.team_id` and `app.user_id` to another identity; the application no longer relies on them, and membership checks against such supplied values do not prove who made the request. An isolated security-definer ledger based only on those settings would let a runtime SQL attacker consume another team's quota. The local ledger instead acts only on the team of the verified signed per-transaction context and requires its `cvs:write` scope, rather than a separately signed quota command; that choice is pending review. Token-scoped API requests must also enforce their scopes before any allocation; team membership alone is insufficient.
 
 The conservative baseline is **never release the charge or reuse the path of an issued ticket**, including after expiry, rejection, successful upload, object deletion, or an uncertain network response. This may permanently consume the allowance and needs an operational recovery process. It is intentionally conservative, not a complete user-facing cleanup solution.
 
