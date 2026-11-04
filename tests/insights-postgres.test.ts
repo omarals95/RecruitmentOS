@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activity, notificationReads, records } from "@/db/schema";
 import { member, user } from "@/db/auth-schema";
@@ -18,7 +18,12 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 describe("bounded, factual PostgreSQL reporting", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -279,17 +284,23 @@ describe("bounded, factual PostgreSQL reporting", () => {
           action: "cv.uploaded",
           summary: "Fictional 1000 upload",
         },
-        {
-          id: randomUUID(),
-          teamId: owner.teamId,
-          actorId: owner.userId,
-          actorType: "session",
-          kind: "api-token",
-          action: "token.created",
-          summary: "Issued token fixture",
-        },
       ]),
     );
+    // Only the owner-run audit helper may write token events, so seed this one as the superuser.
+    await fixture.db.execute(sql`reset role`);
+    try {
+      await fixture.db.insert(activity).values({
+        id: randomUUID(),
+        teamId: owner.teamId,
+        actorId: owner.userId,
+        actorType: "session",
+        kind: "api-token",
+        action: "token.created",
+        summary: "Issued token fixture",
+      });
+    } finally {
+      await fixture.db.execute(sql`set role recruitment_test_runtime`);
+    }
     const initial = await listActivity(
       owner,
       new URLSearchParams({ page: "1", pageSize: "50", search: "", kind: "" }),
@@ -362,8 +373,10 @@ describe("bounded, factual PostgreSQL reporting", () => {
     const firstId = randomUUID(),
       secondId = randomUUID(),
       foreignId = randomUUID();
-    await withTeam(owner, (tx) =>
-      tx.insert(activity).values([
+    // Events name only their writing context's actor, so seed a former member's history as the superuser.
+    await fixture.db.execute(sql`reset role`);
+    try {
+      await fixture.db.insert(activity).values([
         {
           id: firstId,
           teamId: owner.teamId,
@@ -384,20 +397,20 @@ describe("bounded, factual PostgreSQL reporting", () => {
           summary: "Later synthetic event",
           createdAt: new Date("2029-12-02T00:00:00Z"),
         },
-      ]),
-    );
-    await withTeam(other, (tx) =>
-      tx.insert(activity).values({
-        id: foreignId,
-        teamId: other.teamId,
-        actorId: former.userId,
-        actorType: "session",
-        kind: "cv",
-        action: "cv.uploaded",
-        summary: "Foreign synthetic event",
-        createdAt: new Date("2029-12-03T00:00:00Z"),
-      }),
-    );
+        {
+          id: foreignId,
+          teamId: other.teamId,
+          actorId: former.userId,
+          actorType: "session",
+          kind: "cv",
+          action: "cv.uploaded",
+          summary: "Foreign synthetic event",
+          createdAt: new Date("2029-12-03T00:00:00Z"),
+        },
+      ]);
+    } finally {
+      await fixture.db.execute(sql`set role recruitment_test_runtime`);
+    }
     const query = {
       kind: "cv",
       search: "Historical Activity Actor",
@@ -498,11 +511,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
   });
 
   it("keeps personal audit and candidate inventory outside recruitment-only token results", async () => {
-    const token = {
-      ...owner,
-      authType: "token" as const,
-      scopes: ["recruitment:read"] as Principal["scopes"],
-    };
+    const token = await seedApiToken(fixture.db, owner, ["recruitment:read"]);
     await expect(overview(token)).rejects.toMatchObject({ status: 403 });
     const events = await listActivity(
       token,
@@ -596,11 +605,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
   it("requires a write scope for token read markers while allowing a signed-in viewer to mark their own reminders", async () => {
     const reminder = (await notifications(viewer)).data[0];
     expect(reminder.read).toBe(false);
-    const token = {
-      ...viewer,
-      authType: "token" as const,
-      scopes: ["recruitment:read"] as Principal["scopes"],
-    };
+    const token = await seedApiToken(fixture.db, viewer, ["recruitment:read"]);
     await expect(
       markNotifications(token, [reminder.key]),
     ).rejects.toMatchObject({ status: 403 });
@@ -632,15 +637,11 @@ describe("bounded, factual PostgreSQL reporting", () => {
         ),
     );
     expect(saved).toHaveLength(1);
-    const importToken = {
-      ...colleague,
-      authType: "token" as const,
-      scopes: [
-        "recruitment:read",
-        "recruitment:write",
-        "imports:write",
-      ] as Principal["scopes"],
-    };
+    const importToken = await seedApiToken(fixture.db, colleague, [
+      "recruitment:read",
+      "recruitment:write",
+      "imports:write",
+    ]);
     expect(await markNotifications(importToken, [reminder.key])).toEqual({
       updated: 1,
     });

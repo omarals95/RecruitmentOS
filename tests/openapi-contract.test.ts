@@ -10,7 +10,12 @@ import { SCOPES, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { resourceToKind } from "@/domain/records";
 import { GET as openApi } from "@/app/api/openapi.json/route";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 type Handler = (
   request: Request,
@@ -194,12 +199,9 @@ describe("OpenAPI contract", () => {
     operation: Operation,
     scopes: Scope[],
   ): Promise<Response> {
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-      tokenId: randomUUID(),
-      scopes,
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner, scopes),
+    );
     const { handler, params } = routes.get(label)!;
     const [method, path] = label.split(" ");
     const url = `http://localhost:3000${path.replace(/\{(\w+)\}/g, (_, name: string) => String(params[name]))}`;

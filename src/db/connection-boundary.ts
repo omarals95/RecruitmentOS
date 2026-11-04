@@ -7,15 +7,42 @@ export function isLoopbackHost(hostname: string): boolean {
   );
 }
 
-// Until audited context/audit helpers exist, indirect privileged access is forbidden.
-const indirectPrivilegeQuery = `
+/** Reviewed tenant-context helpers each runtime role may execute, by exact signature. */
+export const dataRoleHelpers = [
+  "tenant_context.install(text,text)",
+  "tenant_context.allows(text,text,text)",
+  "tenant_context.allows_activity(text,text,text,text)",
+  "tenant_context.allows_event(text,text,text,uuid)",
+  "tenant_context.activity_actor_name(uuid)",
+];
+export const identityRoleHelpers = [
+  "tenant_context.install(text,text)",
+  "tenant_context.audit_token(text,text)",
+];
+
+// Indirect privileged access is forbidden except the allowlisted, owner-controlled helpers
+// with the exact fixed search_path (pg_temp last).
+function indirectPrivilegeQuery(allowed: readonly string[]) {
+  // Match catalog columns; name lookups would fail without schema USAGE.
+  const signatures = allowed
+    .map((signature) => {
+      const [, name, args] = /^tenant_context\.(\w+)\(([\w,]*)\)$/.exec(
+        signature,
+      )!;
+      return `('${name}','${args.replaceAll(",", ", ")}')`;
+    })
+    .join(",");
+  return `
   EXISTS (SELECT 1 FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
     CROSS JOIN pg_catalog.pg_roles r
     WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
       AND p.prosecdef AND pg_catalog.pg_has_role(current_user,r.oid,'MEMBER')
       AND pg_catalog.has_schema_privilege(r.oid,n.oid,'USAGE')
-      AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE'))
+      AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
+      AND NOT COALESCE(n.nspname='tenant_context' AND p.proowner=n.nspowner
+        AND (p.proname::text, pg_catalog.oidvectortypes(p.proargtypes)) IN (${signatures})
+        AND 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig), false))
   OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     CROSS JOIN pg_catalog.pg_roles r
@@ -24,6 +51,7 @@ const indirectPrivilegeQuery = `
       AND (pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE')
         OR pg_catalog.has_any_column_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE')))
 `;
+}
 
 /** Both roles may read, but neither may replace or assume ownership of the marker. */
 export const markerRoleBoundaryQuery = `
@@ -107,7 +135,7 @@ export function prepareConnectionTargets(
 /** Role membership is checked even with NOINHERIT because SET ROLE may be allowed. */
 export const dataRoleBoundaryQuery = `
   SELECT (
-    ${indirectPrivilegeQuery}
+    ${indirectPrivilegeQuery(dataRoleHelpers)}
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n CROSS JOIN pg_catalog.pg_roles r
       WHERE n.nspname = 'auth'
         AND pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
@@ -131,7 +159,7 @@ export const dataRoleBoundaryQuery = `
 /** Identity mutations must not carry direct access to recruitment records or audit. */
 export const identityRoleBoundaryQuery = `
   SELECT (
-    ${indirectPrivilegeQuery}
+    ${indirectPrivilegeQuery(identityRoleHelpers)}
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
       CROSS JOIN pg_catalog.pg_roles r

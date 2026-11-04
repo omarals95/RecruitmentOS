@@ -2,6 +2,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as app from "./schema";
 import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
+import { installTenantContextKey } from "../lib/tenant-context";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
 import {
   dataRoleBoundaryQuery,
@@ -177,6 +178,8 @@ async function createDb(): Promise<AppDb> {
       resolve(process.cwd(), process.env.PGLITE_DATA_DIR || ".local/database"),
     );
     await applyMigrations(client);
+    // The PGlite process is the owner here; other databases get the key from db:migrate.
+    await installTenantContextKey(client);
     return drizzle(client, { schema }) as unknown as AppDb;
   }
   if (!process.env.DATABASE_URL)

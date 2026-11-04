@@ -16,7 +16,7 @@ After the deployment blockers are resolved and the exact target, migration state
 
 The old [postgres-runtime-role.sql](../infrastructure/postgres-runtime-role.sql) is a legacy synthetic-test fixture and must not be used for deployment. The planned split requires separately restricted data and identity roles, a reviewed grant template and verification against the intended database. No complete deployment-ready role template exists yet. Keep owner credentials out of the application runtime and use TLS with certificate verification for remote connections.
 
-The staged startup checks reject several unsafe role privileges, but they are not a complete privilege audit or proof of tenant isolation. Existing team policies trust caller-set transaction context; do not claim isolation against a compromised runtime SQL role until the replacement controls and adversarial live tests pass.
+The staged startup checks reject several unsafe role privileges, but they are not a complete privilege audit or proof of tenant isolation. Team policies now derive their context from a signed per-transaction assertion rather than caller-set settings, but this is verified on local PGlite only; do not claim isolation against a compromised runtime SQL role until independent review and adversarial live tests pass.
 
 ## 3. Vercel environment
 

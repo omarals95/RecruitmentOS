@@ -28,7 +28,12 @@ import {
   type PlannedRecord,
 } from "../scripts/legacy/plan";
 import { applyPlan } from "../scripts/legacy/apply";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 const origin = "http://localhost:3000";
 
@@ -127,11 +132,9 @@ describe("UI, API and importer reject the same invalid writes", () => {
       user: { id: owner.userId },
       session: { activeOrganizationId: owner.teamId },
     } as Awaited<ReturnType<typeof getVerifiedSession>>);
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-      tokenId: "fictional-entry-token-id",
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner),
+    );
   });
   afterAll(async () => fixture?.close());
 

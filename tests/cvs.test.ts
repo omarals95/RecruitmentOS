@@ -12,6 +12,7 @@ import {
   parseCvListQuery,
 } from "../src/lib/cvs";
 import type { Principal } from "../src/lib/principal";
+import { installTenantContextKey } from "../src/lib/tenant-context";
 import type { StorageGateway } from "../src/lib/storage";
 
 const candidate = randomUUID(),
@@ -89,6 +90,7 @@ describe("private CV lifecycle against PostgreSQL migrations and fake S3", () =>
   const pg = new PGlite();
   beforeAll(async () => {
     await applyMigrations(pg);
+    await installTenantContextKey(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
     await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES('owner','Owner','owner@example.test',true,true);
       INSERT INTO auth.organization(id,name,slug,created_by) VALUES('team','Team','team','owner');

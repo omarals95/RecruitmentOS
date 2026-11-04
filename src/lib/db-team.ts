@@ -1,15 +1,15 @@
-import { sql } from "drizzle-orm";
 import { getDb, type TeamTx } from "@/db";
 import type { Principal } from "./principal";
+import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 export async function withTeam<T>(
-  principal: Pick<Principal, "teamId" | "userId">,
+  principal: Principal,
   work: (tx: TeamTx) => Promise<T>,
 ): Promise<T> {
+  assertTenantContextKey();
   const db = await getDb();
   return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select set_config('app.team_id',${principal.teamId},true),set_config('app.user_id',${principal.userId},true)`,
-    );
+    // The signed context is installed first, before any savepoint can exist.
+    await installTenantContext(tx, principal);
     return work(tx);
   });
 }

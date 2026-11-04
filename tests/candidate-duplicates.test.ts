@@ -7,7 +7,12 @@ import { authenticateApiToken } from "@/lib/api-tokens";
 import { ApiError } from "@/lib/errors";
 import { POST } from "@/app/api/v1/candidates/duplicates/route";
 import type { Principal } from "@/lib/principal";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 describe("possible candidate duplicates", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -79,18 +84,15 @@ describe("possible candidate duplicates", () => {
     expect(
       (await POST(request({ origin: "https://other.example.test" }))).status,
     ).toBe(403);
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-      scopes: [],
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner, []),
+    );
     expect(
       (await POST(request({ authorization: "Bearer synthetic" }))).status,
     ).toBe(403);
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner),
+    );
     expect(
       (
         await POST(
