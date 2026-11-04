@@ -208,3 +208,56 @@ test("invalid slice metadata aborts the provider request before reading", async 
   );
   assert.equal(controller.signal.aborted, true);
 });
+
+const tenMiB = Buffer.alloc(MAX_CV_BYTES);
+for (let i = 0; i < tenMiB.length; i++) tenMiB[i] = (i * 31 + 7) % 251;
+tenMiB.write("%PDF-1.7\nfictional streamed CV\n");
+const tenMiBDigest = createHash("sha256").update(tenMiB).digest("hex");
+const sliceBounds: [number, number][] = [
+  [0, MAX_BLOB_DOWNLOAD_SLICE_BYTES],
+  [MAX_BLOB_DOWNLOAD_SLICE_BYTES, MAX_BLOB_DOWNLOAD_SLICE_BYTES],
+  [
+    2 * MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+    tenMiB.length - 2 * MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+  ],
+];
+/** Parts of an uneven size, so slice boundaries fall inside parts. */
+async function* streamed(bytes: Buffer) {
+  for (let i = 0; i < bytes.length; i += 100_003)
+    yield new Uint8Array(bytes.subarray(i, i + 100_003));
+}
+
+test("streams a 10 MiB object and returns exactly each requested slice", async () => {
+  for (const [offset, length] of sliceBounds) {
+    const slice = await readVerifiedBlobSlice(
+      streamed(tenMiB),
+      tenMiB.length,
+      tenMiBDigest,
+      offset,
+      length,
+    );
+    assert.equal(slice.length, length);
+    assert.ok(slice.equals(tenMiB.subarray(offset, offset + length)));
+  }
+});
+
+test("a one-byte change anywhere in a 10 MiB object rejects every slice", async () => {
+  for (const changed of [0, 5_000_000, tenMiB.length - 1]) {
+    const modified = Buffer.from(tenMiB);
+    modified[changed] ^= 1;
+    for (const [offset, length] of sliceBounds) {
+      let returned: Buffer | undefined;
+      await assert.rejects(
+        readVerifiedBlobSlice(
+          streamed(modified),
+          tenMiB.length,
+          tenMiBDigest,
+          offset,
+          length,
+        ).then((bytes) => (returned = bytes)),
+        /integrity/i,
+      );
+      assert.equal(returned, undefined);
+    }
+  }
+});

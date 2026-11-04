@@ -14,15 +14,8 @@ function assertExpectedSize(sizeBytes: number): void {
     throw new CvValidationError("Invalid stored document size.");
 }
 
-/**
- * Use one request-scoped controller when opening the provider request and reading.
- * Cancellation depends on provider cooperation; a blocked event loop delays the deadline.
- */
-export async function readBlobSnapshot(
-  stream: AsyncIterable<Uint8Array>,
-  expectedSize: number,
-  options?: BlobReadOptions,
-): Promise<{ bytes: Buffer; sha256: string }> {
+/** Validates the read before anything is allocated; a refused read aborts the provider request. */
+function readControl(expectedSize: number, options?: BlobReadOptions) {
   const controller = options?.controller ?? new AbortController();
   const timeoutMs = options?.timeoutMs ?? MAX_BLOB_READ_MS;
   try {
@@ -37,7 +30,21 @@ export async function readBlobSnapshot(
     controller.abort();
     throw error;
   }
-  const bytes = Buffer.alloc(expectedSize);
+  return { controller, timeoutMs };
+}
+
+/**
+ * The shared abort-aware read loop. It hashes every byte as it arrives and hands each
+ * part to `keep` before the next read, so a producer cannot change bytes already seen.
+ * Cancellation depends on provider cooperation; a blocked event loop delays the deadline.
+ */
+async function readBoundedStream(
+  stream: AsyncIterable<Uint8Array>,
+  expectedSize: number,
+  { controller, timeoutMs }: { controller: AbortController; timeoutMs: number },
+  keep: (part: Uint8Array, offset: number) => void,
+): Promise<string> {
+  const hash = createHash("sha256");
   let received = 0;
   const abort = () => controller.abort();
   const timer = setTimeout(abort, timeoutMs);
@@ -86,12 +93,13 @@ export async function readBlobSnapshot(
         throw new CvValidationError(
           "Stored document exceeds its expected size.",
         );
-      bytes.set(part, received);
+      hash.update(part);
+      keep(part, received);
       received += part.byteLength;
     }
     if (received !== expectedSize)
       throw new CvValidationError("Stored document is truncated.");
-    return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+    return hash.digest("hex");
   } catch (error) {
     controller.abort();
     try {
@@ -106,7 +114,27 @@ export async function readBlobSnapshot(
   }
 }
 
-/** Never release a byte until the entire retrieved snapshot matches its stored digest. */
+/** Use one request-scoped controller when opening the provider request and reading. */
+export async function readBlobSnapshot(
+  stream: AsyncIterable<Uint8Array>,
+  expectedSize: number,
+  options?: BlobReadOptions,
+): Promise<{ bytes: Buffer; sha256: string }> {
+  const control = readControl(expectedSize, options);
+  const bytes = Buffer.alloc(expectedSize);
+  const sha256 = await readBoundedStream(
+    stream,
+    expectedSize,
+    control,
+    (part, offset) => bytes.set(part, offset),
+  );
+  return { bytes, sha256 };
+}
+
+/**
+ * Never release a byte until the entire retrieved object matches its stored digest.
+ * The whole object is stream-hashed; only the requested slice is retained.
+ */
 export async function readVerifiedBlobSlice(
   stream: AsyncIterable<Uint8Array>,
   expectedSize: number,
@@ -132,15 +160,28 @@ export async function readVerifiedBlobSlice(
       offset > expectedSize - length
     )
       throw new CvValidationError("Invalid document slice.");
-    const snapshot = await readBlobSnapshot(stream, expectedSize, options);
+    const control = readControl(expectedSize, options);
+    const slice = Buffer.alloc(length);
+    const end = offset + length;
+    const sha256 = await readBoundedStream(
+      stream,
+      expectedSize,
+      control,
+      (part, at) => {
+        const from = Math.max(offset, at);
+        const to = Math.min(end, at + part.byteLength);
+        if (from < to)
+          slice.set(part.subarray(from - at, to - at), from - offset);
+      },
+    );
     if (
       !timingSafeEqual(
-        Buffer.from(snapshot.sha256, "hex"),
+        Buffer.from(sha256, "hex"),
         Buffer.from(expectedSha256, "hex"),
       )
     )
       throw new CvValidationError("Stored document integrity check failed.");
-    return Buffer.from(snapshot.bytes.subarray(offset, offset + length));
+    return slice;
   } catch (error) {
     options?.controller?.abort();
     throw error;

@@ -20,10 +20,13 @@ async function responseJson<T>(response: Response): Promise<T> {
 export function CvUpload({
   candidateId,
   teamId,
+  storageConfigured,
   onComplete,
 }: {
   candidateId: string;
   teamId: string;
+  /** From the server capability; false shows the setup-required state before any file is chosen. */
+  storageConfigured: boolean;
   onComplete?: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
@@ -94,6 +97,17 @@ export function CvUpload({
     }
   }
 
+  if (!storageConfigured)
+    return (
+      <section className="cv-upload" aria-label="Upload candidate CV">
+        <strong>CV uploads are not set up yet.</strong>
+        <p className="muted">
+          Attaching CV files needs file storage that an administrator has to
+          finish setting up. You can still add and edit this candidate&apos;s
+          details.
+        </p>
+      </section>
+    );
   return (
     <section className="cv-upload" aria-label="Upload candidate CV">
       <label htmlFor={`cv-upload-${candidateId}`}>Attach a CV</label>

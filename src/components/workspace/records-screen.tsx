@@ -37,7 +37,7 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { CvUpload } from "@/components/cv-upload";
-import { downloadVerifiedCv } from "@/components/cv-transfer";
+import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
@@ -2115,6 +2115,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       totalPages: number;
     };
   }>(`/api/v1/candidates/${candidateId}/cvs?page=${page}&pageSize=${pageSize}`);
+  const canUpload = Boolean(team) && role !== "viewer";
+  // Environment-only readiness; a failed check keeps the controls and the server still refuses.
+  const capability = useApi<{ data: { storageConfigured: boolean } }>(
+    canUpload ? "/api/v1/cvs/bulk-capabilities" : null,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const setPage = (next: number) => setPagination({ candidateId, page: next });
@@ -2139,14 +2144,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       } else if (cv.downloadProtocol === "blob-chunks-v1") {
         // Bytes and the object URL stay local to this call and never enter React state.
         const file = await downloadVerifiedCv(team.id, cv.id);
-        const url = URL.createObjectURL(
-          new Blob([file.bytes], { type: "application/octet-stream" }),
-        );
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = file.originalName;
-        anchor.click();
-        URL.revokeObjectURL(url);
+        saveCvBytes(file.bytes, file.originalName);
       } else
         throw new Error(
           "This CV uses a download method this page does not support. Refresh the page and try again.",
@@ -2264,10 +2262,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           </div>
         </nav>
       )}
-      {team && role !== "viewer" && (
+      {team && canUpload && !capability.loading && (
         <CvUpload
           teamId={team.id}
           candidateId={candidateId}
+          storageConfigured={capability.data?.data.storageConfigured !== false}
           onComplete={() => {
             setPage(1);
             result.refresh();

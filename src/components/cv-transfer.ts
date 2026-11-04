@@ -22,6 +22,15 @@ type Fetch = typeof fetch;
 const browserFetch: Fetch = (input, init) => fetch(input, init);
 const CHUNK_BYTES = 4 * 1024 * 1024;
 const MAX_CV_BYTES = 10 * 1024 * 1024;
+const REVOKE_OBJECT_URL_MS = 40_000;
+type SaveEnv = {
+  document: { body: { append(node: HTMLElement): void } } & Pick<
+    Document,
+    "createElement"
+  >;
+  URL: Pick<typeof URL, "createObjectURL" | "revokeObjectURL">;
+  setTimeout: (callback: () => void, ms: number) => unknown;
+};
 
 /**
  * Sends the bytes to private storage with only what the ticket names: no cookies, token or
@@ -130,4 +139,32 @@ export async function downloadVerifiedCv(
     chunks(),
   );
   return { bytes, originalName };
+}
+
+/**
+ * Saves verified bytes through an anchor attached to the document. Some Firefox versions
+ * ignore a detached anchor or cancel a download whose object URL is revoked at once.
+ */
+export function saveCvBytes(
+  bytes: Uint8Array<ArrayBuffer>,
+  name: string,
+  env: SaveEnv = {
+    document,
+    URL,
+    setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+  },
+): void {
+  const url = env.URL.createObjectURL(
+    new Blob([bytes], { type: "application/octet-stream" }),
+  );
+  const anchor = env.document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  try {
+    env.document.body.append(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    env.setTimeout(() => env.URL.revokeObjectURL(url), REVOKE_OBJECT_URL_MS);
+  }
 }

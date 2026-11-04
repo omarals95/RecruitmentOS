@@ -28,6 +28,7 @@
     "@better-auth/core": "1.7.15",
     "@better-auth/drizzle-adapter": "1.7.15",
     "@electric-sql/pglite": "0.5.14",
+    "@vercel/blob": "2.8.2",
     "@vercel/functions": "3.10.5",
     "@vercel/oidc": "4.0.5",
     "better-auth": "1.7.15",

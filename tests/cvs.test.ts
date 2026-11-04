@@ -99,6 +99,35 @@ it("rejects Blob upload before creating a reservation or contacting storage", as
   }
 });
 
+it("explains missing storage setup in plain words without naming a provider or setting", async () => {
+  const keys = [
+    "CV_STORAGE_PROVIDER",
+    "S3_BUCKET_NAME",
+    "AWS_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+  ];
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  );
+  try {
+    for (const key of keys) delete process.env[key];
+    await expect(beginCvUpload(p, candidate, metadata())).rejects.toMatchObject(
+      {
+        status: 503,
+        code: "STORAGE_SETUP_REQUIRED",
+        message:
+          "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.",
+      },
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  }
+});
+
 describe("private CV lifecycle against PostgreSQL migrations and fake S3", () => {
   const pg = new PGlite();
   beforeAll(async () => {

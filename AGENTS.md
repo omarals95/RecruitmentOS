@@ -54,5 +54,6 @@ npm run format:check    # prettier; format only the files you changed
 - Do not weaken, remove or flag-bypass a security guard (for example the hosted `tenant_isolation_pending` guard, role-boundary checks, Blob disablement) to make something work. A guard is removed only by completing and testing the control it protects.
 - No silent provider fallback (Blob to S3), no fake success responses, no decorative controls for disabled features.
 - Never deploy, push, change Vercel/Neon/Blob/Resend settings, create credentials or send email. The orchestrator does release work.
+- Never run `scripts/blob-live-verify.ts`, with or without `--confirm-live-preview-blob`: only the owner runs it, against the Preview Blob store.
 - Keep missing facts unknown; no ranking, suitability scores, sensitive-trait inference or automatic hiring decisions.
 - Match the existing code style; keep changes the smallest that fully meet the spec. Commit with short one-line messages, staging explicit paths.
