@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { recordDataSchemas, type RecordDto } from "@/domain/records";
 import type { ExtractedCandidateFields } from "@/domain/cv-extraction";
+import { sendCvBytes, type UploadTicket } from "@/components/cv-transfer";
 import { canStartImport, fileProblem } from "./bulk-cv-queue";
 import {
   hasPendingSuggestions,
@@ -48,9 +49,9 @@ type Entry = {
   error: string;
   done: boolean;
 };
-type UploadTicket = {
+type UploadResponse = {
   data: { id: string };
-  upload: { url: string; fields: Record<string, string> } | null;
+  upload: UploadTicket | null;
 };
 const emptyFields: Fields = {
   name: "",
@@ -247,7 +248,7 @@ export function BulkCvImport({
         update(entry.id, { candidateId, phase: "Preparing CV upload" });
         onChanged();
       }
-      const ticket = await requestJson<UploadTicket>(
+      const ticket = await requestJson<UploadResponse>(
         team.id,
         `/api/v1/candidates/${encodeURIComponent(candidateId)}/cvs/uploads`,
         {
@@ -264,17 +265,7 @@ export function BulkCvImport({
       if (signal.aborted) return;
       if (ticket.upload) {
         update(entry.id, { phase: "Uploading CV" });
-        const form = new FormData();
-        for (const [key, value] of Object.entries(ticket.upload.fields))
-          form.append(key, value);
-        form.append("file", entry.file);
-        const sent = await fetch(ticket.upload.url, {
-          method: "POST",
-          signal,
-          body: form,
-          credentials: "omit",
-          referrerPolicy: "no-referrer",
-        });
+        const sent = await sendCvBytes(ticket.upload, entry.file, signal);
         if (signal.aborted) return;
         if (!sent.ok)
           throw new Error(

@@ -37,6 +37,7 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { CvUpload } from "@/components/cv-upload";
+import { downloadVerifiedCv } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
@@ -2105,6 +2106,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       status: string;
       sourcePath?: string;
       createdAt: string;
+      downloadProtocol: string | null;
     }[];
     pagination: {
       page: number;
@@ -2116,20 +2118,39 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const setPage = (next: number) => setPagination({ candidateId, page: next });
-  const download = async (id: string) => {
+  const download = async (cv: {
+    id: string;
+    downloadProtocol: string | null;
+  }) => {
     if (!team) return;
-    setBusy(id);
+    setBusy(cv.id);
     setError("");
     try {
-      const response = await requestJson<{ url: string }>(
-        team.id,
-        `/api/v1/cvs/${id}/download`,
-      );
-      const anchor = document.createElement("a");
-      anchor.href = response.url;
-      anchor.rel = "noopener noreferrer";
-      anchor.target = "_blank";
-      anchor.click();
+      if (cv.downloadProtocol === "s3-url-v1") {
+        const response = await requestJson<{ url: string }>(
+          team.id,
+          `/api/v1/cvs/${cv.id}/download`,
+        );
+        const anchor = document.createElement("a");
+        anchor.href = response.url;
+        anchor.rel = "noopener noreferrer";
+        anchor.target = "_blank";
+        anchor.click();
+      } else if (cv.downloadProtocol === "blob-chunks-v1") {
+        // Bytes and the object URL stay local to this call and never enter React state.
+        const file = await downloadVerifiedCv(team.id, cv.id);
+        const url = URL.createObjectURL(
+          new Blob([file.bytes], { type: "application/octet-stream" }),
+        );
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = file.originalName;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      } else
+        throw new Error(
+          "This CV uses a download method this page does not support. Refresh the page and try again.",
+        );
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -2188,7 +2209,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
               <button
                 className="button secondary"
                 disabled={cv.status !== "ready" || busy === cv.id}
-                onClick={() => download(cv.id)}
+                onClick={() => download(cv)}
               >
                 <Download size={16} aria-hidden="true" />
                 {busy === cv.id ? "Preparing…" : "Open CV"}
