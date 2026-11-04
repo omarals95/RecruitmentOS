@@ -6,12 +6,19 @@ import {
   attachmentDisposition,
   getStorage,
   assertHostedOidcToken,
+  resolveStorageBinding,
+  StorageConfigurationError,
   type StorageGateway,
 } from "../src/lib/storage.ts";
 
 const pdf = Buffer.from("%PDF-1.7\nfictional test");
 function fake(overrides: Partial<StorageGateway> = {}): StorageGateway {
   return {
+    binding: {
+      provider: "s3",
+      environment: "development",
+      store: "fictional-private-cvs",
+    },
     async assertVersioning() {},
     async presignPost() {
       return { url: "https://example.invalid", fields: {} };
@@ -84,6 +91,36 @@ test("Blob and unknown provider selections fail closed even when S3 credentials 
     storageConfigured({ ...fictional, CV_STORAGE_PROVIDER: "s3" }),
     true,
   );
+});
+test("the storage binding names the provider, the Vercel environment and the bucket without a provider call", () => {
+  const bucket = { S3_BUCKET_NAME: "fictional-private-cvs" };
+  assert.deepEqual(resolveStorageBinding(bucket), {
+    provider: "s3",
+    environment: "development",
+    store: "fictional-private-cvs",
+  });
+  for (const environment of ["preview", "production"])
+    assert.deepEqual(
+      resolveStorageBinding({
+        ...bucket,
+        VERCEL: "1",
+        VERCEL_ENV: environment,
+      }),
+      { provider: "s3", environment, store: "fictional-private-cvs" },
+    );
+  for (const hosted of [
+    { VERCEL: "1" },
+    { VERCEL: "1", VERCEL_ENV: "development" },
+  ])
+    assert.throws(
+      () => resolveStorageBinding({ ...bucket, ...hosted }),
+      StorageConfigurationError,
+    );
+  assert.throws(
+    () => resolveStorageBinding({ ...bucket, CV_STORAGE_PROVIDER: "blob" }),
+    /disabled/i,
+  );
+  assert.throws(() => resolveStorageBinding({}), StorageConfigurationError);
 });
 test("OIDC accepts only a fresh hosted request token and never substitutes local environment tokens", () => {
   const now = Date.now();
@@ -188,16 +225,23 @@ test("AWS SDK signs version-pinned attachment downloads and constrained POST pol
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    "VERCEL",
   ];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
     process.env.AWS_REGION = "us-east-1";
     process.env.S3_BUCKET_NAME = "fictional-storage-test";
     delete process.env.AWS_ROLE_ARN;
+    delete process.env.VERCEL;
     process.env.AWS_ACCESS_KEY_ID = "FAKE_TEST_ONLY_ACCESS";
     process.env.AWS_SECRET_ACCESS_KEY = "fake-test-only-secret-not-a-real-key";
     delete process.env.AWS_SESSION_TOKEN;
     const storage = await getStorage();
+    assert.deepEqual(storage.binding, {
+      provider: "s3",
+      environment: "development",
+      store: "fictional-storage-test",
+    });
     // Signing with explicit fictional credentials is local; no S3 send/HEAD/versioning request occurs.
     const url = new URL(
       await storage.signDownload(

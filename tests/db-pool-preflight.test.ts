@@ -106,10 +106,25 @@ describe("database pool preflight", () => {
     }
   });
 
+  it("refuses the local single pool when the storage schema marker has no row", async () => {
+    configure();
+    vi.stubEnv("IDENTITY_DATABASE_URL", "");
+    vi.stubEnv("DATABASE_URL", "postgresql://data:fake@[::1]/neondb");
+    mocks.query.mockResolvedValue({ rows: [] });
+    await expect(getDb()).rejects.toMatchObject({
+      code: "storage_schema_mismatch",
+    });
+    expect(String(mocks.query.mock.calls[0][0])).toContain(
+      "db_boundary.storage_schema",
+    );
+    expect(mocks.pools[0].end).toHaveBeenCalledTimes(1);
+  });
+
   it("does not force remote TLS on bracketed IPv6 loopback for the local single pool", async () => {
     configure();
     vi.stubEnv("IDENTITY_DATABASE_URL", "");
     vi.stubEnv("DATABASE_URL", "postgresql://data:fake@[::1]/neondb");
+    mocks.query.mockResolvedValue({ rows: [{ version: 1 }] });
     await expect(getDb()).resolves.toBeTruthy();
     expect(mocks.pools).toHaveLength(1);
     expect(mocks.pools[0].ssl).toBeUndefined();
