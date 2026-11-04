@@ -2,8 +2,6 @@ import { randomUUID } from "node:crypto";
 import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
 import { apiTokens, apiRateLimits, member, user } from "@/db/auth-schema";
-import { activity } from "@/db/schema";
-import { withTeam } from "./db-team";
 import { ApiError } from "./errors";
 import { parseRole, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
@@ -14,6 +12,7 @@ import {
   tokenInputSchema,
   type TokenInput,
 } from "./api-token-policy";
+import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 
 type TokenRow = typeof apiTokens.$inferSelect;
 export interface TokenDto {
@@ -163,8 +162,12 @@ export async function createToken(
       "invalid_token_request",
       "Provide a token name, valid scopes and an expiry between 1 and 365 days.",
     );
-  return withTeam(p, async (tx) => {
+  assertTenantContextKey();
+  const db = await getIdentityDb();
+  return db.transaction(async (tx) => {
     const role = await liveHuman(tx, p);
+    // Lock the user row first; the context lets the audit helper pass activity RLS.
+    await installTenantContext(tx, p);
     const scopes = effectiveTokenScopes(parsed.data.scopes, role);
     if (scopes.length !== parsed.data.scopes.length)
       throw new ApiError(
@@ -204,15 +207,9 @@ export async function createToken(
         expiresAt: sql`current_timestamp + (${parsed.data.expiresInDays} * interval '1 day')`,
       })
       .returning();
-    await tx.insert(activity).values({
-      teamId: p.teamId,
-      actorId: p.userId,
-      actorType: "session",
-      action: "token.created",
-      kind: "api-token",
-      summary: "Created an API token",
-      metadata: { tokenId: id, prefix: material.prefix, scopes },
-    });
+    await tx.execute(
+      sql`select tenant_context.audit_token(${id}, ${"token.created"})`,
+    );
     return { token: material.token, data: dto(saved) };
   });
 }
@@ -250,8 +247,11 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
   human(p);
   if (!/^[0-9a-f-]{36}$/i.test(id))
     throw new ApiError(404, "token_not_found", "The API token was not found.");
-  await withTeam(p, async (tx) => {
+  assertTenantContextKey();
+  const db = await getIdentityDb();
+  await db.transaction(async (tx) => {
     const role = await liveHuman(tx, p);
+    await installTenantContext(tx, p);
     const canManageTeam = role === "owner" || role === "admin";
     const [found] = await tx
       .select()
@@ -275,15 +275,9 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
       .update(apiTokens)
       .set({ revokedAt: sql`current_timestamp` })
       .where(and(eq(apiTokens.teamId, p.teamId), eq(apiTokens.id, id)));
-    await tx.insert(activity).values({
-      teamId: p.teamId,
-      actorId: p.userId,
-      actorType: "session",
-      action: "token.revoked",
-      kind: "api-token",
-      summary: "Revoked an API token",
-      metadata: { tokenId: id, prefix: found.prefix },
-    });
+    await tx.execute(
+      sql`select tenant_context.audit_token(${id}, ${"token.revoked"})`,
+    );
   });
 }
 
