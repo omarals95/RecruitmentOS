@@ -61,14 +61,22 @@ The response is `{data, existing, created, skipped}`. `data` lists the applicati
 
 ## Upload a CV
 
-CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private S3 bucket.
+CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private storage.
 
-1. `POST /api/v1/candidates/{candidateId}/cvs/uploads` with JSON containing `originalName`, `mimeType`, `sizeBytes` and a stable `clientUploadId` UUID. Requires `cvs:write`.
-2. Send a multipart form directly to `upload.url`. Include every value in `upload.fields` unchanged, followed by the file part. Do not forward the RecruitmentOS API token to S3.
-3. `POST /api/v1/cvs/uploads/{data.id}/complete` with the RecruitmentOS token. The server checks the exact S3 object version, format and size before marking it ready.
-4. Read metadata through `GET /api/v1/candidates/{candidateId}/cvs?page=1&pageSize=50`. The response includes `data` and `pagination` with the full candidate file total; page size is capped at 100. Request a short-lived attachment URL through `GET /api/v1/cvs/{cvId}/download` when needed. Requires `cvs:read`.
+1. `POST /api/v1/candidates/{candidateId}/cvs/uploads` with JSON containing `originalName`, `mimeType`, `sizeBytes` and a stable `clientUploadId` UUID. Requires `cvs:write`. A ready replay returns `upload: null`.
+2. Switch on `upload.protocol`; never guess it from the URL's hostname, and reject any value you do not know. Send no RecruitmentOS token, cookie or `X-Team-Id` to `upload.url`, and do not log it: it is a secret capability.
+   - `s3-form-v1` (`method: "POST"`): send a multipart form to `upload.url` with every value in `upload.fields` unchanged, followed by the file part.
+   - `blob-put-v1` (`method: "PUT"`): send the file bytes as the body to `upload.url` with exactly the headers in `upload.headers` (`content-type`). Vercel Blob is currently disabled; the reservation returns 503 `STORAGE_SETUP_REQUIRED` for it.
 
-Uploads are limited to 10 MiB and team storage quotas. The upload form expires within five minutes. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
+   Both variants carry `expiresAt` and `maxBytes`, which equals the reserved `sizeBytes`.
+
+3. `POST /api/v1/cvs/uploads/{data.id}/complete` with the RecruitmentOS token and no body. The server reads the stored object itself and checks its size, type and format, then pins the S3 version or records the SHA-256 of the Blob bytes before marking it ready. A client-supplied hash is never used.
+4. Read metadata through `GET /api/v1/candidates/{candidateId}/cvs?page=1&pageSize=50`. The response includes `data` and `pagination` with the full candidate file total; page size is capped at 100. Each ready reference has a `downloadProtocol`. Requires `cvs:read`.
+   - `s3-url-v1`: request a short-lived attachment URL through `GET /api/v1/cvs/{cvId}/download`.
+   - `blob-chunks-v1`: read `GET /api/v1/cvs/{cvId}/manifest` for `{uploadId, originalName, contentType, sizeBytes, sha256, chunkSize, chunkCount}`, then fetch `GET /api/v1/cvs/{cvId}/chunks?index=0` up to `chunkCount - 1`, one at a time. Each 200 response is the raw slice with `X-CV-Upload-Id`, `X-CV-Chunk-Index`, `X-CV-Chunk-Offset`, `X-CV-Size-Bytes` and `X-CV-SHA256` headers; check them against the manifest, join the slices and verify the final SHA-256 before using the file. A 409 `CV_INTEGRITY_FAILED` means the stored object no longer matches; discard every chunk.
+   - The wrong route for a reference returns 409 `CV_DOWNLOAD_PROTOCOL_MISMATCH`.
+
+Uploads are limited to 10 MiB and team storage quotas. The upload ticket expires within five minutes. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
 
 ## Errors
 

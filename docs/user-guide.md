@@ -14,7 +14,7 @@ Open a candidate for education/contact details, source evidence, CVs, related ap
 
 The **My follow-up** area and shortlist are private to your account. Use **Discussion** for shared comments. Save forms explicitly. When a record changes elsewhere, a conflict keeps your draft so you can review the latest version before retrying.
 
-Upload CV files from the candidate's profile after S3 is configured. Files upload directly to private storage, then undergo format checks before a download is available. A file's source path is relative historical metadata. In the cloud, Open/Download uses a short-lived private link; it cannot open Windows File Explorer. Multiple CV references can belong to the same candidate.
+Upload CV files from the candidate's profile after private storage is configured. Files upload directly to private storage, then undergo format checks before a download is available. A file's source path is relative historical metadata. In the cloud, Open/Download uses a short-lived private link; it cannot open Windows File Explorer. Multiple CV references can belong to the same candidate.
 
 Use **Source review** to work through incomplete/ambiguous extraction information. Review evidence before correcting facts. The application does not infer sex/gender, national service completion, nationality or residence from a name or photo. Exports contain candidate information and need the same care as the source CVs.
 
