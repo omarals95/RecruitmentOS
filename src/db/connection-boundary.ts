@@ -12,6 +12,7 @@ export const dataRoleHelpers = [
   "tenant_context.install(text,text)",
   "tenant_context.allows(text,text,text)",
   "tenant_context.allows_activity(text,text,text,text)",
+  "tenant_context.allows_event(text,text,text,uuid)",
   "tenant_context.activity_actor_name(uuid)",
 ];
 export const identityRoleHelpers = [

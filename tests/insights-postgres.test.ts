@@ -373,8 +373,10 @@ describe("bounded, factual PostgreSQL reporting", () => {
     const firstId = randomUUID(),
       secondId = randomUUID(),
       foreignId = randomUUID();
-    await withTeam(owner, (tx) =>
-      tx.insert(activity).values([
+    // Events name only their writing context's actor, so seed a former member's history as the superuser.
+    await fixture.db.execute(sql`reset role`);
+    try {
+      await fixture.db.insert(activity).values([
         {
           id: firstId,
           teamId: owner.teamId,
@@ -395,20 +397,20 @@ describe("bounded, factual PostgreSQL reporting", () => {
           summary: "Later synthetic event",
           createdAt: new Date("2029-12-02T00:00:00Z"),
         },
-      ]),
-    );
-    await withTeam(other, (tx) =>
-      tx.insert(activity).values({
-        id: foreignId,
-        teamId: other.teamId,
-        actorId: former.userId,
-        actorType: "session",
-        kind: "cv",
-        action: "cv.uploaded",
-        summary: "Foreign synthetic event",
-        createdAt: new Date("2029-12-03T00:00:00Z"),
-      }),
-    );
+        {
+          id: foreignId,
+          teamId: other.teamId,
+          actorId: former.userId,
+          actorType: "session",
+          kind: "cv",
+          action: "cv.uploaded",
+          summary: "Foreign synthetic event",
+          createdAt: new Date("2029-12-03T00:00:00Z"),
+        },
+      ]);
+    } finally {
+      await fixture.db.execute(sql`set role recruitment_test_runtime`);
+    }
     const query = {
       kind: "cv",
       search: "Historical Activity Actor",

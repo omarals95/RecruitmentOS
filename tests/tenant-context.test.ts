@@ -19,7 +19,7 @@ import {
   storageUsage,
   uploads,
 } from "@/db/schema";
-import { member } from "@/db/auth-schema";
+import { member, user } from "@/db/auth-schema";
 import {
   dataRoleBoundaryQuery,
   identityRoleBoundaryQuery,
@@ -36,7 +36,12 @@ import { createRecord, getRecord } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { TeamTx } from "@/db";
 import type { StorageGateway } from "@/lib/storage";
-import { createSplitRoleDb, seedIdentity, splitRoles } from "./helpers/db";
+import {
+  createSplitRoleDb,
+  seedApiToken,
+  seedIdentity,
+  splitRoles,
+} from "./helpers/db";
 
 // Fictional data only: two teams, two users per team, one API token.
 const TABLES = [
@@ -774,6 +779,117 @@ describe("signed tenant context under separate nonowner data and identity roles"
       ["token.created", ownerA.userId],
       ["token.revoked", ownerA.userId],
     ]);
+  });
+
+  it("binds new activity rows to the context actor, its own token and the import scope", async () => {
+    type Event = typeof activity.$inferInsert;
+    const event = (p: Principal, overrides: Partial<Event> = {}): Event => ({
+      teamId: p.teamId,
+      actorId: p.userId,
+      actorType: p.authType,
+      tokenId: p.tokenId ?? null,
+      action: "created",
+      kind: "task",
+      summary: "Fictional bound event",
+      ...overrides,
+    });
+    const owner = await harness.asOwner();
+    const write = ["candidates:read", "candidates:write"] as const;
+    const token = await seedApiToken(owner, ownerA, [...write]);
+    const otherToken = await seedApiToken(owner, ownerA, [...write]);
+    const importToken = await seedApiToken(owner, ownerA, [
+      ...write,
+      "imports:write",
+    ]);
+    const rejected: Array<[string, Principal, Partial<Event>]> = [
+      ["same-team member as actor", ownerA, { actorId: memberA.userId }],
+      ["other-team user as actor", ownerA, { actorId: ownerB.userId }],
+      ["session row naming a token", ownerA, { tokenId: token.tokenId }],
+      ["session row typed as token", ownerA, { actorType: "token" }],
+      ["another token's id", token, { tokenId: otherToken.tokenId }],
+      ["token row without its id", token, { tokenId: null }],
+      ["token row typed as session", token, { actorType: "session" }],
+      ["token row naming a colleague", token, { actorId: memberA.userId }],
+      ["import without imports:write", memberA, { actorType: "import" }],
+      ["token import without imports:write", token, { actorType: "import" }],
+    ];
+    for (const [label, p, overrides] of rejected)
+      await expect(
+        withTeam(p, (tx) => tx.insert(activity).values(event(p, overrides))),
+        label,
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+    const accepted: Array<[Principal, Partial<Event>]> = [
+      [ownerA, {}],
+      [memberA, {}],
+      [token, {}],
+      [ownerA, { actorType: "import" }],
+      [importToken, { actorType: "import" }],
+    ];
+    for (const [p, overrides] of accepted)
+      await withTeam(p, (tx) =>
+        tx.insert(activity).values(event(p, overrides)),
+      );
+  });
+
+  it("cannot plant an event under another user's id to read that user's name", async () => {
+    const quiet = await seedIdentity(await harness.asOwner(), {
+      userId: "ctx-quiet-a",
+      teamId: "ctx-a",
+      role: "recruiter",
+    });
+    const superuser = await harness.asSuperuser();
+    for (const [target, name] of [
+      [quiet, "Fictional Quiet Colleague"],
+      [ownerB, "Fictional Other Team Owner"],
+    ] as const)
+      await superuser
+        .update(user)
+        .set({ name })
+        .where(eq(user.id, target.userId));
+    try {
+      for (const target of [quiet, ownerB]) {
+        const id = randomUUID();
+        await expect(
+          withTeam(ownerA, (tx) =>
+            tx.insert(activity).values({
+              id,
+              teamId: ownerA.teamId,
+              actorId: target.userId,
+              actorType: "session",
+              action: "created",
+              kind: "task",
+              summary: "Forged name probe",
+            }),
+          ),
+          target.userId,
+        ).rejects.toMatchObject({ cause: { code: "42501" } });
+        const resolved = await withTeam(ownerA, async (tx) => {
+          const { rows } = await tx.execute<{ name: string | null }>(
+            sql`select tenant_context.activity_actor_name(${id}::uuid) as name`,
+          );
+          return rows[0].name;
+        });
+        expect(resolved, target.userId).toBeNull();
+      }
+      const listed = await listActivity(
+        ownerA,
+        new URLSearchParams({ pageSize: "100" }),
+      );
+      expect(JSON.stringify(listed)).not.toMatch(/Quiet Colleague|Other Team/);
+      for (const search of ["Quiet Colleague", "Other Team Owner"])
+        expect(
+          (await listActivity(ownerA, new URLSearchParams({ search })))
+            .pagination.total,
+          search,
+        ).toBe(0);
+    } finally {
+      await (
+        await harness.asSuperuser()
+      )
+        .update(user)
+        .set({ name: "Fictional Test User" })
+        .where(eq(user.id, ownerB.userId));
+    }
   });
 
   it("denies the data role the key, context and identity tables and the identity role", async () => {

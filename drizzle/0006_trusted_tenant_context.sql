@@ -135,6 +135,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
       AND (row_kind <> 'saved-view' OR c.actor_id = row_actor)
       AND (row_kind <> 'candidate' OR 'candidates:read' = ANY(c.scopes)))
 $$;
+-- New events name only the context actor and its own token; import events need imports:write.
+CREATE FUNCTION tenant_context.allows_event(row_team text, row_actor text, row_actor_type text, row_token uuid) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM tenant_context.contexts c
+    WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
+      AND c.expires_at > clock_timestamp() AND c.team_id = row_team AND c.actor_id = row_actor
+      AND c.scopes && ARRAY['candidates:write','recruitment:write','cvs:write','imports:write']
+      AND row_token::text IS NOT DISTINCT FROM c.token_id
+      AND CASE row_actor_type WHEN 'import' THEN 'imports:write' = ANY(c.scopes)
+        ELSE row_actor_type = c.auth_type END)
+$$;
 
 DO $$ DECLARE tbl text; BEGIN
  FOREACH tbl IN ARRAY ARRAY['records','candidate_states','activity','uploads','storage_usage','idempotency','notification_reads'] LOOP
@@ -151,7 +162,7 @@ DO $$ DECLARE spec text[]; BEGIN
   ['records', 'tenant_context.allows(team_id, private_owner_id, ''read'')', 'tenant_context.allows(team_id, private_owner_id, ''write'')', 'tenant_context.allows(team_id, private_owner_id, ''write'')'],
   ['candidate_states', 'tenant_context.allows(team_id, user_id, ''read'')', 'tenant_context.allows(team_id, user_id, ''write'')', 'tenant_context.allows(team_id, user_id, ''write'')'],
   ['activity', 'tenant_context.allows_activity(team_id, actor_id, action, kind)', 'tenant_context.allows(team_id, NULL, ''write'')',
-   '(kind <> ''api-token'' AND tenant_context.allows(team_id, NULL, ''write'')) OR (kind = ''api-token'' AND action IN (''token.created'', ''token.revoked'') AND tenant_context.allows(team_id, actor_id, ''read'') AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context''))'],
+   '(kind <> ''api-token'' AND tenant_context.allows_event(team_id, actor_id, actor_type, token_id)) OR (kind = ''api-token'' AND action IN (''token.created'', ''token.revoked'') AND tenant_context.allows(team_id, actor_id, ''read'') AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context''))'],
   ['uploads', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
   ['storage_usage', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
   ['idempotency', 'tenant_context.allows(team_id, NULL, ''read'')', 'tenant_context.allows(team_id, NULL, ''write'')', 'tenant_context.allows(team_id, NULL, ''write'')'],
@@ -165,6 +176,7 @@ DO $$ DECLARE spec text[]; BEGIN
 END $$;
 
 -- Resolves a name only for an event the current context may read; former members still resolve.
+-- Insert policies bind actor_id to the writing context, so a caller cannot plant an event to look up a name.
 CREATE FUNCTION tenant_context.activity_actor_name(event_id uuid) RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   SELECT u.name FROM app.activity a JOIN auth."user" u ON u.id = a.actor_id
