@@ -9,15 +9,34 @@ import {
   vi,
 } from "vitest";
 
-// The evidence script must refuse before it ever builds a database client.
-const constructed = vi.hoisted(() => vi.fn());
+// The evidence script must refuse before it ever builds a database client. When a PGlite is
+// bridged in, each client runs as the login named in its URL, one client at a time.
+const bridge = vi.hoisted(() => ({
+  constructed: vi.fn(),
+  pg: null as PGlite | null,
+  user: null as string | null,
+}));
+const constructed = bridge.constructed;
 vi.mock("pg", () => ({
   Client: class {
-    constructor() {
-      constructed();
-      throw new Error(
-        "fictional driver failure for postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55432/fictional_db",
-      );
+    user: string;
+    constructor({ connectionString }: { connectionString: string }) {
+      bridge.constructed();
+      if (!bridge.pg)
+        throw new Error(
+          "fictional driver failure for postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55432/fictional_db",
+        );
+      this.user = new URL(connectionString).username;
+    }
+    on() {}
+    async connect() {}
+    async end() {}
+    async query(text: string, params?: unknown[]) {
+      if (bridge.user !== this.user) {
+        await bridge.pg!.exec(`SET SESSION AUTHORIZATION ${this.user}`);
+        bridge.user = this.user;
+      }
+      return bridge.pg!.query(text, params);
     }
   },
 }));
@@ -36,6 +55,7 @@ import {
   collectRoleEvidence,
   main,
 } from "../scripts/db-role-evidence";
+import { templateGrantMatrix } from "../scripts/runtime-role-template";
 import {
   createSplitRoleDb,
   readRuntimeRoleTemplate,
@@ -94,6 +114,44 @@ const expectedIdentity = {
   },
   schemas: { app: false, auth: true, tenant_context: true, db_boundary: true },
   helpers: identityRoleHelpers,
+};
+const loginOnly = {
+  rolcanlogin: true,
+  rolsuper: false,
+  rolinherit: false,
+  rolcreaterole: false,
+  rolcreatedb: false,
+  rolreplication: false,
+  rolbypassrls: false,
+};
+/** Requirement 7 of the reviewed spec, which the template's GRANT statements must declare. */
+const reviewedMatrix = Object.fromEntries(
+  (
+    [
+      [splitRoles.data, expectedData],
+      [splitRoles.identity, expectedIdentity],
+    ] as const
+  ).map(([role, expected]) => [
+    role,
+    {
+      attributes: loginOnly,
+      database: ["CONNECT"],
+      schemas: Object.fromEntries(
+        Object.entries(expected.schemas)
+          .filter(([, usage]) => usage)
+          .map(([schema]) => [schema, ["USAGE"]]),
+      ),
+      tables: expected.tablePrivileges,
+      execute: [...expected.helpers].sort(),
+    },
+  ]),
+);
+const closedToPublic = {
+  databaseConnect: false,
+  databaseTemporary: false,
+  publicSchemaUsage: false,
+  publicSchemaCreate: false,
+  futureFunctionExecute: false,
 };
 
 /** Every ACL, default ACL, role attribute and membership that the template could change. */
@@ -180,28 +238,39 @@ describe("split runtime role template", () => {
     }
   });
 
+  it("declares exactly the reviewed matrix in its GRANT statements, which the evidence script reads", async () => {
+    const template = await readRuntimeRoleTemplate();
+    expect(templateGrantMatrix(template)).toEqual(reviewedMatrix);
+    for (const unreadable of [
+      "GRANT SELECT ON ALL TABLES IN SCHEMA app TO recruitmentos_data;",
+      "GRANT SELECT ON TABLE app.records TO fictional_other_role;",
+      "GRANT USAGE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_data;",
+      "GRANT recruitmentos_identity TO recruitmentos_data;",
+    ])
+      expect(
+        () => templateGrantMatrix(template.replace("COMMIT;", unreadable)),
+        unreadable,
+      ).toThrow(/cannot be read/);
+  });
+
   it("grants exactly the reviewed matrix, reported by the evidence collector", async () => {
     for (const [kind, expected] of [
       ["data", expectedData],
       ["identity", expectedIdentity],
     ] as const) {
       const { evidence } = await collect(kind);
+      expect(evidence.drift, kind).toEqual([]);
       expect(evidence.currentUser).toBe(splitRoles[kind]);
       expect(evidence.sessionMatchesCurrentUser).toBe(true);
-      expect(evidence.attributes).toEqual({
-        rolcanlogin: true,
-        rolsuper: false,
-        rolinherit: false,
-        rolcreaterole: false,
-        rolcreatedb: false,
-        rolreplication: false,
-        rolbypassrls: false,
-      });
+      expect(evidence.attributes).toEqual(loginOnly);
       expect(evidence.memberOf).toEqual([]);
-      expect(evidence.databasePrivileges).toMatchObject({
+      expect(evidence.databasePrivileges).toEqual({
         connect: true,
         create: false,
+        temporary: false,
       });
+      expect(evidence.defaultPrivileges, kind).toEqual([]);
+      expect(evidence.publicPrivileges, kind).toEqual(closedToPublic);
       expect(evidence.tablePrivileges, kind).toEqual(expected.tablePrivileges);
       expect(evidence.sequencePrivileges, kind).toEqual({});
       expect(evidence.columnPrivileges, kind).toEqual({});
@@ -219,7 +288,11 @@ describe("split runtime role template", () => {
         usage: false,
         create: false,
       });
-      expect(evidence.schemaPrivileges.public.create).toBe(false);
+      expect(evidence.schemaPrivileges.public).toEqual({
+        exists: true,
+        usage: false,
+        create: false,
+      });
     }
   });
 
@@ -272,6 +345,7 @@ describe("split runtime role template", () => {
     const identity = await collect("identity");
     expect(data.evidence.checks).toEqual({
       sessionMatchesCurrentUser: true,
+      matchesTemplate: true,
       runtimeRoleSafe: true,
       markerBoundarySafe: true,
       roleBoundarySafe: true,
@@ -279,6 +353,7 @@ describe("split runtime role template", () => {
     });
     expect(identity.evidence.checks).toEqual({
       sessionMatchesCurrentUser: true,
+      matchesTemplate: true,
       runtimeRoleSafe: true,
       markerBoundarySafe: true,
       roleBoundarySafe: true,
@@ -511,34 +586,42 @@ describe("split runtime role template refusals", () => {
   });
 });
 
+const data =
+  "postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55432/fictional_db";
+const identity =
+  "postgresql://recruitmentos_identity:fictional-identity-secret@127.0.0.1:55432/fictional_db";
+
+/** Run the evidence script's main and check its output never carries a secret. */
+async function run(
+  env: Record<string, string | undefined>,
+  secrets: string[] = [],
+) {
+  const output: string[] = [];
+  const capture = (...args: unknown[]) => void output.push(args.join(" "));
+  vi.spyOn(console, "log").mockImplementation(capture);
+  vi.spyOn(console, "error").mockImplementation(capture);
+  bridge.user = null;
+  const code = await main(env);
+  vi.restoreAllMocks();
+  const text = output.join("\n");
+  for (const secret of [
+    "fictional-data-secret",
+    "fictional-identity-secret",
+    "postgresql://",
+    "127.0.0.1",
+    "55432",
+    "fictional driver failure",
+    ...secrets,
+  ])
+    expect(text).not.toContain(secret);
+  return { code, text };
+}
+
 describe("db-role-evidence configuration refusals", () => {
-  const data =
-    "postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55432/fictional_db";
-  const identity =
-    "postgresql://recruitmentos_identity:fictional-identity-secret@127.0.0.1:55432/fictional_db";
   afterEach(() => {
     vi.restoreAllMocks();
     constructed.mockClear();
   });
-
-  async function run(env: Record<string, string | undefined>) {
-    const output: string[] = [];
-    const capture = (...args: unknown[]) => void output.push(args.join(" "));
-    vi.spyOn(console, "log").mockImplementation(capture);
-    vi.spyOn(console, "error").mockImplementation(capture);
-    const code = await main(env);
-    const text = output.join("\n");
-    for (const secret of [
-      "fictional-data-secret",
-      "fictional-identity-secret",
-      "postgresql://",
-      "127.0.0.1",
-      "55432",
-      "fictional driver failure",
-    ])
-      expect(text).not.toContain(secret);
-    return { code, text };
-  }
 
   for (const [name, env] of [
     ["a missing IDENTITY_DATABASE_URL", { DATABASE_URL: data }],
@@ -575,5 +658,257 @@ describe("db-role-evidence configuration refusals", () => {
     expect(text.split("\n")).toEqual([
       expect.stringMatching(/^Role evidence failed\./),
     ]);
+  });
+});
+
+describe("db-role-evidence template drift", () => {
+  let harness: Awaited<ReturnType<typeof createSplitRoleDb>>;
+  let marker: string;
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    bridge.pg = harness.client;
+    await harness.asSuperuser();
+    marker = (
+      await harness.client.query<{ id: string }>(
+        "SELECT id::text FROM db_boundary.connection_marker",
+      )
+    ).rows[0].id;
+  });
+  afterAll(async () => {
+    bridge.pg = null;
+    await harness?.close();
+  });
+
+  async function evidence() {
+    const { code, text } = await run(
+      { DATABASE_URL: data, IDENTITY_DATABASE_URL: identity },
+      [marker],
+    );
+    const report = JSON.parse(text) as {
+      data: { drift: string[] };
+      identity: { drift: string[] };
+      pass: boolean;
+    };
+    return {
+      code,
+      pass: report.pass,
+      drift: { data: report.data.drift, identity: report.identity.drift },
+    };
+  }
+  async function rerunTemplate() {
+    await harness.asOwner();
+    await harness.client.exec(await readRuntimeRoleTemplate());
+  }
+  const onDatabase = (statement: string) =>
+    `DO $$ BEGIN EXECUTE format('${statement}', current_database()); END $$`;
+
+  it("exits 0 when both roles match the template exactly", async () => {
+    expect(await evidence()).toEqual({
+      code: 0,
+      pass: true,
+      drift: { data: [], identity: [] },
+    });
+  });
+
+  const cases: {
+    name: string;
+    as: "owner" | "superuser";
+    setup: string;
+    cleanup?: string;
+    data?: string[];
+    identity?: string[];
+  }[] = [
+    {
+      name: "an extra table privilege",
+      as: "owner",
+      setup: "GRANT DELETE ON app.records TO recruitmentos_data",
+      data: ["extra DELETE on table app.records"],
+    },
+    {
+      name: "a missing table privilege",
+      as: "owner",
+      setup: "REVOKE UPDATE ON app.records FROM recruitmentos_data",
+      data: ["missing UPDATE on table app.records"],
+    },
+    {
+      name: "TRUNCATE",
+      as: "owner",
+      setup: "GRANT TRUNCATE ON app.records TO recruitmentos_data",
+      data: ["extra TRUNCATE on table app.records"],
+    },
+    {
+      name: "SELECT on tenant_context.keys",
+      as: "owner",
+      setup: "GRANT SELECT ON tenant_context.keys TO recruitmentos_data",
+      data: ["extra SELECT on table tenant_context.keys"],
+    },
+    {
+      name: "SELECT on tenant_context.contexts",
+      as: "owner",
+      setup:
+        "GRANT SELECT ON tenant_context.contexts TO recruitmentos_identity",
+      identity: ["extra SELECT on table tenant_context.contexts"],
+    },
+    {
+      name: "storage_ledger access",
+      as: "owner",
+      setup: `GRANT USAGE ON SCHEMA storage_ledger TO recruitmentos_data;
+        GRANT SELECT ON storage_ledger.stores TO recruitmentos_data`,
+      data: [
+        "extra USAGE on schema storage_ledger",
+        "extra SELECT on table storage_ledger.stores",
+      ],
+    },
+    {
+      name: "an extra column privilege",
+      as: "owner",
+      setup: "GRANT SELECT (id) ON app.records TO recruitmentos_identity",
+      identity: ["extra SELECT on column app.records.id"],
+    },
+    {
+      name: "an extra sequence privilege",
+      as: "owner",
+      setup: `CREATE SEQUENCE app.drift_probe;
+        GRANT USAGE ON SEQUENCE app.drift_probe TO recruitmentos_data`,
+      cleanup: "DROP SEQUENCE app.drift_probe",
+      data: ["extra USAGE on sequence app.drift_probe"],
+    },
+    {
+      name: "an extra function privilege",
+      as: "owner",
+      setup:
+        "GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text,text) TO recruitmentos_data",
+      data: ["extra EXECUTE on function tenant_context.audit_token(text,text)"],
+    },
+    {
+      name: "a missing function privilege",
+      as: "owner",
+      setup:
+        "REVOKE EXECUTE ON FUNCTION tenant_context.acquire_blob_read(text) FROM recruitmentos_data",
+      data: [
+        "missing EXECUTE on function tenant_context.acquire_blob_read(text)",
+      ],
+    },
+    {
+      name: "an extra schema privilege",
+      as: "owner",
+      setup: "GRANT USAGE ON SCHEMA auth TO recruitmentos_data",
+      data: ["extra USAGE on schema auth"],
+    },
+    {
+      name: "a missing schema privilege",
+      as: "owner",
+      setup: "REVOKE USAGE ON SCHEMA app FROM recruitmentos_data",
+      data: ["missing USAGE on schema app"],
+    },
+    {
+      name: "CREATE on a protected schema",
+      as: "owner",
+      setup: "GRANT CREATE ON SCHEMA app TO recruitmentos_data",
+      data: ["extra CREATE on schema app"],
+    },
+    {
+      name: "CREATE on any other schema",
+      as: "superuser",
+      setup: `CREATE SCHEMA drift_probe;
+        GRANT CREATE ON SCHEMA drift_probe TO recruitmentos_identity`,
+      cleanup: "DROP SCHEMA drift_probe",
+      identity: ["extra CREATE on schema drift_probe"],
+    },
+    {
+      name: "database TEMPORARY",
+      as: "owner",
+      setup: onDatabase("GRANT TEMPORARY ON DATABASE %I TO recruitmentos_data"),
+      data: ["extra TEMPORARY on the database"],
+    },
+    {
+      name: "PUBLIC CONNECT",
+      as: "owner",
+      setup: onDatabase("GRANT CONNECT ON DATABASE %I TO PUBLIC"),
+      data: ["PUBLIC holds databaseConnect"],
+      identity: ["PUBLIC holds databaseConnect"],
+    },
+    {
+      name: "PUBLIC USAGE on the public schema",
+      as: "owner",
+      setup: "GRANT USAGE ON SCHEMA public TO PUBLIC",
+      data: ["extra USAGE on schema public", "PUBLIC holds publicSchemaUsage"],
+      identity: [
+        "extra USAGE on schema public",
+        "PUBLIC holds publicSchemaUsage",
+      ],
+    },
+    {
+      name: "role attribute drift",
+      as: "superuser",
+      setup: "ALTER ROLE recruitmentos_data INHERIT",
+      cleanup: "ALTER ROLE recruitmentos_data NOINHERIT",
+      data: ["role attribute rolinherit is not false"],
+    },
+    {
+      name: "role membership drift",
+      as: "superuser",
+      setup: `CREATE ROLE drift_parent NOLOGIN;
+        GRANT drift_parent TO recruitmentos_identity`,
+      cleanup: "DROP ROLE drift_parent",
+      identity: ["member of role drift_parent"],
+    },
+    {
+      name: "a default privilege for a runtime role",
+      as: "owner",
+      setup:
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO recruitmentos_data",
+      data: [
+        "default privilege tenant_test_owner in app on new tables gives SELECT to recruitmentos_data",
+      ],
+    },
+    {
+      name: "PUBLIC EXECUTE on future functions",
+      as: "owner",
+      setup: "ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC",
+      data: ["PUBLIC holds futureFunctionExecute"],
+      identity: ["PUBLIC holds futureFunctionExecute"],
+    },
+  ];
+  for (const drift of cases)
+    it(`exits 1 on ${drift.name} and 0 after a template rerun`, async () => {
+      await harness[drift.as === "owner" ? "asOwner" : "asSuperuser"]();
+      await harness.client.exec(drift.setup);
+      try {
+        expect(await evidence()).toEqual({
+          code: 1,
+          pass: false,
+          drift: { data: drift.data ?? [], identity: drift.identity ?? [] },
+        });
+      } finally {
+        if (drift.cleanup) {
+          await harness.asSuperuser();
+          await harness.client.exec(drift.cleanup);
+        }
+        await rerunTemplate();
+      }
+      expect((await evidence()).code).toBe(0);
+    });
+
+  it("refuses to commit when the runner cannot close the public schema to PUBLIC", async () => {
+    await harness.asSuperuser();
+    const owner = (
+      await harness.client.query<{ owner: string }>(
+        "SELECT nspowner::regrole::text AS owner FROM pg_namespace WHERE nspname = 'public'",
+      )
+    ).rows[0].owner;
+    await harness.client.exec(`
+      ALTER SCHEMA public OWNER TO postgres;
+      GRANT USAGE ON SCHEMA public TO PUBLIC;
+    `);
+    await harness.asOwner();
+    await expect(
+      harness.client.exec(await readRuntimeRoleTemplate()),
+    ).rejects.toThrow(/PUBLIC still has database or public schema access/);
+    await harness.client.exec("ROLLBACK");
+    await harness.asSuperuser();
+    await harness.client.exec(`ALTER SCHEMA public OWNER TO ${owner}`);
+    await rerunTemplate();
+    expect((await evidence()).code).toBe(0);
   });
 });

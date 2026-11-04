@@ -6,10 +6,12 @@
  *   process environment and never loads .env.local, so it inspects exactly what the app uses.
  * - It opens one connection per URL with the runtime TLS rule and runs every query inside a
  *   READ ONLY transaction that is rolled back.
+ * - It compares each role's effective privileges with the grants the template declares and
+ *   lists every difference as drift.
  * - It prints one JSON document and never a password, URL, host, port, the marker value, row
  *   data or driver error text.
- * - Exit codes: 0 every check passes; 1 a check fails or a connection or query error;
- *   2 configuration refused before any connection is opened.
+ * - Exit codes: 0 every check passes and nothing drifts; 1 a check fails, a privilege drifts, or
+ *   a connection or query error; 2 configuration refused before any connection is opened.
  */
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +25,12 @@ import {
 } from "../src/db/connection-boundary.ts";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role.ts";
 import { assertStorageSchema } from "../src/db/storage-schema.ts";
+import {
+  readRuntimeRoleTemplate,
+  runtimeRoleNames,
+  templateGrantMatrix,
+  type RoleMatrix,
+} from "./runtime-role-template.ts";
 
 type Queryable = {
   query: (
@@ -50,6 +58,12 @@ export type RoleEvidence = {
   /** Column privileges the role holds without the same table-level privilege. */
   columnPrivileges: Record<string, string[]>;
   execute: string[];
+  /** Explicit default privileges for future objects granted to this role or PUBLIC. */
+  defaultPrivileges: string[];
+  /** What PUBLIC holds that the template revokes; every value should be false. */
+  publicPrivileges: Record<string, boolean>;
+  /** Every difference from the template's grant matrix. */
+  drift: string[];
   checks: Record<string, boolean>;
   pass: boolean;
 };
@@ -70,6 +84,88 @@ function privilegeMap(rows: Record<string, unknown>[]) {
   return Object.fromEntries(
     rows.map((row) => [row.object as string, row.privileges as string[]]),
   );
+}
+
+function differences(object: string, held: string[], expected: string[]) {
+  return [
+    ...held
+      .filter((privilege) => !expected.includes(privilege))
+      .map((privilege) => `extra ${privilege} on ${object}`),
+    ...expected
+      .filter((privilege) => !held.includes(privilege))
+      .map((privilege) => `missing ${privilege} on ${object}`),
+  ];
+}
+
+/** Every way the collected privileges differ from what the template grants this role. */
+function templateDrift(
+  evidence: Omit<RoleEvidence, "drift" | "checks" | "pass">,
+  role: string,
+  expected: RoleMatrix,
+): string[] {
+  const drift: string[] = [];
+  if (evidence.currentUser !== role)
+    drift.push(`connected as ${evidence.currentUser}, not ${role}`);
+  for (const [attribute, value] of Object.entries(expected.attributes))
+    if (evidence.attributes[attribute] !== value)
+      drift.push(`role attribute ${attribute} is not ${value}`);
+  drift.push(...evidence.memberOf.map((name) => `member of role ${name}`));
+  const database = evidence.databasePrivileges;
+  drift.push(
+    ...differences(
+      "the database",
+      [
+        database.connect && "CONNECT",
+        database.create && "CREATE",
+        database.temporary && "TEMPORARY",
+      ].filter((privilege) => typeof privilege === "string"),
+      expected.database,
+    ),
+  );
+  const keys = (...maps: object[]) =>
+    [...new Set(maps.flatMap((map) => Object.keys(map)))].sort();
+  for (const schema of keys(evidence.schemaPrivileges, expected.schemas)) {
+    const held = evidence.schemaPrivileges[schema];
+    drift.push(
+      ...differences(
+        `schema ${schema}`,
+        [held?.usage && "USAGE", held?.create && "CREATE"].filter(
+          (privilege) => typeof privilege === "string",
+        ),
+        expected.schemas[schema] ?? [],
+      ),
+    );
+  }
+  for (const table of keys(evidence.tablePrivileges, expected.tables))
+    drift.push(
+      ...differences(
+        `table ${table}`,
+        evidence.tablePrivileges[table] ?? [],
+        expected.tables[table] ?? [],
+      ),
+    );
+  for (const [sequence, privileges] of Object.entries(
+    evidence.sequencePrivileges,
+  ))
+    drift.push(...differences(`sequence ${sequence}`, privileges, []));
+  for (const [column, privileges] of Object.entries(evidence.columnPrivileges))
+    drift.push(...differences(`column ${column}`, privileges, []));
+  for (const signature of [
+    ...new Set([...evidence.execute, ...expected.execute]),
+  ].sort())
+    drift.push(
+      ...differences(
+        `function ${signature}`,
+        evidence.execute.includes(signature) ? ["EXECUTE"] : [],
+        expected.execute.includes(signature) ? ["EXECUTE"] : [],
+      ),
+    );
+  drift.push(
+    ...evidence.defaultPrivileges.map((entry) => `default privilege ${entry}`),
+  );
+  for (const [privilege, held] of Object.entries(evidence.publicPrivileges))
+    if (held) drift.push(`PUBLIC holds ${privilege}`);
+  return drift;
 }
 
 async function unsafe(client: Queryable, query: string): Promise<boolean> {
@@ -126,8 +222,10 @@ export async function collectRoleEvidence(
         `SELECT s.name, n.oid IS NOT NULL AS exists,
           COALESCE(pg_catalog.has_schema_privilege(current_user, n.oid, 'USAGE'), false) AS usage,
           COALESCE(pg_catalog.has_schema_privilege(current_user, n.oid, 'CREATE'), false) AS create
-        FROM pg_catalog.unnest($1::text[]) AS s(name)
-        LEFT JOIN pg_catalog.pg_namespace n ON n.nspname = s.name`,
+        FROM (SELECT pg_catalog.unnest($1::text[]) AS name
+          UNION SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE ${userSchemas}) s
+        LEFT JOIN pg_catalog.pg_namespace n ON n.nspname = s.name
+        ORDER BY 1`,
         [listedSchemas],
       )
     ).rows;
@@ -183,9 +281,72 @@ export async function collectRoleEvidence(
           ORDER BY 1`,
       )
     ).rows.map((row) => row.signature as string);
-    const checks: Record<string, boolean> = {
+    const defaultPrivileges = (
+      await client.query(
+        `SELECT pg_catalog.pg_get_userbyid(d.defaclrole)::text || ' in ' || COALESCE(n.nspname::text, 'every schema')
+            || ' on new ' || CASE d.defaclobjtype WHEN 'r' THEN 'tables' WHEN 'S' THEN 'sequences'
+              WHEN 'f' THEN 'functions' WHEN 'T' THEN 'types' WHEN 'n' THEN 'schemas' ELSE d.defaclobjtype::text END
+            || ' gives ' || a.privilege_type || ' to '
+            || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END AS entry
+          FROM pg_catalog.pg_default_acl d
+          LEFT JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a
+          WHERE CASE WHEN a.grantee = 0 THEN true ELSE pg_catalog.pg_has_role(current_user, a.grantee, 'MEMBER') END
+          ORDER BY 1`,
+      )
+    ).rows.map((row) => row.entry as string);
+    // The template's REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC leaves an owner default without PUBLIC.
+    const publicPrivileges = (
+      await client.query(
+        `SELECT pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT') AS "databaseConnect",
+          pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'TEMPORARY') AS "databaseTemporary",
+          COALESCE((SELECT pg_catalog.has_schema_privilege('public', n.oid, 'USAGE')
+            FROM pg_catalog.pg_namespace n WHERE n.nspname = 'public'), false) AS "publicSchemaUsage",
+          COALESCE((SELECT pg_catalog.has_schema_privilege('public', n.oid, 'CREATE')
+            FROM pg_catalog.pg_namespace n WHERE n.nspname = 'public'), false) AS "publicSchemaCreate",
+          COALESCE((SELECT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(d.defaclacl) a
+                WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')
+              FROM pg_catalog.pg_default_acl d
+              JOIN pg_catalog.pg_namespace n ON n.nspname = 'tenant_context' AND d.defaclrole = n.nspowner
+              WHERE d.defaclnamespace = 0 AND d.defaclobjtype = 'f'), true) AS "futureFunctionExecute"`,
+      )
+    ).rows[0] as Record<string, boolean>;
+    const collected = {
+      kind,
+      currentUser: principal.current as string,
+      sessionUser: principal.session as string,
       sessionMatchesCurrentUser:
         Boolean(principal.current) && principal.current === principal.session,
+      database: principal.database as string,
+      attributes,
+      memberOf,
+      databasePrivileges,
+      schemaPrivileges: Object.fromEntries(
+        schemaRows.map((row) => [
+          row.name as string,
+          {
+            exists: row.exists as boolean,
+            usage: row.usage as boolean,
+            create: row.create as boolean,
+          },
+        ]),
+      ),
+      tablePrivileges,
+      sequencePrivileges,
+      columnPrivileges,
+      execute,
+      defaultPrivileges,
+      publicPrivileges,
+    };
+    const role = runtimeRoleNames[kind];
+    const drift = templateDrift(
+      collected,
+      role,
+      templateGrantMatrix(await readRuntimeRoleTemplate())[role],
+    );
+    const checks: Record<string, boolean> = {
+      sessionMatchesCurrentUser: collected.sessionMatchesCurrentUser,
+      matchesTemplate: drift.length === 0,
       runtimeRoleSafe: !(await unsafe(client, runtimeRoleSafetyQuery)),
       markerBoundarySafe: !(await unsafe(client, markerRoleBoundaryQuery)),
       roleBoundarySafe: !(await unsafe(
@@ -207,28 +368,8 @@ export async function collectRoleEvidence(
     });
     return {
       evidence: {
-        kind,
-        currentUser: principal.current as string,
-        sessionUser: principal.session as string,
-        sessionMatchesCurrentUser: checks.sessionMatchesCurrentUser,
-        database: principal.database as string,
-        attributes,
-        memberOf,
-        databasePrivileges,
-        schemaPrivileges: Object.fromEntries(
-          schemaRows.map((row) => [
-            row.name as string,
-            {
-              exists: row.exists as boolean,
-              usage: row.usage as boolean,
-              create: row.create as boolean,
-            },
-          ]),
-        ),
-        tablePrivileges,
-        sequencePrivileges,
-        columnPrivileges,
-        execute,
+        ...collected,
+        drift,
         checks,
         pass: Object.values(checks).every(Boolean),
       },

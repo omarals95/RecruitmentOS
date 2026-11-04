@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
@@ -15,6 +14,7 @@ import { dataRoleHelpers, identityRoleHelpers } from "@/db/connection-boundary";
 import type { Principal } from "@/lib/principal";
 import { roleScopes, type Role } from "@/lib/permissions";
 import { installTenantContextKey } from "@/lib/tenant-context";
+import { readRuntimeRoleTemplate } from "../../scripts/runtime-role-template";
 export async function createTestDb() {
   const client = new PGlite();
   await applyMigrations(client);
@@ -110,16 +110,8 @@ export const splitRoles = {
   data: "recruitmentos_data",
   identity: "recruitmentos_identity",
 } as const;
-/** The reviewed split runtime role template, read unmodified. */
-export function readRuntimeRoleTemplate(): Promise<string> {
-  return readFile(
-    new URL(
-      "../../infrastructure/postgres-split-runtime-roles.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-}
+/** infrastructure/postgres-split-runtime-roles.sql, read unmodified by the loader the evidence script uses. */
+export { readRuntimeRoleTemplate };
 /**
  * One PGlite with a nonsuperuser, non-BYPASSRLS migration owner and the data and identity
  * roles provisioned by the runtime role template. Route pools with dataDb/identityDb.
