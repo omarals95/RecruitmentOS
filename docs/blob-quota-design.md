@@ -23,7 +23,7 @@ Remaining before Blob can be enabled:
 
 - Cleanup, deletion and reconciliation of retained charges and stored objects. Retained charges are currently permanent, so abandoned Blob tickets are never released, by any team.
 - Provider guarantees for one-shot, exact-path, no-overwrite capabilities and for late in-flight uploads (below).
-- A real Blob client and live provider tests of the wired upload, completion and download protocol.
+- Live provider results for the wired upload, completion and download protocol. The real client exists (`src/lib/vercel-blob-client.ts`, built only by tests and the live script), and live results from `scripts/blob-live-verify.ts` are outstanding.
 - Live Neon, multi-connection race and effective-privilege tests.
 
 ## Budget boundaries
