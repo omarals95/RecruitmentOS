@@ -332,6 +332,48 @@ describe("database runtime role safety", () => {
     }
   });
 
+  it("rejects the owner of the current database and a NOINHERIT member of it, even with its database privileges revoked", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      const name = await pg.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      );
+      const database = '"' + name.rows[0].name.replaceAll('"', '""') + '"';
+      await pg.exec(`
+        ${closedToPublic}
+        CREATE ROLE database_owner_probe NOLOGIN;
+        CREATE ROLE database_owner_member NOLOGIN NOINHERIT;
+        GRANT database_owner_probe TO database_owner_member;
+        CREATE ROLE database_owner_unrelated NOLOGIN;
+        ALTER DATABASE ${database} OWNER TO database_owner_probe;
+        -- Without pg_database_owner on the public schema, only the owner clause catches this role.
+        ALTER SCHEMA public OWNER TO CURRENT_USER;
+        SET ROLE database_owner_probe;
+        REVOKE ALL ON DATABASE ${database} FROM database_owner_probe;
+        RESET ROLE;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      const privileges = await pg.query<{ create: boolean; temp: boolean }>(
+        `SELECT has_database_privilege('database_owner_probe', current_database(), 'CREATE') AS create,
+          has_database_privilege('database_owner_probe', current_database(), 'TEMPORARY') AS temp`,
+      );
+      expect(privileges.rows).toEqual([{ create: false, temp: false }]);
+      expect(await unsafe("database_owner_unrelated")).toBe(false);
+      for (const role of ["database_owner_probe", "database_owner_member"])
+        expect(await unsafe(role), role).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
+
   it("rejects any table, column, sequence, function, schema or database privilege held WITH GRANT OPTION, directly or through a member role", async () => {
     const pg = new PGlite();
     try {
