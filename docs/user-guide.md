@@ -2,7 +2,7 @@
 
 ## Start your day
 
-Sign in with your verified email/password, or a configured Google/Microsoft provider. Select your team in the sidebar. **Overview** shows actual candidate, vacancy and workflow counts, upcoming interviews, overdue tasks and recent recruitment activity. Candidate counts describe people; CV counts describe uploaded ready files and can differ. Dark, light and system themes are available in the top bar.
+Sign in with your verified email/password, or a configured Google/Microsoft provider. Select your team in the sidebar. **Overview** shows actual candidate, vacancy and workflow counts, upcoming interviews, overdue tasks and recent recruitment activity. Overdue tasks exclude tasks in buckets marked **Counts as completed**. The **Open vacancies** count includes only vacancies with status Open. Candidate counts describe people; CV counts describe uploaded ready files and can differ. Dark, light and system themes are available in the top bar.
 
 Use the top-bar search (Ctrl/Cmd+K) to find candidates, vacancies, roles and tasks. Search can use a quoted phrase or exclude a word with `-word`. Your team determines which records you can access.
 
@@ -20,13 +20,13 @@ Use **Source review** to work through incomplete/ambiguous extraction informatio
 
 ## Roles, vacancies and applications
 
-Create reusable **Job roles** with title, department, description, requirements and skills. Create an **Open vacancy**, optionally copying a role's details into the draft. Changes to a role do not silently rewrite existing vacancies.
+Create reusable **Job roles** with title, department, description, requirements and skills. Create a **vacancy**, optionally copying a role's details into the draft; only vacancies with status Open count as open. The **Vacancies** screen lists every vacancy, from draft to closed. Changes to a role do not silently rewrite existing vacancies.
 
 Use **Applications** to link a candidate and vacancy. Move the application through the pipeline explicitly. Dragging has a keyboard-accessible Move alternative. Application stage, vacancy status, task bucket, offer status and onboarding status are separate choices. Marking an offer accepted does not automatically mark an application hired.
 
 ## Recruitment tasks
 
-Use **Tasks** for your team's workflow. Add and reorder buckets; choose their names and colours. A bucket is a task's status. Add custom fields (text, number, date, dropdown, checkbox) and choose which are required. Archiving a field retains old values. Archiving a populated bucket asks for a destination and moves its tasks together; at least one bucket must remain.
+Use **Tasks** for your team's workflow. Add and reorder buckets; choose their names and colours. A bucket is a task's status. Tick **Counts as completed** on a bucket whose tasks are finished: those tasks no longer count as overdue and give no reminders. New teams get a **Done** bucket with the box ticked. Existing teams' buckets named Done were ticked once by the upgrade; tick the box yourself on any other finishing bucket. Add custom fields (text, number, date, dropdown, checkbox) and choose which are required. Archiving a field retains old values. Archiving a populated bucket asks for a destination and moves its tasks together; at least one bucket must remain.
 
 Tasks can link candidates and vacancies, or retain a free-text context. Set an owner, due date and priority. Edit or move cards with buttons as well as dragging. Saved views retain filters so frequently used searches are easy to revisit; views are private to your account.
 
@@ -36,13 +36,13 @@ Schedule interviews against an application, with interviewer, duration, location
 
 Track offer amount/currency, pay period, dates, status and decline reason separately from the application stage. Onboarding links to an application and contains document, orientation, training or other checklist items. Progress uses complete/waived items out of configured active items; an empty checklist is not automatically complete.
 
-Notifications collect due tasks, interviews, expiring offers, vacancy targets and onboarding items. Marking visible reminders read affects your account. Analytics distinguish current inventory from changes actually observed by RecruitmentOS. Imported records do not invent old transition dates or time-to-hire values.
+Notifications collect due tasks, interviews, expiring offers, vacancy targets and onboarding items. Tasks in a bucket marked **Counts as completed** give no reminders. Marking visible reminders read affects your account. Analytics distinguish current inventory from changes actually observed by RecruitmentOS. Imported records do not invent old transition dates or time-to-hire values.
 
 ## Team and account settings
 
 Owners/admins manage team details, invitations and permitted membership changes. Only owners manage ownership; a team retains at least one owner. Recruiters work with recruitment records; viewers read them. Team switching changes the active workspace.
 
-Profile settings manage your name, password and sessions. In **API tokens**, create a named token for one integration, choose the smallest necessary scopes and expiry, and copy it once to the integration's secret store. Revoke unused tokens. A token remains tied to your user and team and loses permissions when your role changes or your membership is removed. See [API examples](api-examples.md). To connect an AI assistant such as Claude, see [mcp.md](mcp.md); connected apps appear in the same list with an **OAuth app** badge and are revoked the same way.
+Profile settings manage your name, password and sessions. Signed-in devices load only when you select **Show signed-in devices**. If your sign-in is not recent, the list asks you to sign out and sign in again before it shows your devices; **Sign out all other devices** works without loading the list. In **API tokens**, create a named token for one integration, choose the smallest necessary scopes and expiry, and copy it once to the integration's secret store. Revoke unused tokens. A token remains tied to your user and team and loses permissions when your role changes or your membership is removed. See [API examples](api-examples.md). To connect an AI assistant such as Claude, see [mcp.md](mcp.md); connected apps appear in the same list with an **OAuth app** badge and are revoked the same way.
 
 ## Data administration
 
