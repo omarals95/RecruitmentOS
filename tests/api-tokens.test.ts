@@ -260,7 +260,7 @@ describe("team scoped API tokens against actual SQL", () => {
   it("never authenticates an OAuth grant row as an API token", async () => {
     const material = createTokenMaterial();
     await pg.exec(
-      `INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES('ros_client_FictionalGrantClient00','Fictional','["https://client.example.test/cb"]') ON CONFLICT DO NOTHING`,
+      `INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES('ros_client_FictionalGrantClient00','Fictional','["https://claude.ai/api/mcp/auth_callback"]') ON CONFLICT DO NOTHING`,
     );
     await pg.query(
       `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at,oauth_client_id)

@@ -15,6 +15,7 @@ import { ApiError, errorJson, readLimitedBytes } from "./api";
 import { chargeRateWindow, createOAuthGrant, rateWindow } from "./api-tokens";
 import { hashToken } from "./api-token-policy";
 import { clientIp } from "./client-ip";
+import { cleanClientName } from "./client-name";
 import {
   MCP_SCOPES,
   parseRole,
@@ -97,17 +98,22 @@ export function authorizationServerMetadata(): Response {
   });
 }
 
+const CLAUDE_REDIRECT_URIS = [
+  "https://claude.ai/api/mcp/auth_callback",
+  "https://claude.com/api/mcp/auth_callback",
+];
+/** Claude's two callbacks by exact string, or http loopback for local testing. */
 function validRedirectUri(value: unknown): value is string {
-  if (typeof value !== "string" || value.length > 2000 || value.includes("#"))
-    return false;
+  if (typeof value !== "string") return false;
+  if (CLAUDE_REDIRECT_URIS.includes(value)) return true;
+  if (value.length > 2000 || value.includes("#")) return false;
   try {
     const url = new URL(value);
     return (
       !url.username &&
       !url.password &&
-      (url.protocol === "https:" ||
-        (url.protocol === "http:" &&
-          ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)))
+      url.protocol === "http:" &&
+      ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)
     );
   } catch {
     return false;
@@ -195,14 +201,10 @@ export async function registerClient(request: Request): Promise<Response> {
     return oauthError(
       400,
       "invalid_redirect_uri",
-      "Register 1 to 5 redirect URIs: https, or http on 127.0.0.1, [::1] or localhost, without fragments or credentials.",
+      `Register 1 to 5 redirect URIs, each exactly ${CLAUDE_REDIRECT_URIS.join(" or ")}, or http on 127.0.0.1, [::1] or localhost without fragments or credentials.`,
     );
   const rawName = metadata.client_name ?? "";
-  const name =
-    typeof rawName === "string"
-      ? // eslint-disable-next-line no-control-regex
-        rawName.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim()
-      : null;
+  const name = typeof rawName === "string" ? cleanClientName(rawName) : null;
   const grantTypes =
     metadata.grant_types === undefined
       ? GRANT_TYPES
@@ -251,8 +253,7 @@ export interface AuthorizeRequest {
   params: Record<string, string>;
 }
 export type AuthorizeCheck =
-  | { kind: "fatal"; message: string }
-  | { kind: "redirect"; location: string }
+  | { kind: "fatal"; error: string; message: string }
   | { kind: "ok"; request: AuthorizeRequest };
 const AUTHORIZE_KEYS = [
   "response_type",
@@ -276,8 +277,8 @@ export function redirectWith(
 }
 
 /**
- * Validates an authorize request. An unknown client or a redirect URI that is not exactly
- * registered never redirects; every later problem is reported to the registered redirect URI.
+ * Validates an authorize request. Every problem is reported on the page, never to the client:
+ * the browser reaches a redirect URI only through a signed-in member's consent decision.
  */
 export async function checkAuthorizeRequest(
   params: AuthorizeParams,
@@ -286,27 +287,32 @@ export async function checkAuthorizeRequest(
     const value = params[key];
     return typeof value === "string" ? value : null;
   };
+  const fail = (error: string) =>
+    ({
+      kind: "fatal",
+      error,
+      message:
+        "This connection request is not valid. Start again from the app that sent you here.",
+    }) as const;
   const clientId = one("client_id");
   const redirectUri = one("redirect_uri");
-  const fatal = {
-    kind: "fatal",
-    message:
-      "This connection request is not valid. Start again from the app that sent you here.",
-  } as const;
-  if (!clientId || !CLIENT_ID.test(clientId) || !redirectUri) return fatal;
+  if (!clientId || !CLIENT_ID.test(clientId)) return fail("invalid_client");
+  if (!redirectUri) return fail("invalid_request");
   const db = await getIdentityDb();
   const [client] = await db
     .select()
     .from(oauthClients)
     .where(eq(oauthClients.id, clientId))
     .limit(1);
-  // Exact string match only: no normalisation of case, slashes, ports or paths.
-  if (!client || !client.redirectUris.includes(redirectUri)) return fatal;
+  if (!client) return fail("invalid_client");
+  // Exact string match only: no normalisation of case, slashes, ports or paths. Clients
+  // registered before the allowlist keep their rows but are refused here.
+  if (
+    !client.redirectUris.includes(redirectUri) ||
+    !validRedirectUri(redirectUri)
+  )
+    return fail("invalid_request");
   const state = one("state");
-  const fail = (error: string) => ({
-    kind: "redirect" as const,
-    location: redirectWith(redirectUri, { error, state }),
-  });
   if (AUTHORIZE_KEYS.some((key) => Array.isArray(params[key])))
     return fail("invalid_request");
   if (state !== null && state.length > 1000) return fail("invalid_request");
@@ -332,7 +338,10 @@ export async function checkAuthorizeRequest(
   return {
     kind: "ok",
     request: {
-      client: { id: client.id, name: client.name },
+      client: {
+        id: client.id,
+        name: cleanClientName(client.name) || "Unnamed app",
+      },
       redirectUri,
       redirectHost: new URL(redirectUri).host,
       state,

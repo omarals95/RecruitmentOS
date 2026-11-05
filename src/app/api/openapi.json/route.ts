@@ -5,7 +5,7 @@ import {
   type RecordKind,
 } from "@/domain/records";
 import { MCP_SCOPES, type Scope } from "@/lib/permissions";
-import { scopeDescriptions } from "@/lib/scope-descriptions";
+import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 export const runtime = "nodejs";
 
 // Fictional identifiers and values used only as documentation examples.
@@ -621,7 +621,7 @@ export function GET() {
           {
             response_type: "code",
             client_id: "ros_client_FictionalExampleClient",
-            redirect_uri: "https://client.example.test/callback",
+            redirect_uri: "https://claude.ai/api/mcp/auth_callback",
             code_challenge: "fictional-pkce-challenge-for-documentation-only",
             code_challenge_method: "S256",
             state: "fictional-state",
@@ -1042,7 +1042,10 @@ export function GET() {
                 tokenUrl: "/oauth/token",
                 refreshUrl: "/oauth/token",
                 scopes: Object.fromEntries(
-                  MCP_SCOPES.map((scope) => [scope, scopeDescriptions[scope]]),
+                  MCP_SCOPES.map((scope) => [
+                    scope,
+                    mcpScopeDescriptions[scope],
+                  ]),
                 ),
               },
             },

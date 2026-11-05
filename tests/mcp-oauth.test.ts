@@ -48,6 +48,10 @@ import { GET as authorizationServer } from "../src/app/.well-known/oauth-authori
 import { GET as resourceRoot } from "../src/app/.well-known/oauth-protected-resource/route";
 import { GET as resourceMcp } from "../src/app/.well-known/oauth-protected-resource/api/mcp/route";
 import { safeNext } from "../src/components/auth/auth-form";
+import {
+  mcpScopeDescriptions,
+  scopeDescriptions,
+} from "../src/lib/scope-descriptions";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import {
   stubHostedReadiness,
@@ -56,7 +60,7 @@ import {
 
 const ORIGIN = "http://localhost:3000";
 const RESOURCE = `${ORIGIN}/api/mcp`;
-const REDIRECT = "https://client.example.test/callback";
+const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
 const TEAM = "oauth-team";
 const SCOPES = [
   "candidates:read",
@@ -374,7 +378,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       redirect_uris: [REDIRECT, "http://127.0.0.1:9/callback"],
       token_endpoint_auth_method: "client_secret_basic",
       grant_types: ["authorization_code", "refresh_token"],
-      logo_uri: "https://client.example.test/logo.png",
+      logo_uri: "http://127.0.0.1:9/logo.png",
     });
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -397,8 +401,9 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     for (const redirect_uris of [
       ["http://example.com/cb"],
       [`${REDIRECT}#fragment`],
-      ["https://user:secret@client.example.test/cb"],
-      Array.from({ length: 6 }, (_, n) => `${REDIRECT}/${n}`),
+      ["http://127.0.0.1:9/cb#fragment"],
+      ["http://user:secret@127.0.0.1:9/cb"],
+      Array.from({ length: 6 }, (_, n) => `http://127.0.0.1:${9000 + n}/cb`),
       undefined,
     ]) {
       const refused = await register({ redirect_uris });
@@ -418,6 +423,119 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBe("60");
     expect(await totals()).toBe(before);
+  });
+
+  it("registers only Claude's callbacks and http loopback redirect URIs", async () => {
+    const clients = () =>
+      count("SELECT count(*)::int AS count FROM auth.oauth_clients");
+    for (const uri of [
+      "https://claude.ai/api/mcp/auth_callback",
+      "https://claude.com/api/mcp/auth_callback",
+      "http://127.0.0.1:33418/callback",
+      "http://localhost:8080/cb",
+      "http://[::1]:9/cb",
+    ]) {
+      const response = await register({ redirect_uris: [uri] });
+      expect(response.status, uri).toBe(201);
+      expect((await response.json()).redirect_uris).toEqual([uri]);
+    }
+    const before = await clients();
+    for (const redirect_uris of [
+      ["https://evil.example/cb"],
+      ["https://claude.ai/api/mcp/auth_callback/"],
+      ["https://claude.ai/api/mcp/auth_callback?x=1"],
+      ["https://Claude.ai/api/mcp/auth_callback"],
+      ["https://claude.ai.evil.example/api/mcp/auth_callback"],
+      ["https://localhost/cb"],
+      ["http://example.test/cb"],
+      ["https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"],
+    ]) {
+      const refused = await register({ redirect_uris });
+      expect(refused.status, JSON.stringify(redirect_uris)).toBe(400);
+      const body = await refused.json();
+      expect(body.error).toBe("invalid_redirect_uri");
+      for (const text of [
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+        "127.0.0.1, [::1] or localhost",
+      ])
+        expect(body.error_description).toContain(text);
+    }
+    expect(await clients()).toBe(before);
+  });
+
+  it("strips invisible characters from client names everywhere they are shown", async () => {
+    const response = await register({
+      client_name: "Fict\u202Eional\u200B Conn\u2066ector\uFEFF\u00AD\u3164",
+      redirect_uris: [REDIRECT],
+    });
+    const body = await response.json();
+    expect(body.client_name).toBe("Fictional Connector");
+    const stored = (table: string, id: string) =>
+      asOwner(
+        async () =>
+          (
+            await fixture.client.query<{ name: string }>(
+              `SELECT name FROM ${table} WHERE id=$1`,
+              [id],
+            )
+          ).rows[0].name,
+      );
+    expect(await stored("auth.oauth_clients", body.client_id)).toBe(
+      "Fictional Connector",
+    );
+    const invisible = await (
+      await register({ client_name: "\u200B\u202E", redirect_uris: [REDIRECT] })
+    ).json();
+    expect(await stored("auth.oauth_clients", invisible.client_id)).toBe(
+      "Unnamed app",
+    );
+    const spaced = await register({
+      client_name: "Fictional\u2028Line\u3000\u3000Break\tApp",
+      redirect_uris: [REDIRECT],
+    });
+    expect((await spaced.json()).client_name).toBe("Fictional Line BreakApp");
+
+    const legacy = `ros_client_${randomBytes(16).toString("base64url")}`;
+    await asOwner(() =>
+      fixture.client.query(
+        "INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES($1,$2,$3::jsonb)",
+        [legacy, "Fictional\u202EApp", JSON.stringify([REDIRECT])],
+      ),
+    );
+    const owner = signIn("oauth-owner");
+    const page = await authorize(
+      authorizeParams(legacy, pkce().challenge),
+      owner,
+    );
+    expect(page.html).toContain("<strong>FictionalApp</strong>");
+    expect(page.html).not.toContain("\u202E");
+    const flow = await connect(owner, { clientId: legacy });
+    const [grant] = await grantOf(flow.clientId);
+    expect(await stored("auth.api_tokens", grant.id)).not.toContain("\u202E");
+  });
+
+  it("describes each scope by what the MCP tools actually do", async () => {
+    for (const text of Object.values(mcpScopeDescriptions))
+      expect(text).not.toMatch(/download|edit/i);
+    expect(scopeDescriptions["cvs:read"]).toBe(
+      "Read CVs and private download links",
+    );
+    const clientId = await registered();
+    const page = await authorize(
+      authorizeParams(clientId, pkce().challenge, { scope: SCOPES.join(" ") }),
+      signIn("oauth-owner"),
+    );
+    for (const text of [
+      "Search candidates and read their stated facts and evidence summaries",
+      "Read vacancies, applications, tasks and interviews",
+      "See CV file names, types and sizes, but not CV contents",
+      "Add new candidates",
+      "Add comments to candidates, vacancies and applications",
+    ])
+      expect(page.html, text).toContain(text);
+    expect(page.html).not.toContain("private download links");
+    expect(page.html).not.toContain("Create and edit");
   });
 
   it("requires a verified member's session consent before any code exists", async () => {
@@ -445,7 +563,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     for (const text of [
       "Fictional Consent App",
       "name supplied by the app",
-      "client.example.test",
+      "you return to <strong>claude.ai</strong>",
       "Fictional Oauth Team",
       "candidates:read",
       "recruitment:write",
@@ -503,10 +621,10 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     const { challenge } = pkce();
     for (const redirect_uri of [
       `${REDIRECT}/`,
-      "https://client.example.test:8443/callback",
+      "https://claude.ai:8443/api/mcp/auth_callback",
       `${REDIRECT}/extra`,
-      "https://Client.example.test/callback",
-      "https://client.example.test/Callback",
+      "https://Claude.ai/api/mcp/auth_callback",
+      "https://claude.ai/api/mcp/Auth_callback",
     ]) {
       const result = await authorize(
         authorizeParams(clientId, challenge, { redirect_uri }),
@@ -528,6 +646,163 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect((await mismatch.json()).error).toBe("invalid_grant");
   });
 
+  it("refuses clients registered before the allowlist without redirecting", async () => {
+    const legacy = `ros_client_${randomBytes(16).toString("base64url")}`;
+    const uri = "https://client.example.test/cb";
+    await asOwner(() =>
+      fixture.client.query(
+        "INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES($1,'Fictional Legacy App',$2::jsonb)",
+        [legacy, JSON.stringify([uri])],
+      ),
+    );
+    const params = authorizeParams(legacy, pkce().challenge, {
+      redirect_uri: uri,
+    });
+    for (const cookie of [undefined, signIn("oauth-owner")]) {
+      const result = await authorize(params, cookie);
+      expect(result.redirect).toBeNull();
+      expect(result.html).toContain("This connection cannot continue");
+      expect(result.html).not.toContain("Fictional Legacy App");
+    }
+    const decided = await consent(signIn("oauth-owner"), {
+      ...params,
+      scopes: ["candidates:read"],
+      decision: "deny",
+    });
+    expect(decided.status).toBe(400);
+  });
+
+  it("shows an error page, never a client redirect, for every invalid request", async () => {
+    const clientId = await registered();
+    const { challenge } = pkce();
+    const invalid: [Record<string, string | null>, string][] = [
+      [{ response_type: "token" }, "unsupported_response_type"],
+      [{ code_challenge: null }, "invalid_request"],
+      [{ code_challenge_method: "plain" }, "invalid_request"],
+      [{ scope: "candidates:read fictional:scope" }, "invalid_scope"],
+      [{ resource: `${ORIGIN}/api/v1` }, "invalid_target"],
+      [{ state: "s".repeat(1001) }, "invalid_request"],
+    ];
+    for (const cookie of [undefined, signIn("oauth-owner")])
+      for (const [change, error] of invalid) {
+        const params = authorizeParams(clientId, challenge);
+        for (const [key, value] of Object.entries(change))
+          if (value === null) delete params[key];
+          else params[key] = value;
+        const result = await authorize(params, cookie);
+        const label = `${JSON.stringify(change).slice(0, 80)} ${cookie ? "signed in" : "signed out"}`;
+        expect(result.redirect, label).toBeNull();
+        expect(result.html, label).toContain("This connection cannot continue");
+        expect(result.html, label).toContain(error);
+      }
+    auth.headers = new Headers();
+    const repeated = await Authorize({
+      searchParams: Promise.resolve({
+        ...authorizeParams(clientId, challenge),
+        scope: ["candidates:read", "recruitment:read"],
+      }),
+    });
+    expect(renderToStaticMarkup(repeated)).toContain("invalid_request");
+  });
+
+  it("audits a revocation caused by a reused code or refresh token exactly once", async () => {
+    const owner = signIn("oauth-owner");
+    const revocations = (grantId: string) =>
+      asOwner(
+        async () =>
+          (
+            await fixture.client.query<{
+              kind: string;
+              action: string;
+              actor_type: string;
+              actor_id: string;
+              token_id: string;
+              summary: string;
+              metadata: Record<string, string>;
+            }>(
+              "SELECT kind,action,actor_type,actor_id,token_id,summary,metadata FROM app.activity WHERE action='token.revoked' AND metadata->>'tokenId'=$1",
+              [grantId],
+            )
+          ).rows,
+      );
+    const audited = (grantId: string, reason: string) => [
+      {
+        kind: "api-token",
+        action: "token.revoked",
+        actor_type: "token",
+        actor_id: "oauth-owner",
+        token_id: grantId,
+        summary: "Revoked an OAuth connection after a reused credential",
+        metadata: { tokenId: grantId, prefix: expect.any(String), reason },
+      },
+    ];
+
+    const codeFlow = await connect(owner);
+    await tokens(codeFlow);
+    const [codeGrant] = await grantOf(codeFlow.clientId);
+    expect(await revocations(codeGrant.id)).toEqual([]);
+    for (let n = 0; n < 2; n++) {
+      const replay = await redeem(codeFlow);
+      expect(replay.status).toBe(400);
+      expect((await replay.json()).error).toBe("invalid_grant");
+      expect(await revocations(codeGrant.id)).toEqual(
+        audited(codeGrant.id, "authorization_code_reused"),
+      );
+    }
+
+    const refreshFlow = await connect(owner);
+    const issued = await tokens(refreshFlow);
+    const refresh = () =>
+      tokenRequest({
+        grant_type: "refresh_token",
+        client_id: refreshFlow.clientId,
+        refresh_token: issued.refresh_token,
+      });
+    expect((await refresh()).status).toBe(200);
+    const [refreshGrant] = await grantOf(refreshFlow.clientId);
+    for (let n = 0; n < 2; n++) {
+      const reused = await refresh();
+      expect(reused.status).toBe(400);
+      expect((await reused.json()).error).toBe("invalid_grant");
+      expect(await revocations(refreshGrant.id)).toEqual(
+        audited(refreshGrant.id, "refresh_token_reused"),
+      );
+    }
+
+    const settingsFlow = await connect(owner);
+    const settingsTokens = await tokens(settingsFlow);
+    const [settingsGrant] = await grantOf(settingsFlow.clientId);
+    const revoked = await revokeRoute(
+      new Request(`${ORIGIN}/api/settings/tokens/${settingsGrant.id}`, {
+        method: "DELETE",
+        headers: { cookie: owner, origin: ORIGIN, "x-team-id": TEAM },
+      }),
+      { params: Promise.resolve({ id: settingsGrant.id }) },
+    );
+    expect(revoked.status).toBe(200);
+    const refreshAgain = () =>
+      tokenRequest({
+        grant_type: "refresh_token",
+        client_id: settingsFlow.clientId,
+        refresh_token: settingsTokens.refresh_token,
+      });
+    for (const response of [
+      await redeem(settingsFlow),
+      await refreshAgain(),
+      await refreshAgain(),
+    ]) {
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("invalid_grant");
+    }
+    const settingsRows = await revocations(settingsGrant.id);
+    expect(settingsRows).toHaveLength(1);
+    expect(settingsRows[0]).toMatchObject({
+      actor_type: "session",
+      summary: "Revoked an API token",
+    });
+    expect(settingsRows[0].metadata.reason).toBeUndefined();
+  });
+
   it("enforces S256 PKCE at authorize and at the token endpoint", async () => {
     const clientId = await registered();
     const owner = signIn("oauth-owner");
@@ -541,10 +816,9 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       for (const [key, value] of Object.entries(change))
         if (!value) delete params[key];
       const result = await authorize(params, owner);
-      const location = new URL(result.redirect!);
-      expect(`${location.origin}${location.pathname}`).toBe(REDIRECT);
-      expect(location.searchParams.get("error")).toBe("invalid_request");
-      expect(location.searchParams.get("state")).toBe("fictional-state-1");
+      expect(result.redirect).toBeNull();
+      expect(result.html).toContain("This connection cannot continue");
+      expect(result.html).toContain("invalid_request");
     }
     const flow = await connect(owner, { clientId });
     const wrong = await redeem(flow, { code_verifier: pkce().verifier });
@@ -622,9 +896,8 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       authorizeParams(clientId, challenge, { resource: `${ORIGIN}/api/v1` }),
       owner,
     );
-    expect(new URL(wrongTarget.redirect!).searchParams.get("error")).toBe(
-      "invalid_target",
-    );
+    expect(wrongTarget.redirect).toBeNull();
+    expect(wrongTarget.html).toContain("invalid_target");
     const flow = await connect(owner, { clientId });
     const refused = await redeem(flow, { resource: `${ORIGIN}/api/v1` });
     expect((await refused.json()).error).toBe("invalid_target");

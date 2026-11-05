@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import type { McpScope } from "@/lib/permissions";
-import { scopeDescriptions } from "@/lib/scope-descriptions";
+import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 import { humanError, requestJson } from "@/components/workspace/client";
 
 export interface ConsentTeam {
@@ -118,12 +118,12 @@ export function OAuthConsent({
               <span>
                 <strong>{scope}</strong>
                 <br />
-                <span className="muted">{scopeDescriptions[scope]}</span>
+                <span className="muted">{mcpScopeDescriptions[scope]}</span>
               </span>
             </label>
           ) : (
             <p key={scope} className="muted" style={{ margin: 0 }}>
-              <strong>{scope}</strong>: {scopeDescriptions[scope]}. Not
+              <strong>{scope}</strong>: {mcpScopeDescriptions[scope]}. Not
               available to your role.
             </p>
           ),
