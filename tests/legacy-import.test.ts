@@ -314,6 +314,50 @@ describe("legacy migration planning", () => {
     expect(plan.stats.candidateRecords).toBe(1);
     expect(plan.stats.sourceRows).toBe(2);
   });
+  it("maps legacy review status text to the two controlled values and keeps the original", () => {
+    const source = input();
+    const master = source.workbooks["Resume_Master.xlsx"].Master;
+    master[5].push("Source review status");
+    master[6].push("Verified");
+    master.push([
+      "c_2",
+      "Fictional Second Example",
+      "second@example.test",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "Pending HR",
+    ]);
+    source.workbooks["Recruitment_Operations.xlsx"]["Saved Views"].push(
+      ["q_2", "Verified", "directory", '{"reviewStatus":"Verified"}'],
+      ["q_3", "Pending", "directory", '{"reviewStatus":"Pending HR"}'],
+    );
+    const plan = buildPlan(source);
+    expect(plan.issues.filter((v) => v.severity === "error")).toEqual([]);
+    const candidates = plan.records.filter((v) => v.resource === "candidates");
+    expect(candidates.map((v) => v.data)).toEqual([
+      expect.objectContaining({
+        reviewStatus: "Reviewed",
+        rawSource: expect.objectContaining({
+          "Source review status": "Verified",
+        }),
+      }),
+      expect.objectContaining({
+        reviewStatus: "Needs review",
+        rawSource: expect.objectContaining({
+          "Source review status": "Pending HR",
+        }),
+      }),
+    ]);
+    expect(
+      plan.records
+        .filter((v) => v.resource === "views")
+        .map((v) => (v.data.query as { reviewStatus?: string }).reviewStatus),
+    ).toEqual(["", "Reviewed", "Needs review"]);
+  });
   it("blocks duplicate identities and missing parents rather than merging or guessing", () => {
     const source = input();
     source.workbooks["Resume_Master.xlsx"].Master.push(["c_1", "Duplicate"]);

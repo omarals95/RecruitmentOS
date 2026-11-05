@@ -25,6 +25,16 @@ export const TASK_FIELD_TYPES = [
   "Checkbox",
 ] as const;
 export type ApplicationStage = (typeof APPLICATION_STAGES)[number];
+/** Source review states; "Needs review" until someone checks the source facts. */
+export const REVIEW_STATUSES = ["Needs review", "Reviewed"] as const;
+/** Legacy free text: the reviewed words map to "Reviewed", anything else needs review. */
+export function reviewStatusValue(
+  value: string,
+): (typeof REVIEW_STATUSES)[number] {
+  return /^(verified|reviewed|complete|completed)$/i.test(value.trim())
+    ? "Reviewed"
+    : "Needs review";
+}
 export const uuidSchema = z.uuid();
 const text = (max = 200) => z.string().trim().max(max).default("");
 const requiredText = (max = 200) => z.string().trim().min(1).max(max);
@@ -99,7 +109,7 @@ const savedQuery = z
     status: text(),
     stage: z.enum(APPLICATION_STAGES).optional(),
     vacancyId: uuidSchema.optional(),
-    reviewStatus: text(),
+    reviewStatus: z.union([z.enum(REVIEW_STATUSES), z.literal("")]).default(""),
     shortlisted: z.boolean().optional(),
     needsReview: z.boolean().optional(),
     includeArchived: z.boolean().optional(),
@@ -153,7 +163,7 @@ export const recordDataSchemas = {
       roleStatus: text(300),
       experienceBasis: text(1000),
       experienceWording: text(2000),
-      reviewStatus: text(300),
+      reviewStatus: z.enum(REVIEW_STATUSES).default("Needs review"),
       sourceNotes: notes(),
       rawSource: jsonObject.default({}),
       evidence: z.array(jsonObject).max(1000).default([]),
@@ -565,6 +575,7 @@ const labels: Record<RecordKind, [string, string]> = {
 };
 const enumOptions: Record<string, readonly string[]> = {
   "application.stage": APPLICATION_STAGES,
+  "candidate.reviewStatus": REVIEW_STATUSES,
   "vacancy.status": ["Draft", "Open", "On hold", "Filled", "Closed"],
   "task-field.type": TASK_FIELD_TYPES,
   "task.priority": ["Low", "Normal", "High", "Urgent"],

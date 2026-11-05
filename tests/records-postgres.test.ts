@@ -16,6 +16,7 @@ import {
 import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
 import { roleSnapshot } from "@/components/workspace/helpers";
+import { interviewsOnDay } from "@/components/workspace/calendar";
 import {
   createTestDb,
   enforceTestRls,
@@ -324,6 +325,312 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       data: {},
     });
     expect(second.id).not.toBe(first.id);
+  });
+
+  it("records offer status changes and never changes the offer's application", async () => {
+    const person = await candidate("Fictional Offer Person");
+    const job = await vacancy("Fictional offer vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Offer" },
+    });
+    const offer = await createRecord(owner, "offers", {
+      applicationId: app.id,
+      data: { title: "Fictional offer", status: "Draft" },
+    });
+    const sent = await updateRecord(owner, "offers", offer.id, {
+      version: offer.version,
+      data: { status: "Sent" },
+    });
+    const noted = await updateRecord(owner, "offers", offer.id, {
+      version: sent.version,
+      data: { notes: "Fictional note only" },
+    });
+    const applicationBefore = await getRecord(owner, "applications", app.id);
+    const applicationEvents = () =>
+      withTeam(
+        owner,
+        async (tx) =>
+          (
+            await tx
+              .select({ total: count() })
+              .from(activity)
+              .where(
+                and(
+                  eq(activity.teamId, owner.teamId),
+                  eq(activity.recordId, app.id),
+                ),
+              )
+          )[0].total,
+      );
+    const eventsBefore = await applicationEvents();
+    const accepted = await updateRecord(owner, "offers", offer.id, {
+      version: noted.version,
+      data: { status: "Accepted" },
+    });
+    const archived = await updateRecord(owner, "offers", offer.id, {
+      version: accepted.version,
+      archived: true,
+    });
+    const offerEvents = await withTeam(owner, (tx) =>
+      tx
+        .select({ action: activity.action, metadata: activity.metadata })
+        .from(activity)
+        .where(
+          and(
+            eq(activity.teamId, owner.teamId),
+            eq(activity.recordId, offer.id),
+          ),
+        ),
+    );
+    expect(offerEvents).toHaveLength(5);
+    expect(offerEvents).toEqual(
+      expect.arrayContaining([
+        {
+          action: "created",
+          metadata: { fromStatus: null, toStatus: "Draft" },
+        },
+        {
+          action: "updated",
+          metadata: { fromStatus: "Draft", toStatus: "Sent" },
+        },
+        { action: "updated", metadata: {} },
+        {
+          action: "updated",
+          metadata: { fromStatus: "Sent", toStatus: "Accepted" },
+        },
+        { action: "archived", metadata: {} },
+      ]),
+    );
+    expect(archived.data).toMatchObject({ status: "Accepted" });
+    const applicationAfter = await getRecord(owner, "applications", app.id);
+    expect(applicationAfter.data).toEqual(applicationBefore.data);
+    expect(applicationAfter.data).toMatchObject({ stage: "Offer" });
+    expect(applicationAfter.version).toBe(applicationBefore.version);
+    expect(applicationAfter.updatedAt).toBe(applicationBefore.updatedAt);
+    expect(await applicationEvents()).toBe(eventsBefore);
+  });
+
+  it("refuses archived roles as new vacancy references but keeps an unchanged one editable", async () => {
+    const archivedRole = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional Archived Role" },
+    });
+    await updateRecord(owner, "job-roles", archivedRole.id, {
+      version: archivedRole.version,
+      archived: true,
+    });
+    await expect(
+      createRecord(owner, "vacancies", {
+        jobRoleId: archivedRole.id,
+        data: { title: "Fictional vacancy from an archived role" },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "archived_reference" });
+    const activeRole = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional Active Role" },
+    });
+    const job = await createRecord(owner, "vacancies", {
+      jobRoleId: activeRole.id,
+      data: { title: "Fictional vacancy from an active role" },
+    });
+    await expect(
+      updateRecord(owner, "vacancies", job.id, {
+        version: job.version,
+        jobRoleId: archivedRole.id,
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "archived_reference" });
+    const role = await getRecord(owner, "job-roles", activeRole.id);
+    await updateRecord(owner, "job-roles", activeRole.id, {
+      version: role.version,
+      archived: true,
+    });
+    const edited = await updateRecord(owner, "vacancies", job.id, {
+      version: job.version,
+      jobRoleId: activeRole.id,
+      data: { openings: 2 },
+    });
+    expect(edited).toMatchObject({
+      jobRoleId: activeRole.id,
+      version: job.version + 1,
+      data: { openings: 2 },
+    });
+  });
+
+  it("leaves applications untouched when a vacancy status changes", async () => {
+    const job = await vacancy("Fictional status vacancy");
+    const apps = [];
+    for (const [name, stage] of [
+      ["Fictional Status Person One", "Screening"],
+      ["Fictional Status Person Two", "Interview"],
+    ])
+      apps.push(
+        await createRecord(owner, "applications", {
+          candidateId: (await candidate(name)).id,
+          vacancyId: job.id,
+          data: { stage },
+        }),
+      );
+    const events = () =>
+      withTeam(
+        owner,
+        async (tx) =>
+          (
+            await tx
+              .select({ total: count() })
+              .from(activity)
+              .where(
+                and(
+                  eq(activity.teamId, owner.teamId),
+                  eq(activity.kind, "application"),
+                ),
+              )
+          )[0].total,
+      );
+    const before = await Promise.all(
+      apps.map((app) => getRecord(owner, "applications", app.id)),
+    );
+    const eventsBefore = await events();
+    let current = job;
+    for (const status of ["Closed", "Filled"])
+      current = await updateRecord(owner, "vacancies", job.id, {
+        version: current.version,
+        data: { status },
+      });
+    expect(current.data).toMatchObject({ status: "Filled" });
+    const after = await Promise.all(
+      apps.map((app) => getRecord(owner, "applications", app.id)),
+    );
+    for (const [index, row] of after.entries()) {
+      expect(row.data).toEqual(before[index].data);
+      expect(row.version).toBe(before[index].version);
+      expect(row.updatedAt).toBe(before[index].updatedAt);
+    }
+    expect(await events()).toBe(eventsBefore);
+  });
+
+  it("lists a candidate's interviews, offers and onboarding through their applications", async () => {
+    const personA = await candidate("Fictional Profile Person A");
+    const personB = await candidate("Fictional Profile Person B");
+    const jobs = [
+      await vacancy("Fictional profile vacancy one"),
+      await vacancy("Fictional profile vacancy two"),
+    ];
+    const application = (candidateId: string, vacancyId: string) =>
+      createRecord(owner, "applications", {
+        candidateId,
+        vacancyId,
+        data: { stage: "Interview" },
+      });
+    const appsA = [
+      await application(personA.id, jobs[0].id),
+      await application(personA.id, jobs[1].id),
+    ];
+    const appB = await application(personB.id, jobs[0].id);
+    const linked = async (applicationId: string) => ({
+      interview: await createRecord(owner, "interviews", {
+        applicationId,
+        data: {
+          title: "Fictional profile interview",
+          startAt: "2026-12-01T09:00:00+04:00",
+        },
+      }),
+      offer: await createRecord(owner, "offers", {
+        applicationId,
+        data: { title: "Fictional profile offer" },
+      }),
+      onboarding: await createRecord(owner, "onboarding", {
+        applicationId,
+        data: {},
+      }),
+    });
+    const forA = [await linked(appsA[0].id), await linked(appsA[1].id)];
+    await linked(appB.id);
+    for (const [resource, key] of [
+      ["interviews", "interview"],
+      ["offers", "offer"],
+      ["onboarding", "onboarding"],
+    ] as const) {
+      const listed = await listRecords(
+        owner,
+        resource,
+        new URLSearchParams({ applicationCandidateId: personA.id }),
+      );
+      expect(listed.data.map((row) => row.id).sort()).toEqual(
+        forA.map((item) => item[key].id).sort(),
+      );
+    }
+    await expect(
+      listRecords(
+        owner,
+        "tasks",
+        new URLSearchParams({ applicationCandidateId: personA.id }),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    await expect(
+      listRecords(
+        owner,
+        "offers",
+        new URLSearchParams({ applicationCandidateId: "not-a-record-id" }),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    expect(
+      (
+        await listRecords(
+          other,
+          "offers",
+          new URLSearchParams({ applicationCandidateId: personA.id }),
+        )
+      ).data,
+    ).toEqual([]);
+  });
+
+  it("returns exactly the interviews the calendar places on one Dubai day", async () => {
+    const person = await candidate("Fictional Calendar Person");
+    const job = await vacancy("Fictional calendar vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Interview" },
+    });
+    const ids: Record<string, string> = {};
+    for (const startAt of [
+      "2027-03-09T19:59:59Z",
+      "2027-03-09T20:00:00Z",
+      "2027-03-10T12:00:00Z",
+      "2027-03-10T19:59:59Z",
+      "2027-03-10T20:00:00Z",
+    ])
+      ids[startAt] = (
+        await createRecord(owner, "interviews", {
+          applicationId: app.id,
+          data: { title: `Fictional interview ${startAt}`, startAt },
+        })
+      ).id;
+    const all = await listRecords(
+      owner,
+      "interviews",
+      new URLSearchParams({ applicationId: app.id }),
+    );
+    const listed = await listRecords(
+      owner,
+      "interviews",
+      new URLSearchParams({
+        startFrom: "2027-03-10T00:00:00+04:00",
+        startTo: "2027-03-11T00:00:00+04:00",
+        pageSize: "100",
+      }),
+    );
+    const placed = interviewsOnDay(all.data, "2027-03-10")
+      .map((row) => row.id)
+      .sort();
+    expect(placed).toEqual(
+      [
+        ids["2027-03-09T20:00:00Z"],
+        ids["2027-03-10T12:00:00Z"],
+        ids["2027-03-10T19:59:59Z"],
+      ].sort(),
+    );
+    expect(listed.data.map((row) => row.id).sort()).toEqual(placed);
   });
 
   it("filters candidates by certifications, education and stated experience", async () => {
@@ -1120,7 +1427,7 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
         name: "Fictional TagFilter Person",
         folderCategories: ["Engineering", "Operations"],
         skills: ["TypeScript", "Security"],
-        reviewStatus: "Verified",
+        reviewStatus: "Reviewed",
       },
     });
     const filters = new URLSearchParams({
@@ -1158,6 +1465,38 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
         new URLSearchParams({ categories: "not-json" }),
       ),
     ).rejects.toMatchObject({ status: 400 });
+    const reviewed = await listRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({ reviewStatus: "Reviewed", pageSize: "100" }),
+    );
+    expect(reviewed.data.map((row) => row.id)).toContain(person.id);
+    expect(
+      reviewed.data.every(
+        (row) =>
+          (row as RecordDto<"candidate">).data.reviewStatus === "Reviewed",
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({
+            reviewStatus: "Needs review",
+            pageSize: "100",
+          }),
+        )
+      ).data.map((row) => row.id),
+    ).not.toContain(person.id);
+    for (const value of ["Verified", "reviewed", "Pending HR"])
+      await expect(
+        listRecords(
+          owner,
+          "candidates",
+          new URLSearchParams({ reviewStatus: value }),
+        ),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
     await expect(
       updateRecord(
         { ...owner, role: "recruiter", scopes: ["candidates:write"] },

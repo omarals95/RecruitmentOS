@@ -18,6 +18,7 @@ import {
 } from "@/lib/records";
 import {
   APPLICATION_STAGES,
+  REVIEW_STATUSES,
   SENSITIVE_CANDIDATE_FIELDS,
   recordDataSchemas,
   type RecordDto,
@@ -176,17 +177,21 @@ export const TOOLS: McpTool[] = [
     name: "search_candidates",
     title: "Search candidates",
     description:
-      "Search active candidates by stated facts: words, quoted phrases and -exclusions, plus skill, folder category, emirate, degree and review filters. Returns factual fields only; nothing is ranked or scored.",
+      "Search active candidates by stated facts: words, quoted phrases and -exclusions, plus skill, certification, folder category, emirate, degree, education (degree name, major or university) and review filters, and a stated-experience range in years (candidates without stated experience never match it). Returns factual fields only; nothing is ranked or scored.",
     scopes: ["candidates:read"],
     writes: false,
     input: z
       .object({
         query: query.optional(),
         skills: tags.optional(),
+        certifications: tags.optional(),
         categories: tags.optional(),
         residenceEmirate: filter.optional(),
         degreeLevel: filter.optional(),
-        reviewStatus: filter.optional(),
+        education: filter.optional(),
+        minYearsExperience: z.number().min(0).max(100).optional(),
+        maxYearsExperience: z.number().min(0).max(100).optional(),
+        reviewStatus: z.enum(REVIEW_STATUSES).optional(),
         needsReview: z.boolean().optional(),
         sort: z.enum(["name", "updatedAt", "yearsExperience"]).optional(),
         direction: z.enum(["asc", "desc"]).optional(),

@@ -4,7 +4,9 @@ import {
   resourceToKind,
   type RecordKind,
 } from "@/domain/records";
+import { EXPORT_RESOURCES } from "@/domain/export";
 import { MCP_SCOPES, type Scope } from "@/lib/permissions";
+import { EXPORT_FILTER_KEYS } from "@/lib/records";
 import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 export const runtime = "nodejs";
 
@@ -222,6 +224,7 @@ export function GET() {
             "education",
             "minYearsExperience",
             "maxYearsExperience",
+            "applicationCandidateId",
           ].map((name) => ({ name, in: "query", schema: { type: "string" } })),
         },
       ),
@@ -298,6 +301,37 @@ export function GET() {
         { params: [idParameter] },
       ),
     };
+    if ((EXPORT_RESOURCES as readonly string[]).includes(resource))
+      paths[`/api/v1/${resource}/export`] = {
+        post: operation(
+          [`${scope}:read`],
+          {
+            summary: `Export ${resource} as CSV`,
+            description: `Requires ${scope}:read. Send no body. The query takes the list filters plus sort and direction; page and pageSize are refused because an export covers every matching record. Rows and their count come from one snapshot. 400 invalid_query for an unsupported, repeated or page filter; 400 export_too_large when more than 100,000 records match; 404 for a resource that cannot be exported. Each export writes one activity row (kind export) with the list, row count and applied filter keys, never filter values; if that row cannot be written, no file is sent.`,
+          },
+          {
+            "200": {
+              description:
+                "A UTF-8 CSV with a byte-order mark: the metadata rows, a blank row, the header and one row per record.",
+              headers: {
+                "Content-Disposition": {
+                  schema: { type: "string" },
+                  description: `attachment; filename RecruitmentOS-${resource}-YYYY-MM-DD-HHmm.csv (Asia/Dubai).`,
+                },
+                "X-Export-Rows": { schema: { type: "integer", minimum: 0 } },
+              },
+              content: {
+                "text/csv": { schema: { type: "string" } },
+              },
+            },
+          },
+          {
+            params: [...EXPORT_FILTER_KEYS, "sort", "direction"].map(
+              (name) => ({ name, in: "query", schema: { type: "string" } }),
+            ),
+          },
+        ),
+      };
   }
   paths["/api/v1/candidates/{id}/state"] = {
     get: operation(

@@ -7,6 +7,8 @@ import {
   matchesSearch,
   recordDataSchemas,
   resourceToKind,
+  reviewStatusValue,
+  REVIEW_STATUSES,
   RESOURCE_CONFIG,
   updateRecordSchemas,
 } from "../src/domain/records";
@@ -46,6 +48,37 @@ describe("recruitment domain", () => {
       RESOURCE_CONFIG.buckets.fields.find((field) => field.key === "completed"),
     ).toMatchObject({ type: "checkbox", label: "Counts as completed" });
   });
+  it("keeps review status to two controlled values and maps legacy text", () => {
+    expect(REVIEW_STATUSES).toEqual(["Needs review", "Reviewed"]);
+    expect(
+      recordDataSchemas.candidate.parse({ name: "Fictional Person" })
+        .reviewStatus,
+    ).toBe("Needs review");
+    expect(
+      recordDataSchemas.candidate.safeParse({
+        name: "Fictional Person",
+        reviewStatus: "Pending HR",
+      }).success,
+    ).toBe(false);
+    const view = (reviewStatus: string) =>
+      recordDataSchemas["saved-view"].safeParse({
+        name: "Fictional view",
+        area: "directory",
+        query: { reviewStatus },
+      }).success;
+    expect(view("")).toBe(true);
+    expect(view("Reviewed")).toBe(true);
+    expect(view("Verified")).toBe(false);
+    expect(reviewStatusValue(" Completed ")).toBe("Reviewed");
+    expect(reviewStatusValue("verified")).toBe("Reviewed");
+    expect(reviewStatusValue("Pending HR")).toBe("Needs review");
+    expect(reviewStatusValue("")).toBe("Needs review");
+    expect(
+      RESOURCE_CONFIG.candidates.fields.find(
+        (field) => field.key === "reviewStatus",
+      ),
+    ).toMatchObject({ type: "select", options: REVIEW_STATUSES });
+  });
   it("validates real calendar dates, supported meeting URLs and bounded amounts", () => {
     expect(daySchema.safeParse("2024-02-29").success).toBe(true);
     expect(daySchema.safeParse("2025-02-29").success).toBe(false);
@@ -71,6 +104,19 @@ describe("recruitment domain", () => {
       recordDataSchemas.offer.safeParse({
         title: "Offer",
         amount: "1000000000.01",
+      }).success,
+    ).toBe(false);
+    const openings = (value: unknown) =>
+      recordDataSchemas.vacancy.safeParse({ title: "Vacancy", openings: value })
+        .success;
+    expect(openings(1)).toBe(true);
+    expect(openings(10000)).toBe(true);
+    for (const value of [0, -1, 1.5, 10001, "2"])
+      expect(openings(value), String(value)).toBe(false);
+    expect(
+      recordDataSchemas.vacancy.safeParse({
+        title: "Vacancy",
+        targetDate: "2026-02-30",
       }).success,
     ).toBe(false);
   });

@@ -382,7 +382,13 @@ export async function listActivity(
   if (
     kind &&
     !z
-      .enum([...Object.values(resourceToKind), "cv", "api-token", "mcp-tool"])
+      .enum([
+        ...Object.values(resourceToKind),
+        "cv",
+        "api-token",
+        "mcp-tool",
+        "export",
+      ])
       .safeParse(kind).success
   )
     invalid("Unsupported activity record type.");
