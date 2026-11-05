@@ -44,6 +44,8 @@ npm run build
 
 The SQL integration tests apply the actual migrations to local PostgreSQL-compatible PGlite, including a nonowner runtime role for RLS checks. Tests use fictional records and fake storage; they do not contact AWS, Neon or a mail provider. Cloud-provider end-to-end validation is a separate deployment step.
 
+`npm run test:live-roles` is an opt-in, owner-run multi-connection isolation harness for a real PostgreSQL database (see the [Neon database runbook](docs/neon-database-runbook.md)); it is not part of `npm test` or CI.
+
 With the fictional development server running, `npm run test:local` checks the assembled HTTP routes, workflows and token permissions. It requires the local database flags and `DEV_SEED_PASSWORD`, archives its own fictional records, and revokes its test token. It never targets a remote server.
 
 ## Deployment and migration

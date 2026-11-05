@@ -128,7 +128,8 @@ Only this owner-run helper may insert `api-token` activity rows: the general wri
 ### Open items
 
 - Independent database and security review of this design, the definer functions and the allowlist (DEC-02, DEC-03).
-- The WP-02 grant template is done locally ([postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql), with the read-only `scripts/db-role-evidence.ts`). Neon role provisioning and live multi-connection tests remain: true concurrent revocation, pooler behaviour and lock contention. PGlite is single-connection, so pooled reuse and revocation were proved sequentially.
+- The WP-02 grant template is done locally ([postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql), with the read-only `scripts/db-role-evidence.ts`). Neon role provisioning remains. PGlite is single-connection, so pooled reuse and revocation were proved sequentially there.
+- The opt-in live harness `scripts/live-role-tests.ts` (`npm run test:live-roles`, WP-02c) exists and passed with independent connections on a throwaway local PostgreSQL 18 cluster: tenant isolation, forged and replayed contexts, pooled reuse, revocation and demotion, last-owner and bootstrap races, store-budget and read-lease races, and no audit row from a denied mutation. The owner-run Neon Preview run remains, as do pooler behaviour and lock contention under real traffic.
 - The "capability issued before commit" problem for quota issuance (WP-04/WP-05): a rolled-back transaction cannot withdraw a capability already returned to a client.
 - Review of the WP-04 choice to charge the CV ledger under the verified context through `tenant_context.lock_storage_allocation` and owner-run triggers, rather than through a separately signed quota command (item 5).
 - The hosted `tenant_isolation_pending` guard in `createDbPair()` stays closed until review and live verification pass.
