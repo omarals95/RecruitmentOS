@@ -650,6 +650,28 @@ export async function getRecord(
   );
 }
 
+/** Kind and archive state of a record the caller can see in its team, for checks before a write. */
+export async function recordKindOf(
+  p: Principal,
+  recordId: string,
+): Promise<{ kind: RecordKind; archived: boolean }> {
+  id(recordId);
+  return withTeam(p, async (tx) => {
+    const [row] = await tx
+      .select({
+        kind: records.kind,
+        privateOwnerId: records.privateOwnerId,
+        archivedAt: records.archivedAt,
+      })
+      .from(records)
+      .where(and(eq(records.teamId, p.teamId), eq(records.id, recordId)))
+      .limit(1);
+    if (!row || (row.kind === "saved-view" && row.privateOwnerId !== p.userId))
+      throw new ApiError(404, "not_found", "Record not found in this team.");
+    return { kind: row.kind as RecordKind, archived: !!row.archivedAt };
+  });
+}
+
 export const candidateDuplicateQuerySchema = z
   .object({
     email: z.string().trim().max(320).optional(),
