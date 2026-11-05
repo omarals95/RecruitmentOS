@@ -18,6 +18,7 @@ export const dataRoleHelpers = [
   "tenant_context.acquire_blob_read(text)",
   "tenant_context.release_blob_read(uuid)",
   "tenant_context.audit_mcp_call(text,text)",
+  "tenant_context.audit_export(text,integer,text[])",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",
@@ -31,7 +32,7 @@ function indirectPrivilegeQuery(allowed: readonly string[]) {
   // Match catalog columns; name lookups would fail without schema USAGE.
   const signatures = allowed
     .map((signature) => {
-      const [, name, args] = /^tenant_context\.(\w+)\(([\w,]*)\)$/.exec(
+      const [, name, args] = /^tenant_context\.(\w+)\(([\w,[\]]*)\)$/.exec(
         signature,
       )!;
       return `('${name}','${args.replaceAll(",", ", ")}')`;
