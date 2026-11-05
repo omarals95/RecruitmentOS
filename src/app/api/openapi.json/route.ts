@@ -599,7 +599,7 @@ export function GET() {
       {
         summary: "Approve or deny an OAuth connection",
         description:
-          "Session only, called by the consent page at /oauth/authorize. X-Team-Id selects the team. Every authorize rule is checked again; approved scopes must be requested, allowed by your current role and offered to MCP clients. Approve creates a grant listed in Settings → API tokens and returns the client redirect with a one-time code; deny returns error=access_denied and writes nothing.",
+          "Session only, called by the consent page at /oauth/authorize. X-Team-Id selects the team. Every authorize rule is checked again; approved scopes must be requested, allowed by your current role and offered to MCP clients. Approve creates a grant listed in Settings → API tokens and returns the client redirect with a one-time code; deny returns error=access_denied and writes nothing. Both redirects include iss, the authorization server issuer (RFC 9207).",
         requestBody: jsonBody(
           {
             type: "object",

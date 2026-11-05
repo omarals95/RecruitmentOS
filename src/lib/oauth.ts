@@ -29,6 +29,10 @@ import type { Principal } from "./principal";
 export function appOrigin(): string {
   return new URL(process.env.BETTER_AUTH_URL ?? "").origin;
 }
+/** The RFC 8414 issuer, the same string in both metadata documents and every `iss` (RFC 9207). */
+export function issuer(): string {
+  return appOrigin();
+}
 export function mcpResource(): string {
   return `${appOrigin()}/api/mcp`;
 }
@@ -74,7 +78,7 @@ export function protectedResourceMetadata(): Response {
   if (unavailable) return unavailable;
   return noStore({
     resource: mcpResource(),
-    authorization_servers: [appOrigin()],
+    authorization_servers: [issuer()],
     scopes_supported: [...MCP_SCOPES],
     bearer_methods_supported: ["header"],
     resource_name: "RecruitmentOS",
@@ -86,7 +90,7 @@ export function authorizationServerMetadata(): Response {
   if (unavailable) return unavailable;
   const origin = appOrigin();
   return noStore({
-    issuer: origin,
+    issuer: issuer(),
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
@@ -95,17 +99,22 @@ export function authorizationServerMetadata(): Response {
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     scopes_supported: [...MCP_SCOPES],
+    authorization_response_iss_parameter_supported: true,
   });
 }
 
-const CLAUDE_REDIRECT_URIS = [
+const CLIENT_REDIRECT_URIS = [
   "https://claude.ai/api/mcp/auth_callback",
   "https://claude.com/api/mcp/auth_callback",
+  "https://chatgpt.com/connector_platform_oauth_redirect",
 ];
-/** Claude's two callbacks by exact string, or http loopback for local testing. */
+/**
+ * Claude's two callbacks and ChatGPT's stable callback by exact string, or http loopback for
+ * local testing.
+ */
 function validRedirectUri(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  if (CLAUDE_REDIRECT_URIS.includes(value)) return true;
+  if (CLIENT_REDIRECT_URIS.includes(value)) return true;
   if (value.length > 2000 || value.includes("#")) return false;
   try {
     const url = new URL(value);
@@ -201,7 +210,7 @@ export async function registerClient(request: Request): Promise<Response> {
     return oauthError(
       400,
       "invalid_redirect_uri",
-      `Register 1 to 5 redirect URIs, each exactly ${CLAUDE_REDIRECT_URIS.join(" or ")}, or http on 127.0.0.1, [::1] or localhost without fragments or credentials.`,
+      `Register 1 to 5 redirect URIs, each exactly one of ${CLIENT_REDIRECT_URIS.join(", ")}, or http on 127.0.0.1, [::1] or localhost without fragments or credentials.`,
     );
   const rawName = metadata.client_name ?? "";
   const name = typeof rawName === "string" ? cleanClientName(rawName) : null;
@@ -372,7 +381,8 @@ export async function consentTeams(userId: string) {
 
 /**
  * Applies a consent decision for the session principal's selected team and returns where to
- * send the browser. Every authorize rule is checked again; deny writes nothing.
+ * send the browser. Every authorize rule is checked again; deny writes nothing. Both redirects
+ * carry `iss` (RFC 9207).
  */
 export async function decideConsent(
   p: Principal,
@@ -394,6 +404,7 @@ export async function decideConsent(
     return redirectWith(request.redirectUri, {
       error: "access_denied",
       state: request.state,
+      iss: issuer(),
     });
   const granted = [...new Set(input.scopes)];
   if (
@@ -412,7 +423,11 @@ export async function decideConsent(
     codeChallenge: request.codeChallenge,
     scopes: granted as McpScope[],
   });
-  return redirectWith(request.redirectUri, { code, state: request.state });
+  return redirectWith(request.redirectUri, {
+    code,
+    state: request.state,
+    iss: issuer(),
+  });
 }
 
 type Exchange =
@@ -616,6 +631,7 @@ async function exchange(tx: TeamTx, form: URLSearchParams): Promise<Exchange> {
           and(
             eq(oauthTokens.tokenHash, hashToken(refresh)),
             eq(oauthTokens.kind, "refresh"),
+            eq(oauthTokens.audience, mcpResource()),
           ),
         )
         .for("update")
