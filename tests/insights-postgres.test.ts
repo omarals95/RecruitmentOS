@@ -31,7 +31,8 @@ describe("bounded, factual PostgreSQL reporting", () => {
     colleague: Principal,
     former: Principal,
     other: Principal,
-    viewer: Principal;
+    viewer: Principal,
+    fresh: Principal;
   const now = "2030-01-01T22:00:00.000Z"; // January 2 in Dubai.
   beforeAll(async () => {
     fixture = await createTestDb();
@@ -57,6 +58,10 @@ describe("bounded, factual PostgreSQL reporting", () => {
     viewer = await seedIdentity(fixture.db, {
       userId: "insight-viewer",
       role: "viewer",
+    });
+    fresh = await seedIdentity(fixture.db, {
+      userId: "insight-fresh",
+      teamId: "insight-fresh",
     });
     await enforceTestRls(fixture.db);
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -170,6 +175,74 @@ describe("bounded, factual PostgreSQL reporting", () => {
       "Never return this private body",
     );
     expect((await overview(colleague)).counts.shortlisted).toBe(0);
+  });
+
+  it("treats tasks in a completed bucket as finished in overdue lists and reminders", async () => {
+    const finished = await createRecord(fresh, "buckets", {
+      data: { name: "Fictional finished", completed: true },
+    });
+    const working = await createRecord(fresh, "buckets", {
+      data: { name: "Fictional working", completed: false },
+    });
+    const doneTask = await createRecord(fresh, "tasks", {
+      bucketId: finished.id,
+      data: { title: "Fictional finished task", dueDate: "2029-12-01" },
+    });
+    const openTask = await createRecord(fresh, "tasks", {
+      bucketId: working.id,
+      data: { title: "Fictional open task", dueDate: "2029-12-01" },
+    });
+    const doneKey = `task:${doneTask.id}:2029-12-01`;
+    expect((await overview(fresh)).overdueTasks.map((row) => row.id)).toEqual([
+      openTask.id,
+    ]);
+    const before = await notifications(fresh);
+    expect(before.data.map((row) => row.key)).toEqual([
+      `task:${openTask.id}:2029-12-01`,
+    ]);
+    expect(before).toMatchObject({ total: 1, unread: 1 });
+    expect(await markNotifications(fresh, [doneKey])).toEqual({ updated: 0 });
+
+    await updateRecord(fresh, "buckets", finished.id, {
+      version: finished.version,
+      data: { completed: false },
+    });
+    expect(
+      (await overview(fresh)).overdueTasks.map((row) => row.id).sort(),
+    ).toEqual([doneTask.id, openTask.id].sort());
+    const after = await notifications(fresh);
+    expect(after.data.map((row) => row.key)).toContain(doneKey);
+    expect(after).toMatchObject({ total: 2, unread: 2 });
+    expect(await markNotifications(fresh, [doneKey])).toEqual({ updated: 1 });
+  });
+
+  it("charts open roles by department from vacancies with status Open only", async () => {
+    for (const [department, status] of [
+      ["Finance", "Draft"],
+      ["Finance", "On hold"],
+      ["Finance", "Open"],
+      ["Legal", "Open"],
+    ])
+      await createRecord(fresh, "vacancies", {
+        data: {
+          title: `Fictional ${department} ${status}`,
+          department,
+          status,
+        },
+      });
+    const expected = [
+      { name: "Finance", count: 1 },
+      { name: "Legal", count: 1 },
+    ];
+    expect((await overview(fresh)).departments).toEqual(expected);
+    expect(
+      (
+        await analytics(
+          fresh,
+          new URLSearchParams({ from: "2030-01-01", to: "2030-01-31" }),
+        )
+      ).departments,
+    ).toEqual(expected);
   });
 
   it("aggregates observed first hires only, excludes imports and preserves unknown experience", async () => {

@@ -30,6 +30,22 @@ describe("recruitment domain", () => {
       }).success,
     ).toBe(false);
   });
+  it("marks completion explicitly on buckets and shows it as a checkbox", () => {
+    expect(
+      recordDataSchemas.bucket.parse({ name: "Done", completed: true })
+        .completed,
+    ).toBe(true);
+    expect(recordDataSchemas.bucket.parse({ name: "To do" }).completed).toBe(
+      false,
+    );
+    expect(
+      recordDataSchemas.bucket.safeParse({ name: "Done", completed: "yes" })
+        .success,
+    ).toBe(false);
+    expect(
+      RESOURCE_CONFIG.buckets.fields.find((field) => field.key === "completed"),
+    ).toMatchObject({ type: "checkbox", label: "Counts as completed" });
+  });
   it("validates real calendar dates, supported meeting URLs and bounded amounts", () => {
     expect(daySchema.safeParse("2024-02-29").success).toBe(true);
     expect(daySchema.safeParse("2025-02-29").success).toBe(false);

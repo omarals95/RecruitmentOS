@@ -225,6 +225,17 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   it("atomically moves populated buckets and protects the last active bucket", async () => {
     const workflow = await bootstrapTeam(other);
     expect(workflow.created).toBe(4);
+    expect(
+      workflow.data.map((bucket) => [
+        (bucket.data as { name: string }).name,
+        (bucket.data as { completed: boolean }).completed,
+      ]),
+    ).toEqual([
+      ["To do", false],
+      ["In progress", false],
+      ["Waiting", false],
+      ["Done", true],
+    ]);
     expect((await bootstrapTeam(other)).created).toBe(0);
     const [first, second, third, fourth] = workflow.data;
     const task = await createRecord(other, "tasks", {
@@ -643,6 +654,42 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
         },
       ),
     ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("names comment authors through the activity accessor without exposing user IDs", async () => {
+    await fixture.db.execute(
+      sql`update auth."user" set name='Fictional Comment Author' where id=${owner.userId}`,
+    );
+    const person = await candidate("Fictional Commented Person");
+    const written = await createRecord(owner, "comments", {
+      parentRecordId: person.id,
+      data: { body: "Fictional named comment" },
+    });
+    expect(written.authorName).toBe("Fictional Comment Author");
+    const imported = await createRecord(owner, "comments", {
+      parentRecordId: person.id,
+      data: {
+        body: "Fictional imported comment",
+        legacyAuthorLabel: "Fictional source label",
+      },
+      legacyId: "named-comment-import",
+    });
+    const listed = await listRecords(
+      colleague,
+      "comments",
+      new URLSearchParams({ parentRecordId: person.id, sort: "createdAt" }),
+    );
+    const named = listed.data.find((row) => row.id === written.id)!;
+    expect(named.authorName).toBe("Fictional Comment Author");
+    const { createdBy, ...rest } = named;
+    expect(createdBy).toBe(owner.userId);
+    expect(JSON.stringify(rest)).not.toContain(owner.userId);
+    expect(
+      listed.data.find((row) => row.id === imported.id)?.authorName,
+    ).toBeNull();
+    expect(
+      (await getRecord(colleague, "comments", written.id)).authorName,
+    ).toBe("Fictional Comment Author");
   });
 
   it("preserves imported provenance while never fabricating observed stage history", async () => {

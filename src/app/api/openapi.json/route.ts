@@ -120,6 +120,7 @@ const recordDto = {
     data: { type: "object" },
     version: { type: "integer", minimum: 1 },
     label: { type: "string" },
+    authorName: { type: ["string", "null"] },
     archivedAt: { type: ["string", "null"], format: "date-time" },
   },
 };

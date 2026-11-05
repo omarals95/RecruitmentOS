@@ -202,6 +202,7 @@ export const recordDataSchemas = {
         .regex(/^#[0-9a-fA-F]{6}$/)
         .default("#4338CA"),
       position: z.number().int().min(0).max(10000).default(0),
+      completed: z.boolean().default(false),
     })
     .strict(),
   "task-field": z
@@ -364,6 +365,7 @@ export interface RecordDto<
   privateOwnerId: string | null;
   importMeta?: Record<string, unknown>;
   label?: string;
+  authorName?: string | null;
 }
 export const referencesByKind: Record<
   RecordKind,
@@ -588,6 +590,7 @@ const fieldLabels: Record<string, string> = {
   customValues: "Custom task values",
   meetingUrl: "Meeting URL",
   privateOwnerId: "Owner",
+  completed: "Counts as completed",
 };
 export const RESOURCE_CONFIG = Object.fromEntries(
   Object.entries(resourceToKind).map(([resource, kind]) => [
@@ -616,7 +619,7 @@ export const RESOURCE_CONFIG = Object.fromEntries(
                   "customValues",
                 ].includes(key)
               ? "json"
-              : ["required"].includes(key)
+              : ["required", "completed"].includes(key)
                 ? "checkbox"
                 : [
                       "yearsExperience",

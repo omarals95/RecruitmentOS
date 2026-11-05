@@ -121,6 +121,34 @@ async function decorate(
   p: Principal,
   rows: RecordDto[],
 ): Promise<RecordDto[]> {
+  const commentIds = rows
+    .filter((row) => row.kind === "comment")
+    .map((row) => row.id);
+  if (commentIds.length) {
+    // The accessor names only readable events; imported comments have no 'created' event.
+    const authors = await tx
+      .select({
+        recordId: activity.recordId,
+        name: sql<
+          string | null
+        >`tenant_context.activity_actor_name(${activity.id})`,
+      })
+      .from(activity)
+      .where(
+        and(
+          eq(activity.teamId, p.teamId),
+          eq(activity.kind, "comment"),
+          eq(activity.action, "created"),
+          inArray(activity.recordId, commentIds),
+        ),
+      );
+    const names = new Map(authors.map((row) => [row.recordId, row.name]));
+    rows = rows.map((row) =>
+      row.kind === "comment"
+        ? { ...row, authorName: names.get(row.id) ?? null }
+        : row,
+    );
+  }
   if (
     !p.scopes.includes("recruitment:read") ||
     !rows.some((row) => ["application", "onboarding"].includes(row.kind))
@@ -1415,6 +1443,7 @@ export async function bootstrapTeam(p: Principal) {
               name,
               position,
               color: ["#64748B", "#4338CA", "#D97706", "#059669"][position],
+              completed: name === "Done",
             }),
           },
           false,
