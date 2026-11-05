@@ -90,10 +90,12 @@ export async function requestJson<T>(
           : error.message || "The request could not be completed.",
     );
   }
+  // The duplicate lookup is a read-only POST, so it must not refresh open views.
   if (
     typeof window !== "undefined" &&
     init.method &&
-    init.method.toUpperCase() !== "GET"
+    init.method.toUpperCase() !== "GET" &&
+    path !== "/api/v1/candidates/duplicates"
   )
     window.dispatchEvent(
       new CustomEvent("recruitmentos:data-changed", {

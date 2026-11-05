@@ -113,6 +113,9 @@ export const SENSITIVE_CANDIDATE_FIELDS = [
   "nationalServiceStatus",
 ] as const;
 
+/** Most possible-duplicate matches one contact lookup returns. */
+export const CANDIDATE_DUPLICATE_LIMIT = 20;
+
 export const recordDataSchemas = {
   candidate: z
     .object({

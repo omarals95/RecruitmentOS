@@ -5,11 +5,11 @@ import { findCandidateDuplicates } from "@/lib/records";
 export const runtime = "nodejs";
 export async function POST(request: Request) {
   return runApi(request, "candidates:read", async (principal) =>
-    json({
-      data: await findCandidateDuplicates(
+    json(
+      await findCandidateDuplicates(
         principal,
         await readBody(request, z.unknown(), 4096),
       ),
-    }),
+    ),
   );
 }

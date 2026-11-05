@@ -18,6 +18,7 @@ import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
 import {
+  CANDIDATE_DUPLICATE_LIMIT,
   bulkApplicationsSchema,
   candidateStateSchema,
   createRecordSchemas,
@@ -731,8 +732,8 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
       .from(records)
       .where(and(...owned(p, "candidate"), or(...predicates)))
       .orderBy(asc(records.id))
-      .limit(20);
-    return rows.map((row) => {
+      .limit(CANDIDATE_DUPLICATE_LIMIT + 1);
+    const data = rows.slice(0, CANDIDATE_DUPLICATE_LIMIT).map((row) => {
       const storedEmail =
         typeof row.data.email === "string" ? row.data.email : "";
       const storedPhone =
@@ -752,6 +753,7 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
         ],
       };
     });
+    return { data, limited: rows.length > CANDIDATE_DUPLICATE_LIMIT };
   });
 }
 

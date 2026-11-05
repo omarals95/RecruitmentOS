@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { Fragment, useId, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Search } from "lucide-react";
 import {
   RESOURCE_CONFIG,
@@ -23,6 +23,7 @@ import {
   requestJson,
   humanError,
 } from "./client";
+import { DuplicateWarning, useDuplicateLookup } from "./duplicate-warning";
 import { dataOf, recordLabel, toDubaiInput, fromDubaiInput } from "./helpers";
 import { recordMutation, customValueDefaults } from "./mutation";
 
@@ -107,6 +108,12 @@ export function RecordEditor({
     resource === "tasks"
       ? "/api/v1/task-fields?pageSize=100&sort=position"
       : null,
+  );
+  const duplicates = useDuplicateLookup(
+    team?.id ?? null,
+    resource === "candidates",
+    values.email,
+    values.phone,
   );
   const update = (key: string, value: unknown) =>
     setValues((old) => ({ ...old, [key]: value }));
@@ -268,13 +275,20 @@ export function RecordEditor({
                       ].includes(field.key)),
                 )
                 .map((field) => (
-                  <FieldInput
-                    key={field.key}
-                    field={field}
-                    value={values[field.key]}
-                    error={fieldErrors[field.key]}
-                    onChange={(value) => update(field.key, value)}
-                  />
+                  <Fragment key={field.key}>
+                    <FieldInput
+                      field={field}
+                      value={values[field.key]}
+                      error={fieldErrors[field.key]}
+                      onChange={(value) => update(field.key, value)}
+                    />
+                    {resource === "candidates" && field.key === "phone" && (
+                      <DuplicateWarning
+                        lookup={duplicates}
+                        excludeId={record?.id}
+                      />
+                    )}
+                  </Fragment>
                 ))}
               {resource === "tasks" &&
                 fields.data?.data.map((custom) => {

@@ -338,7 +338,7 @@ export function GET() {
       {
         summary: "Find possible duplicate candidates",
         description:
-          "Requires candidates:read. Returns exact normalized email or phone matches in the selected team as possible matches for review, at most 20 results. An empty result is not proof of uniqueness.",
+          "Requires candidates:read. Returns exact normalized email or phone matches in the selected team as possible matches for review, at most 20 results; limited is true when more matches exist. An empty result is not proof of uniqueness.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -353,7 +353,8 @@ export function GET() {
       },
       {
         "200": {
-          description: "{data: [{id,name,email,phone,matches}]}; at most 20.",
+          description:
+            "{data: [{id,name,email,phone,matches}], limited}; at most 20 in data, limited is true when more matches exist.",
         },
       },
     ),
