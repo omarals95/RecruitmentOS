@@ -53,7 +53,11 @@ function getDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
   return identityPair;
 }
 
-async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+/** Synchronous refusals shared by createDbPair and hosted sign-in readiness; never opens a pool. */
+export function prepareDbPairTargets(): {
+  dataUrl: string;
+  identityUrl: string;
+} {
   if (process.env.DATABASE_MODE === "pglite")
     throw new ApiError(
       503,
@@ -87,7 +91,11 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       "unsafe_database_connections",
       "Configure separate database connections for recruitment data and identity.",
     );
-  const targets = prepareConnectionTargets(dataUrl, identityUrl);
+  return prepareConnectionTargets(dataUrl, identityUrl);
+}
+
+async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+  const targets = prepareDbPairTargets();
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
   function makePool(connectionString: string) {

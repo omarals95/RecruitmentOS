@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
 import { apiTokens, apiRateLimits, member, user } from "@/db/auth-schema";
+import { getAuthOptions } from "./auth";
 import { ApiError } from "./errors";
 import { parseRole, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
@@ -68,15 +69,39 @@ async function liveHuman(tx: TeamTx, p: Principal): Promise<Role> {
   return parseRole(current.role);
 }
 
-export async function authenticateApiToken(raw: string): Promise<Principal> {
+export async function authenticateApiToken(
+  raw: string,
+  clientIp: string | null,
+): Promise<Principal> {
+  // Tokens never work where sign-in is unavailable.
+  if (!getAuthOptions().configured)
+    throw new ApiError(
+      503,
+      "AUTH_NOT_CONFIGURED",
+      "Authentication setup is required.",
+    );
   if (!/^ros_live_[A-Za-z0-9_-]{43}$/.test(raw))
     throw new ApiError(
       401,
       "invalid_token",
       "The API token is invalid or no longer active.",
     );
+  const guessKey = `api-guess:${clientIp ?? "no-client-ip"}`;
   const db = await getIdentityDb();
   const result = await db.transaction(async (tx) => {
+    // The upsert locks this client's row until commit, so concurrent guesses cannot pass the budget.
+    const [budget] = await tx
+      .insert(apiRateLimits)
+      .values({ key: guessKey, windowStart: sql`current_timestamp`, count: 0 })
+      .onConflictDoUpdate({
+        target: apiRateLimits.key,
+        set: {
+          count: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN 0 ELSE ${apiRateLimits.count} END`,
+          windowStart: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN current_timestamp ELSE ${apiRateLimits.windowStart} END`,
+        },
+      })
+      .returning({ count: apiRateLimits.count });
+    if (!budget || budget.count >= 10) return { guessLimited: true as const };
     const [found] = await tx
       .select({
         token: apiTokens,
@@ -102,8 +127,13 @@ export async function authenticateApiToken(raw: string): Promise<Principal> {
     if (
       !found?.verified ||
       !["owner", "admin", "recruiter", "viewer"].includes(found.role)
-    )
+    ) {
+      await tx
+        .update(apiRateLimits)
+        .set({ count: sql`LEAST(${apiRateLimits.count} + 1, 1000000)` })
+        .where(eq(apiRateLimits.key, guessKey));
       return null;
+    }
     const [limit] = await tx
       .insert(apiRateLimits)
       .values({
@@ -141,6 +171,12 @@ export async function authenticateApiToken(raw: string): Promise<Principal> {
       "The API token is invalid or no longer active.",
     );
   // Throw after commit so rejected rate-limit attempts cannot roll back their counter.
+  if ("guessLimited" in result)
+    throw new ApiError(
+      429,
+      "token_guess_rate_limited",
+      "Too many invalid API token attempts. Try again in a minute.",
+    );
   if ("limited" in result)
     throw new ApiError(
       429,

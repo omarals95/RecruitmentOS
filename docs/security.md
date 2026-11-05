@@ -32,7 +32,7 @@ No external AI provider, advertising library, remote font or product analytics s
   - after connecting: a session login that differs from the effective role, or an unsafe runtime role safety, marker or per-role boundary result (`unsafe_database_role`). The safety query rejects elevated attributes, broad `pg_*` roles, protected-object ownership, ownership of the current database (directly or through any membership, NOINHERIT included), database `CREATE`/`TEMPORARY`, grant options and `public` schema access;
   - a missing or mismatched connection marker, the same role on both pools, or a role able to assume the other (`unsafe_database_connections`); a missing or different storage schema version (`storage_schema_mismatch`).
 
-  Startup checks that the signing key is set and well formed. Whether it is installed is enforced per transaction: `tenant_context.install` rejects an uninstalled or retired key (403 `tenant_context_denied`). Hosted sign-in stays unavailable in code, Blob CV storage stays disabled, and console mail is ignored when hosted.
+  Startup checks that the signing key is set and well formed. Whether it is installed is enforced per transaction: `tenant_context.install` rejects an uninstalled or retired key (403 `tenant_context_denied`). Hosted sign-in opens only through the readiness checks in `getAuthOptions()` (Vercel production runtime, HTTPS origin, usable secret, Resend mail and the same pre-pool refusals as `createDbPair()`), which also gate API tokens; Blob CV storage stays disabled, and console mail is ignored when hosted.
 
 ## API and write integrity
 

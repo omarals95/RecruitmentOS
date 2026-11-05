@@ -51,7 +51,7 @@ npm run format:check    # prettier; format only the files you changed
 ## Non-negotiable rules
 
 - Fictional data only. Never add real candidate records, CVs, the owner's personal CV, credentials, database dumps or private reports to the repository, tests, logs or screenshots.
-- Do not weaken, remove or flag-bypass a security guard (for example the hosted runtime role and connection checks in `createDbPair()`, the hosted sign-in block, Blob disablement) to make something work. A guard is removed only by completing and testing the control it protects.
+- Do not weaken, remove or flag-bypass a security guard (for example the hosted runtime role and connection checks in `createDbPair()`, the hosted sign-in readiness checks in `getAuthOptions()`, Blob disablement) to make something work. A guard is removed only by completing and testing the control it protects.
 - No silent provider fallback (Blob to S3), no fake success responses, no decorative controls for disabled features.
 - Never deploy, push, change Vercel/Neon/Blob/Resend settings, create credentials or send email. The orchestrator does release work.
 - Never run `scripts/blob-live-verify.ts`, with or without `--confirm-live-preview-blob`: only the owner runs it, against the Preview Blob store.

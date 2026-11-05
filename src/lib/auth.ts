@@ -13,7 +13,7 @@ import {
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
 import { and, eq } from "drizzle-orm";
-import { getIdentityDb, type AppDb } from "@/db";
+import { getIdentityDb, prepareDbPairTargets, type AppDb } from "@/db";
 import { authTables, member, user } from "@/db/auth-schema";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
@@ -22,6 +22,7 @@ import {
   isUsableAuthSecret,
   validateInvitationRole,
 } from "./auth-policy";
+import { clientIpHeader } from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
 
 export type AuthOptions = {
@@ -47,18 +48,24 @@ export function getAuthOptions(): AuthOptions {
   } catch {
     /* Public pages remain available before setup. */
   }
-  const database =
-    Boolean(
-      process.env.DATABASE_URL &&
-      (!hosted || process.env.IDENTITY_DATABASE_URL),
-    ) ||
-    (!hosted &&
-      process.env.DATABASE_MODE === "pglite" &&
-      process.env.ALLOW_LOCAL_DB === "true");
+  let database = false;
+  if (hosted) {
+    try {
+      // The same refusals createDbPair applies before any pool; connection-time checks still run at first use.
+      prepareDbPairTargets();
+      // Hosted sign-in runs only in the Vercel production runtime.
+      database =
+        process.env.NODE_ENV === "production" && process.env.VERCEL === "1";
+    } catch {
+      /* Report setup required without revealing which setting was refused. */
+    }
+  } else
+    database =
+      Boolean(process.env.DATABASE_URL) ||
+      (process.env.DATABASE_MODE === "pglite" &&
+        process.env.ALLOW_LOCAL_DB === "true");
   return {
     configured: Boolean(
-      // Keep hosted sign-in unavailable while the database isolation gate is active.
-      !hosted &&
       validURL &&
       database &&
       isUsableAuthSecret(process.env.BETTER_AUTH_SECRET) &&
@@ -182,6 +189,8 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       database: { generateId: "uuid" },
       // Better Auth skips callback and redirect origin checks when NODE_ENV=test or TEST is set; keep them on everywhere.
       disableOriginCheck: false,
+      // Auth rate limits and session addresses use the same single client-IP header as the API.
+      ipAddress: { ipAddressHeaders: [clientIpHeader()] },
     },
     user: {
       deleteUser: { enabled: false },

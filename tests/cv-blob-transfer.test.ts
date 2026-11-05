@@ -47,6 +47,7 @@ import { GET as downloadRoute } from "@/app/api/v1/cvs/[id]/download/route";
 import { GET as manifestRoute } from "@/app/api/v1/cvs/[id]/manifest/route";
 import { GET as chunkRoute } from "@/app/api/v1/cvs/[id]/chunks/route";
 import { createTestDb, seedIdentity } from "./helpers/db";
+import { stubLocalAuthReadiness } from "./helpers/readiness";
 import {
   blobBinding,
   fakeBlob,
@@ -221,6 +222,7 @@ describe("private Blob CV transfer behind a fake client", () => {
   }
 
   beforeAll(async () => {
+    stubLocalAuthReadiness();
     fixture = await createTestDb();
     owner = await seedIdentity(fixture.db, {
       userId: "blob-owner",
@@ -265,7 +267,10 @@ describe("private Blob CV transfer behind a fake client", () => {
       "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
     );
   });
-  afterAll(async () => fixture?.close());
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await fixture?.close();
+  });
 
   describe("reservation", () => {
     it("returns a blob-put-v1 ticket built from the stored row without signing material", async () => {
