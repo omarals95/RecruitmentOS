@@ -424,6 +424,7 @@ describe("split runtime role template", () => {
       "SELECT * FROM storage_ledger.stores",
       "SELECT * FROM storage_ledger.blob_read_leases",
       "SELECT tenant_context.audit_token('fictional','token.created')",
+      "SELECT tenant_context.audit_grant_reuse('fictional','refresh_token_reused')",
       "UPDATE db_boundary.connection_marker SET singleton = true",
       "INSERT INTO db_boundary.storage_schema(version) VALUES (2)",
       "UPDATE db_boundary.storage_schema SET version = 2",

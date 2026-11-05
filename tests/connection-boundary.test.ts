@@ -163,6 +163,12 @@ describe("database identity separation", () => {
       await harness.asOwner();
       await harness.client.exec(
         `REVOKE EXECUTE ON FUNCTION tenant_context.audit_token(text,text) FROM ${splitRoles.data};
+        GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text,text) TO ${splitRoles.data}`,
+      );
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text,text) FROM ${splitRoles.data};
         GRANT EXECUTE ON FUNCTION tenant_context.allows(text,text,text) TO ${splitRoles.identity}`,
       );
       expect(await unsafe("data")).toBe(false);

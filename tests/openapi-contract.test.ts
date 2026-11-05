@@ -8,6 +8,7 @@ vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
 import { authenticateApiToken } from "@/lib/api-tokens";
 import { SCOPES, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 import { resourceToKind } from "@/domain/records";
 import { GET as openApi } from "@/app/api/openapi.json/route";
 import {
@@ -290,6 +291,17 @@ describe("OpenAPI contract", () => {
     expect(Object.keys(chunks.responses["200"].content ?? {})).toEqual([
       "application/octet-stream",
     ]);
+  });
+
+  it("describes OAuth scopes with the MCP consent wording", () => {
+    const { securitySchemes } = document.components as unknown as {
+      securitySchemes: {
+        oauth2: { flows: { authorizationCode: { scopes: unknown } } };
+      };
+    };
+    expect(securitySchemes.oauth2.flows.authorizationCode.scopes).toEqual(
+      mcpScopeDescriptions,
+    );
   });
 
   it("rejects Bearer tokens on session-only operations", async () => {

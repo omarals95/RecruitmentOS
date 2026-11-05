@@ -107,6 +107,12 @@ const savedQuery = z
   })
   .strict();
 
+/** Optional candidate fields about sensitive traits; MCP tools never return or search them. */
+export const SENSITIVE_CANDIDATE_FIELDS = [
+  "explicitGender",
+  "nationalServiceStatus",
+] as const;
+
 export const recordDataSchemas = {
   candidate: z
     .object({

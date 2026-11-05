@@ -113,7 +113,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.release_blob_read(uuid) TO recruitmento
 GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_call(text, text) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables without DELETE, the
--- setup marker read-only, the connection marker and the two identity helpers.
+-- setup marker read-only, the connection marker and the three identity helpers.
 GRANT USAGE ON SCHEMA auth TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_identity;
@@ -134,6 +134,7 @@ GRANT SELECT ON TABLE auth.initial_admin_claim TO recruitmentos_identity;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text, text) TO recruitmentos_identity;
+GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text, text) TO recruitmentos_identity;
 
 -- A revoke by a role that does not own the database or the public schema only warns; refuse instead.
 DO $closed$

@@ -62,12 +62,14 @@ export default async function Authorize({
   if (check.kind === "fatal")
     return (
       <Card title="This connection cannot continue" description={check.message}>
+        <p className="muted">
+          Error code: <code>{check.error}</code>
+        </p>
         <Link className="button secondary" href="/app">
           Go to your workspace
         </Link>
       </Card>
     );
-  if (check.kind === "redirect") redirect(check.location);
   const identity = await getSession(await headers());
   if (!identity) {
     const query = new URLSearchParams();
