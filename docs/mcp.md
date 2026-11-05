@@ -1,8 +1,8 @@
 # MCP endpoint for AI assistants
 
-RecruitmentOS offers a remote [Model Context Protocol](https://modelcontextprotocol.io) server at `https://<your-domain>/api/mcp`. AI assistants such as Claude can use it to read your team's recruitment records and, only with explicit write permissions, create candidates and add comments. It is the same team-scoped data as the [REST API](api-examples.md), with the same permission checks.
+RecruitmentOS offers a remote [Model Context Protocol](https://modelcontextprotocol.io) server at `https://<your-domain>/api/mcp`. AI assistants such as Claude and ChatGPT can use it to read your team's recruitment records and, only with explicit write permissions, create candidates and add comments. It is the same team-scoped data as the [REST API](api-examples.md), with the same permission checks.
 
-> **Not yet verified live.** The endpoint, the OAuth flow and every tool are tested locally against fictional data. Connecting Claude.ai or Claude Code to a deployment, and applying migrations `0010` and `0011` and the updated role template to Preview, are owner steps that have not been done yet.
+> **Not yet verified live.** The endpoint, the OAuth flow and every tool are tested locally against fictional data, with fake Claude, ChatGPT and loopback clients. Connecting Claude.ai, Claude Code or ChatGPT to a deployment, and applying migrations `0010` and `0011` and the updated role template to Preview, are owner steps that have not been done yet. Live ChatGPT connection testing, including which ChatGPT accounts can add custom connectors, is an owner step.
 
 ## What the endpoint is
 
@@ -76,6 +76,16 @@ When a reused authorization code or refresh token revokes a connection, the toke
 
 To disconnect, open **Settings → API tokens** in RecruitmentOS. The connection is listed with an **OAuth app** badge; **Revoke** stops it on its next request. Owners and admins can see and revoke every member's connections with **Show all team tokens**.
 
+## ChatGPT connector
+
+1. In ChatGPT, add a custom connector (or app) for a remote MCP server.
+2. Enter the URL `https://<your-domain>/api/mcp` and choose OAuth authentication.
+3. ChatGPT registers itself with dynamic client registration and opens RecruitmentOS. Sign in if asked.
+4. The consent page shows the return host `chatgpt.com`, with the app name, the team and each permission as for Claude.
+5. Approve or deny as for Claude: check the return host, pick the team, untick anything the app does not need and choose **Approve**, or choose **Deny** if you did not start this connection.
+
+If ChatGPT shows a redirect URI, it must be `https://chatgpt.com/connector_platform_oauth_redirect`. RecruitmentOS refuses ChatGPT's per-connection form `https://chatgpt.com/connector/oauth/<id>`; seeing that form means ChatGPT did not detect issuer identification (RFC 9207) in the metadata. Which ChatGPT plans or workspace settings allow custom connectors is not verified here; the owner confirms it. ChatGPT's menu labels may differ from the steps above. Disconnect in **Settings → API tokens** as for Claude.
+
 ## Claude Code with an API token
 
 1. In RecruitmentOS open **Settings → API tokens** and create a token with only the scopes you need, for example `candidates:read` and `recruitment:read`.
@@ -95,9 +105,10 @@ Revoke the token in Settings → API tokens when you no longer need it.
 
 ## OAuth details
 
-- **Discovery:** `/.well-known/oauth-protected-resource/api/mcp` (RFC 9728, also served at `/.well-known/oauth-protected-resource`) and `/.well-known/oauth-authorization-server` (RFC 8414). Every URL comes from `BETTER_AUTH_URL`.
-- **Registration:** `POST /oauth/register` (RFC 7591), public clients only (`token_endpoint_auth_method: none`, no secret). Each redirect URI must be exactly `https://claude.ai/api/mcp/auth_callback` or `https://claude.com/api/mcp/auth_callback` (string comparison: no other case, trailing slash or query), or an `http:` URI on `127.0.0.1`, `[::1]` or `localhost` (any port and path, no fragment or credentials) for local testing; 1 to 5 per client. Any other URI refuses the whole registration with 400 `invalid_redirect_uri` and stores nothing. The allowlist is fixed in code. 5 registrations per minute per client IP. Registering grants nothing. The client name has control, format (bidi and zero-width), private-use, unassigned and invisible filler characters removed and runs of spaces collapsed; an empty result becomes `Unnamed app`.
-- **Authorization:** `GET /oauth/authorize`, authorization code with S256 PKCE only. `redirect_uri` must exactly equal a registered one and still pass the registration allowlist, so clients registered before the allowlist are refused. `resource`, if sent, must be `https://<your-domain>/api/mcp`. A missing `scope` means `candidates:read recruitment:read`. Every invalid request (unknown client, redirect URI, `response_type`, PKCE, `state` over 1000 characters, repeated parameters, `scope` or `resource`) shows the "This connection cannot continue" page with the OAuth error code, signed in or not, and never redirects to the app. The browser returns to the app only after a signed-in, verified member approves or denies a valid request. A valid request without a session goes to sign-in first.
+- **Discovery:** `/.well-known/oauth-protected-resource/api/mcp` (RFC 9728, also served at `/.well-known/oauth-protected-resource`) and `/.well-known/oauth-authorization-server` (RFC 8414). Every URL comes from `BETTER_AUTH_URL`. The metadata `issuer` is the site origin (`https://<your-domain>`, no path or trailing slash) and is the same string as the single `authorization_servers` entry in the protected-resource metadata. The metadata advertises `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]` and `authorization_response_iss_parameter_supported: true`.
+- **Registration:** `POST /oauth/register` (RFC 7591) is the only way to register a client. Public clients only (`token_endpoint_auth_method: none`, no secret). Each redirect URI must be exactly `https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback` or `https://chatgpt.com/connector_platform_oauth_redirect` (string comparison: no other case, scheme, port, trailing slash, path, query or fragment), or an `http:` URI on `127.0.0.1`, `[::1]` or `localhost` (any port and path, no fragment or credentials) for local testing; 1 to 5 per client. Any other URI refuses the whole registration with 400 `invalid_redirect_uri` and stores nothing. The allowlist is fixed in code. 5 registrations per minute per client IP. Registering grants nothing. The client name has control, format (bidi and zero-width), private-use, unassigned and invisible filler characters removed and runs of spaces collapsed; an empty result becomes `Unnamed app`.
+- **Authorization:** `GET /oauth/authorize`, authorization code with S256 PKCE only. `redirect_uri` must exactly equal a registered one and still pass the registration allowlist, so clients registered before the allowlist are refused. `resource` (RFC 8707), if sent, must be exactly `https://<your-domain>/api/mcp`; a missing `resource` is accepted and the tokens are bound to that same value. A missing `scope` means `candidates:read recruitment:read`. Every invalid request (unknown client, redirect URI, `response_type`, PKCE, `state` over 1000 characters, repeated parameters, `scope` or `resource`) shows the "This connection cannot continue" page with the OAuth error code, signed in or not, and never redirects to the app. The browser returns to the app only after a signed-in, verified member approves or denies a valid request. A valid request without a session goes to sign-in first.
+- **Issuer identification (RFC 9207):** both redirects to the app carry `iss` set to the metadata `issuer`: approve sends `code`, `state` (when sent) and `iss`; deny sends `error=access_denied`, `state` (when sent) and `iss`. Clients compare `iss` with the metadata `issuer` by exact string. The error page is not a response to the app and carries no `iss`.
 - **Scopes offered:** `cvs:write` and `imports:write` are never offered. Write scopes are granted only when the app asks for them and you keep them ticked. The consent page describes each scope by what the MCP tools do:
 
   | Scope               | Consent page text                                                    |
@@ -108,7 +119,7 @@ Revoke the token in Settings → API tokens when you no longer need it.
   | `candidates:write`  | Add new candidates                                                   |
   | `recruitment:write` | Add comments to candidates, vacancies and applications               |
 
-- **Tokens:** `POST /oauth/token`. Codes last 120 seconds and work once; reusing a code or a used refresh token revokes the whole connection and writes the `token.revoked` audit row described under [Audit](#audit). 10 failed token requests per minute per client IP.
+- **Tokens:** `POST /oauth/token`. `resource`, if sent with either grant (`authorization_code` or `refresh_token`), must be exactly `https://<your-domain>/api/mcp`; any other value is refused with 400 `invalid_target` before the code or refresh token is looked up, so it stays usable. Access and refresh tokens are bound to the `/api/mcp` audience: `/api/mcp` accepts only access tokens with that audience, and a refresh token whose stored audience differs gets `invalid_grant`. Codes last 120 seconds and work once; reusing a code or a used refresh token revokes the whole connection and writes the `token.revoked` audit row described under [Audit](#audit). 10 failed token requests per minute per client IP.
 
 ## Token lifetimes and limits
 
@@ -121,8 +132,8 @@ Revoke the token in Settings → API tokens when you no longer need it.
 
 Each credential is limited to 60 requests per minute, counting every MCP request, including `initialize` and `tools/list`. Connections count towards the 50 active tokens per user and team. OAuth access tokens are refused by `/api/v1/*`.
 
-**Shared egress:** after 10 invalid tokens from one client IP in a minute, every token from that IP is refused with 429 for the rest of the minute. Hosted assistants such as Claude.ai may reach RecruitmentOS from shared addresses, so other clients' mistakes can briefly block a valid connection. Retry after the `Retry-After` delay.
+**Shared egress:** after 10 invalid tokens from one client IP in a minute, every token from that IP is refused with 429 for the rest of the minute. Hosted assistants such as Claude.ai and ChatGPT may reach RecruitmentOS from shared addresses, so other clients' mistakes can briefly block a valid connection. Retry after the `Retry-After` delay.
 
 ## Not supported
 
-MCP resources, prompts, sampling, elicitation, completions and logging; SSE streams, sessions and resumability; the legacy HTTP+SSE transport; OpenID Connect; confidential clients and client secrets; Client ID Metadata Documents; token revocation or introspection endpoints; JWT access tokens; and an admin screen for registered clients. Tools for offers, onboarding, checklists, listing comments, activity, analytics or CV downloads are not offered.
+MCP resources, prompts, sampling, elicitation, completions and logging; SSE streams, sessions and resumability; the legacy HTTP+SSE transport; OpenID Connect; confidential clients and client secrets; Client ID Metadata Documents, because they would need the server to fetch remote URLs; ChatGPT's per-connection redirect URI `https://chatgpt.com/connector/oauth/<id>`; token revocation or introspection endpoints; JWT access tokens; and an admin screen for registered clients. Tools for offers, onboarding, checklists, listing comments, activity, analytics or CV downloads are not offered.

@@ -56,7 +56,7 @@ With the fictional development server running, `npm run test:local` checks the a
 2. Configure [private S3 storage and Vercel OIDC](docs/s3-setup.md).
 3. Review [security and data flows](docs/security.md).
 4. Run the [legacy migration](docs/migration.md) in dry-run mode first.
-5. Use [API tokens and examples](docs/api-examples.md) for authorised AI integrations, and the [MCP endpoint guide](docs/mcp.md) to connect Claude.ai or Claude Code.
+5. Use [API tokens and examples](docs/api-examples.md) for authorised AI integrations, and the [MCP endpoint guide](docs/mcp.md) to connect Claude.ai, Claude Code or ChatGPT.
 
 Recruiters can follow the [workspace user guide](docs/user-guide.md). GitHub Actions repeats the local validation commands with fictional data and no deployment credentials.
 
