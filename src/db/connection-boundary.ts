@@ -22,6 +22,7 @@ export const dataRoleHelpers = [
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",
   "tenant_context.audit_token(text,text)",
+  "tenant_context.audit_grant_reuse(text,text)",
 ];
 
 // Indirect privileged access is forbidden except the allowlisted, owner-controlled helpers

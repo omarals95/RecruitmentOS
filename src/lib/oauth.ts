@@ -420,11 +420,25 @@ const invalidGrant = () =>
     "invalid_grant",
     "The authorization code or refresh token is invalid, expired or already used.",
   );
-async function revokeGrant(tx: TeamTx, grantId: string) {
-  await tx
+/** Whether this call revoked the grant; an already revoked grant is left unchanged. */
+async function revokeGrant(tx: TeamTx, grantId: string): Promise<boolean> {
+  const revoked = await tx
     .update(apiTokens)
     .set({ revokedAt: sql`current_timestamp` })
-    .where(and(eq(apiTokens.id, grantId), isNull(apiTokens.revokedAt)));
+    .where(and(eq(apiTokens.id, grantId), isNull(apiTokens.revokedAt)))
+    .returning({ id: apiTokens.id });
+  return revoked.length > 0;
+}
+/** Revokes the grant of a replayed code or refresh token and records why, in this transaction. */
+async function revokeReusedGrant(
+  tx: TeamTx,
+  grantId: string,
+  reason: "authorization_code_reused" | "refresh_token_reused",
+) {
+  if (await revokeGrant(tx, grantId))
+    await tx.execute(
+      sql`select tenant_context.audit_grant_reuse(${grantId}, ${reason})`,
+    );
 }
 /** An unrevoked, unexpired grant of this client whose user is verified and still a member. */
 async function liveGrant(tx: TeamTx, grantId: string, clientId: string) {
@@ -548,7 +562,11 @@ async function exchange(tx: TeamTx, form: URLSearchParams): Promise<Exchange> {
     if (!row) return invalidGrant();
     // A replayed code may have leaked: revoke everything issued from it.
     if (row.code.usedAt) {
-      await revokeGrant(tx, row.code.grantId);
+      await revokeReusedGrant(
+        tx,
+        row.code.grantId,
+        "authorization_code_reused",
+      );
       return invalidGrant();
     }
     // Any attempt spends the code, so a wrong verifier cannot be retried.
@@ -595,7 +613,7 @@ async function exchange(tx: TeamTx, form: URLSearchParams): Promise<Exchange> {
     : [];
   if (!row) return invalidGrant();
   if (row.token.usedAt) {
-    await revokeGrant(tx, row.token.grantId);
+    await revokeReusedGrant(tx, row.token.grantId, "refresh_token_reused");
     return invalidGrant();
   }
   await tx
@@ -647,7 +665,7 @@ export async function exchangeToken(request: Request): Promise<Response> {
     if ("error" in outcome) await chargeRateWindow(tx, budget);
     return outcome;
   });
-  // Failures are returned, not thrown, so the budget and any revocation commit.
+  // Failures are returned, not thrown, so the budget and any revocation with its audit row commit.
   if (!result)
     return oauthError(
       429,
