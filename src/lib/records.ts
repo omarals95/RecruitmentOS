@@ -778,6 +778,10 @@ export async function listRecords(
     "needsReview",
     "categories",
     "skills",
+    "certifications",
+    "education",
+    "minYearsExperience",
+    "maxYearsExperience",
     "startFrom",
     "startTo",
     ...referenceFields,
@@ -928,13 +932,60 @@ export async function listRecords(
       where.push(
         sql`(${records.data}->'folderCategories') @> ${JSON.stringify([parse(z.string().max(200), query.get("folderCategory"))])}::jsonb`,
       );
-    for (const key of ["categories", "skills"] as const)
+    for (const key of [
+      "education",
+      "minYearsExperience",
+      "maxYearsExperience",
+    ] as const)
+      if (query.has(key) && kind !== "candidate")
+        throw new ApiError(
+          400,
+          "invalid_query",
+          "Education and experience filters apply only to candidates.",
+        );
+    if (query.has("education")) {
+      const value = parse(z.string().trim().max(300), query.get("education"));
+      if (value)
+        where.push(
+          or(
+            ...["degreeName", "major", "university"].map(
+              (field) =>
+                sql`strpos(lower(coalesce(${records.data}->>${field}, '')), lower(${value})) > 0`,
+            ),
+          )!,
+        );
+    }
+    // Only a stated JSON number is in range; missing experience never matches.
+    const years = (key: string) => {
+      const raw = query.get(key);
+      if (raw === null) return null;
+      const value = Number(raw);
+      if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 100)
+        throw new ApiError(
+          400,
+          "invalid_query",
+          `${key} must be a number from 0 to 100.`,
+        );
+      return value;
+    };
+    const minYears = years("minYearsExperience");
+    const maxYears = years("maxYearsExperience");
+    if (minYears !== null && maxYears !== null && minYears > maxYears)
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "minYearsExperience must not exceed maxYearsExperience.",
+      );
+    const stated = sql`(case when jsonb_typeof(${records.data}->'yearsExperience') = 'number' then (${records.data}->>'yearsExperience')::numeric end)`;
+    if (minYears !== null) where.push(sql`${stated} >= ${minYears}::numeric`);
+    if (maxYears !== null) where.push(sql`${stated} <= ${maxYears}::numeric`);
+    for (const key of ["categories", "skills", "certifications"] as const)
       if (query.has(key)) {
         if (kind !== "candidate")
           throw new ApiError(
             400,
             "invalid_query",
-            "Skill and folder category filters apply only to candidates.",
+            "Skill, certification and folder category filters apply only to candidates.",
           );
         let value: unknown;
         try {
@@ -950,9 +1001,9 @@ export async function listRecords(
           z.array(z.string().trim().min(1).max(200)).max(100),
           value,
         );
-        if (values.length && key === "skills")
+        if (values.length && (key === "skills" || key === "certifications"))
           where.push(
-            sql`(${records.data}->'skills') @> ${JSON.stringify(values)}::jsonb`,
+            sql`(${records.data}->${key}) @> ${JSON.stringify(values)}::jsonb`,
           );
         if (values.length && key === "categories")
           where.push(

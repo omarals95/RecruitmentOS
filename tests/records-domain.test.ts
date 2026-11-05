@@ -125,6 +125,22 @@ describe("recruitment domain", () => {
       }).success,
     ).toBe(false);
     expect(candidateStateSchema.safeParse({ version: 0 }).success).toBe(false);
+    const view = (query: Record<string, unknown>) =>
+      recordDataSchemas["saved-view"].safeParse({
+        name: "Fictional view",
+        area: "directory",
+        query,
+      });
+    expect(
+      view({
+        certifications: ["Fictional certificate"],
+        education: "Fictional University",
+        minYearsExperience: 3,
+        maxYearsExperience: 5,
+      }).success,
+    ).toBe(true);
+    expect(view({ minYearsExperience: 101 }).success).toBe(false);
+    expect(view({ maxYearsExperience: -1 }).success).toBe(false);
     expect(
       bulkApplicationsSchema.safeParse({
         candidateIds: Array(501).fill("6df3687a-9244-4917-8fdb-d5d8d083f2db"),
