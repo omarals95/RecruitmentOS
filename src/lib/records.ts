@@ -731,6 +731,7 @@ export async function listRecords(
   p: Principal,
   resource: ResourceName,
   query: URLSearchParams,
+  options: { omitFromSearch?: readonly string[] } = {},
 ) {
   const kind = kindOf(resource);
   permission(p, resource);
@@ -929,7 +930,15 @@ export async function listRecords(
           );
       }
     // jsonpath extracts scalar values only. JSON property names are never searchable candidate facts.
-    const ownFacts = sql`jsonb_path_query_array(${records.data}, '$.** ? (@.type() == "string" || @.type() == "number" || @.type() == "boolean")')::text`;
+    // Top-level keys in omitFromSearch are removed first, so words neither match nor exclude on them.
+    const omitted = options.omitFromSearch ?? [];
+    const searched = omitted.length
+      ? sql`(${records.data} - array[${sql.join(
+          omitted.map((key) => sql`${key}`),
+          sql`, `,
+        )}]::text[])`
+      : records.data;
+    const ownFacts = sql`jsonb_path_query_array(${searched}, '$.** ? (@.type() == "string" || @.type() == "number" || @.type() == "boolean")')::text`;
     const factual =
       kind === "application"
         ? sql`concat_ws(' ',${ownFacts},

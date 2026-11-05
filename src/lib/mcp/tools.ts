@@ -18,6 +18,7 @@ import {
 } from "@/lib/records";
 import {
   APPLICATION_STAGES,
+  SENSITIVE_CANDIDATE_FIELDS,
   recordDataSchemas,
   type RecordDto,
 } from "@/domain/records";
@@ -109,9 +110,28 @@ function factsOf(row: RecordDto, omit: string[] = []) {
     ),
   };
 }
-/** The first ten evidence entries, each reduced to ten short scalar pairs. */
+/** Source fields that may hold copies of the sensitive fields, as legacy imports do. */
+const SOURCE_FIELDS = ["rawSource", "evidence", "sourceReviews"];
+const SENSITIVE_EVIDENCE = [
+  "gender",
+  "national service",
+  "nationalservice",
+  "male/female",
+];
+/** Whether any key or string value of an evidence entry mentions a sensitive field. */
+function sensitiveEvidence(entry: unknown) {
+  if (!entry || typeof entry !== "object") return false;
+  return Object.entries(entry as Data).some(([key, value]) =>
+    [key, typeof value === "string" ? value : ""].some((text) =>
+      SENSITIVE_EVIDENCE.some((word) => text.toLowerCase().includes(word)),
+    ),
+  );
+}
+/** The first ten non-sensitive evidence entries, each reduced to ten short scalar pairs. */
 function evidenceSummary(data: Data) {
-  const evidence = Array.isArray(data.evidence) ? data.evidence : [];
+  const evidence = (Array.isArray(data.evidence) ? data.evidence : []).filter(
+    (entry) => !sensitiveEvidence(entry),
+  );
   const reviews = Array.isArray(data.sourceReviews) ? data.sourceReviews : [];
   return {
     evidenceCount: evidence.length,
@@ -180,6 +200,7 @@ export const TOOLS: McpTool[] = [
         p,
         "candidates",
         listQuery({ search, ...rest }),
+        { omitFromSearch: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS] },
       );
       return success(
         listed(
@@ -230,7 +251,7 @@ export const TOOLS: McpTool[] = [
       return success(
         capRecord(
           {
-            ...factsOf(row, ["rawSource", "evidence", "sourceReviews"]),
+            ...factsOf(row, [...SOURCE_FIELDS, ...SENSITIVE_CANDIDATE_FIELDS]),
             evidenceSummary: evidenceSummary(data),
             cvs,
             ...(cvs ? {} : { cvsNote: "cvs:read scope required" }),
