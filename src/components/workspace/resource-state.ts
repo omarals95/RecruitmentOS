@@ -3,6 +3,7 @@ export interface ResourceState<T> {
   revision: number;
   data: T | null;
   error: string;
+  status?: number;
 }
 export function resourceSnapshot<T>(
   state: ResourceState<T> | null,
@@ -13,9 +14,11 @@ export function resourceSnapshot<T>(
   const matches = state?.key === key;
   const data = enabled && matches ? state.data : null;
   const pending = enabled && (!matches || state.revision !== revision);
+  const current = enabled && matches && state.revision === revision;
   return {
     data,
-    error: enabled && matches && state.revision === revision ? state.error : "",
+    error: current ? state.error : "",
+    status: current ? state.status : undefined,
     loading: pending && data === null,
     refreshing: pending && data !== null,
   };
@@ -36,5 +39,6 @@ export function failedResourceState<T>(
     revision,
     data: mayRetain && previous?.key === key ? previous.data : null,
     error: error instanceof Error ? error.message : "Unable to load data",
+    status: status || undefined,
   };
 }

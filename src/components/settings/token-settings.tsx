@@ -15,10 +15,12 @@ import { scopeDescriptions } from "@/lib/scope-descriptions";
 import type { TokenDto } from "@/lib/api-tokens";
 import {
   humanError,
+  isAbortError,
   requestJson,
   useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { SettingsNavigation } from "./settings-navigation";
 
 const date = (value: string | null) =>
@@ -43,6 +45,7 @@ function TokenSettingsContent() {
   const [secret, setSecret] = useState("");
   const secretRef = useRef<HTMLTextAreaElement>(null);
   const [now, setNow] = useState(0);
+  const { confirm, dialog } = useConfirm();
   const origin = useSyncExternalStore(
     () => () => {},
     () => window.location.origin,
@@ -122,6 +125,7 @@ function TokenSettingsContent() {
       );
       requestAnimationFrame(() => secretRef.current?.focus());
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(
         `${humanError(e)} If the connection was interrupted, refresh the token list before creating another token. Your form is retained.`,
       );
@@ -133,9 +137,12 @@ function TokenSettingsContent() {
     if (
       !team ||
       busy ||
-      !window.confirm(
-        `Revoke “${token.name}”? Integrations using this token will lose access.`,
-      )
+      !(await confirm({
+        title: "Revoke token?",
+        message: `Revoke “${token.name}”? Integrations using this token will lose access.`,
+        confirmLabel: "Revoke token",
+        destructive: true,
+      }))
     )
       return;
     setBusy(token.id);
@@ -507,6 +514,7 @@ function TokenSettingsContent() {
           </section>
         </>
       )}
+      {dialog}
     </div>
   );
 }

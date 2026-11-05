@@ -44,9 +44,17 @@ import { OfferStats } from "./metrics";
 import { personalStateMutation } from "./mutation";
 import {
   activeFilterCount,
+  checklistProgress,
   dataOf,
+  describeFilters,
   display,
+  exportFilename,
+  exportMetadata,
+  exportSummary,
+  isFiltered,
   recordLabel,
+  referenceText,
+  roleSnapshot,
   initials,
   formatDate,
   formatField,
@@ -56,8 +64,10 @@ import {
   saveCsv,
 } from "./helpers";
 import {
+  ClientError,
   useApi,
   useDebounced,
+  useUnsavedWork,
   useWorkspace,
   requestJson,
   humanError,
@@ -183,17 +193,21 @@ export function RecordsScreen({ section }: { section: string }) {
   const linkedChecklist = searchParams.get("checklist");
   const config = screenDefinitions[section];
   const resource = config.resource;
-  const { team, role } = useWorkspace();
+  const { team, role, environment } = useWorkspace();
   const canWrite = !!team && role !== "viewer";
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [category, setCategory] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
+  const [certifications, setCertifications] = useState<string[]>([]);
   const [shortlisted, setShortlisted] = useState(section === "shortlist");
   const [reviewStatus, setReviewStatus] = useState("");
   const [emirate, setEmirate] = useState("");
   const [degree, setDegree] = useState("");
+  const [education, setEducation] = useState("");
+  const [minYears, setMinYears] = useState("");
+  const [maxYears, setMaxYears] = useState("");
   const [vacancy, setVacancy] = useState("");
   const [archived, setArchived] = useState(false);
   const [sort, setSort] = useState(
@@ -212,6 +226,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filtersId = useId();
+  const experienceHelpId = useId();
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;
@@ -225,6 +240,10 @@ export function RecordsScreen({ section }: { section: string }) {
   const [saveView, setSaveView] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [conflict, setConflict] = useState<{
+    record: RecordDto;
+    target: string;
+  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const debounced = useDebounced(search);
   const params = useMemo(() => {
@@ -245,6 +264,11 @@ export function RecordsScreen({ section }: { section: string }) {
     if (shortlisted) p.set("shortlisted", "true");
     if (categories.length) p.set("categories", JSON.stringify(categories));
     if (skills.length) p.set("skills", JSON.stringify(skills));
+    if (certifications.length)
+      p.set("certifications", JSON.stringify(certifications));
+    if (education.trim()) p.set("education", education.trim());
+    if (minYears) p.set("minYearsExperience", minYears);
+    if (maxYears) p.set("maxYearsExperience", maxYears);
     if (section === "source-review") p.set("needsReview", "true");
     return p;
   }, [
@@ -263,6 +287,10 @@ export function RecordsScreen({ section }: { section: string }) {
     section,
     categories,
     skills,
+    certifications,
+    education,
+    minYears,
+    maxYears,
     shortlisted,
     reviewStatus,
   ]);
@@ -295,6 +323,10 @@ export function RecordsScreen({ section }: { section: string }) {
     pageSize,
     categories,
     skills,
+    certifications,
+    education,
+    minYears,
+    maxYears,
     shortlisted,
     reviewStatus,
   ]);
@@ -332,6 +364,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const move = async (record: RecordDto, value: string) => {
     if (!team) return;
     setError("");
+    setConflict(null);
     try {
       await requestJson(team.id, `/api/v1/${resource}/${record.id}`, {
         method: "PATCH",
@@ -347,8 +380,33 @@ export function RecordsScreen({ section }: { section: string }) {
         resource === "tasks" ? "Task moved." : "Application stage updated.",
       );
     } catch (e) {
+      // A board has no draft to keep: reread it and offer the move again.
+      if (e instanceof ClientError && e.status === 409) {
+        setConflict({ record, target: value });
+        refresh();
+      } else setError(humanError(e));
+    }
+  };
+  const moveAgain = async () => {
+    if (!team || !conflict) return;
+    const { record, target } = conflict;
+    setConflict(null);
+    setError("");
+    try {
+      // Never reuse the stale version; fetch the current one first.
+      const latest = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/${resource}/${record.id}`,
+      );
+      await move(latest.data, target);
+    } catch (e) {
       setError(humanError(e));
     }
+  };
+  const moveTargetName = (target: string) => {
+    if (resource !== "tasks") return target;
+    const bucket = buckets.data?.data.find((item) => item.id === target);
+    return bucket ? recordLabel(bucket) : "the chosen bucket";
   };
   const applyView = (view: RecordDto) => {
     const q = dataOf(view).query as Record<string, unknown>;
@@ -359,8 +417,12 @@ export function RecordsScreen({ section }: { section: string }) {
         q.degreeLevel ||
         q.reviewStatus ||
         q.shortlisted ||
+        q.education ||
+        q.minYearsExperience !== undefined ||
+        q.maxYearsExperience !== undefined ||
         (Array.isArray(q.categories) && q.categories.length) ||
-        (Array.isArray(q.skills) && q.skills.length))
+        (Array.isArray(q.skills) && q.skills.length) ||
+        (Array.isArray(q.certifications) && q.certifications.length))
     ) {
       setError(
         "This saved application view contains candidate-only filters. Edit the view to remove those filters before applying it.",
@@ -371,10 +433,24 @@ export function RecordsScreen({ section }: { section: string }) {
     setCategory(String(q.category || ""));
     setCategories(Array.isArray(q.categories) ? q.categories.map(String) : []);
     setSkills(Array.isArray(q.skills) ? q.skills.map(String) : []);
+    setCertifications(
+      Array.isArray(q.certifications) ? q.certifications.map(String) : [],
+    );
     setShortlisted(q.shortlisted === true || section === "shortlist");
     setReviewStatus(String(q.reviewStatus || ""));
     setEmirate(String(q.emirate || ""));
     setDegree(String(q.degreeLevel || ""));
+    setEducation(String(q.education || ""));
+    setMinYears(
+      typeof q.minYearsExperience === "number"
+        ? String(q.minYearsExperience)
+        : "",
+    );
+    setMaxYears(
+      typeof q.maxYearsExperience === "number"
+        ? String(q.maxYearsExperience)
+        : "",
+    );
     setStatus(String(q.stage || q.status || ""));
     setVacancy(String(q.vacancyId || ""));
     setArchived(!!q.includeArchived);
@@ -382,14 +458,49 @@ export function RecordsScreen({ section }: { section: string }) {
     setDirection(String(q.direction || "asc"));
     setPageSize(Number(q.pageSize) || 25);
   };
+  const filters = {
+    status,
+    category,
+    categories,
+    skills,
+    certifications,
+    shortlisted,
+    reviewStatus,
+    emirate,
+    degree,
+    education,
+    minYears,
+    maxYears,
+    vacancy,
+    archived,
+  };
+  const clearFilters = () => {
+    setSearch("");
+    setStatus("");
+    setCategory("");
+    setCategories([]);
+    setSkills([]);
+    setCertifications([]);
+    setReviewStatus("");
+    setShortlisted(section === "shortlist");
+    setEmirate("");
+    setDegree("");
+    setEducation("");
+    setMinYears("");
+    setMaxYears("");
+    setVacancy("");
+    setArchived(false);
+  };
   const exportAll = async () => {
     if (!team) return;
     setExporting(true);
     setError("");
+    setNotice("");
     try {
       const rows: RecordDto[] = [];
       let current = 1;
       let total = 1;
+      let matched = 0;
       do {
         const query = new URLSearchParams(params);
         query.set("page", String(current));
@@ -400,13 +511,15 @@ export function RecordsScreen({ section }: { section: string }) {
         );
         rows.push(...response.data);
         total = response.pagination.totalPages;
+        matched = response.pagination.total;
         current++;
         if (rows.length > 100000)
           throw new Error("This export is too large. Narrow your filters.");
       } while (current <= total);
       const fields = RESOURCE_CONFIG[resource].fields;
+      const now = new Date();
       saveCsv(
-        `RecruitmentOS-${resource}.csv`,
+        exportFilename(resource, now),
         [
           "Record ID",
           ...fields.map((f) => f.label),
@@ -419,10 +532,27 @@ export function RecordsScreen({ section }: { section: string }) {
           r.createdAt,
           r.updatedAt,
         ]),
+        exportMetadata({
+          title: config.title,
+          now,
+          environment,
+          filters: describeFilters(
+            debounced,
+            filters,
+            resource === "applications"
+              ? "Stage"
+              : resource === "candidates"
+                ? "Follow-up status"
+                : "Status",
+            section === "shortlist",
+          ),
+          written: rows.length,
+          total: matched,
+        }),
       );
-      setNotice(
-        `Exported ${rows.length} records matching the current filters.`,
-      );
+      const summary = exportSummary(rows.length, matched);
+      if (summary.changed) setError(summary.notice);
+      else setNotice(summary.notice);
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -437,21 +567,8 @@ export function RecordsScreen({ section }: { section: string }) {
   const columnLabel = (key: string) => columnField(key)?.label || key;
   const cellText = (key: string, record: RecordDto) =>
     formatField(columnField(key) || { key, type: "text" }, dataOf(record));
-  const filterCount = activeFilterCount(
-    {
-      status,
-      category,
-      categories,
-      skills,
-      shortlisted,
-      reviewStatus,
-      emirate,
-      degree,
-      vacancy,
-      archived,
-    },
-    section === "shortlist",
-  );
+  const filterCount = activeFilterCount(filters, section === "shortlist");
+  const filtered = isFiltered(search, filters, section === "shortlist");
   const stateOptions =
     resource === "applications"
       ? APPLICATION_STAGES
@@ -522,6 +639,28 @@ export function RecordsScreen({ section }: { section: string }) {
       {error && (
         <div className="notice error" role="alert">
           {error}
+        </div>
+      )}
+      {conflict && (
+        <div className="notice error" role="alert">
+          {recordLabel(conflict.record)} was changed by someone else, so your
+          move to {moveTargetName(conflict.target)} was not applied. The board
+          now shows the latest version.
+          <div className="row">
+            <button
+              className="button small"
+              disabled={!canWrite}
+              onClick={moveAgain}
+            >
+              Move to {moveTargetName(conflict.target)} again
+            </button>
+            <button
+              className="button secondary small"
+              onClick={() => setConflict(null)}
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
       {resource === "candidates" && (
@@ -697,6 +836,51 @@ export function RecordsScreen({ section }: { section: string }) {
                 values={skills}
                 onChange={setSkills}
               />
+              <FilterTags
+                label="All of these certifications"
+                values={certifications}
+                onChange={setCertifications}
+              />
+              <label>
+                Education contains
+                <input
+                  value={education}
+                  maxLength={300}
+                  placeholder="Degree, major or university"
+                  onChange={(e) => setEducation(e.target.value)}
+                />
+              </label>
+              <label>
+                Minimum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMinYears(e.target.value)}
+                />
+              </label>
+              <label>
+                Maximum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={maxYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMaxYears(e.target.value)}
+                />
+              </label>
+              {(minYears || maxYears) && (
+                <p className="muted small-text" id={experienceHelpId}>
+                  Candidates without stated experience are not included.
+                </p>
+              )}
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -759,33 +943,8 @@ export function RecordsScreen({ section }: { section: string }) {
             />
             Include archived
           </label>
-          {(search ||
-            status ||
-            category ||
-            emirate ||
-            degree ||
-            vacancy ||
-            archived ||
-            categories.length > 0 ||
-            skills.length > 0 ||
-            shortlisted ||
-            reviewStatus) && (
-            <button
-              className="text-link"
-              onClick={() => {
-                setSearch("");
-                setStatus("");
-                setCategory("");
-                setCategories([]);
-                setSkills([]);
-                setReviewStatus("");
-                setShortlisted(section === "shortlist");
-                setEmirate("");
-                setDegree("");
-                setVacancy("");
-                setArchived(false);
-              }}
-            >
+          {filtered && (
+            <button className="text-link" onClick={clearFilters}>
               Clear filters
             </button>
           )}
@@ -817,21 +976,30 @@ export function RecordsScreen({ section }: { section: string }) {
         ) : !result.data?.data.length ? (
           <EmptyState
             title={
-              search || status || category || emirate
+              filtered
                 ? "No records match these filters"
                 : section === "shortlist"
                   ? "Your shortlist is ready for a first candidate"
-                  : `Your ${config.title.toLowerCase()} start here`
+                  : section === "source-review"
+                    ? "Nothing needs source review"
+                    : `Your ${config.title.toLowerCase()} start here`
             }
             description={
-              search || status || category || emirate
+              filtered
                 ? "Try a broader search or clear your filters."
                 : section === "shortlist"
                   ? "Open a candidate profile and select “Add to my shortlist”."
-                  : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
+                  : section === "source-review"
+                    ? "Every candidate's source information has been reviewed."
+                    : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
             }
             action={
-              section === "shortlist" ? (
+              filtered ? (
+                <button className="button secondary" onClick={clearFilters}>
+                  Clear filters
+                </button>
+              ) : section === "source-review" ? undefined : section ===
+                "shortlist" ? (
                 <Link href="/app/candidates" className="button">
                   Browse candidates
                   <ArrowRight size={16} aria-hidden="true" />
@@ -1144,9 +1312,13 @@ export function RecordsScreen({ section }: { section: string }) {
             category,
             categories,
             skills,
+            certifications,
             shortlisted,
             emirate,
             degreeLevel: degree,
+            education,
+            minYearsExperience: minYears === "" ? undefined : Number(minYears),
+            maxYearsExperience: maxYears === "" ? undefined : Number(maxYears),
             ...(resource === "applications"
               ? { stage: status || undefined, vacancyId: vacancy || undefined }
               : { status, reviewStatus }),
@@ -1547,13 +1719,13 @@ export function ReferenceLabel({
     id ? `/api/v1/${resource}/${id}` : null,
   );
   if (!id) return <span className="muted">Not linked</span>;
-  const label = result.data
-    ? recordLabel(result.data.data)
-    : result.loading
-      ? "Loading…"
-      : `Record ${id.slice(0, 8)}`;
-  if (plain || resource !== "candidates")
-    return <span title={id}>{label}</span>;
+  const label = referenceText({
+    data: result.data?.data ?? null,
+    loading: result.loading,
+    status: result.status,
+  });
+  if (plain || resource !== "candidates" || !result.data)
+    return <span>{label}</span>;
   return <Link href={`/app/candidates/${id}`}>{label}</Link>;
 }
 function OnboardingProgress({ id }: { id: string }) {
@@ -1564,28 +1736,20 @@ function OnboardingProgress({ id }: { id: string }) {
     return <small className="muted">Loading checklist…</small>;
   if (result.error)
     return <small className="field-error">Checklist unavailable</small>;
-  const items = result.data?.data || [];
-  if (!items.length)
-    return <small className="muted">Checklist not configured</small>;
+  const { done, total } = checklistProgress(result.data?.data || []);
+  if (!total) return <small className="muted">Checklist not configured</small>;
   if ((result.data?.pagination.total || 0) > 100)
     return (
       <small className="muted">
         {result.data!.pagination.total} items · open checklist for details
       </small>
     );
-  const complete = items.filter((item) =>
-    ["Complete", "Waived"].includes(String(dataOf(item).status)),
-  ).length;
   return (
     <div className="onboarding-progress">
       <span>
-        {complete} / {items.length} complete or waived
+        {done} / {total} complete or waived
       </span>
-      <progress
-        aria-label="Checklist progress"
-        value={complete}
-        max={items.length}
-      />
+      <progress aria-label="Checklist progress" value={done} max={total} />
     </div>
   );
 }
@@ -1754,7 +1918,7 @@ export function RecordDetail({
         {[
           "details",
           ...(record.kind === "candidate"
-            ? ["resumes", "follow-up", "applications"]
+            ? ["resumes", "follow-up", "applications", "tasks"]
             : record.kind === "vacancy"
               ? ["applications"]
               : []),
@@ -1877,7 +2041,7 @@ export function RecordDetail({
                       "vacancies",
                       { jobRoleId: record.id },
                       {
-                        ...data,
+                        ...roleSnapshot(data),
                         status: "Draft",
                         openings: 1,
                         requisitionId: "",
@@ -2083,6 +2247,7 @@ export function RecordDetail({
           "offers",
           "onboarding",
           "checklist",
+          "tasks",
         ].includes(tab) && (
           <RelatedRecords
             resource={tab as ResourceName}
@@ -2316,6 +2481,7 @@ function CandidateFollowup({ candidateId }: { candidateId: string }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  useUnsavedWork(dirty);
   const current = draft ?? result.data?.data ?? null;
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2475,10 +2641,7 @@ function RelatedRecords({
       active = false;
     };
   }, [team, resource, focusId, parentKey, parentId]);
-  const completed =
-    result.data?.data.filter((r) =>
-      ["Complete", "Waived"].includes(String(dataOf(r).status)),
-    ).length || 0;
+  const progress = checklistProgress(result.data?.data || []);
   return (
     <div className="stack">
       {linkedError && (
@@ -2498,21 +2661,25 @@ function RelatedRecords({
         </button>
       </div>
       {resource === "checklist" &&
-      result.data?.data.length &&
+      result.data &&
       result.data.pagination.total <= 100 ? (
-        <div>
-          <div className="row space-between">
-            <strong>Checklist progress</strong>
-            <span>
-              {completed} / {result.data.data.length}
-            </span>
+        progress.total ? (
+          <div>
+            <div className="row space-between">
+              <strong>Checklist progress</strong>
+              <span>
+                {progress.done} / {progress.total}
+              </span>
+            </div>
+            <progress
+              aria-label="Checklist progress"
+              value={progress.done}
+              max={progress.total}
+            />
           </div>
-          <progress
-            aria-label="Checklist progress"
-            value={completed}
-            max={result.data.data.length}
-          />
-        </div>
+        ) : (
+          <p className="muted">Checklist not configured</p>
+        )
       ) : null}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />
@@ -2528,15 +2695,26 @@ function RelatedRecords({
             >
               <span>
                 <strong>{recordLabel(record)}</strong>
-                <small>
-                  {String(dataOf(record).stage || dataOf(record).status || "")}{" "}
-                  ·{" "}
-                  {formatDate(
-                    dataOf(record).dueDate ||
-                      dataOf(record).startAt ||
-                      record.createdAt,
-                  )}
-                </small>
+                {resource === "tasks" ? (
+                  <small>
+                    {String(dataOf(record).priority)} ·{" "}
+                    {dataOf(record).dueDate
+                      ? `Due ${formatDate(dataOf(record).dueDate)}`
+                      : "No due date"}
+                  </small>
+                ) : (
+                  <small>
+                    {String(
+                      dataOf(record).stage || dataOf(record).status || "",
+                    )}{" "}
+                    ·{" "}
+                    {formatDate(
+                      dataOf(record).dueDate ||
+                        dataOf(record).startAt ||
+                        record.createdAt,
+                    )}
+                  </small>
+                )}
               </span>
               <ArrowUpRight size={17} aria-hidden="true" />
             </button>
@@ -2607,6 +2785,7 @@ function Discussion({ recordId }: { recordId: string }) {
   const [body, setBody] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(body !== "");
   const key = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

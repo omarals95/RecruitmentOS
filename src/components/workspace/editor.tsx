@@ -19,12 +19,19 @@ import { Dialog } from "@/components/ui/dialog";
 import {
   useApi,
   useDebounced,
+  useUnsavedWork,
   useWorkspace,
   requestJson,
   humanError,
 } from "./client";
 import { DuplicateWarning, useDuplicateLookup } from "./duplicate-warning";
-import { dataOf, recordLabel, toDubaiInput, fromDubaiInput } from "./helpers";
+import {
+  dataOf,
+  recordLabel,
+  roleSnapshot,
+  toDubaiInput,
+  fromDubaiInput,
+} from "./helpers";
 import { recordMutation, customValueDefaults } from "./mutation";
 
 type Values = Record<string, unknown>;
@@ -96,9 +103,11 @@ export function RecordEditor({
       return result;
     },
   );
+  const [opened] = useState(() => JSON.stringify([values, refs]));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(saving || JSON.stringify([values, refs]) !== opened);
   const [copyingRole, setCopyingRole] = useState(false);
   const pending = saving || copyingRole;
   const [advanced, setAdvanced] = useState(false);
@@ -182,7 +191,7 @@ export function RecordEditor({
         team.id,
         `/api/v1/job-roles/${id}`,
       );
-      setValues((old) => ({ ...old, ...role.data.data }));
+      setValues((old) => ({ ...old, ...roleSnapshot(role.data.data) }));
     } catch (e) {
       setError(humanError(e));
     } finally {

@@ -10,7 +10,15 @@ import {
   hasPendingSuggestions,
   resolveSuggestion,
 } from "./bulk-cv-suggestions";
-import { humanError, requestJson, useApi, useWorkspace } from "./client";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import {
+  humanError,
+  isAbortError,
+  requestJson,
+  useApi,
+  useUnsavedWork,
+  useWorkspace,
+} from "./client";
 
 type Fields = {
   name: string;
@@ -120,17 +128,23 @@ export function BulkCvImport({
   const [busy, setBusy] = useState(false);
   const activeRequest = useRef<AbortController | null>(null);
   useEffect(() => () => activeRequest.current?.abort(), []);
+  const { confirm, dialog } = useConfirm();
+  useUnsavedWork(entries.some((item) => !item.done));
   const entry = entries.find((item) => item.id === selected);
   const update = (id: string, patch: Partial<Entry>) =>
     setEntries((items) =>
       items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
     );
-  const close = () => {
+  const close = async () => {
     if (
       entries.some((item) => !item.done) &&
-      !window.confirm(
-        "Close this import? The selected files and unfinished review drafts will be lost. Candidates already created will remain in your directory.",
-      )
+      !(await confirm({
+        title: "Close import?",
+        message:
+          "Close this import? The selected files and unfinished review drafts will be lost. Candidates already created will remain in your directory.",
+        confirmLabel: "Close import",
+        destructive: true,
+      }))
     )
       return;
     onClose();
@@ -191,7 +205,7 @@ export function BulkCvImport({
         phase: "",
       });
     } catch (error) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted && !isAbortError(error))
         update(entry.id, { phase: "", error: humanError(error) });
     } finally {
       if (!controller.signal.aborted) setBusy(false);
@@ -303,7 +317,7 @@ export function BulkCvImport({
       update(entry.id, { done: true, phase: "", error: "" });
       onChanged();
     } catch (error) {
-      if (!signal.aborted)
+      if (!signal.aborted && !isAbortError(error))
         update(entry.id, {
           candidateId,
           phase: "",
@@ -432,12 +446,16 @@ export function BulkCvImport({
                 type="button"
                 className="button secondary small"
                 disabled={busy}
-                onClick={() => {
+                onClick={async () => {
                   if (
                     entry.submitted &&
-                    !window.confirm(
-                      "Remove this draft? A candidate may already have been created; check the directory before starting again.",
-                    )
+                    !(await confirm({
+                      title: "Remove draft?",
+                      message:
+                        "Remove this draft? A candidate may already have been created; check the directory before starting again.",
+                      confirmLabel: "Remove draft",
+                      destructive: true,
+                    }))
                   )
                     return;
                   setEntries((items) =>
@@ -659,6 +677,7 @@ export function BulkCvImport({
           Close
         </button>
       </footer>
+      {dialog}
     </Dialog>
   );
 }

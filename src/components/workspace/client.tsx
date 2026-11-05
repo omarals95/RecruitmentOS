@@ -6,6 +6,7 @@ import {
   useEffect,
   useState,
   useCallback,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -18,6 +19,7 @@ export interface WorkspaceIdentity {
   user: { id: string; name: string; email: string };
   team: { id: string; name: string; slug: string } | null;
   role: string | null;
+  environment: string;
 }
 const WorkspaceContext = createContext<WorkspaceIdentity | null>(null);
 export function WorkspaceProvider({
@@ -47,6 +49,27 @@ export class ClientError extends Error {
     super(message);
   }
 }
+/** A non-GET request, except the read-only duplicate lookup POST. */
+function isWrite(path: string, method?: string) {
+  return (
+    !!method &&
+    method.toUpperCase() !== "GET" &&
+    path !== "/api/v1/candidates/duplicates"
+  );
+}
+// In-flight requests per team, so a team switch can abort them.
+const inFlight = new Map<
+  string,
+  Set<{ controller: AbortController; write: boolean }>
+>();
+export function isAbortError(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
 export async function requestJson<T>(
   teamId: string | null,
   path: string,
@@ -55,54 +78,118 @@ export async function requestJson<T>(
   const headers = new Headers(init.headers);
   if (teamId) headers.set("X-Team-Id", teamId);
   if (init.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, {
-    ...init,
-    headers,
-    credentials: "same-origin",
-    cache: "no-store",
-  });
-  let body: unknown;
+  const controller = new AbortController();
+  const signal = init.signal
+    ? AbortSignal.any([controller.signal, init.signal])
+    : controller.signal;
+  const entry = { controller, write: isWrite(path, init.method) };
+  if (teamId)
+    inFlight.set(teamId, (inFlight.get(teamId) ?? new Set()).add(entry));
   try {
-    body = await response.json();
-  } catch {
-    throw new ClientError(
-      response.status,
-      "invalid_response",
-      response.ok
-        ? "The server returned an unreadable response."
-        : "The request could not be completed.",
-    );
+    const response = await fetch(path, {
+      ...init,
+      signal,
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new ClientError(
+        response.status,
+        "invalid_response",
+        response.ok
+          ? "The server returned an unreadable response."
+          : "The request could not be completed.",
+      );
+    }
+    if (!response.ok) {
+      const error = body as {
+        error?: { message?: string; code?: string } | string;
+        message?: string;
+      };
+      throw new ClientError(
+        response.status,
+        typeof error.error === "object"
+          ? error.error.code || "request_failed"
+          : "request_failed",
+        typeof error.error === "object"
+          ? error.error.message || "The request could not be completed."
+          : typeof error.error === "string"
+            ? error.error
+            : error.message || "The request could not be completed.",
+      );
+    }
+    // The duplicate lookup is a read-only POST, so it must not refresh open views.
+    if (typeof window !== "undefined" && entry.write)
+      window.dispatchEvent(
+        new CustomEvent("recruitmentos:data-changed", {
+          detail: { teamId, path },
+        }),
+      );
+    return body as T;
+  } finally {
+    if (teamId) {
+      const entries = inFlight.get(teamId);
+      entries?.delete(entry);
+      if (entries?.size === 0) inFlight.delete(teamId);
+    }
   }
-  if (!response.ok) {
-    const error = body as {
-      error?: { message?: string; code?: string } | string;
-      message?: string;
+}
+/** Aborts every in-flight requestJson call started for this team. */
+export function abortTeamRequests(teamId: string) {
+  const entries = inFlight.get(teamId);
+  inFlight.delete(teamId);
+  for (const entry of entries ?? []) entry.controller.abort();
+}
+export function hasWritesInFlight(teamId: string) {
+  return [...(inFlight.get(teamId) ?? [])].some((entry) => entry.write);
+}
+// Components holding unsaved work, counted per team.
+const unsaved = new Map<string, number>();
+export function hasUnsavedWork(teamId: string) {
+  return (unsaved.get(teamId) ?? 0) > 0;
+}
+/** Registers unsaved work for the current team while `active` holds. */
+export function useUnsavedWork(active: boolean) {
+  const { team } = useWorkspace();
+  const teamId = team?.id;
+  useEffect(() => {
+    if (!active || !teamId) return;
+    unsaved.set(teamId, (unsaved.get(teamId) ?? 0) + 1);
+    return () => {
+      const left = (unsaved.get(teamId) ?? 1) - 1;
+      if (left > 0) unsaved.set(teamId, left);
+      else unsaved.delete(teamId);
     };
-    throw new ClientError(
-      response.status,
-      typeof error.error === "object"
-        ? error.error.code || "request_failed"
-        : "request_failed",
-      typeof error.error === "object"
-        ? error.error.message || "The request could not be completed."
-        : typeof error.error === "string"
-          ? error.error
-          : error.message || "The request could not be completed.",
-    );
-  }
-  // The duplicate lookup is a read-only POST, so it must not refresh open views.
-  if (
-    typeof window !== "undefined" &&
-    init.method &&
-    init.method.toUpperCase() !== "GET" &&
-    path !== "/api/v1/candidates/duplicates"
-  )
-    window.dispatchEvent(
-      new CustomEvent("recruitmentos:data-changed", {
-        detail: { teamId, path },
-      }),
-    );
-  return body as T;
+  }, [active, teamId]);
+}
+/** Kept in module state so it survives the team-keyed remount. */
+export interface SwitchNotice {
+  fromTeam: string;
+  toTeamId: string;
+}
+let switchNotice: SwitchNotice | null = null;
+const noticeListeners = new Set<() => void>();
+export function setSwitchNotice(value: SwitchNotice | null) {
+  switchNotice = value;
+  for (const listener of noticeListeners) listener();
+}
+function subscribeSwitchNotice(listener: () => void) {
+  noticeListeners.add(listener);
+  return () => {
+    noticeListeners.delete(listener);
+  };
+}
+export function useSwitchNotice() {
+  return useSyncExternalStore(
+    subscribeSwitchNotice,
+    () => switchNotice,
+    () => null,
+  );
 }
 export function useApi<T>(path: string | null) {
   const { team } = useWorkspace();
@@ -137,18 +224,20 @@ export function useApi<T>(path: string | null) {
   useEffect(() => {
     let active = true;
     if (!path || !team) return;
-    requestJson<T>(team.id, path)
+    const controller = new AbortController();
+    requestJson<T>(team.id, path, { signal: controller.signal })
       .then((value) => {
         if (active) setState({ key, revision, data: value, error: "" });
       })
       .catch((error: unknown) => {
-        if (active)
+        if (active && !isAbortError(error))
           setState((previous) =>
             failedResourceState(previous, key, revision, error),
           );
       });
     return () => {
       active = false;
+      controller.abort();
     };
   }, [team, path, key, revision]);
   const setData = (data: T | null) =>
@@ -167,7 +256,9 @@ export function useDebounced<T>(value: T, delay = 250) {
   }, [value, delay]);
   return settled;
 }
+/** An aborted request is never an error to show, so it gives an empty message. */
 export function humanError(error: unknown) {
+  if (isAbortError(error)) return "";
   if (error instanceof ClientError && error.status === 409)
     return `${error.message} Your draft is retained. Close this editor to refresh the record before trying again.`;
   if (error instanceof ClientError && error.status === 429)

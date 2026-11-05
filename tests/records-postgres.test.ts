@@ -14,6 +14,8 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
+import type { RecordDto } from "@/domain/records";
+import { roleSnapshot } from "@/components/workspace/helpers";
 import {
   createTestDb,
   enforceTestRls,
@@ -26,7 +28,9 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   let owner: Principal,
     colleague: Principal,
     other: Principal,
-    viewer: Principal;
+    viewer: Principal,
+    bucketRace: Principal,
+    rollback: Principal;
   beforeAll(async () => {
     fixture = await createTestDb();
     owner = await seedIdentity(fixture.db);
@@ -34,6 +38,14 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     other = await seedIdentity(fixture.db, {
       userId: "other-owner",
       teamId: "other-team",
+    });
+    bucketRace = await seedIdentity(fixture.db, {
+      userId: "bucket-race-owner",
+      teamId: "bucket-race-team",
+    });
+    rollback = await seedIdentity(fixture.db, {
+      userId: "rollback-owner",
+      teamId: "rollback-team",
     });
     viewer = await seedIdentity(fixture.db, {
       userId: "test-viewer",
@@ -189,6 +201,212 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     ).rejects.toMatchObject({ status: 409 });
   });
 
+  it("allows one active application when duplicate creates race", async () => {
+    const person = await candidate("Fictional Race Applicant");
+    const job = await vacancy("Fictional race vacancy");
+    const results = await Promise.allSettled(
+      ["fictional-race-a", "fictional-race-b"].map((key) =>
+        createRecord(
+          owner,
+          "applications",
+          { candidateId: person.id, vacancyId: job.id, data: {} },
+          key,
+        ),
+      ),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toMatchObject({ status: 409 });
+    expect(
+      (
+        await listRecords(
+          owner,
+          "applications",
+          new URLSearchParams({ candidateId: person.id, vacancyId: job.id }),
+        )
+      ).pagination.total,
+    ).toBe(1);
+  });
+
+  it("links a task to a candidate without creating or moving an application", async () => {
+    const person = await candidate("Fictional Task Link Person");
+    const job = await vacancy("Fictional task link vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Screening" },
+    });
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional task link bucket" },
+    });
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      candidateId: person.id,
+      data: { title: "Fictional call back", priority: "High" },
+    });
+    const applications = await listRecords(
+      owner,
+      "applications",
+      new URLSearchParams({ candidateId: person.id }),
+    );
+    expect(applications.data).toHaveLength(1);
+    expect(applications.data[0]).toMatchObject({
+      id: app.id,
+      version: app.version,
+      data: { stage: "Screening" },
+    });
+    expect(
+      (
+        await listRecords(
+          owner,
+          "tasks",
+          new URLSearchParams({ candidateId: person.id }),
+        )
+      ).data.map((row) => row.id),
+    ).toEqual([task.id]);
+  });
+
+  it("never changes a vacancy when its source role is edited or archived", async () => {
+    const role = await createRecord(owner, "job-roles", {
+      data: {
+        title: "Fictional Role Analyst",
+        department: "Finance",
+        skills: ["SQL"],
+      },
+    });
+    const job = await createRecord(owner, "vacancies", {
+      jobRoleId: role.id,
+      data: {
+        ...roleSnapshot(role.data as unknown as Record<string, unknown>),
+        status: "Draft",
+        openings: 1,
+      },
+    });
+    const updated = await updateRecord(owner, "job-roles", role.id, {
+      version: role.version,
+      data: { title: "Fictional Role Renamed", skills: ["SQL", "Python"] },
+    });
+    await updateRecord(owner, "job-roles", role.id, {
+      version: updated.version,
+      archived: true,
+    });
+    const after = await getRecord(owner, "vacancies", job.id);
+    expect(after.data).toEqual(job.data);
+    expect(after.version).toBe(job.version);
+    expect(after.data).toMatchObject({
+      title: "Fictional Role Analyst",
+      skills: ["SQL"],
+    });
+  });
+
+  it("allows one active onboarding per application", async () => {
+    const person = await candidate("Fictional Onboarding Person");
+    const job = await vacancy("Fictional onboarding vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Hired" },
+    });
+    const first = await createRecord(owner, "onboarding", {
+      applicationId: app.id,
+      data: {},
+    });
+    await expect(
+      createRecord(owner, "onboarding", { applicationId: app.id, data: {} }),
+    ).rejects.toMatchObject({ status: 409 });
+    await updateRecord(owner, "onboarding", first.id, {
+      version: first.version,
+      archived: true,
+    });
+    const second = await createRecord(owner, "onboarding", {
+      applicationId: app.id,
+      data: {},
+    });
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it("filters candidates by certifications, education and stated experience", async () => {
+    const tag = randomUUID().slice(0, 8);
+    const make = (name: string, data: Record<string, unknown>) =>
+      createRecord(owner, "candidates", {
+        data: { name: `Fictional Filter ${tag} ${name}`, ...data },
+      });
+    const both = await make("Both", {
+      certifications: ["Fictional PMP", "Fictional CPA"],
+      degreeName: "Bachelor of Fictional Science",
+      yearsExperience: 3,
+    });
+    const one = await make("One", {
+      certifications: ["Fictional PMP"],
+      major: "Fictional HISTORY",
+      yearsExperience: 5,
+    });
+    const two = await make("Two", {
+      university: "University of Fictional Arts",
+      yearsExperience: 2,
+    });
+    const six = await make("Six", { yearsExperience: 6 });
+    const unknown = await make("Unknown", { yearsExperience: null });
+    const query = (filters: Record<string, string>) =>
+      new URLSearchParams({
+        search: `"Fictional Filter ${tag}"`,
+        pageSize: "100",
+        ...filters,
+      });
+    const ids = async (filters: Record<string, string>) =>
+      (await listRecords(owner, "candidates", query(filters))).data
+        .map((row) => row.id)
+        .sort();
+    expect(
+      await ids({
+        certifications: JSON.stringify(["Fictional PMP", "Fictional CPA"]),
+      }),
+    ).toEqual([both.id]);
+    expect(
+      await ids({ certifications: JSON.stringify(["Fictional PMP"]) }),
+    ).toEqual([both.id, one.id].sort());
+    expect(await ids({ education: "fictional science" })).toEqual([both.id]);
+    expect(await ids({ education: "history" })).toEqual([one.id]);
+    expect(await ids({ education: "FICTIONAL ARTS" })).toEqual([two.id]);
+    expect(
+      await ids({ minYearsExperience: "3", maxYearsExperience: "5" }),
+    ).toEqual([both.id, one.id].sort());
+    expect(await ids({ minYearsExperience: "0" })).toEqual(
+      [both.id, one.id, two.id, six.id].sort(),
+    );
+    expect(await ids({ maxYearsExperience: "100" })).not.toContain(unknown.id);
+    const page = await listRecords(
+      owner,
+      "candidates",
+      query({
+        minYearsExperience: "3",
+        maxYearsExperience: "5",
+        pageSize: "1",
+      }),
+    );
+    expect(page.data).toHaveLength(1);
+    expect(page.pagination.total).toBe(2);
+    for (const invalid of [
+      { minYearsExperience: "6", maxYearsExperience: "5" },
+      { minYearsExperience: "three" },
+      { maxYearsExperience: "101" },
+      { minYearsExperience: "" },
+    ] as Record<string, string>[])
+      await expect(
+        listRecords(owner, "candidates", query(invalid)),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    for (const [key, value] of [
+      ["certifications", JSON.stringify(["Fictional PMP"])],
+      ["education", "Fictional"],
+      ["minYearsExperience", "1"],
+      ["maxYearsExperience", "5"],
+    ])
+      await expect(
+        listRecords(owner, "tasks", new URLSearchParams({ [key]: value })),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+  });
+
   it("validates every bulk parent before writing and skips active duplicate pairs", async () => {
     const first = await candidate("Fictional Bulk First");
     const second = await candidate("Fictional Bulk Second");
@@ -265,6 +483,101 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     await expect(
       updateRecord(other, "buckets", second.id, { version: 1, archived: true }),
     ).rejects.toMatchObject({ status: 409, code: "last_bucket" });
+  });
+
+  // PGlite has one connection, so these prove the team lock and checks under interleaved calls only.
+  it("keeps one active bucket when the last two are archived concurrently", async () => {
+    const first = await createRecord(bucketRace, "buckets", {
+      data: { name: "Fictional race first" },
+    });
+    const second = await createRecord(bucketRace, "buckets", {
+      data: { name: "Fictional race second" },
+    });
+    const results = await Promise.allSettled([
+      updateRecord(bucketRace, "buckets", first.id, {
+        version: 1,
+        archived: true,
+      }),
+      updateRecord(bucketRace, "buckets", second.id, {
+        version: 1,
+        archived: true,
+      }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toMatchObject({
+      status: 409,
+      code: "last_bucket",
+    });
+    expect(
+      (await listRecords(bucketRace, "buckets", new URLSearchParams()))
+        .pagination.total,
+    ).toBe(1);
+  });
+
+  it("rolls back every task move when the bucket archive fails mid-transaction", async () => {
+    const source = await createRecord(rollback, "buckets", {
+      data: { name: "Fictional rollback source" },
+    });
+    const target = await createRecord(rollback, "buckets", {
+      data: { name: "Fictional rollback target" },
+    });
+    const tasks: RecordDto[] = [];
+    for (const title of ["Fictional rollback one", "Fictional rollback two"])
+      tasks.push(
+        await createRecord(rollback, "tasks", {
+          bucketId: source.id,
+          data: { title },
+        }),
+      );
+    // Renamed below the service so only the bucket's own archive audit is rejected.
+    await withTeam(rollback, (tx) =>
+      tx
+        .update(records)
+        .set({
+          data: sql`jsonb_set(${records.data}, '{name}', '"Fictional forced audit rejection"')`,
+        })
+        .where(eq(records.id, source.id)),
+    );
+    const before = await getRecord(rollback, "buckets", source.id);
+    const taskEvents = () =>
+      withTeam(rollback, (tx) =>
+        tx
+          .select()
+          .from(activity)
+          .where(
+            and(
+              eq(activity.teamId, rollback.teamId),
+              sql`${activity.recordId} in (${sql.join(
+                tasks.map((task) => sql`${task.id}`),
+                sql`, `,
+              )})`,
+            ),
+          ),
+      );
+    expect(await taskEvents()).toHaveLength(2);
+    const failure = await updateRecord(rollback, "buckets", source.id, {
+      version: before.version,
+      archived: true,
+      moveToBucketId: target.id,
+    }).catch((error: Error) => error);
+    // The trigger fires on the bucket's audit row, after the task moves ran.
+    expect(
+      `${failure} ${(failure as Error & { cause?: unknown }).cause}`,
+    ).toContain("Fictional audit failure");
+    for (const task of tasks)
+      expect(await getRecord(rollback, "tasks", task.id)).toMatchObject({
+        bucketId: source.id,
+        version: task.version,
+      });
+    expect(await getRecord(rollback, "buckets", source.id)).toMatchObject({
+      archivedAt: null,
+      version: before.version,
+    });
+    const events = await taskEvents();
+    expect(events).toHaveLength(2);
+    expect(events.every((event) => event.action === "created")).toBe(true);
   });
 
   it("enforces custom values and blocks incompatible schema changes without losing archived values", async () => {

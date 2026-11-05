@@ -16,6 +16,7 @@ const workspace = {
   },
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "owner",
+  environment: "Local development",
 };
 /** Innermost `selector { body }` blocks, so rules inside media queries count too. */
 function rules(file: string) {
