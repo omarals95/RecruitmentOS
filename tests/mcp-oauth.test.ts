@@ -61,6 +61,13 @@ import {
 const ORIGIN = "http://localhost:3000";
 const RESOURCE = `${ORIGIN}/api/mcp`;
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
+const CHATGPT_REDIRECT =
+  "https://chatgpt.com/connector_platform_oauth_redirect";
+const ALLOWED_REDIRECTS = [
+  "https://claude.ai/api/mcp/auth_callback",
+  "https://claude.com/api/mcp/auth_callback",
+  CHATGPT_REDIRECT,
+];
 const TEAM = "oauth-team";
 const SCOPES = [
   "candidates:read",
@@ -71,6 +78,7 @@ const SCOPES = [
 ];
 type Flow = {
   clientId: string;
+  redirectUri: string;
   params: Record<string, string>;
   verifier: string;
   code: string;
@@ -221,11 +229,15 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       scope?: string;
       approve?: string[];
       teamId?: string;
+      redirectUri?: string;
     } = {},
   ): Promise<Flow> {
-    const clientId = options.clientId ?? (await registered());
+    const redirectUri = options.redirectUri ?? REDIRECT;
+    const clientId =
+      options.clientId ?? (await registered(undefined, redirectUri));
     const { verifier, challenge } = pkce();
     const params = authorizeParams(clientId, challenge, {
+      redirect_uri: redirectUri,
       scope: options.scope ?? "candidates:read recruitment:read",
     });
     const response = await consent(
@@ -240,10 +252,12 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     const body = await response.json();
     expect(response.status, JSON.stringify(body)).toBe(200);
     const redirectTo = new URL(body.data.redirectTo);
-    expect(`${redirectTo.origin}${redirectTo.pathname}`).toBe(REDIRECT);
+    expect(`${redirectTo.origin}${redirectTo.pathname}`).toBe(redirectUri);
     expect(redirectTo.searchParams.get("state")).toBe("fictional-state-1");
+    expect(redirectTo.searchParams.get("iss")).toBe(ORIGIN);
     return {
       clientId,
+      redirectUri,
       params,
       verifier,
       code: redirectTo.searchParams.get("code")!,
@@ -254,7 +268,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       grant_type: "authorization_code",
       client_id: flow.clientId,
       code: flow.code,
-      redirect_uri: REDIRECT,
+      redirect_uri: flow.redirectUri,
       code_verifier: flow.verifier,
       resource: RESOURCE,
       ...overrides,
@@ -349,12 +363,8 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       bearer_methods_supported: ["header"],
       resource_name: "RecruitmentOS",
     };
-    for (const route of [resourceRoot, resourceMcp]) {
-      const response = call(route);
-      expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(await response.json()).toEqual(resource);
-    }
-    expect(await call(authorizationServer).json()).toEqual({
+    const metadata = await call(authorizationServer).json();
+    expect(metadata).toEqual({
       issuer: ORIGIN,
       authorization_endpoint: `${ORIGIN}/oauth/authorize`,
       token_endpoint: `${ORIGIN}/oauth/token`,
@@ -364,7 +374,21 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
       scopes_supported: SCOPES,
+      authorization_response_iss_parameter_supported: true,
     });
+    expect(metadata).not.toHaveProperty(
+      "client_id_metadata_document_supported",
+    );
+    expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
+    expect(metadata.token_endpoint_auth_methods_supported).toEqual(["none"]);
+    for (const route of [resourceRoot, resourceMcp]) {
+      const response = call(route);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const document = await response.json();
+      expect(document).toEqual(resource);
+      expect(document.authorization_servers).toHaveLength(1);
+      expect(document.authorization_servers[0] === metadata.issuer).toBe(true);
+    }
   });
 
   it("registers public clients only, validates redirect URIs and grants nothing", async () => {
@@ -425,12 +449,13 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect(await totals()).toBe(before);
   });
 
-  it("registers only Claude's callbacks and http loopback redirect URIs", async () => {
+  it("registers only Claude's and ChatGPT's callbacks and http loopback redirect URIs", async () => {
     const clients = () =>
       count("SELECT count(*)::int AS count FROM auth.oauth_clients");
     for (const uri of [
       "https://claude.ai/api/mcp/auth_callback",
       "https://claude.com/api/mcp/auth_callback",
+      CHATGPT_REDIRECT,
       "http://127.0.0.1:33418/callback",
       "http://localhost:8080/cb",
       "http://[::1]:9/cb",
@@ -449,19 +474,61 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       ["https://localhost/cb"],
       ["http://example.test/cb"],
       ["https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"],
+      ["http://chatgpt.com/connector_platform_oauth_redirect"],
+      [`${CHATGPT_REDIRECT}/`],
+      [`${CHATGPT_REDIRECT}?x=1`],
+      [`${CHATGPT_REDIRECT}#x`],
+      ["https://chatgpt.com:443/connector_platform_oauth_redirect"],
+      ["https://ChatGPT.com/connector_platform_oauth_redirect"],
+      ["https://chatgpt.com/Connector_platform_oauth_redirect"],
+      [`${CHATGPT_REDIRECT}/extra`],
+      ["https://chatgpt.com/connector/oauth/abc123"],
+      ["https://www.chatgpt.com/connector_platform_oauth_redirect"],
+      ["https://chat.openai.com/connector_platform_oauth_redirect"],
+      ["https://chatgpt.com.evil.example/connector_platform_oauth_redirect"],
+      ["https://evil.example/connector_platform_oauth_redirect"],
+      ["https://chatgpt.com/api/mcp/auth_callback"],
+      [CHATGPT_REDIRECT, "https://evil.example/cb"],
     ]) {
       const refused = await register({ redirect_uris });
       expect(refused.status, JSON.stringify(redirect_uris)).toBe(400);
       const body = await refused.json();
       expect(body.error).toBe("invalid_redirect_uri");
       for (const text of [
-        "https://claude.ai/api/mcp/auth_callback",
-        "https://claude.com/api/mcp/auth_callback",
+        ...ALLOWED_REDIRECTS,
         "127.0.0.1, [::1] or localhost",
       ])
         expect(body.error_description).toContain(text);
     }
     expect(await clients()).toBe(before);
+
+    const chatgpt = await registered("Fictional ChatGPT", CHATGPT_REDIRECT);
+    const page = await authorize(
+      authorizeParams(chatgpt, pkce().challenge, {
+        redirect_uri: CHATGPT_REDIRECT,
+      }),
+      signIn("oauth-owner"),
+    );
+    expect(page.redirect).toBeNull();
+    expect(page.html).toContain("you return to <strong>chatgpt.com</strong>");
+
+    // ChatGPT's per-connection callback is not on the allowlist, even for a stored client.
+    const callbackId = "https://chatgpt.com/connector/oauth/abc123";
+    const legacy = `ros_client_${randomBytes(16).toString("base64url")}`;
+    await asOwner(() =>
+      fixture.client.query(
+        "INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES($1,'Fictional Callback App',$2::jsonb)",
+        [legacy, JSON.stringify([callbackId])],
+      ),
+    );
+    for (const cookie of [undefined, signIn("oauth-owner")]) {
+      const result = await authorize(
+        authorizeParams(legacy, pkce().challenge, { redirect_uri: callbackId }),
+        cookie,
+      );
+      expect(result.redirect).toBeNull();
+      expect(result.html).toContain("This connection cannot continue");
+    }
   });
 
   it("strips invisible characters from client names everywhere they are shown", async () => {
@@ -604,7 +671,22 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     const deniedTo = new URL((await denied.json()).data.redirectTo);
     expect(deniedTo.searchParams.get("error")).toBe("access_denied");
     expect(deniedTo.searchParams.get("state")).toBe("fictional-state-1");
+    expect(deniedTo.searchParams.get("iss")).toBe(ORIGIN);
     expect(deniedTo.searchParams.has("code")).toBe(false);
+    const stateless: Record<string, unknown> = {
+      ...decision,
+      decision: "deny",
+    };
+    delete stateless.state;
+    const deniedWithoutState = await consent(owner, stateless);
+    expect(deniedWithoutState.status).toBe(200);
+    const statelessTo = new URL(
+      (await deniedWithoutState.json()).data.redirectTo,
+    );
+    expect(statelessTo.searchParams.get("error")).toBe("access_denied");
+    expect(statelessTo.searchParams.has("state")).toBe(false);
+    expect(statelessTo.searchParams.get("iss")).toBe(ORIGIN);
+    expect(statelessTo.searchParams.has("code")).toBe(false);
     expect(await rows()).toBe(0);
     const guessed = await tokenRequest({
       grant_type: "authorization_code",
@@ -918,6 +1000,219 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     );
     expect((await mcp(issued.access_token)).status).toBe(401);
   });
+
+  it("refuses every resource but /api/mcp at authorize and at both token grants", async () => {
+    const owner = signIn("oauth-owner");
+    const wrong = [
+      `${ORIGIN}/api/v1`,
+      `${ORIGIN}/api/mcp/`,
+      ORIGIN,
+      "https://chatgpt.com/api/mcp",
+      `${ORIGIN.toUpperCase()}/api/mcp`,
+    ];
+    const clientId = await registered();
+    const { challenge } = pkce();
+    for (const cookie of [undefined, owner])
+      for (const resource of wrong) {
+        const result = await authorize(
+          authorizeParams(clientId, challenge, { resource }),
+          cookie,
+        );
+        expect(result.redirect, resource).toBeNull();
+        expect(result.html, resource).toContain(
+          "This connection cannot continue",
+        );
+        expect(result.html, resource).toContain("invalid_target");
+      }
+    const flow = await connect(owner, { clientId });
+    for (const resource of wrong) {
+      const refused = await redeem(flow, { resource });
+      expect(refused.status, resource).toBe(400);
+      expect((await refused.json()).error, resource).toBe("invalid_target");
+    }
+    const issued = await tokens(flow);
+    const refresh = (resource: string) =>
+      tokenRequest({
+        grant_type: "refresh_token",
+        client_id: clientId,
+        refresh_token: issued.refresh_token,
+        resource,
+      });
+    for (const resource of wrong) {
+      const refused = await refresh(resource);
+      expect(refused.status, resource).toBe(400);
+      expect((await refused.json()).error, resource).toBe("invalid_target");
+    }
+    const rotated = await refresh(RESOURCE);
+    expect(rotated.status).toBe(200);
+    expect((await mcp((await rotated.json()).access_token)).status).toBe(200);
+  });
+
+  it("binds refresh tokens and resource-less flows to the /api/mcp audience", async () => {
+    const owner = signIn("oauth-owner");
+    const audiences = (clientId: string) =>
+      asOwner(
+        async () =>
+          (
+            await fixture.client.query<{ kind: string; audience: string }>(
+              "SELECT t.kind, t.audience FROM auth.oauth_tokens t JOIN auth.api_tokens g ON g.id=t.grant_id WHERE g.oauth_client_id=$1 ORDER BY t.kind",
+              [clientId],
+            )
+          ).rows,
+      );
+    const issuedRows = () =>
+      count("SELECT count(*)::int AS count FROM auth.oauth_tokens");
+    const bound = [
+      { kind: "access", audience: RESOURCE },
+      { kind: "refresh", audience: RESOURCE },
+    ];
+
+    const flow = await connect(owner);
+    const issued = await tokens(flow);
+    expect(await audiences(flow.clientId)).toEqual(bound);
+    const [grant] = await grantOf(flow.clientId);
+    await asOwner(() =>
+      fixture.client.query(
+        "UPDATE auth.oauth_tokens SET audience=$1 WHERE grant_id=$2 AND kind='refresh'",
+        [`${ORIGIN}/api/v1`, grant.id],
+      ),
+    );
+    const before = await issuedRows();
+    const moved = await tokenRequest({
+      grant_type: "refresh_token",
+      client_id: flow.clientId,
+      refresh_token: issued.refresh_token,
+      resource: RESOURCE,
+    });
+    expect(moved.status).toBe(400);
+    expect((await moved.json()).error).toBe("invalid_grant");
+    expect(await issuedRows()).toBe(before);
+
+    // A missing resource is accepted and the tokens are still bound to /api/mcp.
+    const clientId = await registered();
+    const { verifier, challenge } = pkce();
+    const params = authorizeParams(clientId, challenge);
+    delete params.resource;
+    const approved = await consent(owner, {
+      ...params,
+      scopes: ["candidates:read", "recruitment:read"],
+      decision: "approve",
+    });
+    expect(approved.status).toBe(200);
+    const code = new URL(
+      (await approved.json()).data.redirectTo,
+    ).searchParams.get("code")!;
+    const redeemed = await tokenRequest({
+      grant_type: "authorization_code",
+      client_id: clientId,
+      code,
+      redirect_uri: REDIRECT,
+      code_verifier: verifier,
+    });
+    expect(redeemed.status).toBe(200);
+    const plain = await redeemed.json();
+    expect(await audiences(clientId)).toEqual(bound);
+    expect((await mcp(plain.access_token)).status).toBe(200);
+    const refreshed = await tokenRequest({
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: plain.refresh_token,
+    });
+    expect(refreshed.status).toBe(200);
+    expect((await mcp((await refreshed.json()).access_token)).status).toBe(200);
+  });
+
+  for (const [label, redirectUri] of [
+    ["Claude", REDIRECT],
+    ["ChatGPT", CHATGPT_REDIRECT],
+    ["loopback", "http://127.0.0.1:33418/callback"],
+  ])
+    it(`connects a fake ${label} client end to end without outbound fetches`, async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      try {
+        const asMetadata = await authorizationServer().json();
+        const resourceMetadata = await resourceMcp().json();
+        const issuer: string = asMetadata.issuer;
+        const resource: string = resourceMetadata.resource;
+        expect(resourceMetadata.authorization_servers).toEqual([issuer]);
+
+        const registeredClient = await registerRoute(
+          new Request(asMetadata.registration_endpoint, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-forwarded-for": nextIp(),
+            },
+            body: JSON.stringify({
+              client_name: `Fictional ${label} Client`,
+              redirect_uris: [redirectUri],
+            }),
+          }),
+        );
+        expect(registeredClient.status).toBe(201);
+        const clientId: string = (await registeredClient.json()).client_id;
+
+        const { verifier, challenge } = pkce();
+        const params = authorizeParams(clientId, challenge, {
+          redirect_uri: redirectUri,
+          resource,
+        });
+        const signedOut = await authorize(params);
+        expect(signedOut.redirect).toBe(
+          `/sign-in?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(params)}`)}`,
+        );
+        const owner = signIn("oauth-owner");
+        const page = await authorize(params, owner);
+        expect(page.html).toContain(
+          `you return to <strong>${new URL(redirectUri).host}</strong>`,
+        );
+
+        const approved = await consent(owner, {
+          ...params,
+          scopes: ["candidates:read", "recruitment:read"],
+          decision: "approve",
+        });
+        expect(approved.status).toBe(200);
+        const redirectTo: string = (await approved.json()).data.redirectTo;
+        expect(redirectTo.startsWith(`${redirectUri}?`)).toBe(true);
+        const returned = new URL(redirectTo).searchParams;
+        expect(returned.get("state")).toBe("fictional-state-1");
+        expect(returned.get("iss")).toBe(issuer);
+        const code = returned.get("code");
+        expect(code).toBeTruthy();
+
+        const exchanged = await tokenRequest({
+          grant_type: "authorization_code",
+          client_id: clientId,
+          code: code!,
+          redirect_uri: redirectUri,
+          code_verifier: verifier,
+          resource,
+        });
+        expect(exchanged.status).toBe(200);
+        const first = await exchanged.json();
+        expect((await mcp(first.access_token)).status).toBe(200);
+
+        const refresh = () =>
+          tokenRequest({
+            grant_type: "refresh_token",
+            client_id: clientId,
+            refresh_token: first.refresh_token,
+            resource,
+          });
+        const refreshed = await refresh();
+        expect(refreshed.status).toBe(200);
+        const second = await refreshed.json();
+        expect((await mcp(second.access_token)).status).toBe(200);
+        const spent = await refresh();
+        expect(spent.status).toBe(400);
+        expect((await spent.json()).error).toBe("invalid_grant");
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
 
   it("issues hour-long, approved-scope access tokens with rotating refresh tokens", async () => {
     const owner = signIn("oauth-owner");
