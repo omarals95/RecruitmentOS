@@ -1,0 +1,5 @@
+# Vercel CLI ignores "CVS" folders case-insensitively by default,
+# which silently drops the cvs API routes from CLI deployments. Keep them.
+!cvs
+!**/cvs
+!**/cvs/**
