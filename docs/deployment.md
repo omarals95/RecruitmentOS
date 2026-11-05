@@ -1,6 +1,6 @@
 # Deploying RecruitmentOS
 
-> **Deployment is not authorized.** Release needs the owner's decision; independent review (DEC-02/DEC-03) and Production verification are still open. Hosted sign-in remains disabled in code and Blob CV storage stays disabled. Hosted database startup no longer has a blanket block: it fails closed on the precise checks in [§2](#2-neon-postgresql). In the owner's run on the Neon Preview database, the split runtime role template [postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql) is applied, `scripts/db-role-evidence.ts` passes with zero drift, and `npm run test:live-roles` passes 27/27 through the transaction-mode pooler and 27/27 direct, with all fixtures removed. Do not run the template against Production before it is reviewed and approved, enable Blob, import real candidate data, or remove these gates. Follow [identity-boundary-plan.md](identity-boundary-plan.md) and [neon-database-runbook.md](neon-database-runbook.md) for the outstanding implementation and verification work.
+> **Deployment is not authorized.** Release needs the owner's decision; independent review (DEC-02/DEC-03) and Production verification are still open. Hosted sign-in opens only when every readiness condition in [authentication.md](authentication.md#hosted-sign-in-readiness) holds, and Blob CV storage stays disabled. Hosted database startup no longer has a blanket block: it fails closed on the precise checks in [§2](#2-neon-postgresql). In the owner's run on the Neon Preview database, the split runtime role template [postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql) is applied, `scripts/db-role-evidence.ts` passes with zero drift, and `npm run test:live-roles` passes 27/27 through the transaction-mode pooler and 27/27 direct, with all fixtures removed. Do not run the template against Production before it is reviewed and approved, enable Blob, import real candidate data, or remove these gates. Follow [identity-boundary-plan.md](identity-boundary-plan.md) and [neon-database-runbook.md](neon-database-runbook.md) for the outstanding implementation and verification work.
 
 The project is prepared for Vercel. No Neon database, S3 bucket, mail account, OAuth client or Vercel project is created by cloning or building the repository. Deployment uses the services you configure below.
 
@@ -22,7 +22,15 @@ The staged startup checks reject several unsafe role privileges, but they are no
 
 ## 3. Vercel environment
 
-Set server-only environment variables from `.env.example`:
+Set server-only environment variables from `.env.example`. Preview and Production each need their own values; this list gives names only.
+
+- **Required for sign-in:** `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `DATABASE_URL`, `IDENTITY_DATABASE_URL`, `TENANT_CONTEXT_SIGNING_KEY`, `RESEND_API_KEY`, `EMAIL_FROM`.
+- **Required for first-administrator setup:** `BOOTSTRAP_OWNER_EMAIL`, `BOOTSTRAP_SETUP_TOKEN`.
+- **Optional:** `ALLOW_PUBLIC_SIGNUP`; Google `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; Microsoft `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`; storage `CV_STORAGE_PROVIDER`, `S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN`.
+- **Platform-provided:** `VERCEL`, `NODE_ENV` (and `VERCEL_ENV`, which CV storage reads). Do not set them yourself.
+- **Must not be set:** `DATABASE_MODE`, `ALLOW_LOCAL_DB`, `DEV_MAIL_MODE`, `DEV_SEED_PASSWORD`, `PGOPTIONS`, `MIGRATION_DATABASE_URL`, `ALLOW_UNSAFE_TENANT_ISOLATION`.
+
+Hosted sign-in stays unavailable unless the sign-in variables pass the readiness checks in [authentication.md](authentication.md#hosted-sign-in-readiness) on the Vercel production runtime; `DATABASE_MODE`, `ALLOW_LOCAL_DB`, `DEV_MAIL_MODE`, `DEV_SEED_PASSWORD` and `PGOPTIONS` also make it refuse. Each variable's purpose:
 
 | Setting                                        | Purpose                                                                |
 | ---------------------------------------------- | ---------------------------------------------------------------------- |
