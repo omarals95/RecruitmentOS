@@ -81,6 +81,12 @@ export const runtimeRoleSafetyQuery = `
         AND CASE WHEN x.grantee = 0 THEN false
           ELSE pg_catalog.pg_has_role(current_user, x.grantee, 'MEMBER') END
     )
+    -- A database owner can re-grant itself revoked database privileges; NOINHERIT does not stop SET ROLE.
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_database d
+      WHERE d.datname = pg_catalog.current_database()
+        AND pg_catalog.pg_has_role(current_user, d.datdba, 'MEMBER')
+    )
     OR pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
     -- The runtime template closes the database and the public schema to PUBLIC.
     OR pg_catalog.has_database_privilege('public', pg_catalog.current_database(), 'CONNECT')
