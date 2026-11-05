@@ -271,7 +271,10 @@ function signerFor(value: string): Signer {
 const sign = (payload: string, key: Buffer) =>
   createHmac("sha256", key).update(payload).digest("hex");
 
-/** The canonical payload installTenantContext signs, bound to this backend and transaction. */
+/**
+ * The canonical payload installTenantContext signs, bound to this backend and transaction, and the
+ * backend pid from the same in-transaction snapshot.
+ */
 async function assertionFor(
   db: Db,
   signer: Signer,
@@ -294,7 +297,11 @@ async function assertionFor(
     scopes: SCOPES.filter((scope) => principal.scopes.includes(scope)),
     exp: Number(rows[0].now) + lifetime,
   });
-  return { payload, signature: sign(payload, signer.key) };
+  return {
+    payload,
+    signature: sign(payload, signer.key),
+    pid: Number(rows[0].pid),
+  };
 }
 
 const installSql = "SELECT tenant_context.install($1,$2)";
@@ -305,9 +312,21 @@ async function installAs(db: Db, signer: Signer, principal: Principal) {
   return assertion;
 }
 
+/**
+ * The backend running the client's open transaction. Behind a transaction pooler only a statement
+ * between BEGIN and COMMIT or ROLLBACK is known to run on that backend.
+ */
+async function backendPid(db: Db) {
+  return Number((await db.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+}
+
 /** Whether the owner sees every listed backend waiting on a lock it has not been granted. */
-async function waitForWaiters(owner: Db, pids: number[], expected: number) {
-  const deadline = Date.now() + OVERLAP_WAIT_MS;
+async function waitForWaiters(
+  owner: Db,
+  pids: number[],
+  expected: number,
+  deadline = Date.now() + OVERLAP_WAIT_MS,
+) {
   while (Date.now() < deadline) {
     const waiting = await count(
       owner,
@@ -372,7 +391,6 @@ type Run = {
   identity: Client;
   identity2: Client;
   workers: Client[];
-  pids: Map<Client, number>;
   dataUrl: string;
   signer: Signer;
   f: Fixtures;
@@ -562,7 +580,11 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
   };
 }
 
-/** Concurrent transactions; the lock holder waits at the gate until the others are seen waiting. */
+/**
+ * Concurrent transactions; the lock holder waits at the gate until the others are seen waiting.
+ * Each worker reports the backend pid read inside its transaction before its first lock-taking
+ * statement, and the owner starts polling only once every worker has reported, within one deadline.
+ */
 async function gatedRace<T>(
   run: Run,
   probe: Probe,
@@ -570,46 +592,67 @@ async function gatedRace<T>(
   work: (
     client: Client,
     index: number,
+    report: (pid: number) => void,
   ) => Promise<{ value: T; commit: boolean }>,
 ) {
+  const deadline = Date.now() + OVERLAP_WAIT_MS;
   let open = () => {};
   const gate = new Promise<void>((done) => {
     open = done;
   });
+  const pids = clients.map(() => Number.NaN);
+  // A worker that fails is reported in the phase it reached.
+  const phases = clients.map((): Phase => "setup");
+  let reported = 0;
+  let failed = false;
   const settled = Promise.allSettled(
     clients.map(async (client, index) => {
-      await client.query("BEGIN");
-      let commit = false;
       try {
-        const outcome = await work(client, index);
-        await gate;
-        commit = outcome.commit;
-        return outcome.value;
-      } finally {
-        await client.query(commit ? "COMMIT" : "ROLLBACK");
+        await client.query("BEGIN");
+        phases[index] = "install";
+        let commit = false;
+        try {
+          const outcome = await work(client, index, (pid) => {
+            pids[index] = pid;
+            phases[index] = "outcome";
+            reported += 1;
+          });
+          await gate;
+          commit = outcome.commit;
+          return outcome.value;
+        } finally {
+          await client.query(commit ? "COMMIT" : "ROLLBACK");
+        }
+      } catch (error) {
+        failed = true;
+        throw error;
       }
     }),
   );
-  let overlapped: boolean;
+  let overlapped = false;
   try {
-    overlapped = await waitForWaiters(
-      run.owner,
-      clients.map((client) => run.pids.get(client)!),
-      clients.length - 1,
-    );
+    while (reported < clients.length && !failed && Date.now() < deadline)
+      await new Promise((done) => setTimeout(done, 50));
+    if (reported === clients.length)
+      overlapped = await waitForWaiters(
+        run.owner,
+        pids,
+        clients.length - 1,
+        deadline,
+      );
   } finally {
     open();
   }
   const results = await settled;
-  const failed = results.find((result) => result.status === "rejected");
+  const rejected = results.findIndex((result) => result.status === "rejected");
   // The check reports the worker's own SQLSTATE or category.
-  if (failed) {
-    probe.at("outcome");
-    throw failed.reason;
+  if (rejected >= 0) {
+    probe.at(phases[rejected]);
+    throw (results[rejected] as PromiseRejectedResult).reason;
   }
   return {
     overlapped,
-    distinct: distinct(clients.map((client) => run.pids.get(client)!)),
+    distinct: distinct(pids),
     values: results.map(
       (result) => (result as PromiseFulfilledResult<T>).value,
     ),
@@ -646,8 +689,11 @@ async function bootstrapRace(run: Run) {
   let firstOutcome: Outcome | undefined;
   let secondOutcome: Outcome;
   let overlapped: boolean;
+  let backends: number[];
   let firstEnded = false;
   try {
+    // Each transaction's backend, read inside it before its first insert.
+    backends = [await backendPid(first), await backendPid(second)];
     // A failed statement aborts its transaction and frees the setup lock at once, so in the closed
     // variant the first transaction holds the lock through a plain user insert it rolls back.
     if (closed) holder = await insert(first, f.users.holder, false);
@@ -655,7 +701,7 @@ async function bootstrapRace(run: Run) {
     // The first transaction holds the setup advisory lock; the rival must wait on it.
     const pending = insert(second, f.users.rival);
     try {
-      overlapped = await waitForWaiters(owner, [run.pids.get(second)!], 1);
+      overlapped = await waitForWaiters(owner, [backends[1]], 1);
       if (closed) firstOutcome = await insert(first, f.users.a1);
     } finally {
       await first.query(!closed && firstOutcome?.ok ? "COMMIT" : "ROLLBACK");
@@ -672,7 +718,7 @@ async function bootstrapRace(run: Run) {
     [f.pattern],
   );
   const after = await claimRow(owner);
-  const pids = distinct([run.pids.get(first)!, run.pids.get(second)!]);
+  const pids = distinct(backends);
   if (closed) {
     await run.check("bootstrap-claim-race", async (probe) =>
       probe.all(
@@ -1181,6 +1227,8 @@ async function runChecks(run: Run) {
   await check("replay-other-connection", async (probe) => {
     let replay: Outcome | undefined;
     let other = false;
+    // Both backends come from the in-transaction snapshots their own assertions were signed for.
+    let backends = [Number.NaN, Number.NaN];
     const own = await transaction(
       data,
       async () => {
@@ -1194,7 +1242,8 @@ async function runChecks(run: Run) {
             assertion.signature,
           ]);
           probe.at("positive-control");
-          await installAs(data2, signer, p.ownerA);
+          const fallback = await installAs(data2, signer, p.ownerA);
+          backends = [assertion.pid, fallback.pid];
           return (await ownRecords(data2, f.teams.a)) > 0;
         });
         return (await ownRecords(data, f.teams.a)) > 0;
@@ -1202,10 +1251,7 @@ async function runChecks(run: Run) {
       true,
     );
     return probe.all(
-      [
-        "backend-identity",
-        distinct([run.pids.get(data)!, run.pids.get(data2)!]),
-      ],
+      ["backend-identity", distinct(backends)],
       outcomeIs(replay !== undefined && denied(replay), replay),
       ["positive-control", other && own],
     );
@@ -1264,17 +1310,15 @@ async function runChecks(run: Run) {
     pool.on("error", () => {});
     try {
       const first = await pool.connect();
-      let firstPid: number;
+      // Each pid is read inside its transaction: the first from its signed snapshot.
+      let firstPid = Number.NaN;
       let granted: boolean;
       try {
-        firstPid = Number(
-          (await first.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
-        );
         probe.at("install");
         granted = await transaction(
           first,
           async () => {
-            await installAs(first, signer, p.ownerA);
+            firstPid = (await installAs(first, signer, p.ownerA)).pid;
             probe.at("positive-control");
             return (await ownRecords(first, f.teams.a)) > 0;
           },
@@ -1286,11 +1330,10 @@ async function runChecks(run: Run) {
       probe.at("outcome");
       const next = await pool.connect();
       try {
-        const nextPid = Number(
-          (await next.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
-        );
+        let nextPid = Number.NaN;
         let unseen = true;
         await transaction(next, async () => {
+          nextPid = await backendPid(next);
           for (const table of APP_TABLES)
             unseen &&=
               (await count(
@@ -1591,8 +1634,11 @@ async function runChecks(run: Run) {
     let removed: Outcome | undefined;
     let demoted: Outcome | undefined;
     let overlapped: boolean | undefined;
+    let backends: number[];
     let firstEnded = false;
     try {
+      // Each transaction's backend, read inside it before its first statement on the members.
+      backends = [await backendPid(identity), await backendPid(identity2)];
       probe.at("outcome");
       const first = await settle(
         identity.query("DELETE FROM auth.member WHERE id = $1", [f.members.c2]),
@@ -1605,7 +1651,7 @@ async function runChecks(run: Run) {
       );
       try {
         probe.at("lock-overlap");
-        overlapped = await waitForWaiters(owner, [run.pids.get(identity2)!], 1);
+        overlapped = await waitForWaiters(owner, [backends[1]], 1);
       } finally {
         await identity.query(first.ok ? "COMMIT" : "ROLLBACK");
         firstEnded = true;
@@ -1620,10 +1666,7 @@ async function runChecks(run: Run) {
     probe.at("end-state");
     return probe.all(
       ["setup", before === 2],
-      [
-        "backend-identity",
-        distinct([run.pids.get(identity)!, run.pids.get(identity2)!]),
-      ],
+      ["backend-identity", distinct(backends)],
       ["lock-overlap", overlapped === true],
       outcomeIs(removed.ok && removed.count === 1, removed),
       failsWith(demoted, "23514"),
@@ -1649,9 +1692,9 @@ async function runChecks(run: Run) {
       run,
       probe,
       run.workers,
-      async (client, index) => {
+      async (client, index, report) => {
         const { principal, candidate } = side(index);
-        await installAs(client, signer, principal);
+        report((await installAs(client, signer, principal)).pid);
         await client.query(
           "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
           [f.stores.race],
@@ -1717,9 +1760,9 @@ async function runChecks(run: Run) {
       run,
       probe,
       run.workers,
-      async (client, index) => {
+      async (client, index, report) => {
         const { principal } = side(index);
-        await installAs(client, signer, principal);
+        report((await installAs(client, signer, principal)).pid);
         const { rows } = await client.query(
           "SELECT tenant_context.acquire_blob_read($1)::text AS lease",
           [store],
@@ -1975,10 +2018,7 @@ export async function main(env: Env = process.env): Promise<number> {
   };
   const endAll = () =>
     Promise.allSettled(clients.map((client) => client.end()));
-  let connections: Omit<
-    Run,
-    "pids" | "dataUrl" | "signer" | "f" | "variant" | "check"
-  >;
+  let connections: Omit<Run, "dataUrl" | "signer" | "f" | "variant" | "check">;
   try {
     connections = {
       owner: open(targets.owner),
@@ -2000,14 +2040,6 @@ export async function main(env: Env = process.env): Promise<number> {
     const ready = await preflight(connections, signer, confirm);
     if ("refusal" in ready)
       return refuse(ready.refusal, "Nothing was written.");
-    const pids = new Map<Client, number>();
-    for (const client of clients)
-      pids.set(
-        client,
-        Number(
-          (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
-        ),
-      );
     const f = fixtureNames(`lrt${randomBytes(6).toString("hex")}`);
     const results: {
       id: string;
@@ -2017,7 +2049,6 @@ export async function main(env: Env = process.env): Promise<number> {
     }[] = [];
     const run: Run = {
       ...connections,
-      pids,
       dataUrl: targets.data,
       signer,
       f,
