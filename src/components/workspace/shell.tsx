@@ -356,11 +356,23 @@ function Shell({ children }: { children: React.ReactNode }) {
         </header>
         <main id="main-content" className="workspace-main">
           {team && switchNotice?.toTeamId === team.id && (
-            <div className="notice" role="status">
-              Switched to {team.name}. Unsaved changes in{" "}
-              {switchNotice.fromTeam} were discarded. A save that was in
-              progress may or may not have completed; review{" "}
-              {switchNotice.fromTeam} before redoing it.
+            <div
+              className="notice"
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 16,
+              }}
+            >
+              <span>
+                Switched to {team.name}. Unsaved changes in{" "}
+                {switchNotice.fromTeam} were discarded. A save that was in
+                progress may or may not have completed; review{" "}
+                {switchNotice.fromTeam} before redoing it.
+              </span>
               <button
                 className="icon-button"
                 aria-label="Dismiss notification"
