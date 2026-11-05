@@ -9,6 +9,7 @@ import {
   useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { SettingsNavigation } from "./settings-navigation";
 
 interface TeamSummary {
@@ -75,6 +76,7 @@ function TeamSettingsContent() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<TeamRole>("recruiter");
   const [roleDrafts, setRoleDrafts] = useState<Record<string, TeamRole>>({});
+  const { confirm, dialog } = useConfirm();
   const canAdmin = role === "owner" || role === "admin";
   const load = useCallback(async () => {
     try {
@@ -228,9 +230,12 @@ function TeamSettingsContent() {
     const next = roleDrafts[person.id] || (person.role as TeamRole);
     if (next === person.role) return;
     if (
-      !window.confirm(
-        `Change ${person.user.name} from ${person.role} to ${next}? This changes their access and API token permissions.`,
-      )
+      !(await confirm({
+        title: "Change member role?",
+        message: `Change ${person.user.name} from ${person.role} to ${next}? This changes their access and API token permissions.`,
+        confirmLabel: "Change role",
+        destructive: true,
+      }))
     )
       return;
     await action(
@@ -251,9 +256,12 @@ function TeamSettingsContent() {
   async function removeMember(person: TeamMember) {
     if (
       !team ||
-      !window.confirm(
-        `Remove ${person.user.name} from ${team.name}? Their team access and API tokens will stop working.`,
-      )
+      !(await confirm({
+        title: "Remove member?",
+        message: `Remove ${person.user.name} from ${team.name}? Their team access and API tokens will stop working.`,
+        confirmLabel: "Remove member",
+        destructive: true,
+      }))
     )
       return;
     await action(
@@ -693,6 +701,7 @@ function TeamSettingsContent() {
           </div>
         </form>
       </section>
+      {dialog}
     </div>
   );
 }
