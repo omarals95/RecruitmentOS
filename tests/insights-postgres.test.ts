@@ -193,9 +193,13 @@ describe("bounded, factual PostgreSQL reporting", () => {
       data: { title: "Fictional open task", dueDate: "2029-12-01" },
     });
     const doneKey = `task:${doneTask.id}:2029-12-01`;
+    const range = new URLSearchParams({ from: "2030-01-01", to: "2030-01-02" });
     expect((await overview(fresh)).overdueTasks.map((row) => row.id)).toEqual([
       openTask.id,
     ]);
+    // "Recruitment tasks" counts only tasks outside completed buckets.
+    expect((await overview(fresh)).counts.tasks).toBe(1);
+    expect((await analytics(fresh, range)).counts.tasks).toBe(1);
     const before = await notifications(fresh);
     expect(before.data.map((row) => row.key)).toEqual([
       `task:${openTask.id}:2029-12-01`,
@@ -210,6 +214,8 @@ describe("bounded, factual PostgreSQL reporting", () => {
     expect(
       (await overview(fresh)).overdueTasks.map((row) => row.id).sort(),
     ).toEqual([doneTask.id, openTask.id].sort());
+    expect((await overview(fresh)).counts.tasks).toBe(2);
+    expect((await analytics(fresh, range)).counts.tasks).toBe(2);
     const after = await notifications(fresh);
     expect(after.data.map((row) => row.key)).toContain(doneKey);
     expect(after).toMatchObject({ total: 2, unread: 2 });

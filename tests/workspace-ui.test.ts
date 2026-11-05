@@ -10,7 +10,17 @@ import {
   formatField,
   commentAuthor,
   activeFilterCount,
+  analyticsExportMetadata,
+  analyticsRange,
+  checklistProgress,
+  describeFilters,
+  exportFilename,
+  exportMetadata,
+  exportSummary,
   initials,
+  isFiltered,
+  referenceText,
+  roleSnapshot,
 } from "../src/components/workspace/helpers";
 import {
   calendarDays,
@@ -188,9 +198,9 @@ describe("interview calendar boundaries", () => {
 });
 describe("one date and number format", () => {
   it("formats money, counts and dates the same way everywhere", () => {
-    // Intl keeps the currency code and amount together with a no-break space.
-    expect(formatMoney("50000", "AED")).toBe("AED 50,000.00");
-    expect(formatMoney("50000", "AED").replace(" ", " ")).toBe("AED 50,000.00");
+    // An ordinary U+0020 space separates the code and amount; no U+00A0 or U+202F.
+    expect(formatMoney("50000", "AED")).toBe("AED 50,000.00");
+    expect(/[\u00a0\u202f]/.test(formatMoney("50000", "AED"))).toBe(false);
     expect(formatMoney(null, "AED")).toBe("Not recorded");
     expect(formatMoney("", "AED")).toBe("Not recorded");
     expect(formatNumber(12345)).toBe("12,345");
@@ -298,19 +308,23 @@ describe("workspace labels and states", () => {
     );
     expect(cvImportState({ data: data(true, true), error: "" })).toBe("ready");
   });
+  const defaults = {
+    status: "",
+    category: "",
+    categories: [] as string[],
+    skills: [] as string[],
+    certifications: [] as string[],
+    shortlisted: false,
+    reviewStatus: "",
+    emirate: "",
+    degree: "",
+    education: "",
+    minYears: "",
+    maxYears: "",
+    vacancy: "",
+    archived: false,
+  };
   it("counts active phone filters, not search or sorting", () => {
-    const defaults = {
-      status: "",
-      category: "",
-      categories: [] as string[],
-      skills: [] as string[],
-      shortlisted: false,
-      reviewStatus: "",
-      emirate: "",
-      degree: "",
-      vacancy: "",
-      archived: false,
-    };
     expect(activeFilterCount(defaults)).toBe(0);
     expect(activeFilterCount({ ...defaults, shortlisted: true }, true)).toBe(0);
     expect(
@@ -322,5 +336,237 @@ describe("workspace labels and states", () => {
         archived: true,
       }),
     ).toBe(4);
+  });
+  it("counts each new candidate filter control once", () => {
+    expect(
+      activeFilterCount({ ...defaults, certifications: ["PMP", "CPA"] }),
+    ).toBe(1);
+    expect(activeFilterCount({ ...defaults, education: "Fictional" })).toBe(1);
+    expect(activeFilterCount({ ...defaults, minYears: "3" })).toBe(1);
+    expect(activeFilterCount({ ...defaults, maxYears: "5" })).toBe(1);
+    expect(
+      activeFilterCount({ ...defaults, minYears: "3", maxYears: "5" }),
+    ).toBe(1);
+    expect(
+      activeFilterCount({
+        ...defaults,
+        certifications: ["PMP"],
+        education: "Fictional",
+        minYears: "0",
+        maxYears: "5",
+      }),
+    ).toBe(3);
+  });
+  it("treats every user filter as filtered, but not forced screen constraints", () => {
+    for (const filters of [
+      { ...defaults, skills: ["SQL"] },
+      { ...defaults, degree: "Bachelor" },
+      { ...defaults, archived: true },
+      { ...defaults, certifications: ["PMP"] },
+      { ...defaults, minYears: "3" },
+      { ...defaults, maxYears: "5" },
+    ])
+      expect(isFiltered("", filters)).toBe(true);
+    expect(isFiltered("python", defaults)).toBe(true);
+    // My shortlist forces the shortlist; Source review forces needsReview outside the filters.
+    expect(isFiltered("", { ...defaults, shortlisted: true }, true)).toBe(
+      false,
+    );
+    expect(isFiltered("", defaults)).toBe(false);
+    expect(isFiltered("  ", defaults)).toBe(false);
+  });
+  it("describes applied filters for export labels", () => {
+    expect(describeFilters("", defaults)).toBe("None");
+    expect(
+      describeFilters(
+        "python",
+        { ...defaults, skills: ["SQL", "Excel"], archived: true },
+        "Follow-up status",
+      ),
+    ).toBe('Search: "python"; Skills: SQL, Excel; Include archived');
+    expect(
+      describeFilters("", {
+        ...defaults,
+        certifications: ["PMP"],
+        education: "Fictional University",
+        minYears: "3",
+        maxYears: "5",
+      }),
+    ).toBe(
+      'Certifications: PMP; Education contains: "Fictional University"; Stated experience: 3 to 5 years',
+    );
+    expect(
+      describeFilters("", { ...defaults, shortlisted: true }, "", true),
+    ).toBe("None");
+  });
+  it("labels a linked parent without ever showing its record ID", () => {
+    const id = "6df3687a-9244-4917-8fdb-d5d8d083f2db";
+    const person = {
+      id,
+      kind: "candidate",
+      label: null,
+      data: { name: "Fictional Person" },
+      archivedAt: "2026-11-01T00:00:00.000Z",
+    } as unknown as RecordDto;
+    const labels = [
+      referenceText({ data: person, loading: false }),
+      referenceText({ data: { ...person, archivedAt: null }, loading: false }),
+      referenceText({ data: null, loading: false, status: 404 }),
+      referenceText({ data: null, loading: false, status: 403 }),
+      referenceText({ data: null, loading: false, status: 500 }),
+      referenceText({ data: null, loading: false }),
+      referenceText({ data: null, loading: true }),
+      referenceText({
+        data: { ...person, data: {} } as unknown as RecordDto,
+        loading: false,
+      }),
+    ];
+    expect(labels).toEqual([
+      "Fictional Person (archived)",
+      "Fictional Person",
+      "Unavailable record",
+      "Unavailable record",
+      "Could not load record",
+      "Could not load record",
+      "Loading…",
+      "Untitled candidate (archived)",
+    ]);
+    for (const label of labels) expect(label).not.toContain(id.slice(0, 8));
+  });
+  it("keeps the HTTP status of a failed resource for its label", () => {
+    const failed = failedResourceState(
+      null,
+      "team-a/candidate-a",
+      0,
+      Object.assign(new Error("Not found"), { status: 404 }),
+    );
+    expect(resourceSnapshot(failed, failed.key, 0, true).status).toBe(404);
+  });
+  it("copies exactly the role snapshot keys into a new skills array", () => {
+    const role = {
+      title: "Fictional Analyst",
+      department: "Finance",
+      location: "Dubai",
+      employmentType: "Full-time",
+      workMode: "Hybrid",
+      description: "Fictional description",
+      requirements: "Fictional requirements",
+      skills: ["SQL", "Excel"],
+      extra: "never copied",
+    };
+    const snapshot = roleSnapshot(role);
+    expect(Object.keys(snapshot).sort()).toEqual(
+      [
+        "title",
+        "department",
+        "location",
+        "employmentType",
+        "workMode",
+        "description",
+        "requirements",
+        "skills",
+      ].sort(),
+    );
+    expect(snapshot.skills).toEqual(["SQL", "Excel"]);
+    snapshot.skills.push("Mutated");
+    expect(role.skills).toEqual(["SQL", "Excel"]);
+  });
+  it("counts checklist progress over non-archived items only", () => {
+    const item = (status: string, archivedAt: string | null = null) =>
+      ({ data: { status }, archivedAt }) as unknown as RecordDto;
+    expect(checklistProgress([])).toEqual({ done: 0, total: 0 });
+    expect(
+      checklistProgress([item("Complete"), item("Waived"), item("Pending")]),
+    ).toEqual({ done: 2, total: 3 });
+    expect(
+      checklistProgress([
+        item("Complete", "2026-11-01T00:00:00.000Z"),
+        item("Pending"),
+      ]),
+    ).toEqual({ done: 0, total: 1 });
+  });
+  it("states the analytics range and timezone", () => {
+    expect(analyticsRange("2026-10-06", "2026-11-04")).toBe(
+      "Showing observed activity from 6 Oct 2026 to 4 Nov 2026 · Asia/Dubai (UTC+4)",
+    );
+  });
+});
+describe("labelled exports", () => {
+  const now = new Date("2026-11-05T09:07:00.000Z"); // 13:07 in Dubai.
+  it("writes the metadata rows in order above the header row", () => {
+    const metadata = exportMetadata({
+      title: "Candidates",
+      now,
+      environment: "Local development",
+      filters: "=HYPERLINK(1)",
+      written: 2,
+      total: 2,
+    });
+    expect(metadata).toEqual([
+      ["RecruitmentOS export", "Candidates"],
+      ["Exported at", "5 Nov 2026, 13:07 (Asia/Dubai)"],
+      ["Environment", "Local development"],
+      ["Filters", "=HYPERLINK(1)"],
+      ["Rows", "2"],
+      [
+        "Data protection",
+        "This file contains personal data from RecruitmentOS. Store and share it only as your team's data-protection rules allow.",
+      ],
+      [],
+    ]);
+    const lines = csvText(["Record ID", "Name"], [["id-1", "A"]], metadata)
+      .slice(1)
+      .split("\r\n");
+    expect(lines[3]).toBe('"Filters","\'=HYPERLINK(1)"');
+    expect(lines[6]).toBe("");
+    expect(lines[7]).toBe('"Record ID","Name"');
+  });
+  it("reports a changed total instead of hiding it", () => {
+    const changed = exportMetadata({
+      title: "Candidates",
+      now,
+      environment: "Preview",
+      filters: "None",
+      written: 12,
+      total: 13,
+    });
+    expect(changed[4]).toEqual([
+      "Rows",
+      "12 (the matching records changed during the export; 13 matched when it finished)",
+    ]);
+    expect(exportSummary(12, 13)).toMatchObject({ changed: true });
+    expect(exportSummary(12, 13).notice).toContain(
+      "the matching records changed during the export; 13 matched when it finished",
+    );
+    expect(exportSummary(4, 4)).toEqual({
+      changed: false,
+      rows: "4",
+      notice:
+        "Exported 4 records matching the current filters. The file contains personal data; store and share it with care.",
+    });
+  });
+  it("names files with the Dubai date and time and labels analytics ranges", () => {
+    expect(exportFilename("candidates", now)).toBe(
+      "RecruitmentOS-candidates-2026-11-05-1307.csv",
+    );
+    expect(exportFilename("tasks", new Date("2026-11-05T21:30:00.000Z"))).toBe(
+      "RecruitmentOS-tasks-2026-11-06-0130.csv",
+    );
+    expect(
+      analyticsExportMetadata({
+        title: "Hiring analytics",
+        from: "2026-10-06",
+        to: "2026-11-04",
+        now,
+        environment: "Production",
+      }),
+    ).toEqual([
+      ["RecruitmentOS export", "Hiring analytics"],
+      ["Date range", "6 Oct 2026 to 4 Nov 2026"],
+      ["Timezone", "Asia/Dubai (UTC+4)"],
+      ["Exported at", "5 Nov 2026, 13:07 (Asia/Dubai)"],
+      ["Environment", "Production"],
+      [],
+    ]);
   });
 });

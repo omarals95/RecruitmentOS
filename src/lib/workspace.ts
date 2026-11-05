@@ -10,6 +10,16 @@ export interface WorkspaceContext {
   user: { id: string; name: string; email: string };
   team: { id: string; name: string; slug: string } | null;
   role: Role | null;
+  environment: string;
+}
+/** Export label from the same signals resolveStorageBinding trusts; off Vercel is local. */
+export function workspaceEnvironment(
+  env: Record<string, string | undefined>,
+): string {
+  if (env.VERCEL === "1" && env.VERCEL_ENV === "production")
+    return "Production";
+  if (env.VERCEL === "1" && env.VERCEL_ENV === "preview") return "Preview";
+  return "Local development";
 }
 export async function getWorkspaceContext(): Promise<WorkspaceContext> {
   if (!getAuthOptions().configured) throw new Error("SETUP_REQUIRED");
@@ -36,5 +46,6 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
       ? { id: active.team.id, name: active.team.name, slug: active.team.slug }
       : null,
     role: active ? parseRole(active.role) : null,
+    environment: workspaceEnvironment(process.env),
   };
 }

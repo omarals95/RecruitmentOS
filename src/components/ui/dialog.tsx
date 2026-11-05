@@ -8,12 +8,16 @@ export function Dialog({
   onClose,
   wide = false,
   busy = false,
+  role,
+  describedBy,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
   busy?: boolean;
+  role?: "alertdialog";
+  describedBy?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const heading = useId();
@@ -30,10 +34,14 @@ export function Dialog({
     <dialog
       ref={ref}
       className={`dialog ${wide ? "dialog-wide" : ""}`}
+      role={role}
       aria-labelledby={heading}
+      aria-describedby={describedBy}
       aria-busy={busy}
       onCancel={(event) => {
         event.preventDefault();
+        // React bubbles cancel to enclosing dialogs; Escape closes only this one.
+        event.stopPropagation();
         if (!busy) onClose();
       }}
     >

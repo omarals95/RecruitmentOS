@@ -6,6 +6,7 @@ import { Laptop, LockKeyhole, RefreshCw, UserRound } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { humanError, useWorkspace } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { SettingsNavigation } from "./settings-navigation";
 
 interface SessionItem {
@@ -50,6 +51,7 @@ export function ProfileSettings({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const { confirm, dialog } = useConfirm();
   const load = useCallback(async () => {
     setDevices("loading");
     setDevicesMessage("");
@@ -130,7 +132,12 @@ export function ProfileSettings({
   async function revokeSession(session: SessionItem) {
     if (
       session.id === currentSession ||
-      !window.confirm("Sign out this device?")
+      !(await confirm({
+        title: "Sign out device?",
+        message: "Sign out this device?",
+        confirmLabel: "Sign out device",
+        destructive: true,
+      }))
     )
       return;
     await action(
@@ -423,6 +430,7 @@ export function ProfileSettings({
           </button>
         </div>
       </section>
+      {dialog}
     </div>
   );
 }

@@ -21,6 +21,8 @@ import {
 import type { RecordDto, ResourceName } from "@/domain/records";
 import { RecordEditor } from "./editor";
 import {
+  analyticsExportMetadata,
+  analyticsRange,
   dataOf,
   formatDate,
   formatNumber,
@@ -157,7 +159,7 @@ export function Overview() {
                 value={result.data.counts.tasks}
                 icon={CheckCheck}
                 href="/app/tasks"
-                caption="Next steps for your team"
+                caption="Tasks not in a completed bucket"
               />
             </div>
             <div className="data-reconciliation">
@@ -433,7 +435,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
   );
 }
 export function Analytics({ talent = false }: { talent?: boolean }) {
-  const { team } = useWorkspace();
+  const { team, environment } = useWorkspace();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
@@ -460,27 +462,35 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
           className="button secondary"
           disabled={!result.data}
           onClick={() => {
-            if (result.data)
-              saveCsv(
-                "RecruitmentOS-analytics.csv",
-                ["Metric", "Group", "Count"],
-                [
-                  ...result.data.stages.map((item) => [
-                    "Application stage",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.sources.map((item) => [
-                    "Application source",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.series.flatMap((item) => [
-                    ["Applications", item.date, item.applications],
-                    ["Observed hires", item.date, item.hired],
-                  ]),
-                ],
-              );
+            if (!result.data) return;
+            const now = new Date();
+            saveCsv(
+              "RecruitmentOS-analytics.csv",
+              ["Metric", "Group", "Count"],
+              [
+                ...result.data.stages.map((item) => [
+                  "Application stage",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.sources.map((item) => [
+                  "Application source",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.series.flatMap((item) => [
+                  ["Applications", item.date, item.applications],
+                  ["Observed hires", item.date, item.hired],
+                ]),
+              ],
+              analyticsExportMetadata({
+                title: talent ? "Talent insights" : "Hiring analytics",
+                from: result.data.from,
+                to: result.data.to,
+                now,
+                environment,
+              }),
+            );
           }}
         >
           Export statistics
@@ -527,6 +537,11 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
             Last 30 days
           </button>
         </form>
+      )}
+      {!talent && result.data && (
+        <p className="muted">
+          {analyticsRange(result.data.from, result.data.to)}
+        </p>
       )}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />

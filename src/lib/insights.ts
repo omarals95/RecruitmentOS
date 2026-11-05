@@ -67,7 +67,7 @@ async function inventory(tx: TeamTx, p: Principal) {
       candidates: sql<number>`count(*) filter(where ${records.kind}='candidate')::int`,
       vacancies: sql<number>`count(*) filter(where ${records.kind}='vacancy' and ${records.data}->>'status'='Open')::int`,
       applications: sql<number>`count(*) filter(where ${records.kind}='application')::int`,
-      tasks: sql<number>`count(*) filter(where ${records.kind}='task')::int`,
+      tasks: sql<number>`count(*) filter(where ${records.kind}='task' and ${notCompleted(p, sql`${records.bucketId}`)})::int`,
       interviews: sql<number>`count(*) filter(where ${records.kind}='interview' and ${records.data}->>'status'='Scheduled')::int`,
       offers: sql<number>`count(*) filter(where ${records.kind}='offer')::int`,
       onboarding: sql<number>`count(*) filter(where ${records.kind}='onboarding' and ${records.data}->>'status'<>'Completed')::int`,
