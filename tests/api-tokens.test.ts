@@ -17,6 +17,7 @@ import {
   listTokens,
   revokeToken,
 } from "../src/lib/api-tokens";
+import { createTokenMaterial } from "../src/lib/api-token-policy";
 import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { installTenantContextKey } from "../src/lib/tenant-context";
@@ -254,6 +255,21 @@ describe("team scoped API tokens against actual SQL", () => {
       response.headers.get("x-correlation-id"),
     );
     expect(body.error.correlationId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("never authenticates an OAuth grant row as an API token", async () => {
+    const material = createTokenMaterial();
+    await pg.exec(
+      `INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES('ros_client_FictionalGrantClient00','Fictional','["https://client.example.test/cb"]') ON CONFLICT DO NOTHING`,
+    );
+    await pg.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at,oauth_client_id)
+        VALUES($1,'team','recruiter','Fictional grant',$2,'ros_oauth_fiction','["candidates:read"]',now()+interval '1 day','ros_client_FictionalGrantClient00')`,
+      [randomUUID(), material.tokenHash],
+    );
+    await expect(
+      authenticateApiToken(material.token, CLIENT_IP),
+    ).rejects.toMatchObject({ status: 401, code: "invalid_token" });
   });
 
   it("never allows a token principal to create or administer tokens", async () => {

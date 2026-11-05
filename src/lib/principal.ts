@@ -2,7 +2,10 @@ import { and, eq } from "drizzle-orm";
 import { getIdentityDb } from "@/db";
 import { member } from "@/db/auth-schema";
 import { getVerifiedSession } from "./auth-session";
-import { authenticateApiToken } from "./api-tokens";
+import {
+  authenticateApiToken,
+  authenticateOAuthAccessToken,
+} from "./api-tokens";
 import { clientIp } from "./client-ip";
 import { ApiError } from "./errors";
 import {
@@ -19,6 +22,8 @@ export interface Principal {
   scopes: Scope[];
   authType: "session" | "token";
   tokenId?: string;
+  /** Set for OAuth grants; tokenId is then the grant's auth.api_tokens id. */
+  oauthClientId?: string;
 }
 export async function requirePrincipal(
   request: Request,
@@ -86,5 +91,41 @@ export async function requirePrincipal(
     };
   }
   if (scope) requireScope(p, scope);
+  return p;
+}
+
+/**
+ * Token-only resolver for /api/mcp: cookies are never read. ros_oat_ tokens are OAuth access
+ * tokens bound to this endpoint; any other Bearer value is checked as an API token.
+ */
+export async function requireMcpPrincipal(
+  request: Request,
+  audience: string,
+): Promise<Principal> {
+  const authorization = request.headers.get("authorization");
+  if (authorization === null)
+    throw new ApiError(
+      401,
+      "authentication_required",
+      "Send an API token or OAuth access token as a Bearer token.",
+    );
+  const match = /^Bearer ([^\s]+)$/.exec(authorization);
+  if (!match)
+    throw new ApiError(
+      401,
+      "invalid_token",
+      "A valid Bearer token is required.",
+    );
+  const ip = clientIp(request.headers);
+  const p = match[1].startsWith("ros_oat_")
+    ? await authenticateOAuthAccessToken(match[1], ip, audience)
+    : await authenticateApiToken(match[1], ip);
+  const selected = request.headers.get("x-team-id");
+  if (selected && selected !== p.teamId)
+    throw new ApiError(
+      403,
+      "token_team_mismatch",
+      "This token belongs to a different team.",
+    );
   return p;
 }

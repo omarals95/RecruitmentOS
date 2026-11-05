@@ -9,6 +9,15 @@ export const SCOPES = [
   "imports:write",
 ] as const;
 export type Scope = (typeof SCOPES)[number];
+/** Scopes an OAuth client may request for the MCP endpoint; CV uploads and imports are never offered. */
+export const MCP_SCOPES = [
+  "candidates:read",
+  "recruitment:read",
+  "cvs:read",
+  "candidates:write",
+  "recruitment:write",
+] as const satisfies readonly Scope[];
+export type McpScope = (typeof MCP_SCOPES)[number];
 export type Role = "owner" | "admin" | "recruiter" | "viewer";
 export function parseRole(value: string): Role {
   if (["owner", "admin", "recruiter", "viewer"].includes(value))
