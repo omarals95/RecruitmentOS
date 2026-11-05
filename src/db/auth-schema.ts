@@ -8,6 +8,7 @@ import {
   uniqueIndex,
   bigint,
   index,
+  uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -170,6 +171,13 @@ export const rateLimit = authSchema.table(
   (t) => [uniqueIndex("auth_rate_limit_key_unique").on(t.key)],
 );
 
+export const oauthClients = authSchema.table("oauth_clients", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+  createdAt: date("created_at").notNull().defaultNow(),
+});
+
 export const apiTokens = authSchema.table(
   "api_tokens",
   {
@@ -188,11 +196,48 @@ export const apiTokens = authSchema.table(
     revokedAt: date("revoked_at"),
     lastUsedAt: date("last_used_at"),
     createdAt: date("created_at").notNull().defaultNow(),
+    oauthClientId: text("oauth_client_id").references(() => oauthClients.id),
   },
   (t) => [
     uniqueIndex("auth_api_tokens_hash_unique").on(t.tokenHash),
     index("auth_api_tokens_team_user_idx").on(t.teamId, t.userId),
   ],
+);
+
+export const oauthCodes = authSchema.table(
+  "oauth_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => apiTokens.id, { onDelete: "cascade" }),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.id),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    expiresAt: date("expires_at").notNull(),
+    usedAt: date("used_at"),
+    createdAt: date("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("auth_oauth_codes_grant_idx").on(t.grantId)],
+);
+
+export const oauthTokens = authSchema.table(
+  "oauth_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => apiTokens.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"access" | "refresh">().notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    audience: text("audience").notNull(),
+    expiresAt: date("expires_at").notNull(),
+    usedAt: date("used_at"),
+    createdAt: date("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("auth_oauth_tokens_grant_idx").on(t.grantId)],
 );
 
 export const apiRateLimits = authSchema.table("api_rate_limits", {
