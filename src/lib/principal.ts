@@ -3,6 +3,7 @@ import { getIdentityDb } from "@/db";
 import { member } from "@/db/auth-schema";
 import { getVerifiedSession } from "./auth-session";
 import { authenticateApiToken } from "./api-tokens";
+import { clientIp } from "./client-ip";
 import { ApiError } from "./errors";
 import {
   parseRole,
@@ -40,7 +41,7 @@ export async function requirePrincipal(
         "invalid_token",
         "A valid Bearer token is required.",
       );
-    p = await authenticateApiToken(match[1]);
+    p = await authenticateApiToken(match[1], clientIp(request.headers));
     const selected = request.headers.get("x-team-id");
     if (selected && selected !== p.teamId)
       throw new ApiError(

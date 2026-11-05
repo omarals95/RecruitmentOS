@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
 import {
   authenticateApiToken,
@@ -13,6 +21,7 @@ import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { installTenantContextKey } from "../src/lib/tenant-context";
 import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
+import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
 const principal = (
   userId = "recruiter",
@@ -29,6 +38,7 @@ const principal = (
 describe("team scoped API tokens against actual SQL", () => {
   const pg = new PGlite();
   beforeAll(async () => {
+    stubLocalAuthReadiness();
     await applyMigrations(pg);
     await installTenantContextKey(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
@@ -44,7 +54,10 @@ describe("team scoped API tokens against actual SQL", () => {
       UPDATE auth."user" SET email_verified=true;
       INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('recruiter-member','team','recruiter','recruiter') ON CONFLICT(id) DO UPDATE SET role='recruiter';`);
   });
-  afterAll(async () => pg.close());
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await pg.close();
+  });
 
   it("returns the secret once and stores/list only safe metadata", async () => {
     const result = await createToken(principal(), {
@@ -58,7 +71,9 @@ describe("team scoped API tokens against actual SQL", () => {
     expect(listed).toHaveLength(1);
     expect(JSON.stringify(listed)).not.toContain(result.token);
     expect(JSON.stringify(listed)).not.toContain("tokenHash");
-    expect((await authenticateApiToken(result.token)).teamId).toBe("team");
+    expect((await authenticateApiToken(result.token, CLIENT_IP)).teamId).toBe(
+      "team",
+    );
     expect(
       (await pg.query("SELECT action FROM app.activity")).rows,
     ).toContainEqual({ action: "token.created" });
@@ -102,7 +117,7 @@ describe("team scoped API tokens against actual SQL", () => {
     `);
     try {
       await expect(revokeToken(principal(), result.data.id)).rejects.toThrow();
-      expect((await authenticateApiToken(result.token)).userId).toBe(
+      expect((await authenticateApiToken(result.token, CLIENT_IP)).userId).toBe(
         "recruiter",
       );
     } finally {
@@ -120,9 +135,9 @@ describe("team scoped API tokens against actual SQL", () => {
     await pg.exec(
       "UPDATE auth.member SET role='viewer' WHERE id='recruiter-member'",
     );
-    expect((await authenticateApiToken(result.token)).scopes).toEqual([
-      "candidates:read",
-    ]);
+    expect(
+      (await authenticateApiToken(result.token, CLIENT_IP)).scopes,
+    ).toEqual(["candidates:read"]);
     await expect(
       createToken(principal(), {
         name: "Stale permission",
@@ -130,7 +145,9 @@ describe("team scoped API tokens against actual SQL", () => {
       }),
     ).rejects.toMatchObject({ status: 403 });
     await pg.exec("DELETE FROM auth.member WHERE id='recruiter-member'");
-    await expect(authenticateApiToken(result.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(result.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
   });
@@ -141,7 +158,9 @@ describe("team scoped API tokens against actual SQL", () => {
       scopes: ["candidates:read"],
     });
     await revokeToken(principal(), first.data.id);
-    await expect(authenticateApiToken(first.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(first.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
     const second = await createToken(principal(), {
@@ -152,7 +171,9 @@ describe("team scoped API tokens against actual SQL", () => {
       "UPDATE auth.api_tokens SET expires_at=now()-interval '1 minute' WHERE id=$1",
       [second.data.id],
     );
-    await expect(authenticateApiToken(second.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(second.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
     const third = await createToken(principal(), {
@@ -162,7 +183,9 @@ describe("team scoped API tokens against actual SQL", () => {
     await pg.exec(
       "UPDATE auth.\"user\" SET email_verified=false WHERE id='recruiter'",
     );
-    await expect(authenticateApiToken(third.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(third.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
   });
@@ -184,7 +207,9 @@ describe("team scoped API tokens against actual SQL", () => {
       status: 404,
     });
     await revokeToken(principal("owner", "owner"), result.data.id);
-    await expect(authenticateApiToken(result.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(result.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
   });
@@ -194,12 +219,16 @@ describe("team scoped API tokens against actual SQL", () => {
       name: "Rate limit",
       scopes: ["candidates:read"],
     });
-    for (let i = 0; i < 60; i++) await authenticateApiToken(result.token);
-    await expect(authenticateApiToken(result.token)).rejects.toMatchObject({
+    for (let i = 0; i < 60; i++)
+      await authenticateApiToken(result.token, CLIENT_IP);
+    await expect(
+      authenticateApiToken(result.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 429,
     });
     const limits = await pg.query<{ count: number }>(
-      "SELECT count FROM auth.api_rate_limits",
+      "SELECT count FROM auth.api_rate_limits WHERE key=$1",
+      [`api-token:${result.data.id}`],
     );
     expect(limits.rows[0].count).toBe(61);
   });
@@ -209,7 +238,8 @@ describe("team scoped API tokens against actual SQL", () => {
       name: "Route rate limit",
       scopes: ["candidates:read", "recruitment:read"],
     });
-    for (let i = 0; i < 60; i++) await authenticateApiToken(result.token);
+    for (let i = 0; i < 60; i++)
+      await authenticateApiToken(result.token, CLIENT_IP);
     const response = await overviewRoute(
       new Request("http://localhost:3000/api/v1/overview", {
         headers: { authorization: `Bearer ${result.token}` },

@@ -21,12 +21,14 @@ import { applyMigrations, schema } from "../src/db";
 import { createTokenMaterial } from "../src/lib/api-token-policy";
 import { authenticateApiToken, listTokens } from "../src/lib/api-tokens";
 import { roleScopes } from "../src/lib/permissions";
+import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
 describe("API-token identity connection", () => {
   const pg = new PGlite();
   const material = createTokenMaterial();
 
   beforeAll(async () => {
+    stubLocalAuthReadiness();
     await applyMigrations(pg);
     await pg.exec(`
       INSERT INTO auth."user"(id,name,email,email_verified,initial_admin)
@@ -59,10 +61,13 @@ describe("API-token identity connection", () => {
     );
   });
   beforeEach(() => vi.clearAllMocks());
-  afterAll(async () => pg.close());
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await pg.close();
+  });
 
   it("authenticates and commits rate-limit updates using the identity pool", async () => {
-    const principal = await authenticateApiToken(material.token);
+    const principal = await authenticateApiToken(material.token, CLIENT_IP);
     expect(principal).toMatchObject({
       userId: "identity-user",
       teamId: "identity-team",
@@ -72,7 +77,8 @@ describe("API-token identity connection", () => {
     expect(pools.identity).toHaveBeenCalledTimes(1);
     expect(pools.data).not.toHaveBeenCalled();
     const result = await pg.query<{ count: number }>(
-      "SELECT count FROM auth.api_rate_limits",
+      "SELECT count FROM auth.api_rate_limits WHERE key=$1",
+      ["api-token:00000000-0000-4000-8000-000000000001"],
     );
     expect(result.rows[0].count).toBe(1);
   });

@@ -42,6 +42,7 @@ import {
   seedIdentity,
   splitRoles,
 } from "./helpers/db";
+import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
 // Fictional data only: two teams, two users per team, one API token.
 const TABLES = [
@@ -155,6 +156,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
   const denied = { code: "42501", message: "Tenant context rejected" };
 
   beforeAll(async () => {
+    stubLocalAuthReadiness();
     harness = await createSplitRoleDb();
     pools.data.mockImplementation(harness.dataDb);
     pools.identity.mockImplementation(harness.identityDb);
@@ -258,7 +260,10 @@ describe("signed tenant context under separate nonowner data and identity roles"
     vacancyB = seededB.job.id;
     await seedRows(memberB, "member-b");
   });
-  afterAll(async () => harness?.close());
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await harness?.close();
+  });
 
   it("runs as nonowner roles that pass their boundary checks and cannot assume each other", async () => {
     const client = await asData();
@@ -714,7 +719,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
       name: "Fictional context token",
       scopes: ["candidates:read", "recruitment:read"],
     });
-    const token = await authenticateApiToken(created.token);
+    const token = await authenticateApiToken(created.token, CLIENT_IP);
     expect(
       await withTeam(
         token,
@@ -728,7 +733,9 @@ describe("signed tenant context under separate nonowner data and identity roles"
       ),
     ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
     await revokeToken(ownerA, created.data.id);
-    await expect(authenticateApiToken(created.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(created.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
     await expect(
@@ -770,7 +777,9 @@ describe("signed tenant context under separate nonowner data and identity roles"
         action,
       ).rejects.toMatchObject({ cause: { code: "42501" } });
     await revokeToken(ownerA, created.data.id);
-    await expect(authenticateApiToken(created.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(created.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
     const events = await withTeam(ownerA, (tx) =>

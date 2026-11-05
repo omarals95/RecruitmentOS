@@ -14,6 +14,7 @@ import {
 } from "../src/lib/api-tokens";
 import type { Principal } from "../src/lib/principal";
 import { createSplitRoleDb, seedIdentity, splitRoles } from "./helpers/db";
+import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
 describe("token create/revoke and audit in one identity-role transaction", () => {
   let harness: Awaited<ReturnType<typeof createSplitRoleDb>>;
@@ -33,6 +34,7 @@ describe("token create/revoke and audit in one identity-role transaction", () =>
     return rows[0];
   }
   beforeAll(async () => {
+    stubLocalAuthReadiness();
     harness = await createSplitRoleDb();
     pools.identity.mockImplementation(harness.identityDb);
     pools.data.mockRejectedValue(
@@ -56,7 +58,10 @@ describe("token create/revoke and audit in one identity-role transaction", () =>
       role: "viewer",
     });
   });
-  afterAll(async () => harness?.close());
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await harness?.close();
+  });
 
   it("creates and revokes under the identity role with exactly one audit event each", async () => {
     const created = await createToken(recruiterA, {
@@ -72,12 +77,14 @@ describe("token create/revoke and audit in one identity-role transaction", () =>
     await expect(
       revokeToken(recruiterB, created.data.id),
     ).rejects.toMatchObject({ status: 404 });
-    expect((await authenticateApiToken(created.token)).userId).toBe(
+    expect((await authenticateApiToken(created.token, CLIENT_IP)).userId).toBe(
       "recruiter-a",
     );
     await revokeToken(owner, created.data.id);
     await revokeToken(owner, created.data.id);
-    await expect(authenticateApiToken(created.token)).rejects.toMatchObject({
+    await expect(
+      authenticateApiToken(created.token, CLIENT_IP),
+    ).rejects.toMatchObject({
       status: 401,
     });
     expect(await counts()).toEqual({
@@ -150,7 +157,7 @@ describe("token create/revoke and audit in one identity-role transaction", () =>
         cause: { code: "42501" },
       });
       expect(await counts()).toEqual(before);
-      expect((await authenticateApiToken(kept.token)).userId).toBe(
+      expect((await authenticateApiToken(kept.token, CLIENT_IP)).userId).toBe(
         "recruiter-a",
       );
     } finally {
