@@ -18,6 +18,8 @@ Tokens expire after 30 days by default; a shorter or longer duration up to 365 d
 
 Write scopes do not implicitly grant the corresponding read scope. Choose both when an integration needs to read its results. A viewer can create a read-only token. A recruiter cannot request import privileges. AI integrations are explicit clients: RecruitmentOS does not send candidate records to an AI provider automatically.
 
+AI assistants that speak the Model Context Protocol, such as Claude Code and Claude.ai, can use `/api/mcp` instead of these REST calls. See [mcp.md](mcp.md) for its tools, scopes and setup.
+
 ## Read candidates
 
 Set `RECRUITMENTOS_URL` to the deployed HTTPS origin and `RECRUITMENTOS_TOKEN` through your shell or integration's secret store. The commands below contain no credentials or real candidate data.

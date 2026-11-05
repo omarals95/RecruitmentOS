@@ -6,6 +6,7 @@ import {
   eq,
   inArray,
   isNull,
+  notInArray,
   sql,
   type SQL,
 } from "drizzle-orm";
@@ -215,8 +216,11 @@ export async function overview(p: Principal) {
   });
   return {
     ...result,
+    // MCP tool audit rows stay on the Activity screen; they would flood the dashboard.
     recentActivity: (
-      await listActivity(p, new URLSearchParams({ pageSize: "8" }))
+      await listActivity(p, new URLSearchParams({ pageSize: "8" }), {
+        excludeKinds: ["mcp-tool"],
+      })
     ).data,
     asOf: now.toISOString(),
     timezone: "Asia/Dubai",
@@ -335,7 +339,11 @@ export async function analytics(p: Principal, params: URLSearchParams) {
   });
 }
 
-export async function listActivity(p: Principal, params: URLSearchParams) {
+export async function listActivity(
+  p: Principal,
+  params: URLSearchParams,
+  options: { excludeKinds?: string[] } = {},
+) {
   requireScope(p, "recruitment:read");
   validateParams(params, ["page", "pageSize", "recordId", "search", "kind"]);
   const pageResult = z.coerce
@@ -364,7 +372,7 @@ export async function listActivity(p: Principal, params: URLSearchParams) {
   if (
     kind &&
     !z
-      .enum([...Object.values(resourceToKind), "cv", "api-token"])
+      .enum([...Object.values(resourceToKind), "cv", "api-token", "mcp-tool"])
       .safeParse(kind).success
   )
     invalid("Unsupported activity record type.");
@@ -388,6 +396,9 @@ export async function listActivity(p: Principal, params: URLSearchParams) {
         ? [sql`${activity.kind}<>'candidate'`]
         : []),
       ...(kind ? [eq(activity.kind, kind)] : []),
+      ...(options.excludeKinds?.length
+        ? [notInArray(activity.kind, options.excludeKinds)]
+        : []),
       ...searchFilter,
     );
     const [total] = await tx

@@ -17,6 +17,7 @@ export const dataRoleHelpers = [
   "tenant_context.lock_storage_allocation(text,text,text)",
   "tenant_context.acquire_blob_read(text)",
   "tenant_context.release_blob_read(uuid)",
+  "tenant_context.audit_mcp_call(text,text)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",

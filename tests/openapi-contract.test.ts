@@ -299,6 +299,7 @@ describe("OpenAPI contract", () => {
     expect(sessionOnly.map(({ label }) => label).sort()).toEqual([
       "DELETE /api/settings/tokens/{id}",
       "GET /api/settings/tokens",
+      "POST /api/oauth/consent",
       "POST /api/settings/tokens",
       "POST /api/v1/teams/bootstrap",
     ]);

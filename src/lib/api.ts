@@ -52,36 +52,11 @@ export async function readBody<T>(
       .startsWith("application/json")
   )
     throw new ApiError(415, "json_required", "Send application/json.");
-  const size = request.headers.get("content-length");
-  if (size && (!/^\d+$/.test(size) || Number(size) > maxBytes))
-    throw new ApiError(413, "body_too_large", "The request is too large.");
-  const reader = request.body?.getReader();
-  if (!reader)
+  const bytes = await readLimitedBytes(request, maxBytes);
+  if (!bytes)
     throw new ApiError(400, "invalid_json", "A JSON body is required.");
-  let length = 0;
-  const chunks: Uint8Array[] = [];
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > maxBytes) {
-        await reader.cancel();
-        throw new ApiError(413, "body_too_large", "The request is too large.");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
   let value: unknown;
   try {
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new ApiError(
@@ -101,6 +76,40 @@ export async function readBody<T>(
         .join("; "),
     );
   return parsed.data;
+}
+/** Streams at most maxBytes; a larger declared or observed body is refused with 413. Null without a body. */
+export async function readLimitedBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  const size = request.headers.get("content-length");
+  if (size && (!/^\d+$/.test(size) || Number(size) > maxBytes))
+    throw new ApiError(413, "body_too_large", "The request is too large.");
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  let length = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        throw new ApiError(413, "body_too_large", "The request is too large.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 /** Every error body and X-Correlation-Id header share one fresh ID for support reports. */
 export function errorJson(

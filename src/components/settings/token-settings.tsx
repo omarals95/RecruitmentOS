@@ -6,10 +6,12 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
 } from "react";
 import { Copy, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
 import { SCOPES, roleScopes, type Role, type Scope } from "@/lib/permissions";
+import { scopeDescriptions } from "@/lib/scope-descriptions";
 import type { TokenDto } from "@/lib/api-tokens";
 import {
   humanError,
@@ -18,15 +20,6 @@ import {
 } from "@/components/workspace/client";
 import { SettingsNavigation } from "./settings-navigation";
 
-const scopeDescriptions: Record<Scope, string> = {
-  "candidates:read": "Read candidate facts",
-  "candidates:write": "Create and edit candidates",
-  "recruitment:read": "Read jobs, pipeline and tasks",
-  "recruitment:write": "Manage recruitment records",
-  "cvs:read": "Read CVs and private download links",
-  "cvs:write": "Upload CVs",
-  "imports:write": "Import legacy identifiers and source evidence",
-};
 const date = (value: string | null) =>
   value
     ? new Date(value).toLocaleString(undefined, {
@@ -54,6 +47,11 @@ function TokenSettingsContent() {
   const [secret, setSecret] = useState("");
   const secretRef = useRef<HTMLTextAreaElement>(null);
   const [now, setNow] = useState(0);
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => "",
+  );
   const admin = role === "owner" || role === "admin";
   const available =
     role && ["owner", "admin", "recruiter", "viewer"].includes(role)
@@ -424,7 +422,11 @@ function TokenSettingsContent() {
                           <td>
                             <strong>{token.name}</strong>
                             <br />
-                            <code>{token.prefix}…</code>
+                            {token.oauthClient ? (
+                              <span className="badge">OAuth app</span>
+                            ) : (
+                              <code>{token.prefix}…</code>
+                            )}
                           </td>
                           {all && (
                             <td>
@@ -491,6 +493,12 @@ function TokenSettingsContent() {
               <code>candidates:write</code> and a stable{" "}
               <code>Idempotency-Key</code>. CVs use a three-step private upload:
               request a form, upload to S3, then complete validation.
+            </p>
+            <p>
+              AI assistants such as Claude connect to{" "}
+              <code>{origin}/api/mcp</code>, either with an API token sent as an
+              Authorization header (Claude Code) or by signing in through the
+              connector (Claude.ai). Connected apps appear in this list.
             </p>
             <a
               className="button secondary"

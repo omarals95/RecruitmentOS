@@ -42,7 +42,7 @@ Notifications collect due tasks, interviews, expiring offers, vacancy targets an
 
 Owners/admins manage team details, invitations and permitted membership changes. Only owners manage ownership; a team retains at least one owner. Recruiters work with recruitment records; viewers read them. Team switching changes the active workspace.
 
-Profile settings manage your name, password and sessions. In **API tokens**, create a named token for one integration, choose the smallest necessary scopes and expiry, and copy it once to the integration's secret store. Revoke unused tokens. A token remains tied to your user and team and loses permissions when your role changes or your membership is removed. See [API examples](api-examples.md).
+Profile settings manage your name, password and sessions. In **API tokens**, create a named token for one integration, choose the smallest necessary scopes and expiry, and copy it once to the integration's secret store. Revoke unused tokens. A token remains tied to your user and team and loses permissions when your role changes or your membership is removed. See [API examples](api-examples.md). To connect an AI assistant such as Claude, see [mcp.md](mcp.md); connected apps appear in the same list with an **OAuth app** badge and are revoked the same way.
 
 ## Data administration
 

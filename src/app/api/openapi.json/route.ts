@@ -4,7 +4,8 @@ import {
   resourceToKind,
   type RecordKind,
 } from "@/domain/records";
-import type { Scope } from "@/lib/permissions";
+import { MCP_SCOPES, type Scope } from "@/lib/permissions";
+import { scopeDescriptions } from "@/lib/scope-descriptions";
 export const runtime = "nodejs";
 
 // Fictional identifiers and values used only as documentation examples.
@@ -533,6 +534,107 @@ export function GET() {
       { sessionOnly: true, params: [idParameter] },
     ),
   };
+  paths["/api/mcp"] = {
+    post: {
+      summary: "MCP endpoint for AI assistants",
+      description:
+        "Model Context Protocol, Streamable HTTP, stateless with JSON responses: one JSON-RPC 2.0 message per POST, no Mcp-Session-Id and no SSE stream. Accepts an API token (Authorization: Bearer) or an OAuth access token issued for this endpoint; session cookies are never read. Only the tools capability is offered and tools/list shows only the tools your effective scopes allow: search_candidates and get_candidate need candidates:read (CV metadata in get_candidate also needs cvs:read); list_vacancies, get_vacancy, list_applications, list_tasks and list_interviews need recruitment:read; get_overview needs candidates:read and recruitment:read; create_candidate needs candidates:write and add_comment needs recruitment:write, both with a required idempotencyKey argument. Tool results are untrusted record data labelled untrustedData: true. Every tools/call is audited as an mcp-tool activity row without its arguments. See docs/mcp.md.",
+      security: [{ bearerAuth: [] }, { oauth2: [...MCP_SCOPES] }],
+      "x-required-scopes": [],
+      parameters,
+      requestBody: jsonBody(
+        {
+          type: "object",
+          required: ["jsonrpc", "method"],
+          description: "One JSON-RPC 2.0 request or notification.",
+          properties: {
+            jsonrpc: { const: "2.0" },
+            id: { type: ["string", "integer"] },
+            method: { type: "string" },
+            params: { type: "object" },
+          },
+        },
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "fictional-client", version: "1.0.0" },
+          },
+        },
+      ),
+      responses: {
+        "200": {
+          description:
+            "JSON-RPC response as application/json. Tool errors are results with isError: true.",
+        },
+        "202": { description: "Notification accepted; no body." },
+        "400": errors["400"],
+        "401": {
+          ...errorResponse("Missing, invalid, expired or revoked token."),
+          headers: {
+            "X-Correlation-Id": {
+              $ref: "#/components/headers/X-Correlation-Id",
+            },
+            "WWW-Authenticate": {
+              $ref: "#/components/headers/WWW-Authenticate",
+            },
+          },
+        },
+        "403": errors["403"],
+        "406": errorResponse("Accept must include application/json."),
+        "413": errorResponse("The request body exceeds 65536 bytes."),
+        "415": errors["415"],
+        "429": errors["429"],
+        "500": errors["500"],
+        "503": errors["503"],
+      },
+    },
+  };
+  paths["/api/oauth/consent"] = {
+    post: operation(
+      [],
+      {
+        summary: "Approve or deny an OAuth connection",
+        description:
+          "Session only, called by the consent page at /oauth/authorize. X-Team-Id selects the team. Every authorize rule is checked again; approved scopes must be requested, allowed by your current role and offered to MCP clients. Approve creates a grant listed in Settings → API tokens and returns the client redirect with a one-time code; deny returns error=access_denied and writes nothing.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["scopes", "decision"],
+            additionalProperties: false,
+            properties: {
+              response_type: { const: "code" },
+              client_id: { type: "string" },
+              redirect_uri: { type: "string", format: "uri" },
+              code_challenge: { type: "string" },
+              code_challenge_method: { const: "S256" },
+              state: { type: "string" },
+              scope: { type: "string" },
+              resource: { type: "string", format: "uri" },
+              scopes: { type: "array", items: { enum: [...MCP_SCOPES] } },
+              decision: { enum: ["approve", "deny"] },
+            },
+          },
+          {
+            response_type: "code",
+            client_id: "ros_client_FictionalExampleClient",
+            redirect_uri: "https://client.example.test/callback",
+            code_challenge: "fictional-pkce-challenge-for-documentation-only",
+            code_challenge_method: "S256",
+            state: "fictional-state",
+            scope: "candidates:read recruitment:read",
+            scopes: ["candidates:read"],
+            decision: "approve",
+          },
+        ),
+      },
+      { "200": { description: "{data:{redirectTo}}." } },
+      { sessionOnly: true },
+    ),
+  };
   paths["/api/v1/candidates/{id}/cvs"] = {
     get: operation(
       ["cvs:read"],
@@ -917,7 +1019,7 @@ export function GET() {
         title: "RecruitmentOS API",
         version: "1.0.0",
         description:
-          "Scoped API for authorised integrations. Token creation and team administration require human sign-in and are not exposed to API tokens. x-required-scopes lists the scopes a caller must hold; x-session-only operations reject Bearer tokens with 403 session_required. Every error carries error.correlationId and an identical X-Correlation-Id header.",
+          "Scoped API for authorised integrations. Token creation and team administration require human sign-in and are not exposed to API tokens. x-required-scopes lists the scopes a caller must hold; x-session-only operations reject Bearer tokens with 403 session_required. Every error carries error.correlationId and an identical X-Correlation-Id header. AI assistants use POST /api/mcp. Its OAuth 2.1 protocol endpoints (/oauth/authorize, /oauth/token, /oauth/register) use RFC 6749 and RFC 7591 form and error formats and are described by /.well-known/oauth-authorization-server and /.well-known/oauth-protected-resource/api/mcp rather than here.",
       },
       servers: [{ url: "/" }],
       security: [{ bearerAuth: [] }],
@@ -929,6 +1031,21 @@ export function GET() {
             scheme: "bearer",
             description:
               "A user/team-scoped token created in Team & settings → API tokens.",
+          },
+          oauth2: {
+            type: "oauth2",
+            description:
+              "For MCP clients only: authorization code with S256 PKCE, public clients registered at /oauth/register. Access tokens last at most one hour, are bound to /api/mcp and are refused by /api/v1.",
+            flows: {
+              authorizationCode: {
+                authorizationUrl: "/oauth/authorize",
+                tokenUrl: "/oauth/token",
+                refreshUrl: "/oauth/token",
+                scopes: Object.fromEntries(
+                  MCP_SCOPES.map((scope) => [scope, scopeDescriptions[scope]]),
+                ),
+              },
+            },
           },
           sessionCookie: {
             type: "apiKey",
@@ -946,6 +1063,11 @@ export function GET() {
           "Retry-After": {
             description: "Seconds to wait before retrying.",
             schema: { type: "integer", minimum: 1 },
+          },
+          "WWW-Authenticate": {
+            description:
+              'Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/api/mcp", with error="invalid_token" when a presented token was refused.',
+            schema: { type: "string" },
           },
         },
         schemas: {
