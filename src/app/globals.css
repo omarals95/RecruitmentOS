@@ -2189,17 +2189,6 @@ progress::-moz-progress-bar {
   background: var(--border);
   flex: 1;
 }
-.settings-nav {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.settings-nav a {
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-}
 /* Public homepage */
 .landing {
   background: var(--surface);

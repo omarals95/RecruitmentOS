@@ -6,6 +6,8 @@
   text-decoration: none;
 }
 .settings-nav a[aria-current="page"] {
+  background: var(--primary);
+  border-color: var(--primary);
   font-weight: 650;
 }
 .settings-page .panel > h2 {
