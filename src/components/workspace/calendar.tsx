@@ -66,6 +66,14 @@ function eventDay(record: RecordDto) {
     day: "2-digit",
   }).format(new Date(String(dataOf(record).startAt)));
 }
+/** One Dubai day's interviews by start time; equal starts are ordered by ID. */
+export function interviewsOnDay(events: RecordDto[], day: string) {
+  const start = (record: RecordDto) =>
+    Date.parse(String(dataOf(record).startAt));
+  return events
+    .filter((record) => eventDay(record) === day)
+    .sort((a, b) => start(a) - start(b) || a.id.localeCompare(b.id));
+}
 export function CalendarScreen() {
   const { team, role } = useWorkspace();
   const linkedRecord = useSearchParams().get("record");
@@ -264,34 +272,28 @@ export function CalendarScreen() {
             ) : view === "day" ? (
               <div className="daily-agenda">
                 {events.length ? (
-                  events
-                    .sort((a, b) =>
-                      String(dataOf(a).startAt).localeCompare(
-                        String(dataOf(b).startAt),
-                      ),
-                    )
-                    .map((record) => (
-                      <button
-                        className="agenda-item"
-                        onClick={() => setDetail(record)}
-                        key={record.id}
-                      >
-                        <strong>
-                          {formatDate(dataOf(record).startAt, true)}
-                        </strong>
-                        <span>
-                          <strong>{recordLabel(record)}</strong>
-                          <small>
-                            {String(
-                              dataOf(record).interviewer ||
-                                "Interviewer not recorded",
-                            )}{" "}
-                            · {String(dataOf(record).minutes)} minutes
-                          </small>
-                        </span>
-                        <Badge value={dataOf(record).status} />
-                      </button>
-                    ))
+                  interviewsOnDay(events, days[0]).map((record) => (
+                    <button
+                      className="agenda-item"
+                      onClick={() => setDetail(record)}
+                      key={record.id}
+                    >
+                      <strong>
+                        {formatDate(dataOf(record).startAt, true)}
+                      </strong>
+                      <span>
+                        <strong>{recordLabel(record)}</strong>
+                        <small>
+                          {String(
+                            dataOf(record).interviewer ||
+                              "Interviewer not recorded",
+                          )}{" "}
+                          · {String(dataOf(record).minutes)} minutes
+                        </small>
+                      </span>
+                      <Badge value={dataOf(record).status} />
+                    </button>
+                  ))
                 ) : (
                   <EmptyState
                     title="A clear day in the calendar"
@@ -312,7 +314,7 @@ export function CalendarScreen() {
                 </div>
                 <div className="calendar-grid">
                   {days.map((day) => {
-                    const records = events.filter((r) => eventDay(r) === day);
+                    const records = interviewsOnDay(events, day);
                     return (
                       <div
                         className={`calendar-day ${day === dubaiToday() ? "today" : ""} ${day.slice(0, 7) !== anchor.slice(0, 7) ? "outside-month" : ""}`}

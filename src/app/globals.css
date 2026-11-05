@@ -957,6 +957,9 @@ input[type="color"] {
 .filter-reference select {
   min-height: 38px;
 }
+.filters-toggle {
+  display: none;
+}
 .directory-note {
   display: flex;
   align-items: center;
@@ -3275,6 +3278,60 @@ progress::-moz-progress-bar {
   }
   .filter-bar .text-link {
     font-size: 11px;
+  }
+  .filters-toggle {
+    display: inline-flex;
+  }
+  .filter-bar:not(.is-open) {
+    display: none;
+  }
+  /* Phone tables become one labelled card per record, without sideways scrolling. */
+  .records-panel .table-wrap {
+    overflow: visible;
+  }
+  .records-panel .data-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .records-panel .data-table,
+  .records-panel .data-table tr {
+    display: block;
+  }
+  .records-panel .data-table tbody {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+  }
+  .records-panel .data-table tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+  }
+  .records-panel .data-table td,
+  .records-panel .data-table td:first-child,
+  .records-panel .data-table td:last-child,
+  .records-panel .data-table tr > td:has(input[type="checkbox"]) {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    width: auto;
+    padding: 6px 0;
+    border-bottom: 0;
+  }
+  .records-panel .data-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .records-panel .table-record-button {
+    min-width: 0;
+    max-width: none;
   }
   .record-card-grid {
     padding: 16px;
