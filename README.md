@@ -14,6 +14,10 @@ A React and TypeScript recruitment workspace, built with Next.js for Vercel, Neo
 
 PostgreSQL is the live data store. Excel imports and exports are transfer tools; they are not a two-way sync. Cloud CV actions open/download private objects; Windows File Explorer is not available from a cloud deployment. Source folder names remain descriptive categories, not an assessment of a candidate's suitability.
 
+## Roadmap
+
+See the [release roadmap](docs/ROADMAP.md): Phase 1 (usable core and go-live), then the feedback loop, hiring managers and approvals, an integrations marketplace (Outlook, Gmail, Google and Microsoft calendars, Teams, Slack, Discord), customisable dashboards, compliance and data lifecycle, and regional reach.
+
 ## Local development
 
 Use Node.js 24 LTS and npm. Clone this repository, then:
