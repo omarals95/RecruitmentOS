@@ -9,8 +9,9 @@
  *   storage reservations and Blob read leases. Denied mutations must leave no audit row.
  * - It reads only DATABASE_URL (data role), IDENTITY_DATABASE_URL (identity role),
  *   MIGRATION_DATABASE_URL (owner), LIVE_ROLE_TESTS_CONFIRM (must equal the database name),
- *   TENANT_CONTEXT_SIGNING_KEY (the key the database was migrated with) and PGOPTIONS (only to
- *   refuse it) from the process environment. It never loads an env file.
+ *   TENANT_CONTEXT_SIGNING_KEY (the key the database was migrated with), LIVE_ROLE_TESTS_DIAGNOSE
+ *   (only the exact value 1 enables diagnostics) and PGOPTIONS (only to refuse it) from the
+ *   process environment. It never loads an env file.
  * - It writes only fictional fixtures under a random run prefix: users, three teams, members and
  *   API tokens as the owner or the identity role; candidates, a vacancy, saved views, candidate
  *   states, reminder reads, idempotency, activity and pending uploads as the data role under
@@ -24,6 +25,11 @@
  *   username, password, the marker, the key, its id, a payload, a signature, row data or driver
  *   error text. Exit codes: 0 every check passed and no fixture remains; 1 a check failed, an
  *   error occurred or a fixture remains; 2 refused before anything was written.
+ * - With LIVE_ROLE_TESTS_DIAGNOSE=1 the document also has `diagnostics`: one
+ *   { check, phase, error } entry per failed check, in the order of failedChecks. The phase is
+ *   setup, install, backend-identity, lock-overlap, outcome, positive-control, end-state or
+ *   cleanup; the error is a SQLSTATE or one of assertion (a false condition, no database error),
+ *   connection (a client connection or network failure) and harness-error (anything else).
  * - Only the owner runs it against a non-local database, and only an approved Preview database:
  *   never Production. Agents never run it against Neon or any remote database.
  */
@@ -51,7 +57,13 @@ type Db = {
     params?: unknown[],
   ) => Promise<{ rows: Row[]; rowCount: number | null }>;
 };
-type Outcome = { ok: boolean; code?: string; count: number; rows: Row[] };
+type Outcome = {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  count: number;
+  rows: Row[];
+};
 type Signer = { key: Buffer; id: string };
 type Principal = {
   team: string;
@@ -62,6 +74,23 @@ type Principal = {
 };
 type Variant = "open" | "closed";
 type Counts = Record<string, number>;
+type Phase =
+  | "setup"
+  | "install"
+  | "backend-identity"
+  | "lock-overlap"
+  | "outcome"
+  | "positive-control"
+  | "end-state"
+  | "cleanup";
+/** A condition, the phase it belongs to and the SQLSTATE or category reported when it is false. */
+type Condition = [phase: Phase, holds: boolean, error?: string];
+type Probe = {
+  /** The phase a check has reached; an error thrown from here on is reported in it. */
+  at: (phase: Phase) => void;
+  /** Whether every condition holds; the first one that does not becomes the diagnostic. */
+  all: (...conditions: Condition[]) => boolean;
+};
 
 const AUDIENCE = "recruitmentos-tenant-context-v1";
 const LIFETIME_MS = 60_000;
@@ -130,6 +159,35 @@ function codeOf(error: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
+const NETWORK_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
+/**
+ * A thrown value as a SQLSTATE or a fixed category: connection for a client connection or network
+ * failure (a Node system error), harness-error for anything else. It reads only `code` and the
+ * structural `syscall`, never the message.
+ */
+export function errorCategory(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "harness-error";
+  const { code, syscall } = error as { code?: unknown; syscall?: unknown };
+  if (
+    typeof syscall === "string" ||
+    (typeof code === "string" && NETWORK_CODES.has(code))
+  )
+    return "connection";
+  if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+  return "harness-error";
+}
+
 async function settle(
   pending: Promise<{ rows: Row[]; rowCount: number | null }>,
 ): Promise<Outcome> {
@@ -137,9 +195,28 @@ async function settle(
     const result = await pending;
     return { ok: true, count: result.rowCount ?? 0, rows: result.rows };
   } catch (error) {
-    return { ok: false, code: codeOf(error), count: 0, rows: [] };
+    return {
+      ok: false,
+      code: codeOf(error),
+      error: errorCategory(error),
+      count: 0,
+      rows: [],
+    };
   }
 }
+
+/** A statement's condition; when false it reports the statement's error, or assertion if it succeeded. */
+const outcomeIs = (
+  holds: boolean,
+  outcome: Outcome | undefined,
+  phase: Phase = "outcome",
+): Condition => [
+  phase,
+  holds,
+  outcome?.ok === false ? outcome.error : "assertion",
+];
+const failsWith = (outcome: Outcome | undefined, code: string) =>
+  outcomeIs(outcome?.ok === false && outcome.code === code, outcome);
 
 /** One statement inside the open transaction; a failure rolls back only this statement. */
 async function attempt(db: Db, text: string, params?: unknown[]) {
@@ -155,6 +232,8 @@ const denied = (outcome: Outcome) => !outcome.ok && outcome.code === "42501";
 /** Another user's or team's rows: nothing touched, or the statement itself is not granted. */
 const untouched = (outcome: Outcome) =>
   (outcome.ok && outcome.count === 0) || denied(outcome);
+const denial = (outcome: Outcome) => outcomeIs(denied(outcome), outcome);
+const leftAlone = (outcome: Outcome) => outcomeIs(untouched(outcome), outcome);
 
 async function count(db: Db, text: string, params?: unknown[]) {
   const { rows } = await db.query(text, params);
@@ -298,7 +377,7 @@ type Run = {
   signer: Signer;
   f: Fixtures;
   variant: Variant;
-  check: (id: string, run: () => Promise<boolean>) => Promise<void>;
+  check: (id: string, run: (probe: Probe) => Promise<boolean>) => Promise<void>;
 };
 
 function principals(f: Fixtures) {
@@ -395,7 +474,10 @@ async function activityCounts(owner: Db, f: Fixtures) {
   });
 }
 
-/** Removes only fixture rows; returns whether FORCE RLS and the activity trigger are restored. */
+/**
+ * Removes only fixture rows; returns whether FORCE RLS and the activity trigger are restored, and
+ * the first error's SQLSTATE or category (assertion when none was thrown).
+ */
 async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
   const tables = new Map(
     fixtureTables(f, variant).map(([table, where, params]) => [
@@ -408,7 +490,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       `DELETE FROM ${table} WHERE ${tables.get(table)!.where}`,
       tables.get(table)!.params,
     );
-  let done = true;
+  let failure: string | undefined;
   try {
     await transaction(
       owner,
@@ -440,8 +522,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       },
       true,
     );
-  } catch {
-    done = false;
+  } catch (error) {
+    failure = errorCategory(error);
   }
   try {
     await transaction(
@@ -460,8 +542,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       },
       true,
     );
-  } catch {
-    done = false;
+  } catch (error) {
+    failure ??= errorCategory(error);
   }
   const { rows } = await owner.query(
     `SELECT (SELECT count(*) FILTER (WHERE c.relforcerowsecurity) FROM pg_catalog.pg_class c
@@ -471,14 +553,19 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         WHERE t.tgrelid = 'app.activity'::regclass AND t.tgname = 'immutable_activity') AS trigger`,
     [[...APP_TABLES]],
   );
-  return (
-    done && rows[0].forced === APP_TABLES.length && rows[0].trigger === "O"
-  );
+  return {
+    restored:
+      failure === undefined &&
+      rows[0].forced === APP_TABLES.length &&
+      rows[0].trigger === "O",
+    error: failure ?? "assertion",
+  };
 }
 
 /** Concurrent transactions; the lock holder waits at the gate until the others are seen waiting. */
 async function gatedRace<T>(
   run: Run,
+  probe: Probe,
   clients: Client[],
   work: (
     client: Client,
@@ -514,8 +601,12 @@ async function gatedRace<T>(
     open();
   }
   const results = await settled;
-  if (results.some((result) => result.status === "rejected"))
-    throw new Error("A concurrent transaction failed.");
+  const failed = results.find((result) => result.status === "rejected");
+  // The check reports the worker's own SQLSTATE or category.
+  if (failed) {
+    probe.at("outcome");
+    throw failed.reason;
+  }
   return {
     overlapped,
     distinct: distinct(clients.map((client) => run.pids.get(client)!)),
@@ -583,16 +674,15 @@ async function bootstrapRace(run: Run) {
   const after = await claimRow(owner);
   const pids = distinct([run.pids.get(first)!, run.pids.get(second)!]);
   if (closed) {
-    await run.check(
-      "bootstrap-claim-race",
-      async () =>
-        pids &&
-        holder?.ok === true &&
-        overlapped &&
-        firstOutcome?.code === "23514" &&
-        secondOutcome.code === "23514" &&
-        users === 0 &&
-        JSON.stringify(after) === before,
+    await run.check("bootstrap-claim-race", async (probe) =>
+      probe.all(
+        outcomeIs(holder?.ok === true, holder, "setup"),
+        ["backend-identity", pids],
+        ["lock-overlap", overlapped],
+        failsWith(firstOutcome, "23514"),
+        failsWith(secondOutcome, "23514"),
+        ["end-state", users === 0 && JSON.stringify(after) === before],
+      ),
     );
     return;
   }
@@ -608,18 +698,21 @@ async function bootstrapRace(run: Run) {
     [f.members.a1, f.teams.a, f.users.a1],
   );
   const completed = await claimRow(owner);
-  await run.check(
-    "bootstrap-claim-race",
-    async () =>
-      pids &&
-      overlapped &&
-      secondOutcome.code === "23514" &&
-      users === 1 &&
-      after.length === 1 &&
-      after[0].user_id === f.users.a1 &&
-      after[0].completed_at === null &&
-      completed.length === 1 &&
-      completed[0].completed_at !== null,
+  await run.check("bootstrap-claim-race", async (probe) =>
+    probe.all(
+      ["backend-identity", pids],
+      ["lock-overlap", overlapped],
+      failsWith(secondOutcome, "23514"),
+      [
+        "end-state",
+        users === 1 &&
+          after.length === 1 &&
+          after[0].user_id === f.users.a1 &&
+          after[0].completed_at === null &&
+          completed.length === 1 &&
+          completed[0].completed_at !== null,
+      ],
+    ),
   );
 }
 
@@ -805,28 +898,35 @@ async function runChecks(run: Run) {
       team,
     ]);
 
-  await check("cross-team-read", () =>
+  await check("cross-team-read", (probe) =>
     transaction(data, async () => {
+      probe.at("install");
       await installAs(data, signer, p.ownerA);
-      let pass = true;
+      probe.at("outcome");
+      let own = true;
+      let other = true;
       for (const table of APP_TABLES) {
         const { rows } = await data.query(
           `SELECT count(*) FILTER (WHERE team_id = $1)::int AS own, count(*) FILTER (WHERE team_id <> $1)::int AS other FROM app.${table}`,
           [f.teams.a],
         );
-        pass &&= Number(rows[0].own) > 0 && Number(rows[0].other) === 0;
+        own &&= Number(rows[0].own) > 0;
+        other &&= Number(rows[0].other) === 0;
       }
-      return pass;
+      return probe.all(["outcome", other], ["positive-control", own]);
     }),
   );
 
-  await check("cross-team-write", () =>
+  await check("cross-team-write", (probe) =>
     transaction(data, async () => {
+      probe.at("install");
       await installAs(data, signer, p.ownerA);
+      probe.at("setup");
       await data.query(
         "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
         [f.stores.seed],
       );
+      probe.at("outcome");
       const B = f.teams.b;
       const inserts: [string, unknown[]][] = [
         [
@@ -863,47 +963,64 @@ async function runChecks(run: Run) {
           [B, f.users.a1, `${B}:cross`],
         ],
       ];
-      let pass = true;
+      const conditions: Condition[] = [];
       for (const [text, params] of inserts)
-        pass &&= denied(await attempt(data, text, params));
+        conditions.push(denial(await attempt(data, text, params)));
       for (const table of APP_TABLES) {
-        pass &&= untouched(
-          await attempt(
-            data,
-            `UPDATE app.${table} SET team_id = team_id WHERE team_id = $1`,
-            [B],
+        conditions.push(
+          leftAlone(
+            await attempt(
+              data,
+              `UPDATE app.${table} SET team_id = team_id WHERE team_id = $1`,
+              [B],
+            ),
           ),
         );
-        pass &&= untouched(
-          await attempt(data, `DELETE FROM app.${table} WHERE team_id = $1`, [
-            B,
-          ]),
+        conditions.push(
+          leftAlone(
+            await attempt(data, `DELETE FROM app.${table} WHERE team_id = $1`, [
+              B,
+            ]),
+          ),
         );
       }
+      probe.at("positive-control");
       const own = await attempt(
         data,
         "UPDATE app.records SET updated_at = updated_at WHERE id = $1",
         [a.candidate],
       );
-      return pass && own.ok && own.count === 1;
+      return probe.all(
+        ...conditions,
+        outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+      );
     }),
   );
 
-  await check("identifier-guessing", async () => {
+  await check("identifier-guessing", async (probe) => {
     const guessed = await transaction(data, async () => {
+      probe.at("install");
       await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
       const ids = [b.candidate, b.vacancy, b.savedView];
-      let pass =
-        (await count(
-          data,
-          "SELECT count(*)::int AS n FROM app.records WHERE id = ANY($1::uuid[])",
-          [ids],
-        )) === 0 &&
-        (await count(
-          data,
-          "SELECT count(*)::int AS n FROM app.uploads WHERE id = $1",
-          [b.upload],
-        )) === 0;
+      const conditions: Condition[] = [
+        [
+          "outcome",
+          (await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.records WHERE id = ANY($1::uuid[])",
+            [ids],
+          )) === 0,
+        ],
+        [
+          "outcome",
+          (await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.uploads WHERE id = $1",
+            [b.upload],
+          )) === 0,
+        ],
+      ];
       for (const [text, params] of [
         [
           "UPDATE app.records SET data = data WHERE id = ANY($1::uuid[])",
@@ -916,7 +1033,7 @@ async function runChecks(run: Run) {
         ],
         ["DELETE FROM app.uploads WHERE id = $1", [b.upload]],
       ] as [string, unknown[]][])
-        pass &&= untouched(await attempt(data, text, params));
+        conditions.push(leftAlone(await attempt(data, text, params)));
       const application = (candidate: string, vacancy: string) =>
         attempt(
           data,
@@ -929,8 +1046,12 @@ async function runChecks(run: Run) {
             vacancy,
           ],
         );
-      pass &&= !(await application(b.candidate, b.vacancy)).ok;
-      pass &&= (await application(a.candidate, a.vacancy)).ok;
+      const otherApplication = await application(b.candidate, b.vacancy);
+      const ownApplication = await application(a.candidate, a.vacancy);
+      conditions.push(
+        outcomeIs(!otherApplication.ok, otherApplication),
+        outcomeIs(ownApplication.ok, ownApplication, "positive-control"),
+      );
       await data.query(
         "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
         [f.stores.seed],
@@ -945,10 +1066,15 @@ async function runChecks(run: Run) {
           f.stores.seed,
           f.users.a1,
         ]);
-      pass &&= !(await reserve(b.candidate, "other")).ok;
-      pass &&= (await reserve(a.candidate, "own")).ok;
-      return pass;
+      const otherUpload = await reserve(b.candidate, "other");
+      const ownUpload = await reserve(a.candidate, "own");
+      return probe.all(
+        ...conditions,
+        outcomeIs(!otherUpload.ok, otherUpload),
+        outcomeIs(ownUpload.ok, ownUpload, "positive-control"),
+      );
     });
+    probe.at("positive-control");
     const ownLease = await transaction(
       data,
       async () => {
@@ -964,7 +1090,7 @@ async function runChecks(run: Run) {
       },
       true,
     );
-    if (!ownLease) return false;
+    if (!ownLease) return probe.all(["positive-control", false]);
     await transaction(
       data,
       async () => {
@@ -975,12 +1101,17 @@ async function runChecks(run: Run) {
       },
       true,
     );
+    probe.at("end-state");
     const leases = await owner.query(
       "SELECT id::text AS id FROM storage_ledger.blob_read_leases WHERE id = ANY($1::uuid[])",
       [[guessLease, ownLease]],
     );
     return (
-      guessed && leases.rows.length === 1 && leases.rows[0].id === guessLease
+      guessed &&
+      probe.all([
+        "end-state",
+        leases.rows.length === 1 && leases.rows[0].id === guessLease,
+      ])
     );
   });
 
@@ -989,39 +1120,45 @@ async function runChecks(run: Run) {
     id: string,
     forge: () => Promise<{ payload: string; signature: string }>,
   ) =>
-    check(id, () =>
+    check(id, (probe) =>
       transaction(data, async () => {
         const assertion = await forge();
-        const rejected = denied(
-          await attempt(data, installSql, [
-            assertion.payload,
-            assertion.signature,
-          ]),
-        );
+        probe.at("outcome");
+        const rejected = await attempt(data, installSql, [
+          assertion.payload,
+          assertion.signature,
+        ]);
+        probe.at("positive-control");
         await installAs(data, signer, p.ownerA);
-        return rejected && (await ownRecords(data, f.teams.a)) > 0;
+        return probe.all(denial(rejected), [
+          "positive-control",
+          (await ownRecords(data, f.teams.a)) > 0,
+        ]);
       }),
     );
-  await check("forged-settings", () =>
+  await check("forged-settings", (probe) =>
     transaction(data, async () => {
       await data.query(
         "SELECT set_config('app.team_id',$1,true), set_config('app.user_id',$2,true)",
         [f.teams.a, f.users.a1],
       );
-      let pass = true;
+      probe.at("outcome");
+      let unseen = true;
       for (const table of APP_TABLES)
-        pass &&=
+        unseen &&=
           (await count(data, `SELECT count(*)::int AS n FROM app.${table}`)) ===
           0;
-      pass &&= denied(
-        await attempt(
-          data,
-          "INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary) VALUES($1,$2,'session','created','candidate',$3)",
-          [f.teams.a, f.users.a1, `Fictional event ${f.prefix}`],
-        ),
+      const insert = await attempt(
+        data,
+        "INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary) VALUES($1,$2,'session','created','candidate',$3)",
+        [f.teams.a, f.users.a1, `Fictional event ${f.prefix}`],
       );
+      probe.at("positive-control");
       await installAs(data, signer, p.ownerA);
-      return pass && (await ownRecords(data, f.teams.a)) > 0;
+      return probe.all(["outcome", unseen], denial(insert), [
+        "positive-control",
+        (await ownRecords(data, f.teams.a)) > 0,
+      ]);
     }),
   );
   await forged("forged-signature", async () => {
@@ -1041,70 +1178,88 @@ async function runChecks(run: Run) {
   );
 
   let replayed: { payload: string; signature: string } | undefined;
-  await check("replay-other-connection", async () => {
-    const pass = await transaction(
+  await check("replay-other-connection", async (probe) => {
+    let replay: Outcome | undefined;
+    let other = false;
+    const own = await transaction(
       data,
       async () => {
+        probe.at("install");
         const assertion = await installAs(data, signer, p.ownerA);
         replayed = assertion;
-        const other = await transaction(data2, async () => {
-          const replayed = denied(
-            await attempt(data2, installSql, [
-              assertion.payload,
-              assertion.signature,
-            ]),
-          );
+        other = await transaction(data2, async () => {
+          probe.at("outcome");
+          replay = await attempt(data2, installSql, [
+            assertion.payload,
+            assertion.signature,
+          ]);
+          probe.at("positive-control");
           await installAs(data2, signer, p.ownerA);
-          return replayed && (await ownRecords(data2, f.teams.a)) > 0;
+          return (await ownRecords(data2, f.teams.a)) > 0;
         });
-        return other && (await ownRecords(data, f.teams.a)) > 0;
+        return (await ownRecords(data, f.teams.a)) > 0;
       },
       true,
     );
-    return pass && distinct([run.pids.get(data)!, run.pids.get(data2)!]);
+    return probe.all(
+      [
+        "backend-identity",
+        distinct([run.pids.get(data)!, run.pids.get(data2)!]),
+      ],
+      outcomeIs(replay !== undefined && denied(replay), replay),
+      ["positive-control", other && own],
+    );
   });
   // The assertion committed above, installed again in a later transaction on the same backend.
-  await check("replay-later-transaction", async () => {
+  await check("replay-later-transaction", async (probe) => {
     const assertion = replayed;
     if (!assertion) return false;
     return transaction(data, async () => {
-      const rejected = denied(
-        await attempt(data, installSql, [
-          assertion.payload,
-          assertion.signature,
-        ]),
-      );
+      probe.at("outcome");
+      const rejected = await attempt(data, installSql, [
+        assertion.payload,
+        assertion.signature,
+      ]);
+      probe.at("positive-control");
       await installAs(data, signer, p.ownerA);
-      return rejected && (await ownRecords(data, f.teams.a)) > 0;
+      return probe.all(denial(rejected), [
+        "positive-control",
+        (await ownRecords(data, f.teams.a)) > 0,
+      ]);
     });
   });
 
-  await check("savepoint-replay", () =>
+  await check("savepoint-replay", (probe) =>
     transaction(data, async () => {
+      probe.at("install");
       const first = await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
       await data.query("SAVEPOINT replay");
-      const again = denied(
-        await attempt(data, installSql, [first.payload, first.signature]),
-      );
+      const again = await attempt(data, installSql, [
+        first.payload,
+        first.signature,
+      ]);
       await data.query("ROLLBACK TO SAVEPOINT replay");
       const fresh = await assertionFor(data, signer, p.ownerB);
-      const second = denied(
-        await attempt(data, installSql, [fresh.payload, fresh.signature]),
-      );
-      const replay = denied(
-        await attempt(data, installSql, [first.payload, first.signature]),
-      );
-      return (
-        again &&
-        second &&
-        replay &&
-        (await ownRecords(data, f.teams.a)) > 0 &&
-        (await ownRecords(data, f.teams.b)) === 0
+      const second = await attempt(data, installSql, [
+        fresh.payload,
+        fresh.signature,
+      ]);
+      const replay = await attempt(data, installSql, [
+        first.payload,
+        first.signature,
+      ]);
+      return probe.all(
+        denial(again),
+        denial(second),
+        denial(replay),
+        ["positive-control", (await ownRecords(data, f.teams.a)) > 0],
+        ["outcome", (await ownRecords(data, f.teams.b)) === 0],
       );
     }),
   );
 
-  await check("pooled-connection-reuse", async () => {
+  await check("pooled-connection-reuse", async (probe) => {
     const pool = new Pool({ ...clientConfig(run.dataUrl), max: 1 });
     pool.on("error", () => {});
     try {
@@ -1115,10 +1270,12 @@ async function runChecks(run: Run) {
         firstPid = Number(
           (await first.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
         );
+        probe.at("install");
         granted = await transaction(
           first,
           async () => {
             await installAs(first, signer, p.ownerA);
+            probe.at("positive-control");
             return (await ownRecords(first, f.teams.a)) > 0;
           },
           true,
@@ -1126,6 +1283,7 @@ async function runChecks(run: Run) {
       } finally {
         first.release();
       }
+      probe.at("outcome");
       const next = await pool.connect();
       try {
         const nextPid = Number(
@@ -1140,7 +1298,11 @@ async function runChecks(run: Run) {
                 `SELECT count(*)::int AS n FROM app.${table}`,
               )) === 0;
         });
-        return granted && nextPid === firstPid && unseen;
+        return probe.all(
+          ["positive-control", granted],
+          ["backend-identity", nextPid === firstPid],
+          ["outcome", unseen],
+        );
       } finally {
         next.release();
       }
@@ -1156,33 +1318,51 @@ async function runChecks(run: Run) {
     visible: string,
     own: [string, unknown[]][],
   ) =>
-    check(id, async () => {
+    check(id, async (probe) => {
       const member = await transaction(data, async () => {
+        probe.at("install");
         await installAs(data, signer, p.memberA);
+        probe.at("outcome");
         const [read, ...writes] = probes;
-        let pass = (await count(data, read[0], read[1])) === 0;
+        const conditions: Condition[] = [
+          ["outcome", (await count(data, read[0], read[1])) === 0],
+        ];
         for (const [text, params] of writes)
-          pass &&= untouched(await attempt(data, text, params));
-        return (
-          pass &&
-          (await count(data, visible, [f.teams.a])) > 0 &&
-          (
-            await attempt(
-              data,
-              "INSERT INTO app.notification_reads(team_id,user_id,key) VALUES($1,$2,$3)",
-              [f.teams.a, f.users.a2, `${f.teams.a}:${id}`],
-            )
-          ).ok
+          conditions.push(leftAlone(await attempt(data, text, params)));
+        probe.at("positive-control");
+        const visibleRows = await count(data, visible, [f.teams.a]);
+        const marker = await attempt(
+          data,
+          "INSERT INTO app.notification_reads(team_id,user_id,key) VALUES($1,$2,$3)",
+          [f.teams.a, f.users.a2, `${f.teams.a}:${id}`],
+        );
+        return probe.all(
+          ...conditions,
+          ["positive-control", visibleRows > 0],
+          outcomeIs(marker.ok, marker, "positive-control"),
         );
       });
       const owner = await transaction(data, async () => {
+        probe.at("install");
         await installAs(data, signer, p.ownerA);
-        let pass = (await count(data, probes[0][0], probes[0][1])) > 0;
+        probe.at("positive-control");
+        const conditions: Condition[] = [
+          [
+            "positive-control",
+            (await count(data, probes[0][0], probes[0][1])) > 0,
+          ],
+        ];
         for (const [text, params] of own) {
           const outcome = await attempt(data, text, params);
-          pass &&= outcome.ok && outcome.count > 0;
+          conditions.push(
+            outcomeIs(
+              outcome.ok && outcome.count > 0,
+              outcome,
+              "positive-control",
+            ),
+          );
         }
-        return pass;
+        return probe.all(...conditions);
       });
       return member && owner;
     });
@@ -1270,11 +1450,13 @@ async function runChecks(run: Run) {
       );
       return JSON.stringify(rows[0]);
     });
-  await check("data-role-identity-writes", async () => {
+  await check("data-role-identity-writes", async (probe) => {
     const before = await identityRows();
     const pass = await transaction(data, async () => {
+      probe.at("install");
       await installAs(data, signer, p.ownerA);
-      let denials = true;
+      probe.at("outcome");
+      const conditions: Condition[] = [];
       for (const [text, params] of [
         [
           "INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at) VALUES($1,$2,$3,$4,$5,$1,'[]'::jsonb,now() + interval '1 hour')",
@@ -1300,20 +1482,28 @@ async function runChecks(run: Run) {
           [f.tokens.live],
         ],
       ] as [string, unknown[]][])
-        denials &&= denied(await attempt(data, text, params));
-      return denials && (await ownRecords(data, f.teams.a)) > 0;
+        conditions.push(denial(await attempt(data, text, params)));
+      probe.at("positive-control");
+      return probe.all(...conditions, [
+        "positive-control",
+        (await ownRecords(data, f.teams.a)) > 0,
+      ]);
     });
-    return pass && (await identityRows()) === before;
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await identityRows()) === before]);
   });
 
-  await check("identity-role-candidate-reads", () =>
+  await check("identity-role-candidate-reads", (probe) =>
     transaction(identity, async () => {
+      probe.at("install");
       await installAs(identity, signer, p.ownerA);
+      probe.at("positive-control");
       const members = await count(
         identity,
         "SELECT count(*)::int AS n FROM auth.member WHERE organization_id = $1",
         [f.teams.a],
       );
+      probe.at("outcome");
       const records = await attempt(
         identity,
         "SELECT count(*) FROM app.records",
@@ -1322,57 +1512,73 @@ async function runChecks(run: Run) {
         identity,
         "SELECT count(*) FROM app.candidate_states",
       );
-      return members > 0 && denied(records) && denied(states);
+      return probe.all(
+        ["positive-control", members > 0],
+        denial(records),
+        denial(states),
+      );
     }),
   );
 
   /** A rejected install, then a valid session install and a read on the same connection. */
-  const rejectedThenSession = (principal: Principal, fallback: Principal) =>
+  const rejectedThenSession = (
+    probe: Probe,
+    principal: Principal,
+    fallback: Principal,
+  ) =>
     transaction(data, async () => {
+      probe.at("outcome");
       const assertion = await assertionFor(data, signer, principal);
-      const rejected = denied(
-        await attempt(data, installSql, [
-          assertion.payload,
-          assertion.signature,
-        ]),
-      );
+      const rejected = await attempt(data, installSql, [
+        assertion.payload,
+        assertion.signature,
+      ]);
+      probe.at("positive-control");
       await installAs(data, signer, fallback);
-      return rejected && (await ownRecords(data, fallback.team)) > 0;
+      return probe.all(denial(rejected), [
+        "positive-control",
+        (await ownRecords(data, fallback.team)) > 0,
+      ]);
     });
-  const granted = (principal: Principal) =>
+  const granted = (probe: Probe, principal: Principal) =>
     transaction(data, async () => {
+      probe.at("positive-control");
       await installAs(data, signer, principal);
       return (await ownRecords(data, principal.team)) > 0;
     });
-  await check("revoked-token", async () => {
-    const before = await granted(p.liveToken);
+  await check("revoked-token", async (probe) => {
+    const before = await granted(probe, p.liveToken);
+    probe.at("setup");
     const revoked = await identity.query(
       "UPDATE auth.api_tokens SET revoked_at = now() WHERE id = $1",
       [f.tokens.live],
     );
     return (
-      before &&
-      revoked.rowCount === 1 &&
-      (await rejectedThenSession(p.liveToken, p.ownerA))
+      probe.all(
+        ["positive-control", before],
+        ["setup", revoked.rowCount === 1],
+      ) && (await rejectedThenSession(probe, p.liveToken, p.ownerA))
     );
   });
-  await check("expired-token", () =>
-    rejectedThenSession(p.expiredToken, p.ownerA),
+  await check("expired-token", (probe) =>
+    rejectedThenSession(probe, p.expiredToken, p.ownerA),
   );
-  await check("demoted-owner", async () => {
-    const before = await granted(p.demotedB);
+  await check("demoted-owner", async (probe) => {
+    const before = await granted(probe, p.demotedB);
+    probe.at("setup");
     const demoted = await identity.query(
       "UPDATE auth.member SET role = 'viewer' WHERE id = $1",
       [f.members.b2],
     );
     return (
-      before &&
-      demoted.rowCount === 1 &&
-      (await rejectedThenSession(p.demotedB, p.viewerB))
+      probe.all(
+        ["positive-control", before],
+        ["setup", demoted.rowCount === 1],
+      ) && (await rejectedThenSession(probe, p.demotedB, p.viewerB))
     );
   });
 
-  await check("last-owner-race", async () => {
+  await check("last-owner-race", async (probe) => {
     const owners = () =>
       count(
         owner,
@@ -1387,6 +1593,7 @@ async function runChecks(run: Run) {
     let overlapped: boolean | undefined;
     let firstEnded = false;
     try {
+      probe.at("outcome");
       const first = await settle(
         identity.query("DELETE FROM auth.member WHERE id = $1", [f.members.c2]),
       );
@@ -1397,25 +1604,30 @@ async function runChecks(run: Run) {
         ]),
       );
       try {
+        probe.at("lock-overlap");
         overlapped = await waitForWaiters(owner, [run.pids.get(identity2)!], 1);
       } finally {
         await identity.query(first.ok ? "COMMIT" : "ROLLBACK");
         firstEnded = true;
       }
+      probe.at("outcome");
       demoted = await pending;
     } finally {
       if (!firstEnded) await identity.query("ROLLBACK").catch(() => {});
       // The demotion must fail; it is committed only if it unexpectedly succeeded, so the count shows it.
       await identity2.query(demoted?.ok ? "COMMIT" : "ROLLBACK");
     }
-    return (
-      distinct([run.pids.get(identity)!, run.pids.get(identity2)!]) &&
-      overlapped &&
-      before === 2 &&
-      removed.ok &&
-      removed.count === 1 &&
-      demoted.code === "23514" &&
-      (await owners()) === 1
+    probe.at("end-state");
+    return probe.all(
+      ["setup", before === 2],
+      [
+        "backend-identity",
+        distinct([run.pids.get(identity)!, run.pids.get(identity2)!]),
+      ],
+      ["lock-overlap", overlapped === true],
+      outcomeIs(removed.ok && removed.count === 1, removed),
+      failsWith(demoted, "23514"),
+      ["end-state", (await owners()) === 1],
     );
   });
 
@@ -1424,7 +1636,7 @@ async function runChecks(run: Run) {
     { principal: p.ownerB, candidate: b.candidate },
   ];
   const side = (index: number) => sides[index % 2];
-  await check("store-budget-race", async () => {
+  await check("store-budget-race", async (probe) => {
     const teamReserved = async () =>
       (
         await owner.query(
@@ -1433,26 +1645,32 @@ async function runChecks(run: Run) {
         )
       ).rows[0];
     const before = await teamReserved();
-    const race = await gatedRace(run, run.workers, async (client, index) => {
-      const { principal, candidate } = side(index);
-      await installAs(client, signer, principal);
-      await client.query(
-        "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
-        [f.stores.race],
-      );
-      const outcome = await settle(
-        client.query(INSERT_UPLOAD, [
-          principal.team,
-          candidate,
-          `${f.prefix}-race-${index}.pdf`,
-          UPLOAD_BYTES,
-          `${f.prefix}/race/${index}`,
-          f.stores.race,
-          principal.actor,
-        ]),
-      );
-      return { value: outcome, commit: outcome.ok };
-    });
+    const race = await gatedRace(
+      run,
+      probe,
+      run.workers,
+      async (client, index) => {
+        const { principal, candidate } = side(index);
+        await installAs(client, signer, principal);
+        await client.query(
+          "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
+          [f.stores.race],
+        );
+        const outcome = await settle(
+          client.query(INSERT_UPLOAD, [
+            principal.team,
+            candidate,
+            `${f.prefix}-race-${index}.pdf`,
+            UPLOAD_BYTES,
+            `${f.prefix}/race/${index}`,
+            f.stores.race,
+            principal.actor,
+          ]),
+        );
+        return { value: outcome, commit: outcome.ok };
+      },
+    );
+    probe.at("end-state");
     const after = await teamReserved();
     const store = (
       await owner.query(
@@ -1470,33 +1688,52 @@ async function runChecks(run: Run) {
     const refused = race.values.filter(
       (outcome) => outcome.code === "RQ001",
     ).length;
-    return (
-      race.distinct &&
-      race.overlapped &&
-      succeeded === STORE_ROOM &&
-      refused === WORKERS - STORE_ROOM &&
-      store.within === true &&
-      Number(store.files) === STORE_ROOM &&
-      Number(store.pending) === STORE_ROOM &&
-      store.bytes === store.pending_bytes &&
-      Number(after.bytes) - Number(before.bytes) === Number(store.bytes) &&
-      Number(after.files) - Number(before.files) === Number(store.files)
+    // A refusal other than the budget's names its own error; otherwise too many succeeded or too few did.
+    const unexpected = race.values.find(
+      (outcome) => !outcome.ok && outcome.code !== "RQ001",
+    );
+    return probe.all(
+      ["backend-identity", race.distinct],
+      ["lock-overlap", race.overlapped],
+      [
+        "outcome",
+        succeeded === STORE_ROOM && refused === WORKERS - STORE_ROOM,
+        unexpected?.error ?? (succeeded > STORE_ROOM ? "assertion" : "RQ001"),
+      ],
+      [
+        "end-state",
+        store.within === true &&
+          Number(store.files) === STORE_ROOM &&
+          Number(store.pending) === STORE_ROOM &&
+          store.bytes === store.pending_bytes &&
+          Number(after.bytes) - Number(before.bytes) === Number(store.bytes) &&
+          Number(after.files) - Number(before.files) === Number(store.files),
+      ],
     );
   });
 
-  const leaseRace = async (store: string) => {
-    const race = await gatedRace(run, run.workers, async (client, index) => {
-      const { principal } = side(index);
-      await installAs(client, signer, principal);
-      const { rows } = await client.query(
-        "SELECT tenant_context.acquire_blob_read($1)::text AS lease",
-        [store],
-      );
-      return {
-        value: { team: principal.team, lease: rows[0].lease as string | null },
-        commit: true,
-      };
-    });
+  const leaseRace = async (probe: Probe, store: string) => {
+    const race = await gatedRace(
+      run,
+      probe,
+      run.workers,
+      async (client, index) => {
+        const { principal } = side(index);
+        await installAs(client, signer, principal);
+        const { rows } = await client.query(
+          "SELECT tenant_context.acquire_blob_read($1)::text AS lease",
+          [store],
+        );
+        return {
+          value: {
+            team: principal.team,
+            lease: rows[0].lease as string | null,
+          },
+          commit: true,
+        };
+      },
+    );
+    probe.at("end-state");
     const live = (
       await owner.query(
         `SELECT count(*)::int AS total,
@@ -1509,7 +1746,10 @@ async function runChecks(run: Run) {
     const grantedTo = (team: string) =>
       race.values.filter((value) => value.team === team && value.lease).length;
     return {
-      ok: race.distinct && race.overlapped,
+      race: [
+        ["backend-identity", race.distinct],
+        ["lock-overlap", race.overlapped],
+      ] as Condition[],
       a: grantedTo(f.teams.a),
       b: grantedTo(f.teams.b),
       live: {
@@ -1519,36 +1759,37 @@ async function runChecks(run: Run) {
       },
     };
   };
-  await check("read-lease-team-cap", async () => {
-    const race = await leaseRace(f.stores.lease);
-    return (
-      race.ok &&
-      race.a === 2 &&
-      race.b === 2 &&
-      race.live.a <= 2 &&
-      race.live.b <= 2 &&
-      race.live.total === 4
+  await check("read-lease-team-cap", async (probe) => {
+    const race = await leaseRace(probe, f.stores.lease);
+    return probe.all(
+      ...race.race,
+      ["outcome", race.a === 2 && race.b === 2],
+      [
+        "end-state",
+        race.live.a <= 2 && race.live.b <= 2 && race.live.total === 4,
+      ],
     );
   });
-  await check("read-lease-store-cap", async () => {
-    const race = await leaseRace(f.stores.cap);
-    return (
-      race.ok &&
-      race.a <= 2 &&
-      race.b <= 2 &&
-      race.a + race.b === 3 &&
-      race.live.total === 8
+  await check("read-lease-store-cap", async (probe) => {
+    const race = await leaseRace(probe, f.stores.cap);
+    return probe.all(
+      ...race.race,
+      ["outcome", race.a <= 2 && race.b <= 2 && race.a + race.b === 3],
+      ["end-state", race.live.total === 8],
     );
   });
 
-  await check("denied-mutations-no-audit", async () => {
+  await check("denied-mutations-no-audit", async (probe) => {
+    probe.at("end-state");
     const end = await activityCounts(owner, f);
-    return (
-      baseline.private > 0 &&
-      baseline.token === 1 &&
-      end.total === baseline.total &&
-      end.private === baseline.private &&
-      end.token === baseline.token
+    return probe.all(
+      ["setup", baseline.private > 0 && baseline.token === 1],
+      [
+        "end-state",
+        end.total === baseline.total &&
+          end.private === baseline.private &&
+          end.token === baseline.token,
+      ],
     );
   });
 }
@@ -1691,6 +1932,7 @@ export async function main(env: Env = process.env): Promise<number> {
   const migrationUrl = env.MIGRATION_DATABASE_URL;
   const confirm = env.LIVE_ROLE_TESTS_CONFIRM;
   const signingKey = env.TENANT_CONTEXT_SIGNING_KEY;
+  const diagnose = env.LIVE_ROLE_TESTS_DIAGNOSE === "1";
   if (!dataUrl || !identityUrl || !migrationUrl || !confirm || !signingKey)
     return refuse(
       "Set DATABASE_URL, IDENTITY_DATABASE_URL, MIGRATION_DATABASE_URL, LIVE_ROLE_TESTS_CONFIRM and TENANT_CONTEXT_SIGNING_KEY.",
@@ -1767,7 +2009,12 @@ export async function main(env: Env = process.env): Promise<number> {
         ),
       );
     const f = fixtureNames(`lrt${randomBytes(6).toString("hex")}`);
-    const results: { id: string; pass: boolean }[] = [];
+    const results: {
+      id: string;
+      pass: boolean;
+      phase?: Phase;
+      error?: string;
+    }[] = [];
     const run: Run = {
       ...connections,
       pids,
@@ -1776,19 +2023,43 @@ export async function main(env: Env = process.env): Promise<number> {
       f,
       variant: ready.variant,
       async check(id, work) {
+        let phase: Phase = "setup";
+        let failure: Condition | undefined;
+        const probe: Probe = {
+          at: (next) => {
+            phase = next;
+          },
+          all: (...conditions) => {
+            const failed = conditions.find(([, holds]) => !holds);
+            failure ??= failed;
+            return !failed;
+          },
+        };
         let pass: boolean;
         try {
-          pass = (await work()) === true;
-        } catch {
+          pass = (await work(probe)) === true;
+        } catch (error) {
           pass = false;
+          failure ??= [phase, false, errorCategory(error)];
         }
-        results.push({ id, pass });
+        const [failedPhase, , failedError] = failure ?? [phase, false];
+        results.push(
+          pass
+            ? { id, pass }
+            : {
+                id,
+                pass,
+                phase: failedPhase,
+                error: failedError ?? "assertion",
+              },
+        );
       },
     };
     let error = false;
     let created: Counts = {};
     let remaining: Counts = {};
     let restored = false;
+    let cleanupError = "assertion";
     try {
       await runChecks(run);
     } catch {
@@ -1806,9 +2077,14 @@ export async function main(env: Env = process.env): Promise<number> {
         error = true;
       }
       try {
-        restored = await cleanup(run.owner, f, run.variant);
-      } catch {
+        ({ restored, error: cleanupError } = await cleanup(
+          run.owner,
+          f,
+          run.variant,
+        ));
+      } catch (error) {
         restored = false;
+        cleanupError = errorCategory(error);
       }
       try {
         remaining = await fixtureCounts(run.owner, f, run.variant);
@@ -1816,10 +2092,18 @@ export async function main(env: Env = process.env): Promise<number> {
         error = true;
       }
     }
-    results.push({ id: "cleanup-restored", pass: restored });
-    const failedChecks = results
-      .filter((result) => !result.pass)
-      .map((result) => result.id);
+    results.push(
+      restored
+        ? { id: "cleanup-restored", pass: restored }
+        : {
+            id: "cleanup-restored",
+            pass: restored,
+            phase: "cleanup",
+            error: cleanupError,
+          },
+    );
+    const failed = results.filter((result) => !result.pass);
+    const failedChecks = failed.map((result) => result.id);
     const removed = Object.fromEntries(
       Object.entries(created).map(([table, rows]) => [
         table,
@@ -1842,6 +2126,15 @@ export async function main(env: Env = process.env): Promise<number> {
             failed: failedChecks.length,
           },
           failedChecks,
+          ...(diagnose
+            ? {
+                diagnostics: failed.map(({ id, phase, error }) => ({
+                  check: id,
+                  phase,
+                  error,
+                })),
+              }
+            : {}),
           bootstrapVariant: run.variant,
           fixtures: { created, removed, remaining },
           pass,
