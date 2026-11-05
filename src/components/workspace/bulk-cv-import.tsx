@@ -83,6 +83,22 @@ const tags = (value: string) =>
     .map((part) => part.trim())
     .filter(Boolean);
 
+export type CvImportState =
+  "checking" | "not-set-up" | "unavailable" | "error" | "ready";
+/** Controls render only once the capability check has an answer. */
+export function cvImportState(capability: {
+  data: {
+    data: { uploadsAvailable: boolean; storageConfigured: boolean };
+  } | null;
+  error: string;
+}): CvImportState {
+  if (capability.error) return "error";
+  const data = capability.data?.data;
+  if (!data) return "checking";
+  if (!data.storageConfigured) return "not-set-up";
+  return data.uploadsAvailable ? "ready" : "unavailable";
+}
+
 export function BulkCvImport({
   onClose,
   onChanged,
@@ -98,7 +114,7 @@ export function BulkCvImport({
       storageConfigured: boolean;
     };
   }>("/api/v1/cvs/bulk-capabilities");
-  const storageMissing = capability.data?.data.storageConfigured === false;
+  const importState = cvImportState(capability);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
@@ -329,7 +345,12 @@ export function BulkCvImport({
           Drafts stay in this browser until you close this window or switch
           teams.
         </p>
-        {storageMissing ? (
+        {importState === "checking" && (
+          <p className="muted" role="status">
+            Checking CV import availability…
+          </p>
+        )}
+        {importState === "not-set-up" && (
           <div className="notice" role="status">
             <strong>CV uploads are not set up yet.</strong>
             <p>
@@ -338,16 +359,15 @@ export function BulkCvImport({
               the candidate directory.
             </p>
           </div>
-        ) : (
-          !capability.data?.data.uploadsAvailable && (
-            <p className="notice error" role="status">
-              CV import is unavailable while private storage safeguards are
-              being verified. You can prepare a review draft, but candidates
-              cannot be imported yet.
-            </p>
-          )
         )}
-        {capability.error && (
+        {importState === "unavailable" && (
+          <p className="notice error" role="status">
+            CV import is unavailable while private storage safeguards are being
+            verified. You can prepare a review draft, but candidates cannot be
+            imported yet.
+          </p>
+        )}
+        {importState === "error" && (
           <p className="notice error" role="alert">
             Could not check import availability. {capability.error}
           </p>
@@ -361,7 +381,7 @@ export function BulkCvImport({
           team and show up to 20 matches. They do not check names or guarantee
           that a candidate is unique.
         </p>
-        {!storageMissing && (
+        {(importState === "ready" || importState === "unavailable") && (
           <div className="field">
             <label htmlFor="bulk-cv-files">Choose CV files</label>
             <input

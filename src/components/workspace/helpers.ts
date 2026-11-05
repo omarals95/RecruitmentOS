@@ -43,6 +43,64 @@ export function formatDate(value: unknown, includeTime = false) {
     ...(includeTime ? { hour: "2-digit", minute: "2-digit" } : {}),
   }).format(date);
 }
+export function formatNumber(value: number) {
+  return new Intl.NumberFormat("en-GB").format(value);
+}
+export function formatMoney(amount: unknown, currency: string) {
+  if (amount === null || amount === undefined || amount === "")
+    return "Not recorded";
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency }).format(
+    Number(amount),
+  );
+}
+/** One display rule per field type, so detail facts and table cells agree. */
+export function formatField(
+  field: { key: string; type: string },
+  data: Record<string, unknown>,
+) {
+  const value = data[field.key];
+  if (field.key === "amount") return formatMoney(value, String(data.currency));
+  if (field.type === "date") return formatDate(value);
+  if (field.type === "datetime-local") return formatDate(value, true);
+  if (field.type === "number" && typeof value === "number")
+    return formatNumber(value);
+  return display(value);
+}
+/** Imported comments keep their source label; a user ID is never shown. */
+export function commentAuthor(comment: RecordDto) {
+  const legacy = dataOf(comment).legacyAuthorLabel;
+  if (legacy) return `${String(legacy)} · imported label`;
+  return comment.authorName || "Author not recorded";
+}
+/** Filters hidden behind the phone "Filters" button; search and sorting are not counted. */
+export function activeFilterCount(
+  filters: {
+    status: string;
+    category: string;
+    categories: string[];
+    skills: string[];
+    shortlisted: boolean;
+    reviewStatus: string;
+    emirate: string;
+    degree: string;
+    vacancy: string;
+    archived: boolean;
+  },
+  shortlistSection = false,
+) {
+  return [
+    filters.status,
+    filters.category,
+    filters.categories.length > 0,
+    filters.skills.length > 0,
+    filters.shortlisted && !shortlistSection,
+    filters.reviewStatus,
+    filters.emirate,
+    filters.degree,
+    filters.vacancy,
+    filters.archived,
+  ].filter(Boolean).length;
+}
 export function toDubaiInput(value: string) {
   if (!value) return "";
   const date = new Date(value);

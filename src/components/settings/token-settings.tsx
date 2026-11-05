@@ -18,15 +18,11 @@ import {
   requestJson,
   useWorkspace,
 } from "@/components/workspace/client";
+import { formatDate } from "@/components/workspace/helpers";
 import { SettingsNavigation } from "./settings-navigation";
 
 const date = (value: string | null) =>
-  value
-    ? new Date(value).toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-    : "Never";
+  value ? formatDate(value, true) : "Never";
 
 export function TokenSettings() {
   const { team } = useWorkspace();

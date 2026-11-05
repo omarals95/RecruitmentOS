@@ -20,7 +20,13 @@ import {
 } from "lucide-react";
 import type { RecordDto, ResourceName } from "@/domain/records";
 import { RecordEditor } from "./editor";
-import { dataOf, formatDate, recordLabel, saveCsv } from "./helpers";
+import {
+  dataOf,
+  formatDate,
+  formatNumber,
+  recordLabel,
+  saveCsv,
+} from "./helpers";
 import { useApi, useWorkspace, requestJson, humanError } from "./client";
 import {
   BarChart,
@@ -137,7 +143,7 @@ export function Overview() {
                 value={result.data.counts.vacancies}
                 icon={BriefcaseBusiness}
                 href="/app/vacancies"
-                caption="Roles currently being recruited"
+                caption="Vacancies with status Open"
               />
               <Stat
                 label="Applications"
@@ -156,21 +162,22 @@ export function Overview() {
             </div>
             <div className="data-reconciliation">
               <span>
-                <strong>
-                  {result.data.counts.candidates?.toLocaleString()}
-                </strong>{" "}
+                <strong>{formatNumber(result.data.counts.candidates)}</strong>{" "}
                 candidate records
               </span>
               <span>
                 <strong>
-                  {result.data.counts.cvFiles?.toLocaleString() ?? "—"}
+                  {result.data.counts.cvFiles === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.cvFiles)}
                 </strong>{" "}
                 private CV files
               </span>
               <span>
                 <strong>
-                  {result.data.counts.candidatesWithCvs?.toLocaleString() ??
-                    "—"}
+                  {result.data.counts.candidatesWithCvs === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.candidatesWithCvs)}
                 </strong>{" "}
                 candidates with CVs
               </span>
@@ -356,7 +363,7 @@ function Stat({
         </span>
       </div>
       <strong className="stat-value">
-        {typeof value === "number" ? value.toLocaleString() : "—"}
+        {typeof value === "number" ? formatNumber(value) : "—"}
       </strong>
       <div className="row space-between">
         <small>{caption}</small>
@@ -405,7 +412,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
           <div className="row space-between">
             <span>{row.name}</span>
             <strong>
-              {row.count.toLocaleString()} / {coverage.total.toLocaleString()}
+              {formatNumber(row.count)} / {formatNumber(coverage.total)}
             </strong>
           </div>
           <progress
@@ -418,7 +425,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
       <Link className="coverage-review" href="/app/source-review">
         <span>Source records needing review</span>
         <strong>
-          {coverage.reviewRequired.toLocaleString()}
+          {formatNumber(coverage.reviewRequired)}
           <ArrowUpRight size={15} aria-hidden="true" />
         </strong>
       </Link>
@@ -605,7 +612,7 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     caption="Current active application records"
                   />
                   <Stat
-                    label="Vacancies"
+                    label="Open vacancies"
                     value={result.data.counts.vacancies}
                     icon={BriefcaseBusiness}
                     href="/app/vacancies"
@@ -646,7 +653,10 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     <BarChart data={result.data.offers} />
                   </section>
                   <section className="panel">
-                    <PanelHeading title="Open roles by department" />
+                    <PanelHeading
+                      title="Open roles by department"
+                      description="Vacancies with status Open"
+                    />
                     <BarChart data={result.data.departments} />
                   </section>
                 </div>

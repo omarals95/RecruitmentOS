@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Archive,
@@ -14,8 +14,6 @@ import {
   FileText,
   Filter,
   FolderOpen,
-  LayoutGrid,
-  List,
   LoaderCircle,
   Mail,
   MessageSquare,
@@ -39,16 +37,21 @@ import {
 import { CvUpload } from "@/components/cv-upload";
 import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
+import { DisplayModeToggle, type DisplayMode } from "./display-mode-toggle";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
 import { personalStateMutation } from "./mutation";
 import {
+  activeFilterCount,
   dataOf,
   display,
   recordLabel,
   initials,
   formatDate,
+  formatField,
+  formatNumber,
+  commentAuthor,
   badgeTone,
   saveCsv,
 } from "./helpers";
@@ -130,8 +133,8 @@ export const screenDefinitions: Record<
     resource: "candidates",
   },
   vacancies: {
-    title: "Open vacancies",
-    description: "A clear view of the roles your team is working to fill.",
+    title: "Vacancies",
+    description: "Every vacancy your team manages, from draft to closed.",
     resource: "vacancies",
   },
   roles: {
@@ -199,7 +202,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const [direction, setDirection] = useState("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [mode, setMode] = useState<"table" | "cards" | "board">(
+  const [mode, setMode] = useState<DisplayMode>(
     resource === "tasks" || resource === "applications"
       ? "board"
       : resource === "vacancies" || resource === "job-roles"
@@ -207,6 +210,8 @@ export function RecordsScreen({ section }: { section: string }) {
         : "table",
   );
   const [selected, setSelected] = useState<string[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;
@@ -427,6 +432,26 @@ export function RecordsScreen({ section }: { section: string }) {
   const columns =
     tableColumns[resource] ||
     RESOURCE_CONFIG[resource].fields.slice(0, 5).map((field) => field.key);
+  const columnField = (key: string) =>
+    RESOURCE_CONFIG[resource].fields.find((f) => f.key === key);
+  const columnLabel = (key: string) => columnField(key)?.label || key;
+  const cellText = (key: string, record: RecordDto) =>
+    formatField(columnField(key) || { key, type: "text" }, dataOf(record));
+  const filterCount = activeFilterCount(
+    {
+      status,
+      category,
+      categories,
+      skills,
+      shortlisted,
+      reviewStatus,
+      emirate,
+      degree,
+      vacancy,
+      archived,
+    },
+    section === "shortlist",
+  );
   const stateOptions =
     resource === "applications"
       ? APPLICATION_STAGES
@@ -446,7 +471,7 @@ export function RecordsScreen({ section }: { section: string }) {
             {config.title}
             {result.data && (
               <span className="heading-count">
-                {result.data.pagination.total.toLocaleString()}
+                {formatNumber(result.data.pagination.total)}
               </span>
             )}
           </h1>
@@ -569,31 +594,11 @@ export function RecordsScreen({ section }: { section: string }) {
               )}
               Export
             </button>
-            <div className="view-toggle" aria-label="Display mode">
-              {(resource === "applications" || resource === "tasks") && (
-                <button
-                  aria-label="Board view"
-                  aria-pressed={mode === "board"}
-                  onClick={() => setMode("board")}
-                >
-                  <LayoutGrid size={17} />
-                </button>
-              )}
-              <button
-                aria-label="Table view"
-                aria-pressed={mode === "table"}
-                onClick={() => setMode("table")}
-              >
-                <List size={18} />
-              </button>
-              <button
-                aria-label="Card view"
-                aria-pressed={mode === "cards"}
-                onClick={() => setMode("cards")}
-              >
-                <LayoutGrid size={17} />
-              </button>
-            </div>
+            <DisplayModeToggle
+              board={resource === "applications" || resource === "tasks"}
+              mode={mode}
+              onChange={setMode}
+            />
             <button
               className="icon-button"
               aria-label="Refresh records"
@@ -601,9 +606,21 @@ export function RecordsScreen({ section }: { section: string }) {
             >
               <RefreshCw size={17} />
             </button>
+            <button
+              className="button secondary filters-toggle"
+              aria-expanded={filtersOpen}
+              aria-controls={filtersId}
+              onClick={() => setFiltersOpen((open) => !open)}
+            >
+              <Filter size={16} aria-hidden="true" />
+              {filterCount > 0 ? `Filters (${filterCount})` : "Filters"}
+            </button>
           </div>
         </div>
-        <div className="filter-bar">
+        <div
+          className={`filter-bar${filtersOpen ? " is-open" : ""}`}
+          id={filtersId}
+        >
           {stateOptions.length > 0 && (
             <label>
               Status
@@ -884,11 +901,7 @@ export function RecordsScreen({ section }: { section: string }) {
                   ) && <th>Application</th>}
                   {resource === "onboarding" && <th>Checklist progress</th>}
                   {columns.map((key) => (
-                    <th key={key}>
-                      {RESOURCE_CONFIG[resource].fields.find(
-                        (f) => f.key === key,
-                      )?.label || key}
-                    </th>
+                    <th key={key}>{columnLabel(key)}</th>
                   ))}
                   <th>
                     <span className="sr-only">Actions</span>
@@ -902,7 +915,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     className={record.archivedAt ? "is-archived" : ""}
                   >
                     {resource === "candidates" && (
-                      <td>
+                      <td data-label="Select">
                         <input
                           type="checkbox"
                           aria-label={`Select ${recordLabel(record)}`}
@@ -919,13 +932,13 @@ export function RecordsScreen({ section }: { section: string }) {
                     )}
                     {resource === "applications" && (
                       <>
-                        <td>
+                        <td data-label="Candidate">
                           <ReferenceLabel
                             resource="candidates"
                             id={record.candidateId}
                           />
                         </td>
-                        <td>
+                        <td data-label="Vacancy">
                           <ReferenceLabel
                             resource="vacancies"
                             id={record.vacancyId}
@@ -936,7 +949,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     {["interviews", "offers", "onboarding"].includes(
                       resource,
                     ) && (
-                      <td>
+                      <td data-label="Application">
                         <ReferenceLabel
                           resource="applications"
                           id={record.applicationId}
@@ -944,12 +957,12 @@ export function RecordsScreen({ section }: { section: string }) {
                       </td>
                     )}
                     {resource === "onboarding" && (
-                      <td>
+                      <td data-label="Checklist progress">
                         <OnboardingProgress id={record.id} />
                       </td>
                     )}
                     {columns.map((key, index) => (
-                      <td key={key}>
+                      <td key={key} data-label={columnLabel(key)}>
                         {index === 0 ? (
                           <button
                             className="table-record-button"
@@ -961,7 +974,7 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                             <span>
-                              <strong>{display(dataOf(record)[key])}</strong>
+                              <strong>{cellText(key, record)}</strong>
                               {resource === "candidates" && (
                                 <small>
                                   {String(
@@ -993,10 +1006,8 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                           </div>
-                        ) : key.endsWith("Date") || key === "startAt" ? (
-                          formatDate(dataOf(record)[key], key === "startAt")
                         ) : (
-                          display(dataOf(record)[key])
+                          cellText(key, record)
                         )}
                       </td>
                     ))}
@@ -1030,7 +1041,7 @@ export function RecordsScreen({ section }: { section: string }) {
                 </select>
               </label>
               <span className="muted">
-                {result.data.pagination.total.toLocaleString()} matching records
+                {formatNumber(result.data.pagination.total)} matching records
                 {mode === "board" ? " · board shows this page" : ""}
               </span>
             </div>
@@ -1578,6 +1589,10 @@ function OnboardingProgress({ id }: { id: string }) {
     </div>
   );
 }
+const customFieldTypes: Record<string, string> = {
+  Date: "date",
+  Number: "number",
+};
 function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
   const fields = useApi<ListResponse>(
     "/api/v1/task-fields?pageSize=100&includeArchived=true&sort=position",
@@ -1606,7 +1621,16 @@ function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
                   ? value
                     ? "Yes"
                     : "No"
-                  : display(value)}
+                  : formatField(
+                      {
+                        key,
+                        type:
+                          (field &&
+                            customFieldTypes[String(dataOf(field).type)]) ||
+                          "text",
+                      },
+                      values,
+                    )}
               </dd>
             </div>
           );
@@ -1981,7 +2005,7 @@ export function RecordDetail({
                             "Not recorded"}
                         </div>
                       ) : (
-                        display(data[field.key])
+                        formatField(field, data)
                       )}
                     </dd>
                   </div>
@@ -2162,7 +2186,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           CV files & versions
           {result.data && (
             <span className="heading-count">
-              {result.data.pagination.total.toLocaleString()} file records
+              {formatNumber(result.data.pagination.total)} file records
             </span>
           )}
         </h3>
@@ -2236,8 +2260,8 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
         <nav className="pagination" aria-label="CV file pages">
           <span>
             {result.data.data.length > 0
-              ? `Showing ${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, result.data.pagination.total).toLocaleString()} of ${result.data.pagination.total.toLocaleString()} file records`
-              : `0 records on this page · ${result.data.pagination.total.toLocaleString()} total file records`}
+              ? `Showing ${formatNumber((page - 1) * pageSize + 1)}–${formatNumber(Math.min(page * pageSize, result.data.pagination.total))} of ${formatNumber(result.data.pagination.total)} file records`
+              : `0 records on this page · ${formatNumber(result.data.pagination.total)} total file records`}
           </span>
           <div className="row">
             <button
@@ -2624,10 +2648,7 @@ function Discussion({ recordId }: { recordId: string }) {
       {result.data?.data.map((comment) => (
         <article className="comment" key={comment.id}>
           <header>
-            <strong>
-              {String(dataOf(comment).legacyAuthorLabel || comment.createdBy)}
-              {dataOf(comment).legacyAuthorLabel ? " · imported label" : ""}
-            </strong>
+            <strong>{commentAuthor(comment)}</strong>
             <time>{formatDate(comment.createdAt, true)}</time>
           </header>
           <p className="pre-wrap">{String(dataOf(comment).body)}</p>
@@ -2833,7 +2854,7 @@ function WorkflowSettings({ onClose }: { onClose: () => void }) {
                     ? "Archived"
                     : tab === "task-fields"
                       ? `${dataOf(record).type}${dataOf(record).required ? " · Required" : ""}`
-                      : `Position ${dataOf(record).position}`}
+                      : `Position ${dataOf(record).position}${dataOf(record).completed ? " · Counts as completed" : ""}`}
                 </small>
               </span>
               <div className="row">

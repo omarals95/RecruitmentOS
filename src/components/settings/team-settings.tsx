@@ -8,6 +8,7 @@ import {
   requestJson,
   useWorkspace,
 } from "@/components/workspace/client";
+import { formatDate } from "@/components/workspace/helpers";
 import { SettingsNavigation } from "./settings-navigation";
 
 interface TeamSummary {
@@ -602,11 +603,7 @@ function TeamSettingsContent() {
                               <tr key={item.id}>
                                 <td>{item.email}</td>
                                 <td>{item.role}</td>
-                                <td>
-                                  {new Date(
-                                    item.expiresAt,
-                                  ).toLocaleDateString()}
-                                </td>
+                                <td>{formatDate(item.expiresAt)}</td>
                                 <td>
                                   <button
                                     className="button secondary"

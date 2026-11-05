@@ -76,6 +76,10 @@ async function inventory(tx: TeamTx, p: Principal) {
     .where(active(p));
   return counts;
 }
+/** A task is completed when its bucket says so; a missing flag means not completed. */
+function notCompleted(p: Principal, bucketId: SQL) {
+  return sql`not exists(select 1 from ${records} b where b.team_id=${p.teamId} and b.id=${bucketId} and b.kind='bucket' and b.data->>'completed'='true')`;
+}
 async function stages(tx: TeamTx, p: Principal): Promise<Count[]> {
   const rows = await tx
     .select({ name: sql<string>`${records.data}->>'stage'`, count: count() })
@@ -87,6 +91,11 @@ async function stages(tx: TeamTx, p: Principal): Promise<Count[]> {
     count: rows.find((row) => row.name === name)?.count ?? 0,
   }));
 }
+// Groups that only count records in one status.
+const statusFilters: Record<string, string> = {
+  "offer.declineReason": "Declined",
+  "vacancy.department": "Open",
+};
 async function grouped(
   tx: TeamTx,
   p: Principal,
@@ -95,8 +104,8 @@ async function grouped(
   array = false,
 ): Promise<Count[]> {
   // Aggregate in PostgreSQL; do not load candidate texts, comments or notes.
-  const statusFilter =
-    field === "declineReason" ? sql`and r.data->>'status'='Declined'` : sql``;
+  const status = statusFilters[`${kind}.${field}`];
+  const statusFilter = status ? sql`and r.data->>'status'=${status}` : sql``;
   const source = array
     ? sql`select distinct r.id, coalesce(nullif(btrim(tag.value),''),'Not recorded') as name from ${records} r
         cross join lateral jsonb_array_elements_text(case when jsonb_typeof(r.data->${field})='array' and r.data->${field}<>'[]'::jsonb then r.data->${field} else '["Not recorded"]'::jsonb end) tag(value)
@@ -200,6 +209,7 @@ export async function overview(p: Principal) {
           active(p, "task"),
           sql`coalesce(${records.data}->>'dueDate','')<>''`,
           sql`${records.data}->>'dueDate'<${today}`,
+          notCompleted(p, sql`${records.bucketId}`),
         ),
       )
       .orderBy(asc(sql`${records.data}->>'dueDate'`), asc(records.id))
@@ -507,8 +517,8 @@ function dueSource(p: Principal, now = new Date()): SQL {
   return sql`with possible as(select id,kind,onboarding_id as parent_id,data->>'title' as title,
     case when kind='interview' then to_char((data->>'startAt')::timestamptz at time zone 'Asia/Dubai','YYYY-MM-DD') when kind='offer' then data->>'expiryDate' when kind='vacancy' then data->>'targetDate' when kind='onboarding' then data->>'startDate' else data->>'dueDate' end as day,
     case when kind='interview' then data->>'startAt' when kind='offer' then data->>'expiryDate' when kind='vacancy' then data->>'targetDate' when kind='onboarding' then data->>'startDate' else data->>'dueDate' end as due_value
-    from ${records} where team_id=${p.teamId} and archived_at is null and private_owner_id is null and(
-      kind='task' or(kind='interview' and data->>'status'='Scheduled') or(kind='offer' and data->>'status'='Sent') or(kind='checklist' and data->>'status' not in('Complete','Waived')) or(kind='vacancy' and data->>'status'='Open') or(kind='onboarding' and data->>'status' in('Planned','In progress')))),
+    from ${records} r where team_id=${p.teamId} and archived_at is null and private_owner_id is null and(
+      (kind='task' and ${notCompleted(p, sql`r.bucket_id`)}) or(kind='interview' and data->>'status'='Scheduled') or(kind='offer' and data->>'status'='Sent') or(kind='checklist' and data->>'status' not in('Complete','Waived')) or(kind='vacancy' and data->>'status'='Open') or(kind='onboarding' and data->>'status' in('Planned','In progress')))),
     due as(select *,kind||':'||id::text||':'||due_value as key from possible where coalesce(day,'')<>'' and day<=${horizon})`;
 }
 export async function notifications(p: Principal) {
