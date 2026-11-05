@@ -1421,6 +1421,18 @@ input[type="color"] {
 .related-item:hover {
   color: var(--primary-text);
 }
+.role-difference {
+  align-items: flex-start;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.role-difference small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .comment {
   padding: 16px;
   border: 1px solid var(--border);

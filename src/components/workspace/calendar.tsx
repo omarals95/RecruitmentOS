@@ -74,6 +74,19 @@ export function interviewsOnDay(events: RecordDto[], day: string) {
     .filter((record) => eventDay(record) === day)
     .sort((a, b) => start(a) - start(b) || a.id.localeCompare(b.id));
 }
+/** Each day's first 3 (month), 20 (week) or all (day) interviews and the count left for "+N more". */
+export function calendarCells(
+  events: RecordDto[],
+  days: string[],
+  view: "month" | "week" | "day",
+) {
+  const limit = view === "month" ? 3 : view === "week" ? 20 : Infinity;
+  return days.map((day) => {
+    const all = interviewsOnDay(events, day);
+    const shown = all.slice(0, limit);
+    return { day, shown, hidden: all.length - shown.length };
+  });
+}
 export function CalendarScreen() {
   const { team, role } = useWorkspace();
   const linkedRecord = useSearchParams().get("record");
@@ -313,9 +326,8 @@ export function CalendarScreen() {
                   )}
                 </div>
                 <div className="calendar-grid">
-                  {days.map((day) => {
-                    const records = interviewsOnDay(events, day);
-                    return (
+                  {calendarCells(events, days, view).map(
+                    ({ day, shown, hidden }) => (
                       <div
                         className={`calendar-day ${day === dubaiToday() ? "today" : ""} ${day.slice(0, 7) !== anchor.slice(0, 7) ? "outside-month" : ""}`}
                         key={day}
@@ -330,27 +342,25 @@ export function CalendarScreen() {
                         >
                           {Number(day.slice(-2))}
                         </button>
-                        {records
-                          .slice(0, view === "week" ? 20 : 3)
-                          .map((record) => (
-                            <button
-                              className={`calendar-event ${dataOf(record).status === "Cancelled" ? "cancelled" : ""}`}
-                              key={record.id}
-                              onClick={() => setDetail(record)}
-                            >
-                              <strong>
-                                {new Intl.DateTimeFormat("en-GB", {
-                                  timeZone: "Asia/Dubai",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                }).format(
-                                  new Date(String(dataOf(record).startAt)),
-                                )}
-                              </strong>
-                              <span>{recordLabel(record)}</span>
-                            </button>
-                          ))}
-                        {records.length > 3 && view === "month" && (
+                        {shown.map((record) => (
+                          <button
+                            className={`calendar-event ${dataOf(record).status === "Cancelled" ? "cancelled" : ""}`}
+                            key={record.id}
+                            onClick={() => setDetail(record)}
+                          >
+                            <strong>
+                              {new Intl.DateTimeFormat("en-GB", {
+                                timeZone: "Asia/Dubai",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }).format(
+                                new Date(String(dataOf(record).startAt)),
+                              )}
+                            </strong>
+                            <span>{recordLabel(record)}</span>
+                          </button>
+                        ))}
+                        {hidden > 0 && (
                           <button
                             className="calendar-more"
                             onClick={() => {
@@ -358,12 +368,12 @@ export function CalendarScreen() {
                               setView("day");
                             }}
                           >
-                            +{records.length - 3} more
+                            +{hidden} more
                           </button>
                         )}
                       </div>
-                    );
-                  })}
+                    ),
+                  )}
                 </div>
               </div>
             )}

@@ -70,6 +70,23 @@ export function isAbortError(error: unknown) {
     error.name === "AbortError"
   );
 }
+function errorFromBody(status: number, body: unknown) {
+  const error = (body ?? {}) as {
+    error?: { message?: string; code?: string } | string;
+    message?: string;
+  };
+  return new ClientError(
+    status,
+    typeof error.error === "object"
+      ? error.error.code || "request_failed"
+      : "request_failed",
+    typeof error.error === "object"
+      ? error.error.message || "The request could not be completed."
+      : typeof error.error === "string"
+        ? error.error
+        : error.message || "The request could not be completed.",
+  );
+}
 export async function requestJson<T>(
   teamId: string | null,
   path: string,
@@ -106,23 +123,7 @@ export async function requestJson<T>(
           : "The request could not be completed.",
       );
     }
-    if (!response.ok) {
-      const error = body as {
-        error?: { message?: string; code?: string } | string;
-        message?: string;
-      };
-      throw new ClientError(
-        response.status,
-        typeof error.error === "object"
-          ? error.error.code || "request_failed"
-          : "request_failed",
-        typeof error.error === "object"
-          ? error.error.message || "The request could not be completed."
-          : typeof error.error === "string"
-            ? error.error
-            : error.message || "The request could not be completed.",
-      );
-    }
+    if (!response.ok) throw errorFromBody(response.status, body);
     // The duplicate lookup is a read-only POST, so it must not refresh open views.
     if (typeof window !== "undefined" && entry.write)
       window.dispatchEvent(
@@ -139,7 +140,60 @@ export async function requestJson<T>(
     }
   }
 }
-/** Aborts every in-flight requestJson call started for this team. */
+/**
+ * POSTs a record export and returns the file. A team switch aborts it like any team request, but
+ * it is not a write: it never blocks a switch or refreshes open views.
+ */
+export async function requestExport(
+  teamId: string,
+  path: string,
+): Promise<{ blob: Blob; filename: string; rows: number }> {
+  const controller = new AbortController();
+  const entry = { controller, write: false };
+  inFlight.set(teamId, (inFlight.get(teamId) ?? new Set()).add(entry));
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "X-Team-Id": teamId },
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        throw new ClientError(
+          response.status,
+          "invalid_response",
+          "The request could not be completed.",
+        );
+      }
+      throw errorFromBody(response.status, body);
+    }
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+    const filename = encoded
+      ? decodeURIComponent(encoded)
+      : /filename="([^"]+)"/i.exec(disposition)?.[1];
+    const count = response.headers.get("x-export-rows") ?? "";
+    const rows = /^\d{1,6}$/.test(count) ? Number(count) : -1;
+    if (!filename || rows < 0)
+      throw new ClientError(
+        response.status,
+        "invalid_response",
+        "The server returned an unreadable response.",
+      );
+    return { blob: await response.blob(), filename, rows };
+  } finally {
+    const entries = inFlight.get(teamId);
+    entries?.delete(entry);
+    if (entries?.size === 0) inFlight.delete(teamId);
+  }
+}
+/** Aborts every in-flight requestJson or requestExport call started for this team. */
 export function abortTeamRequests(teamId: string) {
   const entries = inFlight.get(teamId);
   inFlight.delete(teamId);
