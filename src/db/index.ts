@@ -2,7 +2,10 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as app from "./schema";
 import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
-import { installTenantContextKey } from "../lib/tenant-context";
+import {
+  assertTenantContextKey,
+  installTenantContextKey,
+} from "../lib/tenant-context";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
 import { assertStorageSchema } from "./storage-schema";
 import {
@@ -57,6 +60,25 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       "local_db_disabled",
       "Local database mode is not available for isolated production pools.",
     );
+  if (hostedOrProduction()) {
+    if (process.env.ALLOW_LOCAL_DB === "true")
+      throw new ApiError(
+        503,
+        "local_db_disabled",
+        "Local database settings are not available in a hosted deployment.",
+      );
+    if (
+      process.env.DEV_MAIL_MODE === "console" ||
+      process.env.DEV_SEED_PASSWORD
+    )
+      throw new ApiError(
+        503,
+        "development_setting_refused",
+        "Development mail and seed settings are not available in a hosted deployment.",
+      );
+    // Startup proves the key is set and well formed; tenant_context.install rejects an uninstalled key per transaction.
+    assertTenantContextKey();
+  }
   const dataUrl = process.env.DATABASE_URL;
   const identityUrl = process.env.IDENTITY_DATABASE_URL;
   if (!dataUrl || !identityUrl)
@@ -66,13 +88,6 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       "Configure separate database connections for recruitment data and identity.",
     );
   const targets = prepareConnectionTargets(dataUrl, identityUrl);
-  // Remove only after trusted tenant policies and identity workflows pass end-to-end review.
-  if (hostedOrProduction())
-    throw new ApiError(
-      503,
-      "tenant_isolation_pending",
-      "The database identity boundary is not ready for deployment.",
-    );
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
   function makePool(connectionString: string) {
