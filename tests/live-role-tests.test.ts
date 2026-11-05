@@ -23,7 +23,7 @@ vi.mock("pg", () => ({
   },
 }));
 
-import { main } from "../scripts/live-role-tests";
+import { errorCategory, main } from "../scripts/live-role-tests";
 
 const data =
   "postgresql://recruitmentos_data:fictional-data-secret@127.0.0.1:55440/fictional_app";
@@ -170,9 +170,90 @@ describe("live role tests configuration refusals", () => {
     ]);
   });
 
+  it("keeps the generic connection line in diagnostic mode", async () => {
+    const { code, text } = await run({
+      ...valid,
+      LIVE_ROLE_TESTS_DIAGNOSE: "1",
+    });
+    expect(code).toBe(1);
+    expect(text.split("\n")).toEqual([
+      expect.stringMatching(/^Live role tests could not connect\./),
+    ]);
+  });
+
   it("leaves the process signing key as it was", async () => {
     const before = process.env.TENANT_CONTEXT_SIGNING_KEY;
     await run({ ...valid, LIVE_ROLE_TESTS_CONFIRM: "fictional_other" });
     expect(process.env.TENANT_CONTEXT_SIGNING_KEY).toBe(before);
+  });
+});
+
+describe("live role tests error classification", () => {
+  const categories = ["assertion", "connection", "harness-error"];
+  const message = `fictional driver failure for ${data} at host 127.0.0.1 with password fictional-data-secret`;
+
+  it("returns a valid SQLSTATE unchanged", () => {
+    for (const code of ["42501", "23514", "RQ001", "57014", "08P01", "40P01"])
+      expect(errorCategory(Object.assign(new Error(message), { code }))).toBe(
+        code,
+      );
+  });
+
+  it("returns connection for a Node network or system error", () => {
+    expect(errorCategory({ code: "ECONNRESET" })).toBe("connection");
+    expect(errorCategory({ code: "EPIPE" })).toBe("connection");
+    expect(
+      errorCategory(
+        Object.assign(new Error(message), {
+          code: "ECONNREFUSED",
+          syscall: "connect",
+          address: "127.0.0.1",
+          port: 55440,
+        }),
+      ),
+    ).toBe("connection");
+  });
+
+  it("returns harness-error for a non-SQLSTATE code, a missing code and a non-object", () => {
+    for (const error of [
+      { code: "ERR_INVALID_ARG_TYPE" },
+      { code: "4250" },
+      { code: "425011" },
+      { code: "rq001" },
+      { code: 42501 },
+      { code: data },
+      new Error(message),
+      {},
+      undefined,
+      null,
+      "42501",
+      message,
+      42501,
+    ])
+      expect(errorCategory(error)).toBe("harness-error");
+  });
+
+  it("never returns any part of the error message", () => {
+    for (const error of [
+      new Error(message),
+      Object.assign(new Error(message), { code: "42501" }),
+      Object.assign(new Error(message), { code: data }),
+      Object.assign(new Error(message), { code: "ECONNREFUSED" }),
+      { message, code: "fictional-data-secret" },
+      message,
+    ]) {
+      const result = errorCategory(error);
+      expect(categories.includes(result) || /^[0-9A-Z]{5}$/.test(result)).toBe(
+        true,
+      );
+      for (const secret of [
+        "fictional",
+        "postgresql://",
+        "127.0.0.1",
+        "55440",
+        "secret",
+      ])
+        expect(result).not.toContain(secret);
+    }
   });
 });
