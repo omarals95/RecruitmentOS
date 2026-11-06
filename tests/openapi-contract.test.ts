@@ -350,6 +350,49 @@ describe("OpenAPI contract", () => {
     );
     expect(capability).not.toMatch(/always reports uploads/i);
     expect(capability).toContain("uploadsAvailable:boolean");
+    expect(capability).toContain("aiAvailable:boolean");
+    expect(capability).toContain("none is configured in this build");
+    for (const code of [
+      "aiReview",
+      "ai_review_invalid",
+      "ai_review_incomplete",
+    ])
+      expect(item).toContain(code);
+  });
+
+  it("documents the AI extraction consent and job contract", () => {
+    const consent = JSON.stringify(
+      document.paths["/api/v1/extraction-consent"],
+    );
+    for (const code of ["ai_not_configured", "ai_disclosure_changed"])
+      expect(consent).toContain(code);
+    const jobs = document.paths["/api/v1/extraction-jobs"].post;
+    expect(jobs["x-required-scopes"]).toEqual([
+      "cvs:write",
+      "candidates:write",
+    ]);
+    expect(Object.keys(jobs.responses)).toEqual(
+      expect.arrayContaining(["200", "400", "409", "413", "429", "502", "504"]),
+    );
+    const text = JSON.stringify(jobs);
+    for (const code of [
+      "ai_not_configured",
+      "invalid_input",
+      "ai_file_too_large",
+      "ai_digest_mismatch",
+      "INVALID_CV",
+      "ai_disclosure_changed",
+      "ai_consent_required",
+      "ai_request_used",
+      "ai_budget_exhausted",
+      "ai_timed_out",
+      "ai_rate_limited",
+      "ai_quota_exhausted",
+      "ai_provider_failed",
+      "ai_invalid_response",
+      "ai_cancelled",
+    ])
+      expect(text).toContain(code);
   });
 
   it("describes OAuth scopes with the MCP consent wording", () => {
@@ -370,8 +413,11 @@ describe("OpenAPI contract", () => {
     expect(sessionOnly.map(({ label }) => label).sort()).toEqual([
       "DELETE /api/settings/tokens/{id}",
       "GET /api/settings/tokens",
+      "GET /api/v1/extraction-consent",
       "POST /api/oauth/consent",
       "POST /api/settings/tokens",
+      "POST /api/v1/extraction-consent",
+      "POST /api/v1/extraction-jobs",
       "POST /api/v1/teams/bootstrap",
     ]);
     for (const { label, operation } of sessionOnly) {

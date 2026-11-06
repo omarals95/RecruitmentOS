@@ -500,14 +500,188 @@ export function GET() {
       {
         summary: "Read bulk CV import availability",
         description:
-          "Requires cvs:write and candidates:write. storageConfigured reports whether private CV storage is set up in the server environment; it is read from configuration only and contacts no storage provider. uploadsAvailable equals storageConfigured, the same readiness single CV upload uses: Blob and unknown providers report false. AI extraction is always unavailable.",
+          "Requires cvs:write and candidates:write. storageConfigured reports whether private CV storage is set up in the server environment; it is read from configuration only and contacts no storage provider. uploadsAvailable equals storageConfigured, the same readiness single CV upload uses: Blob and unknown providers report false. aiAvailable is true only when an approved AI extraction provider is configured; none is configured in this build, so it is false.",
       },
       {
         "200": {
           description:
-            "{data:{uploadsAvailable:boolean, aiAvailable:false, storageConfigured:boolean}}.",
+            "{data:{uploadsAvailable:boolean, aiAvailable:boolean, storageConfigured:boolean}}.",
         },
       },
+    ),
+  };
+  const disclosureSchema = {
+    type: ["object", "null"],
+    required: [
+      "version",
+      "provider",
+      "model",
+      "region",
+      "retention",
+      "trainingUse",
+      "costNote",
+      "purpose",
+      "dataSent",
+      "limits",
+    ],
+    properties: {
+      version: {
+        type: "string",
+        pattern: "^[0-9a-f]{64}$",
+        description:
+          "SHA-256 of every other disclosure field; any change to them changes it.",
+      },
+      ...Object.fromEntries(
+        [
+          "provider",
+          "model",
+          "region",
+          "retention",
+          "trainingUse",
+          "costNote",
+          "purpose",
+          "dataSent",
+          "limits",
+        ].map((name) => [name, { type: "string" }]),
+      ),
+    },
+  };
+  const consentShape = {
+    "200": {
+      description:
+        "{data:{available, disclosure, consent:{status, at}}}. status is none (no decision), granted (for the current disclosure version), withdrawn, or outdated (granted for another version, or no provider is configured).",
+      content: {
+        "application/json": {
+          schema: {
+            type: "object",
+            required: ["data"],
+            properties: {
+              data: {
+                type: "object",
+                required: ["available", "disclosure", "consent"],
+                properties: {
+                  available: { type: "boolean" },
+                  disclosure: disclosureSchema,
+                  consent: {
+                    type: "object",
+                    required: ["status", "at"],
+                    properties: {
+                      status: {
+                        enum: ["none", "granted", "withdrawn", "outdated"],
+                      },
+                      at: { type: ["string", "null"], format: "date-time" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const aiScopes: Scope[] = ["cvs:write", "candidates:write"];
+  const aiAccess =
+    "Session only: a Bearer token returns 403 session_required. Requires cvs:write and candidates:write, so viewers get 403. No approved AI extraction provider is configured in this build, so the extraction endpoints are unavailable.";
+  paths["/api/v1/extraction-consent"] = {
+    get: operation(
+      aiScopes,
+      {
+        summary: "Read the AI extraction disclosure and my consent",
+        description: `${aiAccess} available is false and disclosure is null when no provider is configured. Consent is per user and team and is tied to the disclosure version.`,
+      },
+      consentShape,
+      { sessionOnly: true },
+    ),
+    post: operation(
+      aiScopes,
+      {
+        summary: "Allow or withdraw AI suggestions from CVs",
+        description: `${aiAccess} grant needs a configured provider (503 ai_not_configured) and the current disclosure version (409 ai_disclosure_changed). withdraw is always recorded, with the version shown to the user or null; it stops new requests, and CVs already sent stay with the provider under its stated retention terms. Each decision is one append-only ai-extraction activity event (ai.consent_granted with disclosureVersion, provider and model; ai.consent_withdrawn with disclosureVersion), visible to team members. Body at most 4096 bytes.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["decision", "disclosureVersion"],
+            additionalProperties: false,
+            properties: {
+              decision: { enum: ["grant", "withdraw"] },
+              disclosureVersion: {
+                type: ["string", "null"],
+                pattern: "^[0-9a-f]{64}$",
+              },
+            },
+          },
+          {
+            decision: "grant",
+            disclosureVersion:
+              "5f1c0e7a9b3d2c4e6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e",
+          },
+        ),
+      },
+      consentShape,
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/extraction-jobs"] = {
+    post: operation(
+      aiScopes,
+      {
+        summary: "Get unverified AI suggestions from one CV",
+        description: `${aiAccess} Sends one CV, base64-encoded in content, for unverified suggestions of the 10 candidate fields. The body is at most ${4 * 1024 * 1024 + 8192} bytes. Checks run in order: 503 ai_not_configured; 400 invalid_input for malformed base64; 413 ai_file_too_large over 3 MiB; 400 ai_digest_mismatch when the decoded length differs from file.sizeBytes or its SHA-256 from file.sha256; 400 INVALID_CV when the bytes fail the CV format check; then, under a per-team lock, 409 ai_disclosure_changed, 409 ai_consent_required, 409 ai_request_used for a requestId already sent (it is never sent again) and 429 ai_budget_exhausted after 100 requests by the team in 24 hours, where every request counts, failed, cancelled and uncertain ones included. The provider's adapter then receives only the CV bytes and MIME type, once, with no retries, and stops after 30 seconds. Provider outcomes: 504 ai_timed_out, 429 ai_rate_limited, 429 ai_quota_exhausted, 502 ai_provider_failed, 502 ai_invalid_response and 409 ai_cancelled when the client goes away; after a timeout or provider failure the CV may already have reached the provider. Each request writes ai.extraction_started and ai.extraction_finished activity events with the request ID, digest, size, type, provider, model, outcome and suggested field names, never the file name or any CV content or extracted value. Nothing is saved to a record: suggestions are returned only for the user to accept, reject or edit before import.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["requestId", "disclosureVersion", "file", "content"],
+            additionalProperties: false,
+            properties: {
+              requestId: { type: "string", format: "uuid" },
+              disclosureVersion: { type: "string", pattern: "^[0-9a-f]{64}$" },
+              file: {
+                type: "object",
+                required: ["originalName", "mimeType", "sizeBytes", "sha256"],
+                additionalProperties: false,
+                properties: {
+                  originalName: { type: "string", maxLength: 180 },
+                  mimeType: { type: "string", maxLength: 150 },
+                  sizeBytes: { type: "integer", minimum: 1 },
+                  sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                },
+              },
+              content: {
+                type: "string",
+                contentEncoding: "base64",
+                description: "The whole CV file, standard padded base64.",
+              },
+            },
+          },
+          {
+            requestId: exampleIds.second,
+            disclosureVersion:
+              "5f1c0e7a9b3d2c4e6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e",
+            file: {
+              originalName: "fictional-cv.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 9,
+              sha256:
+                "0716f9264c9fe19f5d7455276107f3ddcc1d3497f63d60689a73558ae8a1bf5e",
+            },
+            content: "JVBERi0xLjcK",
+          },
+        ),
+      },
+      {
+        "200": {
+          description:
+            "{data:{requestId, status:'succeeded', suggestions, provenance:{requestId, sourceSha256, provider, model, extractedAt}}}. suggestions holds only the 10 candidate fields; null means unknown and an omitted field was not supplied. All suggestions are unverified.",
+        },
+        "502": errorResponse(
+          "ai_provider_failed or ai_invalid_response; no suggestions were added.",
+        ),
+        "504": errorResponse(
+          "ai_timed_out; the CV may already have reached the provider.",
+        ),
+      },
+      { sessionOnly: true },
     ),
   };
   const batchParam = {
@@ -581,7 +755,7 @@ export function GET() {
       ["cvs:write", "candidates:write"],
       {
         summary: "Create the candidate for one reviewed bulk CV",
-        description: `Requires cvs:write and candidates:write. Returns 503 STORAGE_SETUP_REQUIRED before any write when CV uploads are unavailable. A batch holds up to ${BULK_INTAKE_MAX_FILES} items; another item returns 400 bulk_batch_limit. Reusing an item ID with a different file or different data returns 409 bulk_item_conflict. Repeating a created item returns it unchanged and creates nothing. Otherwise factsReviewed and duplicatesReviewed must both be true (400 bulk_review_required), and the server re-runs the exact email and phone match: any current match not listed in acknowledgedDuplicateIds returns 409 bulk_duplicates_changed, so check duplicates again. The candidate is created with reviewStatus Reviewed, and its created activity event records the review evidence (bulkIntake: batchId, itemId, factsReviewed, duplicatesReviewed, possibleDuplicates, limited). Source fields (rawSource, evidence, sourceReviews) are not accepted. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Returns 503 STORAGE_SETUP_REQUIRED before any write when CV uploads are unavailable. A batch holds up to ${BULK_INTAKE_MAX_FILES} items; another item returns 400 bulk_batch_limit. Reusing an item ID with a different file or different data returns 409 bulk_item_conflict. Repeating a created item returns it unchanged and creates nothing. Otherwise factsReviewed and duplicatesReviewed must both be true (400 bulk_review_required), and the server re-runs the exact email and phone match: any current match not listed in acknowledgedDuplicateIds returns 409 bulk_duplicates_changed, so check duplicates again. The candidate is created with reviewStatus Reviewed, and its created activity event records the review evidence (bulkIntake: batchId, itemId, factsReviewed, duplicatesReviewed, possibleDuplicates, limited). Source fields (rawSource, evidence, sourceReviews) are not accepted. Optional aiReview ({requestId, decisions}) records how AI suggestions were reviewed: before anything is created, the server looks for the caller's own ai.extraction_finished event in the team with that requestId, outcome succeeded and the same validated file size and MIME type (else 400 ai_review_invalid), and the decision keys must equal its suggested field names (else 400 ai_review_incomplete). The created event then also holds aiReview: requestId, sourceSha256, provider, model, extractedAt and decisions. data is always the submitted human-reviewed values; aiReview is not part of the replay check. ${bulkLifetime}`,
         requestBody: jsonBody(
           {
             type: "object",
@@ -615,6 +789,36 @@ export function GET() {
                 items: { type: "string", format: "uuid" },
                 description:
                   "The possible duplicate IDs shown at the last duplicate check.",
+              },
+              aiReview: {
+                type: "object",
+                required: ["requestId", "decisions"],
+                additionalProperties: false,
+                properties: {
+                  requestId: { type: "string", format: "uuid" },
+                  decisions: {
+                    type: "object",
+                    propertyNames: {
+                      enum: [
+                        "name",
+                        "email",
+                        "phone",
+                        "jobTitle",
+                        "employer",
+                        "university",
+                        "degreeName",
+                        "major",
+                        "skills",
+                        "certifications",
+                      ],
+                    },
+                    additionalProperties: {
+                      enum: ["accepted", "rejected", "edited"],
+                    },
+                  },
+                },
+                description:
+                  "Optional. The extraction job's requestId and one decision per suggested field.",
               },
             },
           },
