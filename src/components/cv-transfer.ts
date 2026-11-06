@@ -32,6 +32,32 @@ type SaveEnv = {
   setTimeout: (callback: () => void, ms: number) => unknown;
 };
 
+export const UPLOAD_LOCK_BUSY =
+  "Another CV upload is in progress in this browser. Wait for it to finish, then try again.";
+export const UPLOAD_LOCK_UNSUPPORTED =
+  "This browser cannot run CV uploads safely. Use a current version of your browser.";
+type UploadLocks = Pick<LockManager, "request">;
+/**
+ * Runs one CV upload, or one whole bulk import, under a Web Lock shared by every tab, so only
+ * one runs per browser. Resolves "" after `run`, or the refusal message when nothing started.
+ * Without Web Locks nothing starts: uploads never run unlocked.
+ */
+export async function withUploadLock(
+  run: () => Promise<void>,
+  locks: UploadLocks | undefined,
+): Promise<string> {
+  if (!locks) return UPLOAD_LOCK_UNSUPPORTED;
+  return locks.request(
+    "recruitmentos-cv-upload",
+    { ifAvailable: true },
+    async (lock) => {
+      if (!lock) return UPLOAD_LOCK_BUSY;
+      await run();
+      return "";
+    },
+  );
+}
+
 /**
  * Sends the bytes to private storage with only what the ticket names: no cookies, token or
  * team header. Resolves the storage response; error messages never include the upload URL.

@@ -4,6 +4,9 @@ import {
   downloadVerifiedCv,
   saveCvBytes,
   sendCvBytes,
+  UPLOAD_LOCK_BUSY,
+  UPLOAD_LOCK_UNSUPPORTED,
+  withUploadLock,
   type UploadTicket,
 } from "../src/components/cv-transfer";
 
@@ -330,5 +333,57 @@ describe("saveCvBytes", () => {
     expect(scheduled.map(({ ms }) => ms)).toEqual([40_000]);
     scheduled[0].callback();
     expect(revoked).toEqual(["blob:http://localhost/fictional-1"]);
+  });
+});
+
+describe("withUploadLock", () => {
+  /** A fake Web Locks manager holding at most one named lock. */
+  function fakeLocks(held = false) {
+    const requests: { name: string; options: LockOptions }[] = [];
+    const locks = {
+      async request(
+        name: string,
+        options: LockOptions,
+        callback: (lock: Lock | null) => Promise<unknown>,
+      ) {
+        requests.push({ name, options });
+        return callback(held ? null : ({ name, mode: "exclusive" } as Lock));
+      },
+    } as Pick<LockManager, "request">;
+    return { locks, requests };
+  }
+
+  it("runs the task under the shared lock when it is free", async () => {
+    const { locks, requests } = fakeLocks();
+    let ran = false;
+    expect(
+      await withUploadLock(async () => {
+        ran = true;
+      }, locks),
+    ).toBe("");
+    expect(ran).toBe(true);
+    expect(requests).toEqual([
+      { name: "recruitmentos-cv-upload", options: { ifAvailable: true } },
+    ]);
+  });
+
+  it("starts nothing and explains when another upload holds the lock", async () => {
+    const { locks } = fakeLocks(true);
+    let ran = false;
+    const message = await withUploadLock(async () => {
+      ran = true;
+    }, locks);
+    expect(ran).toBe(false);
+    expect(message).toBe(UPLOAD_LOCK_BUSY);
+    expect(message).toMatch(/^Another CV upload is in progress/);
+  });
+
+  it("refuses without Web Locks instead of running unlocked", async () => {
+    let ran = false;
+    const message = await withUploadLock(async () => {
+      ran = true;
+    }, undefined);
+    expect(ran).toBe(false);
+    expect(message).toBe(UPLOAD_LOCK_UNSUPPORTED);
   });
 });

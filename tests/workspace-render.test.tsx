@@ -2,7 +2,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
-import { BulkCvImport } from "../src/components/workspace/bulk-cv-import";
+import {
+  BulkCvImport,
+  BulkCvImportDialog,
+  type CvImportState,
+} from "../src/components/workspace/bulk-cv-import";
+import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+} from "../src/domain/records";
 import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
 
 const workspace = {
@@ -88,5 +96,49 @@ describe("Import CVs", () => {
     expect(markup).not.toContain('type="file"');
     expect(markup).not.toContain("unavailable");
     expect(markup).not.toContain("not set up");
+  });
+
+  const dialog = (importState: CvImportState) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <BulkCvImportDialog
+          importState={importState}
+          capabilityError={importState === "error" ? "Network unavailable" : ""}
+          onCapabilityLost={() => {}}
+          onClose={() => {}}
+          onChanged={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  it.each(["checking", "not-set-up", "unavailable", "error"] as const)(
+    "shows only the explanation and Close while %s",
+    (importState) => {
+      const markup = dialog(importState);
+      expect(markup).not.toContain('type="file"');
+      expect(markup).not.toContain("Import reviewed");
+      expect(markup).not.toContain("prepare a review draft");
+      expect(markup).not.toContain("Recent imports");
+      expect(markup).toContain(">Close</button>");
+    },
+  );
+  it("explains each unavailable state in plain words", () => {
+    expect(dialog("not-set-up")).toContain("CV uploads are not set up yet.");
+    expect(dialog("unavailable")).toContain(
+      "CV import is not available right now. You can still add and edit candidate details in the candidate directory.",
+    );
+    expect(dialog("error")).toContain(
+      "Could not check import availability. Network unavailable",
+    );
+  });
+  it("shows the limits before any work once uploads are ready", () => {
+    const markup = dialog("ready");
+    const limits = `Up to ${BULK_INTAKE_MAX_FILES} files per import, 10 MiB each. One CV uploads at a time in this browser. Import progress is kept on the server for ${BULK_INTAKE_RECOVERY_HOURS} hours; selected files and drafts stay only in this browser.`;
+    expect(markup).toContain(`<p>${limits}</p>`);
+    expect(markup.indexOf(limits)).toBeLessThan(markup.indexOf('type="file"'));
+    expect(markup).toContain(
+      `Recent imports (kept for ${BULK_INTAKE_RECOVERY_HOURS} hours)`,
+    );
+    expect(markup).toContain("Import reviewed (0)");
+    expect(markup).not.toContain("Cancel import");
   });
 });
