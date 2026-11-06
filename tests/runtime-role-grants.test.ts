@@ -89,6 +89,8 @@ const appTables = [
   "storage_usage",
   "idempotency",
   "notification_reads",
+  "bulk_intake_batches",
+  "bulk_intake_items",
 ];
 const authTables = [
   '"user"',
@@ -102,7 +104,13 @@ const authTables = [
   "api_tokens",
   "api_rate_limits",
 ];
-const deletable = ["candidate_states", "notification_reads", "idempotency"];
+const deletable = [
+  "candidate_states",
+  "notification_reads",
+  "idempotency",
+  "bulk_intake_batches",
+  "bulk_intake_items",
+];
 const expectedData = {
   tablePrivileges: {
     ...Object.fromEntries(

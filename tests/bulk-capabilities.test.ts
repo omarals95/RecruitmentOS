@@ -26,7 +26,7 @@ async function capabilities() {
 describe("bulk CV capabilities", () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it("remains disabled even if storage and AI environment settings are present", async () => {
+  it("stays disabled for Blob even when its settings are present", async () => {
     vi.stubEnv("CV_STORAGE_PROVIDER", "blob");
     vi.stubEnv("BLOB_READ_WRITE_TOKEN", "synthetic");
     expect(await capabilities()).toEqual({
@@ -38,14 +38,14 @@ describe("bulk CV capabilities", () => {
     });
   });
 
-  it("reports configured storage truthfully while uploads stay unavailable", async () => {
+  it("reports uploads available where single CV upload works, with AI still unavailable", async () => {
     for (const key of storageKeys) vi.stubEnv(key, undefined);
     vi.stubEnv("S3_BUCKET_NAME", "fictional-private-cvs");
     vi.stubEnv("AWS_REGION", "eu-west-2");
     vi.stubEnv("AWS_ROLE_ARN", "arn:aws:iam::000000000000:role/fictional");
     expect(await capabilities()).toEqual({
       data: {
-        uploadsAvailable: false,
+        uploadsAvailable: true,
         aiAvailable: false,
         storageConfigured: true,
       },

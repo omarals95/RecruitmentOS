@@ -298,6 +298,43 @@ describe("OpenAPI contract", () => {
     ]);
   });
 
+  it("documents the bulk intake routes, their limits and the real upload capability", () => {
+    const bulk = {
+      "/api/v1/cvs/bulk-batches": "get",
+      "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}": "post",
+      "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload": "post",
+    };
+    for (const [path, method] of Object.entries(bulk))
+      expect(document.paths[path][method]["x-required-scopes"], path).toEqual([
+        "cvs:write",
+        "candidates:write",
+      ]);
+    const item = JSON.stringify(
+      document.paths["/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}"],
+    );
+    for (const code of [
+      "STORAGE_SETUP_REQUIRED",
+      "bulk_batch_expired",
+      "bulk_batch_limit",
+      "bulk_item_conflict",
+      "bulk_review_required",
+      "bulk_duplicates_changed",
+    ])
+      expect(item).toContain(code);
+    expect(
+      JSON.stringify(
+        document.paths[
+          "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload"
+        ],
+      ),
+    ).toContain("bulk_candidate_required");
+    const capability = JSON.stringify(
+      document.paths["/api/v1/cvs/bulk-capabilities"],
+    );
+    expect(capability).not.toMatch(/always reports uploads/i);
+    expect(capability).toContain("uploadsAvailable:boolean");
+  });
+
   it("describes OAuth scopes with the MCP consent wording", () => {
     const { securitySchemes } = document.components as unknown as {
       securitySchemes: {

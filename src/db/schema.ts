@@ -128,6 +128,7 @@ export const uploads = appSchema.table(
     blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
   },
   (t) => [
+    unique("uploads_team_id_id_key").on(t.teamId, t.id),
     index("uploads_team_candidate_idx").on(t.teamId, t.candidateId),
     uniqueIndex("uploads_provider_object_key_unique").on(
       t.storageProvider,
@@ -185,4 +186,57 @@ export const notificationReads = appSchema.table(
     readAt: time("read_at").notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.teamId, t.userId, t.key] })],
+);
+/** Private bulk CV intake recovery rows; file metadata and review evidence, no candidate values. */
+export const bulkIntakeBatches = appSchema.table(
+  "bulk_intake_batches",
+  {
+    id: uuid("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id),
+    createdAt: time("created_at").notNull(),
+    expiresAt: time("expires_at").notNull(),
+  },
+  (t) => [
+    unique("bulk_intake_batches_team_id_id_created_by_key").on(
+      t.teamId,
+      t.id,
+      t.createdBy,
+    ),
+    index("bulk_intake_batches_owner_idx").on(
+      t.teamId,
+      t.createdBy,
+      t.expiresAt,
+    ),
+  ],
+);
+export const bulkIntakeItems = appSchema.table(
+  "bulk_intake_items",
+  {
+    id: uuid("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    batchId: uuid("batch_id").notNull(),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id),
+    originalName: text("original_name").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    reviewedAt: time("reviewed_at"),
+    possibleDuplicates: integer("possible_duplicates"),
+    candidateId: uuid("candidate_id"),
+    uploadId: uuid("upload_id"),
+    createdAt: time("created_at").notNull(),
+    updatedAt: time("updated_at").notNull(),
+  },
+  (t) => [
+    index("bulk_intake_items_batch_idx").on(t.teamId, t.batchId, t.createdBy),
+  ],
 );
