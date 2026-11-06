@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { and, asc, count, desc, eq, gt, inArray, lte, ne } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
+import { and, asc, count, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { bulkIntakeBatches, bulkIntakeItems, uploads } from "@/db/schema";
 import type { TeamTx } from "@/db";
@@ -61,6 +61,12 @@ const notFound = () =>
     "not_found",
     "This import item is not available in the selected team.",
   );
+const batchNotFound = () =>
+  new ApiError(
+    404,
+    "not_found",
+    "This import is not available in the selected team.",
+  );
 const expired = () =>
   new ApiError(
     409,
@@ -111,6 +117,17 @@ async function lockBatch(tx: TeamTx, p: Principal, batchId: string) {
     .for("update");
   return batch;
 }
+/**
+ * Deletes up to 100 expired batches of any team and user, with their items, in its own committed
+ * transaction. The owner-run helper returns nothing, so no other team's count is revealed.
+ */
+async function purgeExpired(p: Principal, keepBatch: string | null) {
+  await withTeam(p, (tx) =>
+    tx.execute(
+      sql`select tenant_context.purge_bulk_intake(${keepBatch}::uuid)`,
+    ),
+  );
+}
 
 /**
  * Creates the candidate for one reviewed bulk item. Review and duplicate acknowledgement are
@@ -144,19 +161,11 @@ export async function createBulkItem(
     .update(JSON.stringify(data))
     .digest("hex");
   requireUploads();
+  // The requested batch is kept so an expired one is refused below, not recreated.
+  await purgeExpired(p, batchId);
   return withTeam(p, async (tx) => {
     await lockTeam(tx, p);
     const now = new Date();
-    // Expired batches go when their user next imports; the requested one is refused below.
-    await tx
-      .delete(bulkIntakeBatches)
-      .where(
-        and(
-          ...own(p),
-          lte(bulkIntakeBatches.expiresAt, now),
-          ne(bulkIntakeBatches.id, batchId),
-        ),
-      );
     await tx
       .insert(bulkIntakeBatches)
       .values({
@@ -272,7 +281,11 @@ export async function createBulkItem(
   });
 }
 
-/** Reserves the CV upload for an item's candidate, idempotent per item; completion is unchanged. */
+/**
+ * Reserves the CV upload for an item's candidate, idempotent per attempt; completion is unchanged.
+ * A live or ready attempt is returned again. A rejected or expired one is replaced once by a new
+ * attempt for the same file under a new server-chosen clientUploadId.
+ */
 export async function beginBulkItemUpload(
   p: Principal,
   batchId: string,
@@ -308,22 +321,56 @@ export async function beginBulkItemUpload(
       );
     return { ...row.item, candidateId: row.item.candidateId };
   });
-  const result = await beginCvUpload(p, item.candidateId, {
-    originalName: item.originalName,
-    mimeType: item.mimeType,
-    sizeBytes: item.sizeBytes,
-    clientUploadId: item.id,
-  });
+  // The stored file metadata is reused for every attempt; the client chooses neither it nor the key.
+  const attempt = (clientUploadId: string) =>
+    beginCvUpload(p, item.candidateId, {
+      originalName: item.originalName,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      clientUploadId,
+    });
+  const thisItem = and(
+    eq(bulkIntakeItems.teamId, p.teamId),
+    eq(bulkIntakeItems.id, item.id),
+  );
+  const currentKey = sql<string>`coalesce(${bulkIntakeItems.uploadKey}, ${bulkIntakeItems.id})`;
+  let key = item.uploadKey ?? item.id;
+  let result: Awaited<ReturnType<typeof beginCvUpload>>;
+  try {
+    result = await attempt(key);
+  } catch (error) {
+    if (
+      !(error instanceof ApiError) ||
+      (error.code !== "CV_UPLOAD_REJECTED" &&
+        error.code !== "CV_UPLOAD_EXPIRED")
+    )
+      throw error;
+    // A dead attempt gets a new server-chosen key. Only a call that still finds the dead key
+    // rotates it, so overlapping calls share one new attempt.
+    const dead = key,
+      next = randomUUID();
+    key = await withTeam(p, async (tx) => {
+      const [rotated] = await tx
+        .update(bulkIntakeItems)
+        .set({ uploadKey: next, updatedAt: new Date() })
+        .where(and(thisItem, sql`${currentKey} = ${dead}`))
+        .returning({ id: bulkIntakeItems.id });
+      if (rotated) return next;
+      const [row] = await tx
+        .select({ key: currentKey })
+        .from(bulkIntakeItems)
+        .where(thisItem);
+      if (!row) throw notFound();
+      return row.key;
+    });
+    result = await attempt(key);
+  }
+  const reserved = result.data.id;
   await withTeam(p, (tx) =>
     tx
       .update(bulkIntakeItems)
-      .set({ uploadId: result.data.id, updatedAt: new Date() })
-      .where(
-        and(
-          eq(bulkIntakeItems.teamId, p.teamId),
-          eq(bulkIntakeItems.id, item.id),
-        ),
-      ),
+      .set({ uploadId: reserved, updatedAt: new Date() })
+      .where(and(thisItem, sql`${currentKey} = ${key}`)),
   );
   return result;
 }
@@ -337,57 +384,131 @@ function outcome(
   return status === "rejected" ? "cv-rejected" : "cv-pending";
 }
 
-/** The caller's unexpired batches in the selected team, newest first, with each item's outcome. */
-export async function listBulkBatches(p: Principal) {
+type BatchRow = typeof bulkIntakeBatches.$inferSelect;
+/** Each batch with all its items (at most 50) and each item's outcome. */
+async function batchEntries(tx: TeamTx, p: Principal, batches: BatchRow[]) {
+  const items = batches.length
+    ? await tx
+        .select({
+          id: bulkIntakeItems.id,
+          batchId: bulkIntakeItems.batchId,
+          originalName: bulkIntakeItems.originalName,
+          sizeBytes: bulkIntakeItems.sizeBytes,
+          candidateId: bulkIntakeItems.candidateId,
+          status: uploads.status,
+        })
+        .from(bulkIntakeItems)
+        .leftJoin(
+          uploads,
+          and(
+            eq(uploads.teamId, bulkIntakeItems.teamId),
+            eq(uploads.id, bulkIntakeItems.uploadId),
+          ),
+        )
+        .where(
+          and(
+            eq(bulkIntakeItems.teamId, p.teamId),
+            eq(bulkIntakeItems.createdBy, p.userId),
+            inArray(
+              bulkIntakeItems.batchId,
+              batches.map((batch) => batch.id),
+            ),
+          ),
+        )
+        .orderBy(asc(bulkIntakeItems.createdAt), asc(bulkIntakeItems.id))
+    : [];
+  return batches.map((batch) => ({
+    id: batch.id,
+    createdAt: batch.createdAt.toISOString(),
+    expiresAt: batch.expiresAt.toISOString(),
+    items: items
+      .filter((item) => item.batchId === batch.id)
+      .map((item) => ({
+        id: item.id,
+        originalName: item.originalName,
+        sizeBytes: item.sizeBytes,
+        candidateId: item.candidateId,
+        outcome: outcome(item.candidateId, item.status),
+      })),
+  }));
+}
+
+const batchPageSchema = z
+  .object({
+    page: z.number().int().min(1).max(1_000_000).default(1),
+    pageSize: z.number().int().min(1).max(20).default(10),
+  })
+  .strict();
+const invalidQuery = (message: string) =>
+  new ApiError(400, "invalid_query", message);
+export function parseBulkBatchQuery(query: URLSearchParams) {
+  const values: { page?: number; pageSize?: number } = {};
+  for (const key of query.keys()) {
+    if (!["page", "pageSize"].includes(key) || query.getAll(key).length !== 1)
+      throw invalidQuery("Use only one page and pageSize parameter.");
+    const value = query.get(key)!;
+    if (!/^[1-9]\d*$/.test(value))
+      throw invalidQuery(
+        "Import pagination values must be positive whole decimal numbers.",
+      );
+    values[key as "page" | "pageSize"] = Number(value);
+  }
+  const parsed = batchPageSchema.safeParse(values);
+  if (!parsed.success)
+    throw invalidQuery(
+      "Use a page from 1 to 1000000 and a page size from 1 to 20.",
+    );
+  return parsed.data;
+}
+
+/** One page of the caller's unexpired batches in the selected team, newest first. */
+export async function listBulkBatches(
+  p: Principal,
+  options: { page: number; pageSize: number },
+) {
+  const { page, pageSize } = options;
+  await purgeExpired(p, null);
   return withTeam(p, async (tx) => {
+    const where = and(...own(p), gt(bulkIntakeBatches.expiresAt, new Date()));
+    const [{ total }] = await tx
+      .select({ total: count() })
+      .from(bulkIntakeBatches)
+      .where(where);
     const batches = await tx
       .select()
       .from(bulkIntakeBatches)
-      .where(and(...own(p), gt(bulkIntakeBatches.expiresAt, new Date())))
-      .orderBy(desc(bulkIntakeBatches.createdAt), desc(bulkIntakeBatches.id));
-    const items = batches.length
-      ? await tx
-          .select({
-            id: bulkIntakeItems.id,
-            batchId: bulkIntakeItems.batchId,
-            originalName: bulkIntakeItems.originalName,
-            sizeBytes: bulkIntakeItems.sizeBytes,
-            candidateId: bulkIntakeItems.candidateId,
-            status: uploads.status,
-          })
-          .from(bulkIntakeItems)
-          .leftJoin(
-            uploads,
-            and(
-              eq(uploads.teamId, bulkIntakeItems.teamId),
-              eq(uploads.id, bulkIntakeItems.uploadId),
-            ),
-          )
-          .where(
-            and(
-              eq(bulkIntakeItems.teamId, p.teamId),
-              eq(bulkIntakeItems.createdBy, p.userId),
-              inArray(
-                bulkIntakeItems.batchId,
-                batches.map((batch) => batch.id),
-              ),
-            ),
-          )
-          .orderBy(asc(bulkIntakeItems.createdAt), asc(bulkIntakeItems.id))
-      : [];
-    return batches.map((batch) => ({
-      id: batch.id,
-      createdAt: batch.createdAt.toISOString(),
-      expiresAt: batch.expiresAt.toISOString(),
-      items: items
-        .filter((item) => item.batchId === batch.id)
-        .map((item) => ({
-          id: item.id,
-          originalName: item.originalName,
-          sizeBytes: item.sizeBytes,
-          candidateId: item.candidateId,
-          outcome: outcome(item.candidateId, item.status),
-        })),
-    }));
+      .where(where)
+      .orderBy(desc(bulkIntakeBatches.createdAt), desc(bulkIntakeBatches.id))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
+    return {
+      data: await batchEntries(tx, p, batches),
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+      },
+    };
+  });
+}
+
+/** The caller's own unexpired batch; any other ID reads as not found. It does not purge. */
+export async function getBulkBatch(p: Principal, batchId: string) {
+  if (!uuidSchema.safeParse(batchId).success) throw batchNotFound();
+  return withTeam(p, async (tx) => {
+    const [batch] = await tx
+      .select()
+      .from(bulkIntakeBatches)
+      .where(
+        and(
+          ...own(p),
+          eq(bulkIntakeBatches.id, batchId),
+          gt(bulkIntakeBatches.expiresAt, new Date()),
+        ),
+      );
+    if (!batch) throw batchNotFound();
+    const [entry] = await batchEntries(tx, p, [batch]);
+    return entry;
   });
 }

@@ -114,6 +114,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.acquire_blob_read(text) TO recruitmento
 GRANT EXECUTE ON FUNCTION tenant_context.release_blob_read(uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_call(text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_export(text, integer, text[]) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.purge_bulk_intake(uuid) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables without DELETE, the
 -- setup marker read-only, the connection marker and the three identity helpers.
