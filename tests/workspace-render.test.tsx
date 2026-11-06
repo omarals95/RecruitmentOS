@@ -7,7 +7,14 @@ import {
 } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/app/pipeline",
+  useRouter: () => ({ push: () => {}, refresh: () => {} }),
+}));
+
 import { WorkspaceProvider } from "../src/components/workspace/client";
+import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
   BulkCvImport,
@@ -26,6 +33,7 @@ import {
   AI_EXTRACTION_LIMITS_TEXT,
   AI_EXTRACTION_PURPOSE,
 } from "../src/domain/cv-extraction";
+import { rules } from "./helpers/css";
 
 const workspace = {
   user: {
@@ -41,6 +49,70 @@ const buttonSvg = (markup: string, label: string) =>
   new RegExp(`aria-label="${label}"[^>]*>(<svg[\\s\\S]*?</svg>)`).exec(
     markup,
   )?.[1];
+
+describe("workspace shell", () => {
+  it("names the search button at every width, not only through its hidden text", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <WorkspaceShell identity={workspace}>
+          <p>Fictional page</p>
+        </WorkspaceShell>
+      </WorkspaceProvider>,
+    );
+    const button = /<button[^>]*class="search-launcher"[^>]*>/.exec(
+      markup,
+    )?.[0];
+    expect(button).toBeDefined();
+    expect(button).toContain('aria-label="Search your workspace"');
+  });
+});
+
+describe("workspace accessibility styles", () => {
+  const css = rules("src/app/globals.css");
+  const rule = (selector: string, media = "") =>
+    css.find((item) => item.selector === selector && item.media === media);
+  it("keeps visually hidden text inside the board and table scrollers", () => {
+    for (const selector of [".kanban", ".table-wrap"])
+      expect(rule(selector)?.body, selector).toMatch(
+        /(^|;)\s*position:\s*relative\s*;/,
+      );
+  });
+  it("draws outside-month days and cancelled interviews without opacity", () => {
+    for (const selector of [
+      ".calendar-day.outside-month .calendar-day-number",
+      ".calendar-event.cancelled",
+    ]) {
+      expect(rule(selector), selector).toBeDefined();
+      expect(rule(selector)!.body, selector).not.toMatch(/opacity/);
+    }
+    expect(rule(".calendar-event.cancelled")!.body).toMatch(
+      /text-decoration:\s*line-through/,
+    );
+  });
+  it("gives +N more a 24 px target", () => {
+    const height = /min-height:\s*(\d+)px/.exec(
+      rule(".calendar-more")?.body ?? "",
+    );
+    expect(Number(height?.[1])).toBeGreaterThanOrEqual(24);
+  });
+  it("takes the closed phone menu out of the tab order", () => {
+    const phone = "@media (max-width: 720px)";
+    expect(rule(".workspace-sidebar:not(.is-open)", phone)?.body).toMatch(
+      /visibility:\s*hidden/,
+    );
+    expect(rule(".workspace-sidebar.is-open", phone)?.body).toMatch(
+      /visibility:\s*visible/,
+    );
+    expect(
+      css.some(
+        (item) =>
+          item.media === "" &&
+          item.selector.includes(".workspace-sidebar") &&
+          /visibility/.test(item.body),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("display mode toggle", () => {
   it("uses a distinct board icon and hides every icon from assistive technology", () => {

@@ -28,6 +28,7 @@ import {
 import {
   calendarCells,
   calendarDays,
+  calendarMoreLabel,
   interviewsOnDay,
 } from "../src/components/workspace/calendar";
 import {
@@ -642,6 +643,14 @@ describe("calendar cells and view agreement", () => {
     expect(busyCell("day")).toMatchObject({ hidden: 0 });
     expect(busyCell("day").shown).toHaveLength(23);
     expect(busyCell("day").shown[0].id).toBe("busy-midnight");
+  });
+  it("names each +N more button with its visible text and its day", () => {
+    expect(calendarMoreLabel(3, "2026-11-18")).toBe(
+      "+3 more interviews on 18 Nov 2026",
+    );
+    expect(calendarMoreLabel(20, "2026-12-05")).toBe(
+      "+20 more interviews on 5 Dec 2026",
+    );
   });
   it("gives the list view the same Dubai date as the cell holding each event", () => {
     const cells = calendarCells(
