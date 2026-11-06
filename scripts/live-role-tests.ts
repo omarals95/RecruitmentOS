@@ -7,6 +7,9 @@
  *   data role writing identity rows, the identity role reading candidate data, revoked and
  *   expired tokens, a demoted owner, and concurrent last-owner removal, bootstrap claims,
  *   storage reservations and Blob read leases. Denied mutations must leave no audit row.
+ * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
+ *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
+ *   its session, and the next transaction on the same pooled backend reads its earlier values.
  * - It reads only DATABASE_URL (data role), IDENTITY_DATABASE_URL (identity role),
  *   MIGRATION_DATABASE_URL (owner), LIVE_ROLE_TESTS_CONFIRM (must equal the database name),
  *   TENANT_CONTEXT_SIGNING_KEY (the key the database was migrated with), LIVE_ROLE_TESTS_DIAGNOSE
@@ -16,7 +19,7 @@
  *   API tokens as the owner or the identity role; candidates, a vacancy, saved views, candidate
  *   states, reminder reads, idempotency, activity, pending uploads and bulk intake batches and
  *   items as the data role under signed contexts; fixture stores and read leases as the owner. It never changes budgets, keys,
- *   roles, grants, policies, migrations or settings.
+ *   roles, grants, policies, migrations or settings beyond transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the contexts, leases,
@@ -45,6 +48,11 @@ import {
   prepareConnectionTargets,
   verifyPoolPair,
 } from "../src/db/connection-boundary.ts";
+import {
+  DEADLINES_SQL,
+  STATEMENT_TIMEOUT_MS as APP_STATEMENT_TIMEOUT_MS,
+  TRANSACTION_TIMEOUT_MS as APP_TRANSACTION_TIMEOUT_MS,
+} from "../src/db/deadlines.ts";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role.ts";
 import { SCOPES } from "../src/lib/permissions.ts";
 import { assertTenantContextKey } from "../src/lib/tenant-context.ts";
@@ -1428,6 +1436,87 @@ async function runChecks(run: Run) {
     } finally {
       await pool.end();
     }
+  });
+
+  // The app's deadline statement on the data role, with no fixture rows. Each setting is read
+  // inside a transaction, the only place a transaction pooler pins one backend.
+  await check("transaction-deadlines", async (probe) => {
+    const settings =
+      "SELECT current_setting('statement_timeout') AS statement, current_setting('transaction_timeout') AS transaction";
+    const app = {
+      statement: `${APP_STATEMENT_TIMEOUT_MS / 1000}s`,
+      transaction: `${APP_TRANSACTION_TIMEOUT_MS / 1000}s`,
+    };
+    const same = (row: Row, expected: Row) =>
+      row.statement === expected.statement &&
+      row.transaction === expected.transaction;
+    const pool = new Pool({ ...clientConfig(run.dataUrl), max: 1 });
+    pool.on("error", () => {});
+    const conditions: Condition[] = [];
+    try {
+      const reused = await pool.connect();
+      try {
+        const before = await transaction(
+          reused,
+          async () => (await reused.query(settings)).rows[0],
+        );
+        conditions.push(["setup", !same(before, app)]);
+        probe.at("install");
+        let firstPid = Number.NaN;
+        const applied = await transaction(
+          reused,
+          async () => {
+            await reused.query(DEADLINES_SQL);
+            firstPid = await backendPid(reused);
+            return (await reused.query(settings)).rows[0];
+          },
+          true,
+        );
+        conditions.push(["install", same(applied, app)]);
+        probe.at("outcome");
+        const cancelled = await transaction(reused, async () => {
+          await reused.query(DEADLINES_SQL);
+          await reused.query("SET LOCAL statement_timeout = '100ms'");
+          return settle(reused.query("SELECT pg_sleep(1)"));
+        });
+        conditions.push(failsWith(cancelled, "57014"));
+        probe.at("end-state");
+        let nextPid = Number.NaN;
+        const after = await transaction(reused, async () => {
+          nextPid = await backendPid(reused);
+          return (await reused.query(settings)).rows[0];
+        });
+        conditions.push(
+          ["backend-identity", nextPid === firstPid],
+          ["end-state", same(after, before)],
+        );
+      } finally {
+        reused.release();
+      }
+    } finally {
+      await pool.end();
+    }
+    // A transaction timeout ends the whole session, so it runs on its own discarded connection.
+    probe.at("outcome");
+    const dedicated = connect(run.dataUrl);
+    try {
+      await dedicated.connect();
+      await dedicated.query("BEGIN");
+      await dedicated.query("SET LOCAL transaction_timeout = '200ms'");
+      const ended = await settle(dedicated.query("SELECT pg_sleep(1)"));
+      // A closed connection refuses the next statement without a SQLSTATE.
+      const next = ended.ok ? ended : await settle(dedicated.query("SELECT 1"));
+      conditions.push(
+        outcomeIs(
+          !ended.ok &&
+            (ended.code === "25P04" || (!next.ok && next.code === undefined)),
+          ended,
+        ),
+      );
+    } finally {
+      await dedicated.end().catch(() => {});
+    }
+    return probe.all(...conditions);
   });
 
   // The second member of team A against the first member's private rows; both are positive-controlled.
