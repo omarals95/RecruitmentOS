@@ -39,6 +39,7 @@ vi.mock("pg", () => ({
     ssl: unknown;
     kinds: string[] = [];
     end = vi.fn(async () => undefined);
+    on = vi.fn();
     constructor(options: { connectionString: string; ssl?: unknown }) {
       this.connectionString = options.connectionString;
       this.ssl = options.ssl;
