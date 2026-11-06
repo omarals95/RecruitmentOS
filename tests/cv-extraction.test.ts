@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  AI_EXTRACTION_DATA_SENT,
+  AI_EXTRACTION_LIMITS,
+  AI_EXTRACTION_LIMITS_TEXT,
+  AI_EXTRACTION_PURPOSE,
+  ExtractionProviderError,
   runCandidateExtraction,
   type CandidateExtractionAdapter,
 } from "@/domain/cv-extraction";
@@ -165,6 +170,78 @@ describe("candidate extraction contract", () => {
       caller.abort();
       expect(received?.aborted).toBe(false);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("maps provider rate and quota errors to their own outcomes without the adapter's message", async () => {
+    const rejecting = (error: Error): CandidateExtractionAdapter<void> => ({
+      async extract() {
+        throw error;
+      },
+    });
+    for (const code of ["rate_limited", "quota_exhausted"] as const)
+      expect(
+        await runCandidateExtraction(
+          rejecting(new ExtractionProviderError(code)),
+          undefined,
+        ),
+      ).toEqual({ ok: false, error: code });
+    expect(
+      await runCandidateExtraction(
+        rejecting(new Error("rate_limited")),
+        undefined,
+      ),
+    ).toEqual({ ok: false, error: "provider_failed" });
+  });
+
+  it("refuses tags holding a comma, which could not be reviewed as one value", async () => {
+    for (const fixture of [
+      { skills: ["Payroll, Excel"] },
+      { certifications: ["Fictional, Certificate"] },
+    ])
+      expect(await runCandidateExtraction(syntheticAdapter, fixture)).toEqual({
+        ok: false,
+        error: "invalid_response",
+      });
+  });
+
+  it("stops at AI_EXTRACTION_LIMITS.timeoutMs and states the limits in the disclosure texts", async () => {
+    expect(AI_EXTRACTION_LIMITS).toEqual({
+      maxFileBytes: 3 * 1024 * 1024,
+      timeoutMs: 30_000,
+      teamRequestsPer24Hours: 100,
+    });
+    for (const text of [
+      "3 MiB",
+      "100 requests per team in 24 hours",
+      "30 seconds",
+    ])
+      expect(AI_EXTRACTION_LIMITS_TEXT).toContain(text);
+    expect(AI_EXTRACTION_LIMITS_TEXT).toContain(
+      "including failed, cancelled or uncertain ones",
+    );
+    expect(AI_EXTRACTION_PURPOSE).toContain(
+      "never rank, score, shortlist, reject or hire",
+    );
+    expect(AI_EXTRACTION_DATA_SENT).toContain("one file per request");
+    const limits = AI_EXTRACTION_LIMITS as { timeoutMs: number };
+    vi.useFakeTimers();
+    limits.timeoutMs = 5_000;
+    try {
+      const stalled: CandidateExtractionAdapter<void> = {
+        extract: () => new Promise(() => {}),
+      };
+      let settled: unknown;
+      void runCandidateExtraction(stalled, undefined).then((result) => {
+        settled = result;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toEqual({ ok: false, error: "timed_out" });
+    } finally {
+      limits.timeoutMs = 30_000;
       vi.useRealTimers();
     }
   });
