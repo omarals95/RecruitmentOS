@@ -35,6 +35,11 @@
  *   connection (a client connection or network failure) and harness-error (anything else).
  * - Only the owner runs it against a non-local database, and only an approved Preview database:
  *   never Production. Agents never run it against Neon or any remote database.
+ * - Before writing it refuses (exit 2) any database whose schema db_boundary does not carry
+ *   exactly the PREVIEW_MARK comment, which only the schema owner can set, by hand, with the
+ *   statement in docs/neon-database-runbook.md §3 item 4. Migrations, the role template and this
+ *   code never set it, so Production has none unless someone sets it there; a copy or branch of
+ *   Preview carries it. The comment's value is never printed.
  */
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
@@ -101,6 +106,8 @@ type Probe = {
 };
 
 const AUDIENCE = "recruitmentos-tenant-context-v1";
+/** The db_boundary comment only its owner can set; migrations and the role template never set it. */
+const PREVIEW_MARK = "recruitmentos-environment=preview";
 const LIFETIME_MS = 60_000;
 const STATEMENT_TIMEOUT_MS = 20_000;
 const OVERLAP_WAIT_MS = 10_000;
@@ -270,7 +277,7 @@ async function transaction<T>(
   }
 }
 
-function signerFor(value: string): Signer {
+export function signerFor(value: string): Signer {
   const key = Buffer.from(value, "base64url");
   return {
     key,
@@ -2121,7 +2128,7 @@ async function runtimePairSafe(data: Db, identity: Db) {
 }
 
 /** Every check that must pass before the first write; returns a refusal reason or the variant. */
-async function preflight(
+export async function preflight(
   connections: { owner: Db; data: Db; identity: Db },
   signer: Signer,
   confirm: string,
@@ -2178,6 +2185,16 @@ async function preflight(
         return {
           refusal: "Every connection must be on the confirmed database.",
         };
+    // The database name does not tell Preview from Production; only the owner's mark does.
+    const mark = (
+      await connections.owner.query(
+        "SELECT pg_catalog.obj_description('db_boundary'::regnamespace, 'pg_namespace') AS mark",
+      )
+    ).rows[0];
+    if (mark.mark !== PREVIEW_MARK)
+      return {
+        refusal: "The database is not marked as an approved Preview database.",
+      };
     const setup = (
       await connections.owner.query(
         `SELECT (SELECT count(*) FROM auth.initial_admin_claim)::int AS claims,
