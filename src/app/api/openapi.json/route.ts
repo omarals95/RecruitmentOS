@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
   recordDataSchemas,
   resourceToKind,
   type RecordKind,
@@ -498,14 +500,131 @@ export function GET() {
       {
         summary: "Read bulk CV import availability",
         description:
-          "Requires cvs:write and candidates:write. Currently always reports uploads and AI as unavailable. storageConfigured reports whether private CV storage is set up in the server environment; it is read from configuration only and contacts no storage provider.",
+          "Requires cvs:write and candidates:write. storageConfigured reports whether private CV storage is set up in the server environment; it is read from configuration only and contacts no storage provider. uploadsAvailable equals storageConfigured, the same readiness single CV upload uses: Blob and unknown providers report false. AI extraction is always unavailable.",
       },
       {
         "200": {
           description:
-            "{data:{uploadsAvailable:false, aiAvailable:false, storageConfigured:boolean}}.",
+            "{data:{uploadsAvailable:boolean, aiAvailable:false, storageConfigured:boolean}}.",
         },
       },
+    ),
+  };
+  const bulkParams = [
+    {
+      name: "batchId",
+      in: "path",
+      required: true,
+      schema: { type: "string", format: "uuid" },
+      description:
+        "Client-chosen import batch ID; one per import session. The batch is private to its creator.",
+    },
+    {
+      name: "itemId",
+      in: "path",
+      required: true,
+      schema: { type: "string", format: "uuid" },
+      description:
+        "Client-chosen item ID, one per selected CV file. It is also the CV upload's clientUploadId.",
+    },
+  ];
+  const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended; afterwards the batch returns 409 bulk_batch_expired and is deleted when its user next imports. Another team's or another user's batch or item returns 404.`;
+  paths["/api/v1/cvs/bulk-batches"] = {
+    get: operation(
+      ["cvs:write", "candidates:write"],
+      {
+        summary: "List my recent bulk CV imports",
+        description: `Requires cvs:write and candidates:write. Returns the caller's unexpired batches in the selected team, newest first. outcome is derived when read: not-imported (no candidate), cv-pending (candidate without a ready CV), imported (CV ready) or cv-rejected. No candidate field values are stored or returned. ${bulkLifetime}`,
+      },
+      {
+        "200": {
+          description:
+            "{data: [{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]}]}.",
+        },
+      },
+    ),
+  };
+  paths["/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}"] = {
+    post: operation(
+      ["cvs:write", "candidates:write"],
+      {
+        summary: "Create the candidate for one reviewed bulk CV",
+        description: `Requires cvs:write and candidates:write. Returns 503 STORAGE_SETUP_REQUIRED before any write when CV uploads are unavailable. A batch holds up to ${BULK_INTAKE_MAX_FILES} items; another item returns 400 bulk_batch_limit. Reusing an item ID with a different file or different data returns 409 bulk_item_conflict. Repeating a created item returns it unchanged and creates nothing. Otherwise factsReviewed and duplicatesReviewed must both be true (400 bulk_review_required), and the server re-runs the exact email and phone match: any current match not listed in acknowledgedDuplicateIds returns 409 bulk_duplicates_changed, so check duplicates again. The candidate is created with reviewStatus Reviewed, and its created activity event records the review evidence (bulkIntake: batchId, itemId, factsReviewed, duplicatesReviewed, possibleDuplicates, limited). Source fields (rawSource, evidence, sourceReviews) are not accepted. ${bulkLifetime}`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["file", "data"],
+            additionalProperties: false,
+            properties: {
+              file: {
+                type: "object",
+                required: ["originalName", "mimeType", "sizeBytes"],
+                additionalProperties: false,
+                properties: {
+                  originalName: { type: "string", maxLength: 180 },
+                  mimeType: { type: "string", maxLength: 150 },
+                  sizeBytes: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 10485760,
+                  },
+                },
+              },
+              data: {
+                $ref: "#/components/schemas/candidates",
+                description:
+                  "Candidate details without rawSource, evidence or sourceReviews.",
+              },
+              factsReviewed: { type: "boolean", const: true },
+              duplicatesReviewed: { type: "boolean", const: true },
+              acknowledgedDuplicateIds: {
+                type: "array",
+                maxItems: 20,
+                items: { type: "string", format: "uuid" },
+                description:
+                  "The possible duplicate IDs shown at the last duplicate check.",
+              },
+            },
+          },
+          {
+            file: {
+              originalName: "fictional-cv.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 48213,
+            },
+            data: {
+              name: "Amira Fictional",
+              email: "amira.fictional@example.test",
+            },
+            factsReviewed: true,
+            duplicatesReviewed: true,
+            acknowledgedDuplicateIds: [],
+          },
+        ),
+      },
+      {
+        "201": {
+          description:
+            "{data: item} with id, batchId, originalName, mimeType, sizeBytes, candidateId, uploadId, reviewedAt, possibleDuplicates, createdAt, updatedAt and the batch expiresAt.",
+        },
+      },
+      { params: bulkParams },
+    ),
+  };
+  paths["/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload"] = {
+    post: operation(
+      ["cvs:write", "candidates:write"],
+      {
+        summary: "Reserve the CV upload for a bulk item",
+        description: `Requires cvs:write and candidates:write. Reserves the private CV upload for the item's candidate with the item's file metadata, using the item ID as clientUploadId, so a repeat returns the same CV upload. Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
+      },
+      {
+        "201": {
+          description:
+            "{data: CV reference, upload}, as for /api/v1/candidates/{id}/cvs/uploads.",
+        },
+      },
+      { params: bulkParams },
     ),
   };
   paths["/api/v1/teams/bootstrap"] = {

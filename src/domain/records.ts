@@ -129,6 +129,10 @@ export const SENSITIVE_CANDIDATE_FIELDS = [
 
 /** Most possible-duplicate matches one contact lookup returns. */
 export const CANDIDATE_DUPLICATE_LIMIT = 20;
+/** Most CV files one bulk import batch can hold. */
+export const BULK_INTAKE_MAX_FILES = 50;
+/** Hours a bulk import batch's recovery rows stay readable, counted from its creation. */
+export const BULK_INTAKE_RECOVERY_HOURS = 24;
 
 export const recordDataSchemas = {
   candidate: z

@@ -100,6 +100,8 @@ GRANT SELECT, INSERT, UPDATE ON TABLE app.uploads TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.storage_usage TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.idempotency TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.notification_reads TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.bulk_intake_batches TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.bulk_intake_items TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_data;

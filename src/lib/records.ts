@@ -274,7 +274,7 @@ async function find(
     throw new ApiError(404, "not_found", "Record not found in this team.");
   return rows[0];
 }
-async function lockTeam(tx: TeamTx, p: Principal) {
+export async function lockTeam(tx: TeamTx, p: Principal) {
   // A transaction-scoped lock also serializes empty-set and cross-record invariants.
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`recruitment-records:${p.teamId}`}, 0))`,
@@ -719,6 +719,18 @@ export const candidateDuplicateQuerySchema = z
 export async function findCandidateDuplicates(p: Principal, input: unknown) {
   permission(p, "candidates");
   const query = parse(candidateDuplicateQuerySchema, input);
+  return withTeam(p, (tx) => matchCandidateContacts(tx, p, query));
+}
+
+/**
+ * The contact match behind findCandidateDuplicates, inside the caller's transaction: lower-cased
+ * email or digits-only phone of at least seven digits. Without either it matches nothing.
+ */
+export async function matchCandidateContacts(
+  tx: TeamTx,
+  p: Principal,
+  query: { email?: string; phone?: string },
+) {
   const email = query.email?.toLowerCase() || "";
   const phone = (query.phone || "").replace(/\D/g, "");
   const predicates: SQL[] = [];
@@ -728,35 +740,34 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
     predicates.push(
       sql`regexp_replace(coalesce(${records.data}->>'phone', ''), '[^0-9]', '', 'g') = ${phone}`,
     );
-  return withTeam(p, async (tx) => {
-    const rows = await tx
-      .select({ id: records.id, data: records.data })
-      .from(records)
-      .where(and(...owned(p, "candidate"), or(...predicates)))
-      .orderBy(asc(records.id))
-      .limit(CANDIDATE_DUPLICATE_LIMIT + 1);
-    const data = rows.slice(0, CANDIDATE_DUPLICATE_LIMIT).map((row) => {
-      const storedEmail =
-        typeof row.data.email === "string" ? row.data.email : "";
-      const storedPhone =
-        typeof row.data.phone === "string" ? row.data.phone : "";
-      return {
-        id: row.id,
-        name: typeof row.data.name === "string" ? row.data.name : "",
-        email: storedEmail,
-        phone: storedPhone,
-        matches: [
-          ...(email && storedEmail.trim().toLowerCase() === email
-            ? ["email"]
-            : []),
-          ...(phone.length >= 7 && storedPhone.replace(/\D/g, "") === phone
-            ? ["phone"]
-            : []),
-        ],
-      };
-    });
-    return { data, limited: rows.length > CANDIDATE_DUPLICATE_LIMIT };
+  if (!predicates.length) return { data: [], limited: false };
+  const rows = await tx
+    .select({ id: records.id, data: records.data })
+    .from(records)
+    .where(and(...owned(p, "candidate"), or(...predicates)))
+    .orderBy(asc(records.id))
+    .limit(CANDIDATE_DUPLICATE_LIMIT + 1);
+  const data = rows.slice(0, CANDIDATE_DUPLICATE_LIMIT).map((row) => {
+    const storedEmail =
+      typeof row.data.email === "string" ? row.data.email : "";
+    const storedPhone =
+      typeof row.data.phone === "string" ? row.data.phone : "";
+    return {
+      id: row.id,
+      name: typeof row.data.name === "string" ? row.data.name : "",
+      email: storedEmail,
+      phone: storedPhone,
+      matches: [
+        ...(email && storedEmail.trim().toLowerCase() === email
+          ? ["email"]
+          : []),
+        ...(phone.length >= 7 && storedPhone.replace(/\D/g, "") === phone
+          ? ["phone"]
+          : []),
+      ],
+    };
   });
+  return { data, limited: rows.length > CANDIDATE_DUPLICATE_LIMIT };
 }
 
 /** Every list query key; an export takes the filter keys plus sort and direction. */
@@ -1179,12 +1190,14 @@ export async function exportRecords(
   });
 }
 
-async function createInside(
+/** `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review. */
+export async function createInside(
   tx: TeamTx,
   p: Principal,
   kind: RecordKind,
   input: WriteInput,
   imported: boolean,
+  auditMetadata: Data = {},
 ): Promise<RecordDto> {
   validateRelations(kind, input.data);
   await checkReferences(
@@ -1262,11 +1275,14 @@ async function createInside(
     p,
     row,
     imported ? "imported" : "created",
-    kind === "application" && !imported
-      ? { fromStage: null, toStage: input.data.stage }
-      : kind === "offer" && !imported
-        ? { fromStatus: null, toStatus: input.data.status }
-        : {},
+    {
+      ...(kind === "application" && !imported
+        ? { fromStage: null, toStage: input.data.stage }
+        : kind === "offer" && !imported
+          ? { fromStatus: null, toStatus: input.data.status }
+          : {}),
+      ...auditMetadata,
+    },
     imported,
   );
   return dto(row);

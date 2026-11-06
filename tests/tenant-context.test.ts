@@ -12,6 +12,8 @@ vi.mock("@/db", async (original) => ({
 
 import {
   activity,
+  bulkIntakeBatches,
+  bulkIntakeItems,
   candidateStates,
   idempotency,
   notificationReads,
@@ -53,6 +55,8 @@ const TABLES = [
   "storage_usage",
   "idempotency",
   "notification_reads",
+  "bulk_intake_batches",
+  "bulk_intake_items",
 ] as const;
 const AUDIENCE = "recruitmentos-tenant-context-v1";
 const testKey = () =>
@@ -231,6 +235,27 @@ describe("signed tenant context under separate nonowner data and identity roles"
           userId: p.userId,
           key: `fictional-${label}`,
         });
+        const batchId = randomUUID();
+        const now = new Date();
+        await tx.insert(bulkIntakeBatches).values({
+          id: batchId,
+          teamId: p.teamId,
+          createdBy: p.userId,
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + 3_600_000),
+        });
+        await tx.insert(bulkIntakeItems).values({
+          id: randomUUID(),
+          teamId: p.teamId,
+          batchId,
+          createdBy: p.userId,
+          originalName: `fictional-${label}.pdf`,
+          mimeType: "application/pdf",
+          sizeBytes: 10,
+          payloadHash: "0".repeat(64),
+          createdAt: now,
+          updatedAt: now,
+        });
         await tx.insert(activity).values([
           {
             teamId: p.teamId,
@@ -314,6 +339,10 @@ describe("signed tenant context under separate nonowner data and identity roles"
       expect(states.map((row) => row.userId)).toEqual([ownerA.userId]);
       const reads = await tx.select().from(notificationReads);
       expect(reads.map((row) => row.userId)).toEqual([ownerA.userId]);
+      const batches = await tx.select().from(bulkIntakeBatches);
+      expect(batches.map((row) => row.createdBy)).toEqual([ownerA.userId]);
+      const items = await tx.select().from(bulkIntakeItems);
+      expect(items.map((row) => row.createdBy)).toEqual([ownerA.userId]);
       const views = await tx
         .select()
         .from(records)
@@ -360,6 +389,19 @@ describe("signed tenant context under separate nonowner data and identity roles"
           .update(records)
           .set({ data: { name: "Overwritten view" } })
           .where(eq(records.privateOwnerId, memberA.userId))
+          .returning(),
+      ).toEqual([]);
+      expect(
+        await tx
+          .update(bulkIntakeItems)
+          .set({ originalName: "overwritten.pdf" })
+          .where(eq(bulkIntakeItems.createdBy, memberA.userId))
+          .returning(),
+      ).toEqual([]);
+      expect(
+        await tx
+          .delete(bulkIntakeBatches)
+          .where(eq(bulkIntakeBatches.createdBy, memberA.userId))
           .returning(),
       ).toEqual([]);
       const events = await tx
@@ -441,8 +483,18 @@ describe("signed tenant context under separate nonowner data and identity roles"
           .select()
           .from(notificationReads)
           .where(eq(notificationReads.teamId, ownerB.teamId)),
+        tx
+          .select()
+          .from(bulkIntakeBatches)
+          .where(eq(bulkIntakeBatches.teamId, ownerB.teamId)),
+        tx
+          .select()
+          .from(bulkIntakeItems)
+          .where(eq(bulkIntakeItems.teamId, ownerB.teamId)),
       ]);
-      expect(foreign.map((rows) => rows.length)).toEqual([0, 0, 0, 0, 0, 0, 0]);
+      expect(foreign.map((rows) => rows.length)).toEqual([
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
+      ]);
       const own = await tx.select().from(uploads);
       expect(own.map((row) => row.legacySourceId)).toEqual([
         "fictional-legacy-owner-a",
@@ -510,6 +562,27 @@ describe("signed tenant context under separate nonowner data and identity roles"
           teamId: ownerB.teamId,
           userId: ownerA.userId,
           key: "forged",
+        }),
+      (tx: TeamTx) =>
+        tx.insert(bulkIntakeBatches).values({
+          id: randomUUID(),
+          teamId: ownerB.teamId,
+          createdBy: ownerA.userId,
+          createdAt: new Date(),
+          expiresAt: later,
+        }),
+      (tx: TeamTx) =>
+        tx.insert(bulkIntakeItems).values({
+          id: randomUUID(),
+          teamId: ownerB.teamId,
+          batchId: randomUUID(),
+          createdBy: ownerA.userId,
+          originalName: "forged.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          payloadHash: "0".repeat(64),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         }),
     ];
     for (const [index, insert] of inserts.entries())

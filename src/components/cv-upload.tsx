@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { sendCvBytes, type UploadTicket } from "./cv-transfer";
+import { sendCvBytes, withUploadLock, type UploadTicket } from "./cv-transfer";
 
 type UploadResponse = {
   data: { id: string; status: string };
@@ -45,6 +45,11 @@ export function CvUpload({
       setError("Choose a CV between 1 byte and 10 MiB.");
       return;
     }
+    const refused = await withUploadLock(() => send(file), navigator.locks);
+    if (refused) setError(refused);
+  }
+
+  async function send(file: File) {
     clientUploadId.current ||= crypto.randomUUID();
     const headers = { "Content-Type": "application/json", "X-Team-Id": teamId };
     try {
