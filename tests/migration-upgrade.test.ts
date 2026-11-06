@@ -1,0 +1,354 @@
+import { randomUUID } from "node:crypto";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
+import { listCandidateCvs } from "../src/lib/cvs";
+import { roleScopes, type Role } from "../src/lib/permissions";
+import type { Principal } from "../src/lib/principal";
+import { getCandidateState, getRecord, listRecords } from "../src/lib/records";
+import { installTenantContextKey } from "../src/lib/tenant-context";
+
+// A populated fictional workspace written by the 0006 schema, upgraded in place through every
+// later migration. Candidates already hold a controlled review status and no bucket is named Done,
+// so 0012 and 0014 have nothing to rewrite and every row must come through unchanged.
+const ids = Object.fromEntries(
+  [
+    "jobRole",
+    "vacancy",
+    "candidate",
+    "otherCandidate",
+    "application",
+    "offer",
+    "interview",
+    "onboarding",
+    "checklist",
+    "bucket",
+    "task",
+    "comment",
+    "view",
+    "teamBCandidate",
+    "cv",
+  ].map((name) => [name, randomUUID()]),
+) as Record<string, string>;
+const principal = (userId: string, teamId: string, role: Role): Principal => ({
+  userId,
+  teamId,
+  role,
+  scopes: roleScopes(role),
+  authType: "session",
+});
+const ownerA = principal("upgrade-owner-a", "upgrade-team-a", "owner");
+const memberA = principal("upgrade-member-a", "upgrade-team-a", "recruiter");
+const ownerB = principal("upgrade-owner-b", "upgrade-team-b", "owner");
+const note = "Fictional private follow-up note";
+const recordColumns =
+  "id, team_id, kind, data, version, candidate_id, vacancy_id, application_id, onboarding_id, bucket_id, job_role_id, parent_record_id, private_owner_id";
+const activityColumns =
+  "id, team_id, record_id, actor_id, actor_type, token_id, action, kind, summary, metadata, created_at";
+const stateColumns =
+  "team_id, user_id, candidate_id, shortlisted, status, note, version, import_meta, updated_at";
+const migrationFiles = async (dir: string) =>
+  (await readdir(dir)).filter((f) => /^\d{4}.*\.sql$/.test(f)).sort();
+
+describe("populated fictional baseline upgrade from 0006", () => {
+  const pg = new PGlite();
+  const snapshot = async () => ({
+    records: (
+      await pg.query(`SELECT ${recordColumns} FROM app.records ORDER BY id`)
+    ).rows,
+    activity: (
+      await pg.query(`SELECT ${activityColumns} FROM app.activity ORDER BY id`)
+    ).rows,
+    states: (
+      await pg.query(
+        `SELECT ${stateColumns} FROM app.candidate_states ORDER BY candidate_id`,
+      )
+    ).rows,
+  });
+  const ledger = async () =>
+    (
+      await pg.query<{ name: string }>(
+        "SELECT name FROM public.recruitment_migrations ORDER BY name",
+      )
+    ).rows.map((row) => row.name);
+  let before: Awaited<ReturnType<typeof snapshot>>;
+  let uploadBefore: Record<string, unknown>;
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0006_trusted_tenant_context.sql");
+    // The first owner completes the initial-administrator setup before anyone else signs up.
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('upgrade-owner-a','Fictional Owner A','upgrade-owner-a@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('upgrade-team-a','Fictional Team A','upgrade-team-a','upgrade-owner-a');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('upgrade-ma','upgrade-team-a','upgrade-owner-a','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('upgrade-member-a','Fictional Member A','upgrade-member-a@example.test',true,false),
+        ('upgrade-owner-b','Fictional Owner B','upgrade-owner-b@example.test',true,false);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('upgrade-team-b','Fictional Team B','upgrade-team-b','upgrade-owner-b');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('upgrade-mm','upgrade-team-a','upgrade-member-a','recruiter'),
+        ('upgrade-mb','upgrade-team-b','upgrade-owner-b','owner');`);
+    const insert = (
+      id: string,
+      team: string,
+      kind: string,
+      data: object,
+      refs: Record<string, string> = {},
+      privateOwner: string | null = null,
+    ) =>
+      pg.query(
+        `INSERT INTO app.records(id,team_id,kind,data,created_by,candidate_id,vacancy_id,application_id,onboarding_id,bucket_id,job_role_id,parent_record_id,private_owner_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [
+          id,
+          team,
+          kind,
+          JSON.stringify(data),
+          team === "upgrade-team-a" ? ownerA.userId : ownerB.userId,
+          refs.candidate ?? null,
+          refs.vacancy ?? null,
+          refs.application ?? null,
+          refs.onboarding ?? null,
+          refs.bucket ?? null,
+          refs.jobRole ?? null,
+          refs.parent ?? null,
+          privateOwner,
+        ],
+      );
+    const a = "upgrade-team-a";
+    await insert(ids.jobRole, a, "job-role", {
+      title: "Fictional Platform Engineer",
+      department: "Engineering",
+    });
+    await insert(
+      ids.vacancy,
+      a,
+      "vacancy",
+      { title: "Fictional Platform Engineer", requisitionId: "UPG-001" },
+      { jobRole: ids.jobRole },
+    );
+    await insert(ids.candidate, a, "candidate", {
+      name: "Fictional Upgrade Candidate",
+      email: "upgrade-candidate@example.test",
+      reviewStatus: "Reviewed",
+    });
+    await insert(ids.otherCandidate, a, "candidate", {
+      name: "Fictional Second Candidate",
+      reviewStatus: "Needs review",
+    });
+    await insert(
+      ids.application,
+      a,
+      "application",
+      { stage: "Offer" },
+      { candidate: ids.candidate, vacancy: ids.vacancy },
+    );
+    await insert(
+      ids.offer,
+      a,
+      "offer",
+      {
+        title: "Fictional offer",
+        amount: "25000.50",
+        currency: "AED",
+        status: "Draft",
+      },
+      { application: ids.application },
+    );
+    await insert(
+      ids.interview,
+      a,
+      "interview",
+      { title: "Fictional interview", status: "Scheduled" },
+      { application: ids.application },
+    );
+    await insert(
+      ids.onboarding,
+      a,
+      "onboarding",
+      { status: "In progress" },
+      { application: ids.application },
+    );
+    await insert(
+      ids.checklist,
+      a,
+      "checklist",
+      { title: "Fictional orientation", status: "Pending" },
+      { onboarding: ids.onboarding },
+    );
+    await insert(ids.bucket, a, "bucket", { name: "Fictional follow-ups" });
+    await insert(
+      ids.task,
+      a,
+      "task",
+      { title: "Fictional follow-up task" },
+      { bucket: ids.bucket },
+    );
+    await insert(
+      ids.comment,
+      a,
+      "comment",
+      { body: "Fictional comment" },
+      { parent: ids.candidate },
+    );
+    await insert(
+      ids.view,
+      a,
+      "saved-view",
+      { name: "Fictional private view", query: { q: "Fictional" } },
+      {},
+      memberA.userId,
+    );
+    await insert(ids.teamBCandidate, "upgrade-team-b", "candidate", {
+      name: "Fictional Team B Candidate",
+      reviewStatus: "Reviewed",
+    });
+    await pg.query(
+      `INSERT INTO app.candidate_states(team_id,user_id,candidate_id,status,note) VALUES($1,$2,$3,'Contacted',$4)`,
+      [a, memberA.userId, ids.candidate, note],
+    );
+    await pg.query(
+      `INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary,created_at) VALUES
+        ($1,$2,$4,'session','created','candidate','Fictional candidate created','2026-01-01T00:00:00Z'),
+        ($1,$3,$4,'session','created','offer','Fictional offer created','2026-01-02T00:00:00Z'),
+        ($1,$5,$4,'session','created','comment','Fictional comment created','2026-01-03T00:00:00Z')`,
+      [a, ids.candidate, ids.offer, ownerA.userId, ids.comment],
+    );
+    await pg.query(
+      `INSERT INTO app.uploads(id,team_id,candidate_id,original_name,mime_type,size_bytes,status,object_key,object_version,created_by,created_at,completed_at,expires_at)
+        VALUES($1,$2,$3,'fictional-cv.pdf','application/pdf',300,'ready','teams/upgrade-team-a/cvs/fictional-cv.pdf','fictional-v1',$4,'2026-01-01T00:00:00Z','2026-01-01T00:05:00Z','2026-01-01T01:00:00Z')`,
+      [ids.cv, a, ids.candidate, ownerA.userId],
+    );
+    await pg.query(
+      "INSERT INTO app.storage_usage(team_id,used_bytes,used_files) VALUES($1,300,1)",
+      [a],
+    );
+    before = await snapshot();
+    uploadBefore = (
+      await pg.query<Record<string, unknown>>(
+        "SELECT id, candidate_id, object_key, object_version, size_bytes::int, status FROM app.uploads",
+      )
+    ).rows[0];
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+    setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
+  });
+  afterAll(async () => pg.close());
+
+  it("records every migration file in the ledger", async () => {
+    expect(await ledger()).toEqual(
+      await migrationFiles(join(process.cwd(), "drizzle")),
+    );
+  });
+
+  it("keeps every record, audit row and private state unchanged", async () => {
+    expect(before.records).toHaveLength(14);
+    expect(before.activity).toHaveLength(3);
+    expect(before.states).toHaveLength(1);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("keeps the offer amount and currency exactly", async () => {
+    const offer = await getRecord(ownerA, "offers", ids.offer);
+    expect(offer.data).toMatchObject({ amount: "25000.50", currency: "AED" });
+    expect(
+      (
+        await pg.query(
+          "SELECT data->>'amount' AS amount, data->>'currency' AS currency FROM app.records WHERE id=$1",
+          [ids.offer],
+        )
+      ).rows,
+    ).toEqual([{ amount: "25000.50", currency: "AED" }]);
+  });
+
+  it("keeps the CV identity and moves its version into s3_version_id", async () => {
+    const { object_version, ...identity } = uploadBefore;
+    expect(
+      (
+        await pg.query(
+          "SELECT id, candidate_id, object_key, s3_version_id, size_bytes::int, status FROM app.uploads",
+        )
+      ).rows,
+    ).toEqual([{ ...identity, s3_version_id: object_version }]);
+    expect(object_version).toBe("fictional-v1");
+    expect(
+      (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
+    ).toEqual([ids.cv]);
+  });
+
+  it("keeps team and private boundaries through the application", async () => {
+    await expect(
+      getRecord(ownerB, "candidates", ids.candidate),
+    ).rejects.toMatchObject({ status: 404, code: "not_found" });
+    expect(await getCandidateState(memberA, ids.candidate)).toMatchObject({
+      status: "Contacted",
+      note,
+    });
+    expect(await getCandidateState(ownerA, ids.candidate)).toMatchObject({
+      status: "New",
+      note: "",
+      version: 0,
+    });
+    const views = async (p: Principal) =>
+      (await listRecords(p, "views", new URLSearchParams())).data.map(
+        (view) => view.id,
+      );
+    expect(await views(memberA)).toEqual([ids.view]);
+    expect(await views(ownerA)).toEqual([]);
+  });
+
+  it("leaves no trace of a failed migration and continues once it is removed", async () => {
+    const source = join(process.cwd(), "drizzle");
+    const real = await migrationFiles(source);
+    const applied = await ledger();
+    const root = await mkdtemp(
+      join(tmpdir(), "recruitmentos-failed-migration-"),
+    );
+    const drizzleDir = join(root, "drizzle");
+    const failing = join(drizzleDir, "9999_fictional_failure.sql");
+    await mkdir(drizzleDir);
+    for (const file of real)
+      await copyFile(join(source, file), join(drizzleDir, file));
+    // The table is created first; the division then aborts the whole file.
+    await writeFile(
+      failing,
+      "CREATE TABLE app.fictional_partial(value integer);\nINSERT INTO app.fictional_partial(value) VALUES (1/0);\n",
+    );
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+    try {
+      await expect(applyMigrations(pg)).rejects.toMatchObject({
+        code: "22012",
+      });
+      expect(await ledger()).toEqual(applied);
+      expect(applied).toEqual(real);
+      expect(
+        (
+          await pg.query(
+            "SELECT to_regclass('app.fictional_partial') IS NULL AS absent",
+          )
+        ).rows,
+      ).toEqual([{ absent: true }]);
+      expect(await snapshot()).toEqual(before);
+      await rm(failing);
+      await applyMigrations(pg);
+      expect(await ledger()).toEqual(applied);
+    } finally {
+      cwd.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
