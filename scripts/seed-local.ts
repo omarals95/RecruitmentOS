@@ -2,12 +2,20 @@ import "./load-env";
 import { randomBytes, randomUUID } from "node:crypto";
 import { hashPassword } from "better-auth/crypto";
 import { eq } from "drizzle-orm";
-import { getDb } from "../src/db";
+import { closeDb, getDb } from "../src/db";
 import { user, account, organization, member } from "../src/db/auth-schema";
 import { bootstrapTeam, createRecord } from "../src/lib/records";
 import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 async function main() {
+  try {
+    await seed();
+  } finally {
+    // An open PGlite client keeps the process alive after the work is done.
+    await closeDb();
+  }
+}
+async function seed() {
   if (
     process.env.NODE_ENV === "production" ||
     process.env.DATABASE_MODE !== "pglite" ||
