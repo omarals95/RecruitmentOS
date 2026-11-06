@@ -44,6 +44,25 @@ export function getIdentityDb(): Promise<AppDb> {
   return getDb();
 }
 
+/**
+ * A server can end a pooled connection (for example a transaction timeout), and pg emits that on
+ * the pool or a checked-out client; unhandled, it would crash the process instead of failing one
+ * request. Log only a fixed category and the SQLSTATE; pg-pool discards the broken client.
+ */
+function logConnectionErrors(pool: Pool): Pool {
+  const log = (category: string) => (error: unknown) => {
+    const code = (error as { code?: unknown } | null)?.code;
+    const sqlState =
+      typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
+        ? ` sqlstate=${code}`
+        : "";
+    console.error(`database_connection_error category=${category}${sqlState}`);
+  };
+  pool.on("error", log("pool"));
+  pool.on("connect", (client) => client.on("error", log("client")));
+  return pool;
+}
+
 function getDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
   if (!identityPair)
     identityPair = createDbPair().catch((error) => {
@@ -102,14 +121,16 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
     const url = new URL(connectionString);
     const local = isLoopbackHost(url.hostname);
     if (!local) url.searchParams.set("sslmode", "verify-full");
-    return new Pool({
-      connectionString: url.toString(),
-      max: 5,
-      idleTimeoutMillis: 10000,
-      connectionTimeoutMillis: 10000,
-      allowExitOnIdle: true,
-      ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
-    });
+    return logConnectionErrors(
+      new Pool({
+        connectionString: url.toString(),
+        max: 5,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 10000,
+        allowExitOnIdle: true,
+        ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
+      }),
+    );
   }
   const dataPool = makePool(targets.dataUrl);
   const identityPool = makePool(targets.identityUrl);
@@ -219,14 +240,16 @@ async function createDb(): Promise<AppDb> {
   const url = new URL(process.env.DATABASE_URL);
   const local = isLoopbackHost(url.hostname);
   if (!local) url.searchParams.set("sslmode", "verify-full");
-  const pool = new Pool({
-    connectionString: url.toString(),
-    max: 5,
-    idleTimeoutMillis: 10000,
-    connectionTimeoutMillis: 10000,
-    allowExitOnIdle: true,
-    ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
-  });
+  const pool = logConnectionErrors(
+    new Pool({
+      connectionString: url.toString(),
+      max: 5,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+      ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
+    }),
+  );
   try {
     if (process.env.NODE_ENV === "production") {
       const result = await pool.query<{ unsafe: boolean }>(
