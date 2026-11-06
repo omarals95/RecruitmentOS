@@ -147,6 +147,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           uploadsSkipped: result.uploadsSkipped,
           conflicts: result.conflicts.length,
           errors: result.errors.length,
+          missing: result.missing.length,
+          reconciliation: result.reconciliation,
         },
         null,
         2,

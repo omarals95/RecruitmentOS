@@ -10,7 +10,11 @@ import {
   safeResolve,
   validateWorkbookZip,
 } from "../scripts/legacy/files";
-import { applyPlan, validateApiUrl } from "../scripts/legacy/apply";
+import {
+  applyPlan,
+  validateApiUrl,
+  type ApplyResult,
+} from "../scripts/legacy/apply";
 
 const folders: string[] = [];
 async function temp() {
@@ -548,9 +552,14 @@ describe("legacy API apply", () => {
     ])
       expect(() => validateApiUrl(url)).toThrow();
   });
-  it("applies references topologically and reruns without duplicating or overwriting user edits", async () => {
-    const plan = buildPlan(input()),
-      store: Record<string, Record<string, unknown>[]> = {},
+  /**
+   * An in-memory target API that lists, creates and patches records and already holds the fictional
+   * private state. `fail` answers a matching write with HTTP 500 and stores nothing.
+   */
+  function fakeTarget(
+    fail?: (resource: string, body: Record<string, unknown>) => boolean,
+  ) {
+    const store: Record<string, Record<string, unknown>[]> = {},
       requests: { path: string; body: Record<string, unknown> }[] = [];
     let sequence = 0;
     const fakeFetch: typeof fetch = async (request, options) => {
@@ -586,6 +595,8 @@ describe("legacy API apply", () => {
         });
       const body = JSON.parse(String(options.body));
       requests.push({ path: url.pathname, body });
+      if (fail?.(resource, body))
+        return Response.json({ code: "fictional_failure" }, { status: 500 });
       if (options.method === "PATCH") {
         const row = store[resource].find((v) => v.id === id)!;
         Object.assign(row, body);
@@ -600,6 +611,52 @@ describe("legacy API apply", () => {
       store[resource].push(row);
       return Response.json({ data: row });
     };
+    return { fakeFetch, store, requests };
+  }
+  const targetOptions = (fetchImpl: typeof fetch) => ({
+    apiUrl: "https://recruit.example.test",
+    teamId: "team",
+    token: "fictional-token",
+    fetchImpl,
+  });
+  /** Every planned item has exactly one outcome in its category. */
+  function expectBalanced({ reconciliation }: ApplyResult) {
+    const { records, states, files } = reconciliation;
+    expect(
+      records.created +
+        records.updated +
+        records.skipped +
+        records.conflicts +
+        records.failed,
+    ).toBe(records.planned);
+    expect(
+      states.imported + states.unchanged + states.conflicts + states.failed,
+    ).toBe(states.planned);
+    expect(files.ready + files.skipped + files.failed).toBe(files.planned);
+  }
+  /** Plan B: c_1 renamed, checklist k_1 (no dependants) dropped, candidate c_2 added. */
+  function changedInput(): LegacyInputs {
+    const changed = input();
+    const master = changed.workbooks["Resume_Master.xlsx"].Master;
+    master[6][1] = "Fictional Example Revised";
+    master.push([
+      "c_2",
+      "Fictional Newcomer",
+      "newcomer@example.test",
+      "Finance",
+      "Not stated",
+      1,
+      "",
+      "",
+      "",
+    ]);
+    changed.workbooks["Recruitment_Operations.xlsx"].Checklist.splice(1, 1);
+    return changed;
+  }
+
+  it("applies references topologically and reruns without duplicating or overwriting user edits", async () => {
+    const plan = buildPlan(input());
+    const { fakeFetch, store, requests } = fakeTarget();
     const opts = {
       apiUrl: "https://recruit.example.test",
       teamId: "team",
@@ -630,6 +687,99 @@ describe("legacy API apply", () => {
     expect((store.candidates[0].data as { name: string }).name).toBe(
       "Manually corrected",
     );
+  });
+  it("accounts for a changed plan without overwriting or deleting target records", async () => {
+    const planA = buildPlan(input()),
+      planB = buildPlan(changedInput());
+    expect(planB.issues.filter((v) => v.severity === "error")).toEqual([]);
+    const { fakeFetch, store } = fakeTarget();
+    const first = await applyPlan(planA, targetOptions(fakeFetch));
+    expect(first.missing).toEqual([]);
+    expectBalanced(first);
+    const result = await applyPlan(planB, targetOptions(fakeFetch));
+    expect(result.errors).toEqual([]);
+    expect(result.conflicts).toEqual(["candidates:c_1"]);
+    expect(result.missing).toEqual(["checklist:k_1"]);
+    expect(result.reconciliation.records).toEqual({
+      planned: planB.records.length,
+      created: 1,
+      updated: 0,
+      skipped: planB.records.length - 2,
+      conflicts: 1,
+      failed: 0,
+      missing: 1,
+    });
+    expect(result.reconciliation.states).toEqual({
+      planned: 1,
+      imported: 0,
+      unchanged: 1,
+      conflicts: 0,
+      failed: 0,
+    });
+    expect(result.reconciliation.files).toEqual({
+      planned: planB.sources.length,
+      ready: 0,
+      skipped: planB.sources.length,
+      failed: 0,
+    });
+    expectBalanced(result);
+    expect(store.checklist.map((row) => row.legacyId)).toEqual(["k_1"]);
+    expect(
+      store.candidates.map((row) => [
+        row.legacyId,
+        (row.data as { name: string }).name,
+      ]),
+    ).toEqual([
+      ["c_1", "Fictional Example"],
+      ["c_2", "Fictional Newcomer"],
+    ]);
+  });
+  it("updates the changed record only with updateExisting and still reports the missing one", async () => {
+    const planB = buildPlan(changedInput());
+    const { fakeFetch, store } = fakeTarget();
+    await applyPlan(buildPlan(input()), targetOptions(fakeFetch));
+    const result = await applyPlan(planB, {
+      ...targetOptions(fakeFetch),
+      updateExisting: true,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.missing).toEqual(["checklist:k_1"]);
+    expect(result.reconciliation.records).toEqual({
+      planned: planB.records.length,
+      created: 1,
+      updated: 1,
+      skipped: planB.records.length - 2,
+      conflicts: 0,
+      failed: 0,
+      missing: 1,
+    });
+    expectBalanced(result);
+    expect(store.checklist.map((row) => row.legacyId)).toEqual(["k_1"]);
+    expect((store.candidates[0].data as { name: string }).name).toBe(
+      "Fictional Example Revised",
+    );
+  });
+  it("counts a record the API refuses as failed and keeps the totals balanced", async () => {
+    const plan = buildPlan(input());
+    const { fakeFetch, store } = fakeTarget(
+      (resource) => resource === "comments",
+    );
+    const result = await applyPlan(plan, targetOptions(fakeFetch));
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        location: "comments:m_1",
+        code: "fictional_failure",
+      }),
+    );
+    expect(result.reconciliation.records).toMatchObject({
+      planned: plan.records.length,
+      created: plan.records.length - 1,
+      failed: 1,
+      missing: 0,
+    });
+    expectBalanced(result);
+    expect(store.comments).toEqual([]);
   });
   it("stops before mutation when target permissions are denied", async () => {
     let writes = 0;
@@ -684,6 +834,13 @@ describe("legacy API apply", () => {
       fetchImpl: fakeFetch,
     });
     expect(result.errors).toEqual([]);
+    expect(result.reconciliation.states).toEqual({
+      planned: 1,
+      imported: 1,
+      unchanged: 0,
+      conflicts: 0,
+      failed: 0,
+    });
     expect(stateBody).toMatchObject({
       note: "Private note with original whitespace",
       importMeta: {
@@ -768,6 +925,14 @@ describe("legacy API apply", () => {
     expect(storageCalls).toBe(1);
     expect(completeCalls).toBe(1);
     expect(result.uploadsReady).toBe(1);
+    expect(result.reconciliation.files).toEqual({
+      planned: 1,
+      ready: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(result.reconciliation.states.planned).toBe(0);
+    expectBalanced(result);
   });
   it("rejects an offsite upload ticket before opening any local CV", async () => {
     const plan = buildPlan(input());
@@ -979,6 +1144,13 @@ describe("legacy API apply", () => {
         expect.objectContaining({ location: "CV:s_1", code }),
       ]);
       expect(result.uploadsReady).toBe(0);
+      expect(result.reconciliation.files).toEqual({
+        planned: 1,
+        ready: 0,
+        skipped: 0,
+        failed: 1,
+      });
+      expectBalanced(result);
       expect(offsite).toHaveLength(0);
       expect(completions).toHaveLength(0);
     }

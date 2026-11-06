@@ -1,3 +1,4 @@
+import type { PGlite } from "@electric-sql/pglite";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as app from "./schema";
 import * as auth from "./auth-schema";
@@ -36,6 +37,14 @@ export function getDb(): Promise<AppDb> {
       throw error;
     });
   return singleton;
+}
+/** Closes the local PGlite client behind getDb() so a script can exit; the pair and test database stay. */
+export async function closeDb(): Promise<void> {
+  const pending = singleton;
+  if (!pending) return;
+  const db = await pending.catch(() => undefined);
+  if (db) await (db as unknown as { $client: PGlite }).$client.close();
+  if (singleton === pending) singleton = undefined;
 }
 export function getIdentityDb(): Promise<AppDb> {
   if (testDatabase) return testDatabase;

@@ -1,6 +1,6 @@
 import "./load-env";
 import { Client } from "pg";
-import { applyMigrations, getDb } from "../src/db";
+import { applyMigrations, closeDb, getDb } from "../src/db";
 import { isLoopbackHost } from "../src/db/connection-boundary";
 import { ApiError } from "../src/lib/errors";
 import {
@@ -10,8 +10,13 @@ import {
 async function main() {
   assertTenantContextKey();
   if (process.env.DATABASE_MODE === "pglite") {
-    await getDb();
-    console.log("Local PostgreSQL migrations applied.");
+    try {
+      await getDb();
+      console.log("Local PostgreSQL migrations applied.");
+    } finally {
+      // An open PGlite client keeps the process alive after the work is done.
+      await closeDb();
+    }
     return;
   }
   if (!process.env.MIGRATION_DATABASE_URL)

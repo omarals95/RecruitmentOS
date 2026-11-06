@@ -47,6 +47,29 @@ export interface ApplyResult {
   sourceMapping: Record<string, string>;
   notificationMapping: Record<string, string>;
   notificationReads: Row[];
+  /** Target records with a legacy ID this plan no longer contains; reported only, never changed. */
+  missing: string[];
+  reconciliation: Reconciliation;
+}
+/** One outcome per planned item, so each category's planned total equals the sum of its outcomes. */
+export interface Reconciliation {
+  records: {
+    planned: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    conflicts: number;
+    failed: number;
+    missing: number;
+  };
+  states: {
+    planned: number;
+    imported: number;
+    unchanged: number;
+    conflicts: number;
+    failed: number;
+  };
+  files: { planned: number; ready: number; skipped: number; failed: number };
 }
 const key = (resource: ResourceName, id: string) => `${resource}:${id}`;
 export function canonical(value: unknown): string {
@@ -207,7 +230,32 @@ export async function applyPlan(
     sourceMapping: {},
     notificationMapping: {},
     notificationReads: plan.notificationReads,
+    missing: [],
+    reconciliation: {
+      records: {
+        planned: plan.records.length,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        conflicts: 0,
+        failed: 0,
+        missing: 0,
+      },
+      states: {
+        planned: plan.states.length,
+        imported: 0,
+        unchanged: 0,
+        conflicts: 0,
+        failed: 0,
+      },
+      files: { planned: plan.sources.length, ready: 0, skipped: 0, failed: 0 },
+    },
   };
+  const {
+    records: recordTally,
+    states: stateTally,
+    files: fileTally,
+  } = result.reconciliation;
   let lastRequest = 0;
   const request = async (
     path: string,
@@ -335,6 +383,13 @@ export async function applyPlan(
       page++;
     }
   }
+  const plannedKeys = new Set(
+    plan.records.map((record) => key(record.resource, record.legacyId)),
+  );
+  result.missing = [...existing.keys()].filter(
+    (recordKey) => !plannedKeys.has(recordKey),
+  );
+  recordTally.missing = result.missing.length;
   function payloadFor(record: PlannedRecord): Row {
     const data: Row = { ...record.data },
       payload: Row = {
@@ -395,6 +450,7 @@ export async function applyPlan(
           canonical(old.importMeta || {}) === canonical(record.importMeta);
         if (equal) {
           result.skipped++;
+          recordTally.skipped++;
           continue;
         }
         const immutableRefMismatch = Object.entries(
@@ -409,6 +465,7 @@ export async function applyPlan(
           immutableRefMismatch
         ) {
           result.conflicts.push(recordKey);
+          recordTally.conflicts++;
           if (immutableRefMismatch) delete result.mapping[recordKey];
           continue;
         }
@@ -430,6 +487,7 @@ export async function applyPlan(
           saved.data ? object(saved.data) : object(payload.data),
         );
         result.updated++;
+        recordTally.updated++;
       } else {
         const response = await request(
             `/api/v1/${record.resource}`,
@@ -444,9 +502,11 @@ export async function applyPlan(
           saved.data ? object(saved.data) : object(payload.data),
         );
         result.created++;
+        recordTally.created++;
       }
     } catch (error) {
       failure(recordKey, error);
+      recordTally.failed++;
     }
     options.onProgress?.(
       `Records processed: ${result.created + result.updated + result.skipped}; conflicts: ${result.conflicts.length}; errors: ${result.errors.length}`,
@@ -477,9 +537,13 @@ export async function applyPlan(
         current.status === state.status &&
         current.note === note &&
         canonical(current.importMeta || {}) === canonical(importMeta);
-      if (same) continue;
+      if (same) {
+        stateTally.unchanged++;
+        continue;
+      }
       if (current.version !== 0 && !options.updateExisting) {
         result.conflicts.push(location);
+        stateTally.conflicts++;
         continue;
       }
       await request(`/api/v1/candidates/${id}/state`, "PATCH", {
@@ -490,8 +554,10 @@ export async function applyPlan(
         importMeta,
       });
       result.statesImported++;
+      stateTally.imported++;
     } catch (error) {
       failure(location, error);
+      stateTally.failed++;
     }
   }
   const notificationResources: Record<string, ResourceName> = {
@@ -566,6 +632,7 @@ export async function applyPlan(
   for (const source of plan.sources) {
     if (!source.uploadable) {
       result.uploadsSkipped++;
+      fileTally.skipped++;
       continue;
     }
     const location = `CV:${source.id}`;
@@ -582,6 +649,7 @@ export async function applyPlan(
       if (prior) {
         result.sourceMapping[source.id] = prior;
         result.uploadsSkipped++;
+        fileTally.skipped++;
         continue;
       }
       const metadata = {
@@ -708,8 +776,10 @@ export async function applyPlan(
       result.sourceMapping[source.id] = cvId;
       uploadedPhysical.set(physicalKey, cvId);
       result.uploadsReady++;
+      fileTally.ready++;
     } catch (error) {
       failure(location, error);
+      fileTally.failed++;
     }
     options.onProgress?.(
       `CVs ready: ${result.uploadsReady}; skipped: ${result.uploadsSkipped}; errors: ${result.errors.length}`,
