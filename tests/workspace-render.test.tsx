@@ -21,6 +21,11 @@ import {
   BULK_INTAKE_RECOVERY_HOURS,
 } from "../src/domain/records";
 import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
+import {
+  AI_EXTRACTION_DATA_SENT,
+  AI_EXTRACTION_LIMITS_TEXT,
+  AI_EXTRACTION_PURPOSE,
+} from "../src/domain/cv-extraction";
 
 const workspace = {
   user: {
@@ -150,6 +155,115 @@ describe("Import CVs", () => {
     expect(markup).toContain("Import reviewed (0)");
     expect(markup).not.toContain("Cancel import");
   });
+  // A fictional disclosure; no provider is configured in this build.
+  const disclosure = {
+    version: "c".repeat(64),
+    provider: "Fictional Extraction Service",
+    model: "fictional-model-1",
+    region: "Fictional region (test only)",
+    retention: "Fictional: deleted after 30 days",
+    trainingUse: "Fictional: not used for training",
+    costNote: "Fictional: no charge in tests",
+    purpose: AI_EXTRACTION_PURPOSE,
+    dataSent: AI_EXTRACTION_DATA_SENT,
+    limits: AI_EXTRACTION_LIMITS_TEXT,
+  };
+  const aiDialog = (
+    importState: CvImportState,
+    consent: "none" | "granted" | "withdrawn" | "outdated",
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <BulkCvImportDialog
+          importState={importState}
+          capabilityError=""
+          onCapabilityLost={() => {}}
+          onClose={() => {}}
+          onChanged={() => {}}
+          ai={{ disclosure, consent }}
+          onAiChanged={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  const changedTerms = "The AI service or its terms changed since you agreed.";
+  it("keeps the not-configured text and no AI controls without an AI provider", () => {
+    for (const markup of [
+      dialog("ready"),
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <BulkCvImportDialog
+            importState="ready"
+            capabilityError=""
+            onCapabilityLost={() => {}}
+            onClose={() => {}}
+            onChanged={() => {}}
+            ai={null}
+          />
+        </WorkspaceProvider>,
+      ),
+    ]) {
+      expect(markup).toContain(
+        "AI extraction is not configured. Enter details from each CV and verify them yourself. No CV content is sent to an AI service.",
+      );
+      expect(markup).not.toContain("Allow AI suggestions");
+      expect(markup).not.toContain("Withdraw AI consent");
+      expect(markup).not.toContain("AI suggestions</h3>");
+    }
+  });
+  it("shows the full disclosure and Allow AI suggestions before the file input", () => {
+    const markup = aiDialog("ready", "none");
+    const file = markup.indexOf('type="file"');
+    expect(file).toBeGreaterThan(0);
+    for (const value of [
+      disclosure.provider,
+      disclosure.model,
+      disclosure.region,
+      disclosure.retention,
+      disclosure.trainingUse,
+      disclosure.costNote,
+      disclosure.purpose,
+      disclosure.dataSent,
+      disclosure.limits,
+      "Selecting files sends nothing to the AI service",
+      "continue manually",
+      ">Allow AI suggestions</button>",
+    ]) {
+      expect(markup, value).toContain(value);
+      expect(markup.indexOf(value), value).toBeLessThan(file);
+    }
+    expect(markup).not.toContain("AI extraction is not configured");
+    expect(markup).not.toContain("Withdraw AI consent");
+    expect(markup).not.toContain(changedTerms);
+    expect(aiDialog("ready", "withdrawn")).toContain("Allow AI suggestions");
+  });
+  it("explains changed terms for an outdated consent", () => {
+    const markup = aiDialog("ready", "outdated");
+    expect(markup).toContain(changedTerms);
+    expect(markup).toContain("Allow AI suggestions");
+  });
+  it("offers withdrawal once consent is granted", () => {
+    const markup = aiDialog("ready", "granted");
+    expect(markup).toContain(">Withdraw AI consent</button>");
+    expect(markup).not.toContain("Allow AI suggestions");
+    expect(markup).toContain(disclosure.retention);
+  });
+  it.each(["checking", "not-set-up", "unavailable", "error"] as const)(
+    "renders no AI text or control while %s",
+    (importState) => {
+      for (const consent of ["none", "granted", "outdated"] as const) {
+        const markup = aiDialog(importState, consent);
+        for (const text of [
+          "AI suggestions",
+          "AI extraction",
+          "AI consent",
+          disclosure.provider,
+          disclosure.purpose,
+          "Unverified suggestion",
+        ])
+          expect(markup).not.toContain(text);
+      }
+    },
+  );
   const recentPage = (totalPages: number): RecentImportsPage => ({
     data: [
       {

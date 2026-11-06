@@ -7,7 +7,11 @@ import {
   BULK_INTAKE_RECOVERY_HOURS,
   recordDataSchemas,
 } from "@/domain/records";
-import type { ExtractedCandidateFields } from "@/domain/cv-extraction";
+import {
+  AI_EXTRACTION_LIMITS,
+  type ExtractedCandidateFields,
+  type ExtractionDisclosure,
+} from "@/domain/cv-extraction";
 import {
   storeCv,
   withUploadLock,
@@ -23,8 +27,17 @@ import {
   uncertainRetryTooOld,
 } from "./bulk-cv-queue";
 import {
+  aiReviewPayload,
+  beginSuggestionRequest,
+  cancelSuggestionRequest,
+  editDraftField,
   hasPendingSuggestions,
+  requestCvSuggestions,
   resolveSuggestion,
+  stageSuggestions,
+  suggestionFailure,
+  suggestionFailureMessage,
+  type AiReview,
 } from "./bulk-cv-suggestions";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
@@ -63,6 +76,7 @@ type Entry = {
   fields: Fields;
   suggestions?: ExtractedCandidateFields;
   suggestionRequestId?: string;
+  aiReview?: AiReview;
   checked: boolean;
   duplicates: Match[];
   duplicatesReviewed: boolean;
@@ -165,6 +179,19 @@ export function BulkCvImport({
       storageConfigured: boolean;
     };
   }>("/api/v1/cvs/bulk-capabilities");
+  // Consent is read only when an approved extraction provider is configured.
+  const consent = useApi<{
+    data: {
+      available: boolean;
+      disclosure: ExtractionDisclosure | null;
+      consent: { status: AiConsent; at: string | null };
+    };
+  }>(
+    capability.data?.data.aiAvailable === true
+      ? "/api/v1/extraction-consent"
+      : null,
+  );
+  const view = consent.data?.data;
   return (
     <BulkCvImportDialog
       importState={cvImportState(capability)}
@@ -172,10 +199,17 @@ export function BulkCvImport({
       onCapabilityLost={capability.refresh}
       onClose={onClose}
       onChanged={onChanged}
+      ai={
+        view?.disclosure
+          ? { disclosure: view.disclosure, consent: view.consent.status }
+          : null
+      }
+      onAiChanged={consent.refresh}
     />
   );
 }
 
+type AiConsent = "none" | "granted" | "withdrawn" | "outdated";
 /** The import dialog for one capability answer; only the ready state renders import controls. */
 export function BulkCvImportDialog({
   importState,
@@ -183,12 +217,18 @@ export function BulkCvImportDialog({
   onCapabilityLost,
   onClose,
   onChanged,
+  ai = null,
+  onAiChanged,
 }: {
   importState: CvImportState;
   capabilityError: string;
   onCapabilityLost: () => void;
   onClose: () => void;
   onChanged: () => void;
+  /** The current disclosure and the user's consent; null when AI extraction is unavailable. */
+  ai?: { disclosure: ExtractionDisclosure; consent: AiConsent } | null;
+  /** Re-reads consent after a decision or a consent or disclosure refusal. */
+  onAiChanged?: () => void;
 }) {
   const { team } = useWorkspace();
   const available = importState === "ready";
@@ -209,6 +249,12 @@ export function BulkCvImportDialog({
   const [showSummary, setShowSummary] = useState(false);
   const activeRequest = useRef<AbortController | null>(null);
   useEffect(() => () => activeRequest.current?.abort(), []);
+  // At most one suggestion request per dialog; it never sets busy, so typing continues.
+  const suggestionRequest = useRef<AbortController | null>(null);
+  const [suggesting, setSuggesting] = useState("");
+  useEffect(() => () => suggestionRequest.current?.abort(), []);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [aiNotice, setAiNotice] = useState("");
   const { confirm, dialog } = useConfirm();
   useUnsavedWork(entries.some((item) => !item.done));
   const entry = entries.find((item) => item.id === selected);
@@ -299,6 +345,96 @@ export function BulkCvImportDialog({
       setBusy(false);
     }
   };
+  const decideConsent = async (decision: "grant" | "withdraw") => {
+    if (!team || !ai || consentBusy) return;
+    const { provider, retention, version } = ai.disclosure;
+    if (
+      decision === "withdraw" &&
+      !(await confirm({
+        title: "Withdraw AI consent?",
+        message: `New CVs will not be sent to ${provider} for AI suggestions. CVs already sent stay with ${provider} under its stated retention terms (${retention}), and RecruitmentOS cannot delete them.`,
+        confirmLabel: "Withdraw AI consent",
+        destructive: true,
+      }))
+    )
+      return;
+    setConsentBusy(true);
+    setAiNotice("");
+    try {
+      await requestJson(team.id, "/api/v1/extraction-consent", {
+        method: "POST",
+        body: JSON.stringify({ decision, disclosureVersion: version }),
+      });
+    } catch (error) {
+      setAiNotice(
+        error instanceof ClientError ? error.message : humanError(error),
+      );
+    } finally {
+      setConsentBusy(false);
+      onAiChanged?.();
+    }
+  };
+  const requestSuggestions = async (item: Entry) => {
+    if (
+      !team ||
+      !ai ||
+      suggestionRequest.current ||
+      item.aiReview ||
+      hasPendingSuggestions(item)
+    )
+      return;
+    const requestId = crypto.randomUUID();
+    const controller = new AbortController();
+    suggestionRequest.current = controller;
+    setSuggesting(item.id);
+    setEntries((items) => {
+      try {
+        return beginSuggestionRequest(items, item.id, requestId);
+      } catch {
+        return items;
+      }
+    });
+    update(item.id, { error: "" });
+    try {
+      const result = await requestCvSuggestions({
+        teamId: team.id,
+        file: item.file,
+        requestId,
+        disclosureVersion: ai.disclosure.version,
+        signal: controller.signal,
+      });
+      // A result for a draft edited since the request started is dropped.
+      setEntries((items) => {
+        try {
+          return stageSuggestions(
+            items,
+            item.id,
+            requestId,
+            result.suggestions,
+            result.provenance,
+          );
+        } catch {
+          return cancelSuggestionRequest(
+            items,
+            item.id,
+            requestId,
+            "invalid_response",
+          );
+        }
+      });
+    } catch (error) {
+      const outcome = suggestionFailure(error);
+      setEntries((items) =>
+        cancelSuggestionRequest(items, item.id, requestId, outcome),
+      );
+      if (outcome === "consent_required" || outcome === "disclosure_changed")
+        onAiChanged?.();
+    } finally {
+      if (suggestionRequest.current === controller)
+        suggestionRequest.current = null;
+      setSuggesting("");
+    }
+  };
   const ready = (item: Entry) =>
     !item.done &&
     !hasPendingSuggestions(item) &&
@@ -368,6 +504,7 @@ export function BulkCvImportDialog({
               acknowledgedDuplicateIds: entry.duplicates.map(
                 (match) => match.id,
               ),
+              aiReview: aiReviewPayload(entry),
             }),
           },
         );
@@ -603,10 +740,80 @@ export function BulkCvImportDialog({
               Drafts stay in this browser until you close this window or switch
               teams.
             </p>
-            <p className="muted">
-              AI extraction is not configured. Enter details from each CV and
-              verify them yourself. No CV content is sent to an AI service.
-            </p>
+            {ai ? (
+              <section className="stack" aria-label="AI suggestions">
+                <h3>AI suggestions</h3>
+                <p className="muted">
+                  Optional. Selecting files sends nothing to the AI service; a
+                  CV is sent only when you ask for suggestions on its draft. The
+                  review form works without AI, so you can always continue
+                  manually.
+                </p>
+                <dl className="detail-facts">
+                  {(
+                    [
+                      ["AI service", ai.disclosure.provider],
+                      ["Model", ai.disclosure.model],
+                      ["Region", ai.disclosure.region],
+                      ["Retention", ai.disclosure.retention],
+                      ["Training use", ai.disclosure.trainingUse],
+                      ["Cost", ai.disclosure.costNote],
+                      ["Purpose", ai.disclosure.purpose],
+                      ["Data sent", ai.disclosure.dataSent],
+                      ["Limits", ai.disclosure.limits],
+                    ] as const
+                  ).map(([label, value]) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+                {ai.consent === "granted" ? (
+                  <div className="row">
+                    <p>You allowed AI suggestions under these terms.</p>
+                    <button
+                      type="button"
+                      className="button secondary small"
+                      disabled={consentBusy}
+                      onClick={() => decideConsent("withdraw")}
+                    >
+                      Withdraw AI consent
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {ai.consent === "outdated" && (
+                      <p className="notice" role="status">
+                        The AI service or its terms changed since you agreed.
+                        Review the details above before allowing AI suggestions
+                        again.
+                      </p>
+                    )}
+                    <div>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        disabled={consentBusy}
+                        onClick={() => decideConsent("grant")}
+                      >
+                        Allow AI suggestions
+                      </button>
+                    </div>
+                  </>
+                )}
+                {aiNotice && (
+                  <p className="notice error" role="alert">
+                    {aiNotice}
+                  </p>
+                )}
+              </section>
+            ) : (
+              <p className="muted">
+                AI extraction is not configured. Enter details from each CV and
+                verify them yourself. No CV content is sent to an AI service.
+              </p>
+            )}
             <p className="muted">
               Duplicate checks compare exact normalized email and phone within
               your team and show up to 20 matches. They do not check names or
@@ -703,6 +910,50 @@ export function BulkCvImportDialog({
                           `Candidate ID: ${entry.candidateId}`}
                       </p>
                     )}
+                    {ai?.consent === "granted" &&
+                      !entry.submitted &&
+                      (suggesting === entry.id ? (
+                        <div className="row">
+                          <p role="status">
+                            Getting unverified suggestions from this CV…
+                          </p>
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            onClick={() => suggestionRequest.current?.abort()}
+                          >
+                            Cancel suggestions
+                          </button>
+                        </div>
+                      ) : !entry.aiReview &&
+                        !fileProblem(entry.file.name, entry.file.size) ? (
+                        entry.file.size > AI_EXTRACTION_LIMITS.maxFileBytes ? (
+                          <p className="muted">
+                            {suggestionFailureMessage("file_too_large")}
+                          </p>
+                        ) : (
+                          !suggesting && (
+                            <div>
+                              <button
+                                type="button"
+                                className="button secondary"
+                                disabled={busy}
+                                onClick={() => requestSuggestions(entry)}
+                              >
+                                Get unverified suggestions from this CV
+                              </button>
+                            </div>
+                          )
+                        )
+                      ) : null)}
+                    {Object.values(entry.suggestions ?? {}).some(
+                      (value) => value != null,
+                    ) && (
+                      <p className="notice" role="status">
+                        AI suggestions are unverified. Accept, reject or edit
+                        each one against the CV before importing.
+                      </p>
+                    )}
                     <div className="form-grid">
                       {labels.map(([key, label]) => (
                         <div className="field" key={key}>
@@ -719,35 +970,17 @@ export function BulkCvImportDialog({
                             onChange={(event) => {
                               const value = event.target.value;
                               setEntries((items) =>
-                                items.map((item) =>
-                                  item.id === entry.id
-                                    ? {
-                                        ...item,
-                                        fields: {
-                                          ...item.fields,
-                                          [key]: value,
-                                        },
-                                        suggestionRequestId: undefined,
-                                        checked: false,
-                                        duplicatesReviewed: false,
-                                        reviewed: false,
-                                      }
-                                    : (key === "email" || key === "phone") &&
-                                        !item.submitted &&
-                                        !item.done
-                                      ? { ...item, duplicatesReviewed: false }
-                                      : item,
-                                ),
+                                editDraftField(items, entry.id, key, value),
                               );
                             }}
                           />
                           {entry.suggestions?.[key] != null && (
                             <div
                               className="notice"
-                              aria-label={`Suggested ${label}`}
+                              aria-label={`Unverified suggestion for ${label}`}
                             >
                               <p>
-                                Suggested:{" "}
+                                Unverified suggestion:{" "}
                                 {Array.isArray(entry.suggestions[key])
                                   ? entry.suggestions[key].join(", ")
                                   : entry.suggestions[key]}
