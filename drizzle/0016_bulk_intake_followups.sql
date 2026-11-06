@@ -7,13 +7,15 @@ ALTER TABLE app.bulk_intake_items ADD COLUMN upload_key uuid,
 
 -- Owner-only access to every team's and user's recovery rows, so the purge helper can delete
 -- expired batches across teams. A runtime role is never the owner, so its access is unchanged.
-DO $owner_policies$ DECLARE tbl text; BEGIN
+DO $owner_policies$ DECLARE tbl text; owner_only text :=
+  'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')';
+BEGIN
  FOREACH tbl IN ARRAY ARRAY['bulk_intake_batches','bulk_intake_items'] LOOP
-  EXECUTE format('CREATE POLICY ledger_owner_read ON app.%I FOR SELECT USING (%s)', tbl,
-    'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')');
-  EXECUTE format('CREATE POLICY ledger_owner_delete ON app.%I FOR DELETE USING (%s)', tbl,
-    'current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = ''tenant_context'')');
+  EXECUTE format('CREATE POLICY ledger_owner_read ON app.%I FOR SELECT USING (%s)', tbl, owner_only);
+  EXECUTE format('CREATE POLICY ledger_owner_delete ON app.%I FOR DELETE USING (%s)', tbl, owner_only);
  END LOOP;
+ -- Under FORCE RLS a row lock (FOR UPDATE) needs an UPDATE policy as well; the helper never updates.
+ EXECUTE format('CREATE POLICY ledger_owner_update ON app.bulk_intake_batches FOR UPDATE USING (%s) WITH CHECK (%s)', owner_only, owner_only);
 END $owner_policies$;
 
 -- Deletes up to 100 expired batches of any team and user, oldest expiry first, and their items.
