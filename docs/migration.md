@@ -120,6 +120,23 @@ Existing rows are skipped when their imported data and provenance match. Differe
 
 Only after reviewing the report and backing up the destination, add `--update-existing` if you deliberately want source values to overwrite matching legacy records and your own personal state. This flag does not remove records absent from the source. It does not merge differently identified buckets/candidates or bypass optimistic version checks.
 
+### Reconciliation counts
+
+After an apply the summary also prints `missing` and a `reconciliation` block. Each planned item gets exactly one outcome, so in every category `planned` equals the sum of the other counts:
+
+- `records`: `planned` (records in this plan) = `created` + `updated` + `skipped` + `conflicts` + `failed`. `missing` is reported beside them and is not part of that sum.
+- `states` (private shortlist/status/note): `planned` = `imported` + `unchanged` + `conflicts` + `failed`.
+- `files` (CV sources): `planned` = `ready` + `skipped` (not uploadable, or the same physical file as another source of that candidate) + `failed`.
+
+`missing` counts target records that carry a legacy ID but are no longer in this plan, for example a row deleted from a workbook after an earlier import. The private report lists them as `resource:legacyId` keys. The importer never deletes, archives or changes a missing record, with or without `--update-existing`, and a missing record does not change the exit code. Decide about each one in RecruitmentOS yourself.
+
+When the source changes after an earlier import (a changed plan):
+
+1. Rerun the dry run on the changed source and resolve every error.
+2. Back up the destination, then apply without `--update-existing`. Records you did not change are skipped and new ones are created. Changed ones become conflicts, so corrections made in RecruitmentOS are kept.
+3. Review every conflict and every `missing` key in the private report.
+4. Only if the source values should replace the target's on purpose, apply again with `--update-existing`. The conflicts then become `updated`; `missing` records stay as they are.
+
 If a CV reservation is expired or rejected, resolve the reported file/format issue, rerun reconciliation, then use `--upload-attempt 2` to request a new stable upload-attempt ID. Increase this number only when starting another replacement attempt. The source ID still identifies the same logical CV; no arbitrary upload URL is accepted.
 
 After an apply, inspect its private report:
