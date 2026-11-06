@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const pools = vi.hoisted(() => ({ data: vi.fn(), identity: vi.fn() }));
@@ -11,6 +12,7 @@ vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
 
 import { POST as exportRoute } from "../src/app/api/v1/[resource]/export/route";
+import { schema, type AppDb } from "../src/db";
 import { activity } from "../src/db/schema";
 import { authenticateApiToken } from "../src/lib/api-tokens";
 import { getVerifiedSession } from "../src/lib/auth-session";
@@ -218,16 +220,51 @@ describe("server-side record export over real migrations and RLS", () => {
         [large.teamId, large.userId],
       ),
     );
-    signIn(large);
-    const tooLarge = await post("/api/v1/job-roles/export");
-    expect(tooLarge.status).toBe(400);
-    expect(await tooLarge.json()).toMatchObject({
-      error: {
-        code: "export_too_large",
-        message: "This export is too large. Narrow your filters.",
-      },
-    });
-    expect(await exportRows(large.teamId)).toEqual([]);
+    // Serve both exports over the same client with every statement recorded.
+    const statements: string[] = [];
+    pools.data.mockResolvedValue(
+      drizzle(fixture.client, {
+        schema,
+        logger: { logQuery: (query) => statements.push(query) },
+      }) as unknown as AppDb,
+    );
+    const loadsRows = (statement: string) =>
+      statement.includes('from "app"."records"') &&
+      statement.includes("over ()");
+    try {
+      signIn(large);
+      const tooLarge = await post("/api/v1/job-roles/export");
+      expect(tooLarge.status).toBe(400);
+      expect(await tooLarge.json()).toMatchObject({
+        error: {
+          code: "export_too_large",
+          message: "This export is too large. Narrow your filters.",
+        },
+      });
+      expect(await exportRows(large.teamId)).toEqual([]);
+      // The bounded count read the table; no statement loaded its rows.
+      expect(
+        statements.filter((statement) =>
+          statement.includes('from "app"."records"'),
+        ),
+      ).toHaveLength(1);
+      expect(statements.filter(loadsRows)).toEqual([]);
+
+      statements.length = 0;
+      signIn(owner);
+      const normal = await post("/api/v1/candidates/export?search=Fictional");
+      expect(normal.status).toBe(200);
+      expect(normal.headers.get("x-export-rows")).toBe("3");
+      const lines = new TextDecoder("utf-8", { ignoreBOM: true })
+        .decode(await normal.arrayBuffer())
+        .split("\r\n");
+      expect(lines[4]).toBe('"Rows","3"');
+      expect(lines.slice(8)).toHaveLength(3);
+      expect(statements.filter(loadsRows)).toHaveLength(1);
+      expect(await exportRows(owner.teamId)).toHaveLength(before + 1);
+    } finally {
+      pools.data.mockResolvedValue(fixture.db);
+    }
   }, 120000);
 
   it("sends no file when the export audit row cannot be written", async () => {

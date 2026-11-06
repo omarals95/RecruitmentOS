@@ -1132,8 +1132,10 @@ export async function listRecords(
 }
 
 /**
- * Every matching record and one audit row, in one transaction. Rows and total come from one
- * statement, so the file and its Rows count agree. The audit names applied filter keys, never values.
+ * Every matching record and one audit row, in one transaction. A count bounded at EXPORT_LIMIT + 1
+ * refuses an oversized match before any row is loaded. Rows and total then come from one statement,
+ * so the file and its Rows count agree; its recheck catches rows added between the two statements.
+ * The audit names applied filter keys, never values.
  */
 export async function exportRecords(
   p: Principal,
@@ -1163,7 +1165,22 @@ export async function exportRecords(
     )
     .map(([key]) => key)
     .sort();
+  const tooLarge = () =>
+    new ApiError(
+      400,
+      "export_too_large",
+      "This export is too large. Narrow your filters.",
+    );
   return withTeam(p, async (tx) => {
+    const [matching] = await tx.select({ total: count() }).from(
+      tx
+        .select({ id: records.id })
+        .from(records)
+        .where(condition)
+        .limit(EXPORT_LIMIT + 1)
+        .as("matching"),
+    );
+    if ((matching?.total ?? 0) > EXPORT_LIMIT) throw tooLarge();
     const rows = await tx
       .select({
         record: records,
@@ -1174,12 +1191,7 @@ export async function exportRecords(
       .orderBy(...orderBy)
       .limit(EXPORT_LIMIT);
     const total = rows[0]?.total ?? 0;
-    if (total > EXPORT_LIMIT)
-      throw new ApiError(
-        400,
-        "export_too_large",
-        "This export is too large. Narrow your filters.",
-      );
+    if (total > EXPORT_LIMIT) throw tooLarge();
     await tx.execute(
       sql`select tenant_context.audit_export(${name}::text, ${total}::integer, array[${sql.join(
         filters.map((key) => sql`${key}`),
