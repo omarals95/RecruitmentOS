@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
+import { withDeadlines } from "@/db/deadlines";
 import {
   apiTokens,
   member,
@@ -157,7 +158,7 @@ export async function registerClient(request: Request): Promise<Response> {
   const unavailable = notReady();
   if (unavailable) return unavailable;
   const db = await getIdentityDb();
-  const attempts = await db.transaction((tx) =>
+  const attempts = await withDeadlines(db, (tx) =>
     rateWindow(
       tx,
       `oauth-register:${clientIp(request.headers) ?? "no-client-ip"}`,
@@ -684,7 +685,7 @@ export async function exchangeToken(request: Request): Promise<Response> {
     );
   const budget = `oauth-token:${clientIp(request.headers) ?? "no-client-ip"}`;
   const db = await getIdentityDb();
-  const result = await db.transaction(async (tx) => {
+  const result = await withDeadlines(db, async (tx) => {
     if ((await rateWindow(tx, budget, 0)) >= 10) return null;
     const outcome = await exchange(tx, form);
     if ("error" in outcome) await chargeRateWindow(tx, budget);

@@ -11,6 +11,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
+import { withDeadlines } from "@/db/deadlines";
 import {
   apiTokens,
   apiRateLimits,
@@ -192,7 +193,7 @@ export async function authenticateApiToken(
   requireReadiness(raw, /^ros_live_[A-Za-z0-9_-]{43}$/);
   const guessKey = `api-guess:${clientIp ?? "no-client-ip"}`;
   const db = await getIdentityDb();
-  const result = await db.transaction(async (tx): Promise<Authenticated> => {
+  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
     if ((await rateWindow(tx, guessKey, 0)) >= 10)
       return { guessLimited: true };
     const [found] = await tx
@@ -243,7 +244,7 @@ export async function authenticateOAuthAccessToken(
   requireReadiness(raw, /^ros_oat_[A-Za-z0-9_-]{43}$/);
   const guessKey = `api-guess:${clientIp ?? "no-client-ip"}`;
   const db = await getIdentityDb();
-  const result = await db.transaction(async (tx): Promise<Authenticated> => {
+  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
     if ((await rateWindow(tx, guessKey, 0)) >= 10)
       return { guessLimited: true };
     const [found] = await tx
@@ -319,7 +320,7 @@ export async function createToken(
     );
   assertTenantContextKey();
   const db = await getIdentityDb();
-  return db.transaction(async (tx) => {
+  return withDeadlines(db, async (tx) => {
     const role = await liveHuman(tx, p);
     // Lock the user row first; the context lets the audit helper pass activity RLS.
     await installTenantContext(tx, p);
@@ -370,7 +371,7 @@ export async function createOAuthGrant(
   human(p);
   assertTenantContextKey();
   const db = await getIdentityDb();
-  return db.transaction(async (tx) => {
+  return withDeadlines(db, async (tx) => {
     const role = await liveHuman(tx, p);
     await installTenantContext(tx, p);
     const scopes = effectiveTokenScopes(input.scopes, role);
@@ -416,7 +417,7 @@ export async function listTokens(
 ): Promise<TokenDto[]> {
   human(p);
   const db = await getIdentityDb();
-  return db.transaction(async (tx) => {
+  return withDeadlines(db, async (tx) => {
     const role = await liveHuman(tx, p);
     if (all && role !== "owner" && role !== "admin")
       throw new ApiError(
@@ -449,7 +450,7 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
     throw new ApiError(404, "token_not_found", "The API token was not found.");
   assertTenantContextKey();
   const db = await getIdentityDb();
-  await db.transaction(async (tx) => {
+  await withDeadlines(db, async (tx) => {
     const role = await liveHuman(tx, p);
     await installTenantContext(tx, p);
     const canManageTeam = role === "owner" || role === "admin";

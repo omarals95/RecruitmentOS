@@ -1,4 +1,5 @@
 import { getDb, type TeamTx } from "@/db";
+import { withDeadlines } from "@/db/deadlines";
 import type { Principal } from "./principal";
 import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 export async function withTeam<T>(
@@ -7,8 +8,8 @@ export async function withTeam<T>(
 ): Promise<T> {
   assertTenantContextKey();
   const db = await getDb();
-  return db.transaction(async (tx) => {
-    // The signed context is installed first, before any savepoint can exist.
+  return withDeadlines(db, async (tx) => {
+    // After the deadlines, the signed context is installed before any other statement or savepoint.
     await installTenantContext(tx, principal);
     return work(tx);
   });

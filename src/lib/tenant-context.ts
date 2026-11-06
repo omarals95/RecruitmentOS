@@ -51,7 +51,8 @@ export async function installTenantContextKey(client: {
 
 /**
  * Signs exactly one assertion for this transaction and installs it. Only withTeam and the
- * identity-side token transaction call this; withTeam calls it before any other statement.
+ * identity-side token transaction call this; withTeam calls it right after the transaction's
+ * deadline statement (no savepoint, no xid), before any other statement.
  */
 export async function installTenantContext(
   tx: TeamTx,
