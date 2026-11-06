@@ -120,7 +120,7 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
       await server.close();
     }
   } catch (error) {
-    const response = errorResponse(error);
+    const response = errorResponse(error, request);
     if (response.status === 401)
       response.headers.set(
         "WWW-Authenticate",

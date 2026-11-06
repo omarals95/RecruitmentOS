@@ -5,11 +5,60 @@ import {
   validateCvBytes,
   containsControlCharacters,
 } from "./storage-format.ts";
+import { ApiError } from "./errors.ts";
 
-export class StorageConfigurationError extends Error {}
+/**
+ * A fixed code per setup cause, lowercase letters and underscores only. Only the code is logged,
+ * because the messages name settings.
+ */
+export type StorageConfigurationReason =
+  | "unspecified"
+  | "provider_disabled"
+  | "provider_unsupported"
+  | "hosted_environment_invalid"
+  | "not_configured"
+  | "oidc_not_hosted"
+  | "oidc_missing"
+  | "oidc_malformed"
+  | "oidc_expired"
+  | "oidc_context_changed"
+  | "aws_versioning_disabled"
+  | "aws_upload_unversioned"
+  | "aws_version_missing"
+  | "blob_client_invalid"
+  | "blob_protocol_mismatch"
+  | "aws_protocol_mismatch";
+export class StorageConfigurationError extends Error {
+  readonly reason: StorageConfigurationReason;
+  constructor(
+    message: string,
+    reason: StorageConfigurationReason = "unspecified",
+  ) {
+    super(message);
+    this.reason = reason;
+  }
+}
 /** The only text users see for any storage setup refusal; it names no provider or setting. */
 export const STORAGE_SETUP_REQUIRED_MESSAGE =
   "CV storage is not set up yet. Ask an administrator to finish setting it up, then try again.";
+/**
+ * Logs one safe line for operators (correlation ID and reason code only, never the message, stack
+ * or settings) and returns the generic 503 whose body carries the same correlation ID.
+ */
+export function storageSetupRequired(
+  error: StorageConfigurationError,
+): ApiError {
+  const correlationId = crypto.randomUUID();
+  console.error(
+    `storage_configuration_error correlationId=${correlationId} code=STORAGE_SETUP_REQUIRED reason=${error.reason}`,
+  );
+  return new ApiError(
+    503,
+    "STORAGE_SETUP_REQUIRED",
+    STORAGE_SETUP_REQUIRED_MESSAGE,
+    correlationId,
+  );
+}
 /** The provider, environment and store every CV reference is bound to. */
 export type StorageBinding = {
   provider: "s3" | "blob";
@@ -52,11 +101,15 @@ export function storageConfigured(
 }
 
 function providerDisabled(provider: string) {
-  return new StorageConfigurationError(
-    provider === "blob" || provider === "vercel-blob"
-      ? "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed."
-      : "The configured CV storage provider is not supported.",
-  );
+  return provider === "blob" || provider === "vercel-blob"
+    ? new StorageConfigurationError(
+        "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed.",
+        "provider_disabled",
+      )
+    : new StorageConfigurationError(
+        "The configured CV storage provider is not supported.",
+        "provider_unsupported",
+      );
 }
 
 /** Reads only the environment; it never contacts a provider. Off Vercel is development. */
@@ -71,6 +124,7 @@ export function resolveStorageBinding(
     )
       throw new StorageConfigurationError(
         "Hosted CV storage needs VERCEL_ENV set to production or preview.",
+        "hosted_environment_invalid",
       );
     environment = env.VERCEL_ENV;
   }
@@ -78,7 +132,10 @@ export function resolveStorageBinding(
   if (provider !== "s3") throw providerDisabled(provider);
   const store = env.S3_BUCKET_NAME?.trim();
   if (!store)
-    throw new StorageConfigurationError(STORAGE_SETUP_REQUIRED_MESSAGE);
+    throw new StorageConfigurationError(
+      STORAGE_SETUP_REQUIRED_MESSAGE,
+      "not_configured",
+    );
   return { provider, environment, store };
 }
 
@@ -91,6 +148,7 @@ export function assertHostedOidcToken(
   if (env.VERCEL !== "1")
     throw new StorageConfigurationError(
       "AWS role authentication requires a hosted Vercel request. Use explicit test IAM credentials for local development.",
+      "oidc_not_hosted",
     );
   if (
     typeof requestToken !== "string" ||
@@ -99,6 +157,7 @@ export function assertHostedOidcToken(
   )
     throw new StorageConfigurationError(
       "A hosted request-context OIDC token is required. Local Vercel CLI credentials and token files are not used.",
+      "oidc_missing",
     );
   let expiry: unknown;
   try {
@@ -110,6 +169,7 @@ export function assertHostedOidcToken(
   } catch {
     throw new StorageConfigurationError(
       "The hosted request-context OIDC token is malformed.",
+      "oidc_malformed",
     );
   }
   if (
@@ -119,6 +179,7 @@ export function assertHostedOidcToken(
   )
     throw new StorageConfigurationError(
       "The hosted request-context OIDC token is expired or near expiry. Retry with a fresh request.",
+      "oidc_expired",
     );
   return requestToken;
 }
@@ -149,6 +210,7 @@ export async function inspectStoredCv(
   if (!head.version || head.version === "null")
     throw new StorageConfigurationError(
       "S3 bucket versioning must be Enabled before CV uploads can be completed.",
+      "aws_upload_unversioned",
     );
   if (
     head.sizeBytes !== cv.sizeBytes ||
@@ -181,7 +243,10 @@ export async function getStorage(): Promise<StorageGateway> {
     process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
   if (provider !== "s3") throw providerDisabled(provider);
   if (!storageConfigured())
-    throw new StorageConfigurationError(STORAGE_SETUP_REQUIRED_MESSAGE);
+    throw new StorageConfigurationError(
+      STORAGE_SETUP_REQUIRED_MESSAGE,
+      "not_configured",
+    );
   let credentials;
   if (process.env.AWS_ROLE_ARN) {
     if (process.env.VERCEL !== "1")
@@ -195,6 +260,7 @@ export async function getStorage(): Promise<StorageGateway> {
       if (getVercelOidcTokenSync() !== requestToken)
         throw new StorageConfigurationError(
           "The hosted request OIDC context changed. Retry the request.",
+          "oidc_context_changed",
         );
       return requestToken;
     };
@@ -241,6 +307,7 @@ export async function getStorage(): Promise<StorageGateway> {
       if (result.Status !== "Enabled")
         throw new StorageConfigurationError(
           "Enable versioning on the private S3 bucket before uploading CVs.",
+          "aws_versioning_disabled",
         );
     },
     async presignPost(key, mimeType, sizeBytes, expiresSeconds) {
@@ -311,6 +378,7 @@ export async function getStorage(): Promise<StorageGateway> {
       if (!version || version === "null")
         throw new StorageConfigurationError(
           "This CV has no immutable S3 version reference.",
+          "aws_version_missing",
         );
       return getSignedUrl(
         client,

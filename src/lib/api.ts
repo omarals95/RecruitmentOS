@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ApiError } from "./errors";
 import { requirePrincipal, type Principal } from "./principal";
 import type { Scope } from "./permissions";
+import { StorageConfigurationError, storageSetupRequired } from "./storage";
 export { ApiError } from "./errors";
 export function json(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -77,7 +78,18 @@ export async function readBody<T>(
     );
   return parsed.data;
 }
-/** Streams at most maxBytes; a larger declared or observed body is refused with 413. Null without a body. */
+/** A client that aborted or reset its connection; nothing is logged for it. */
+function requestCancelled() {
+  return new ApiError(
+    499,
+    "request_cancelled",
+    "The request was cancelled before it finished.",
+  );
+}
+/**
+ * Streams at most maxBytes; a larger declared or observed body is refused with 413. Null without a
+ * body. A failing read means the client went away, so it is a cancelled request.
+ */
 export async function readLimitedBytes(
   request: Request,
   maxBytes: number,
@@ -91,7 +103,13 @@ export async function readLimitedBytes(
   const chunks: Uint8Array[] = [];
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        throw requestCancelled();
+      }
+      const { done, value } = chunk;
       if (done) break;
       length += value.byteLength;
       if (length > maxBytes) {
@@ -117,21 +135,27 @@ export function errorJson(
   code: string,
   message: string,
   headers: Record<string, string> = {},
+  correlationId: string = crypto.randomUUID(),
 ): Response {
-  const correlationId = crypto.randomUUID();
   const response = json({ error: { code, message, correlationId } }, status);
   response.headers.set("X-Correlation-Id", correlationId);
   for (const [name, value] of Object.entries(headers))
     response.headers.set(name, value);
   return response;
 }
-export function errorResponse(error: unknown): Response {
+/** Pass the request so an error caused by the client going away is a quiet cancelled outcome. */
+export function errorResponse(error: unknown, request?: Request): Response {
+  if (!(error instanceof ApiError) && request?.signal.aborted)
+    error = requestCancelled();
+  if (error instanceof StorageConfigurationError)
+    error = storageSetupRequired(error);
   if (error instanceof ApiError)
     return errorJson(
       error.status,
       error.code,
       error.message,
       error.status === 429 ? { "Retry-After": "60" } : {},
+      error.correlationId,
     );
   const dbError =
     (error as { cause?: { code?: string }; code?: string })?.cause ??
@@ -180,6 +204,6 @@ export async function runApi(
       await requirePrincipal(request, scope, options?.humanOnly),
     );
   } catch (error) {
-    return errorResponse(error);
+    return errorResponse(error, request);
   }
 }
