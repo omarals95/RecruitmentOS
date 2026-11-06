@@ -940,6 +940,90 @@ describe("MCP endpoint over real migrations and RLS", () => {
     }
   });
 
+  it("filters candidates by certifications, education and stated experience", async () => {
+    const valid = await apiToken(owner.userId, ["candidates:read"]);
+    const tag = randomUUID().slice(0, 8);
+    const names: Record<string, string> = {};
+    for (const [key, facts] of [
+      [
+        "match",
+        {
+          certifications: [`CERT-${tag}`, "Fictional CPA"],
+          major: `Fictional Accounting ${tag}`,
+          yearsExperience: 4,
+        },
+      ],
+      [
+        "noCertificate",
+        { major: `Fictional Accounting ${tag}`, yearsExperience: 4 },
+      ],
+      [
+        "tooSenior",
+        {
+          certifications: [`CERT-${tag}`],
+          university: `Fictional Accounting ${tag} University`,
+          yearsExperience: 9,
+        },
+      ],
+      [
+        "unknownYears",
+        {
+          certifications: [`CERT-${tag}`],
+          degreeName: `Fictional Accounting ${tag}`,
+        },
+      ],
+    ] as const) {
+      names[key] = `Filter Fictional ${key} ${tag}`;
+      await createRecord(owner, "candidates", {
+        data: { name: names[key], ...facts },
+      });
+    }
+    const found = data<{ name: string }[]>(
+      await call(valid.token, "search_candidates", {
+        certifications: [`CERT-${tag}`],
+        education: `accounting ${tag}`,
+        minYearsExperience: 2,
+        maxYearsExperience: 5,
+        pageSize: 25,
+      }),
+    );
+    expect(found.map((row) => row.name)).toEqual([names.match]);
+    expect(
+      data<{ name: string }[]>(
+        await call(valid.token, "search_candidates", {
+          certifications: [`CERT-${tag}`],
+          pageSize: 25,
+        }),
+      )
+        .map((row) => row.name)
+        .sort(),
+    ).toEqual([names.match, names.tooSenior, names.unknownYears].sort());
+    expect(
+      toolError(
+        await call(valid.token, "search_candidates", {
+          minYearsExperience: 6,
+          maxYearsExperience: 5,
+        }),
+      ),
+    ).toBe("invalid_query");
+    expect(
+      toolError(
+        await call(valid.token, "search_candidates", {
+          reviewStatus: "Verified",
+        }),
+      ),
+    ).toBe("invalid_input");
+    expect(
+      data<unknown[]>(
+        await call(valid.token, "search_candidates", {
+          query: tag,
+          reviewStatus: "Needs review",
+          pageSize: 25,
+        }),
+      ),
+    ).toHaveLength(4);
+  });
+
   it("shows interview times in Asia/Dubai without the meeting link", async () => {
     const valid = await apiToken(owner.userId, ["recruitment:read"]);
     const result = await call(valid.token, "list_interviews", {

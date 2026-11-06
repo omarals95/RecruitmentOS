@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Archive,
@@ -30,6 +37,7 @@ import {
   kindToResource,
   APPLICATION_STAGES,
   CANDIDATE_STATUSES,
+  REVIEW_STATUSES,
   type RecordDto,
   type ResourceName,
   type ReferenceField,
@@ -46,14 +54,13 @@ import {
   activeFilterCount,
   checklistProgress,
   dataOf,
-  describeFilters,
   display,
-  exportFilename,
-  exportMetadata,
   exportSummary,
   isFiltered,
+  loadAllPages,
   recordLabel,
   referenceText,
+  roleDifferences,
   roleSnapshot,
   initials,
   formatDate,
@@ -61,27 +68,27 @@ import {
   formatNumber,
   commentAuthor,
   badgeTone,
-  saveCsv,
+  saveBlob,
+  type ListResponse,
 } from "./helpers";
 import {
   ClientError,
+  isAbortError,
   useApi,
   useDebounced,
   useUnsavedWork,
   useWorkspace,
+  requestExport,
   requestJson,
   humanError,
 } from "./client";
+import {
+  failedResourceState,
+  resourceSnapshot,
+  type ResourceState,
+} from "./resource-state";
 
-export interface ListResponse {
-  data: RecordDto[];
-  pagination: {
-    page: number;
-    pageSize: number;
-    total: number;
-    totalPages: number;
-  };
-}
+export type { ListResponse } from "./helpers";
 function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   const buttons = [
@@ -187,13 +194,73 @@ export const screenDefinitions: Record<
   },
 };
 
+/** Most applications the whole-vacancy board loads; above it the board is replaced by a message. */
+const BOARD_LIMIT = 1000;
+/** Every application matching `query` (no page), reloaded on refresh and on application changes. */
+function useWholePipeline(query: string | null) {
+  const { team } = useWorkspace();
+  const [state, setState] = useState<ResourceState<
+    Awaited<ReturnType<typeof loadAllPages>>
+  > | null>(null);
+  const [revision, setRevision] = useState(0);
+  const key = JSON.stringify([team?.id || "", query || ""]);
+  const refresh = useCallback(() => setRevision((n) => n + 1), []);
+  useEffect(() => {
+    if (!team || !query) return;
+    const onChange = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ teamId: string | null; path: string }>
+      ).detail;
+      if (
+        detail.teamId === team.id &&
+        detail.path.split("/")[3] === "applications"
+      )
+        refresh();
+    };
+    window.addEventListener("recruitmentos:data-changed", onChange);
+    return () =>
+      window.removeEventListener("recruitmentos:data-changed", onChange);
+  }, [team, query, refresh]);
+  useEffect(() => {
+    if (!team || !query) return;
+    let active = true;
+    const controller = new AbortController();
+    const fetchPage = (page: number) =>
+      requestJson<ListResponse>(
+        team.id,
+        `/api/v1/applications?${query}&page=${page}&pageSize=100`,
+        { signal: controller.signal },
+      );
+    (async () => {
+      let loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      // The pipeline changed between pages; one more pass usually settles it.
+      if (!loaded.tooMany && !loaded.complete)
+        loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      if (active) setState({ key, revision, data: loaded, error: "" });
+    })().catch((error: unknown) => {
+      if (active && !isAbortError(error))
+        setState((previous) =>
+          failedResourceState(previous, key, revision, error),
+        );
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [team, query, key, revision]);
+  return {
+    ...resourceSnapshot(state, key, revision, !!query && !!team),
+    refresh,
+  };
+}
+
 export function RecordsScreen({ section }: { section: string }) {
   const searchParams = useSearchParams();
   const linkedRecord = searchParams.get("record");
   const linkedChecklist = searchParams.get("checklist");
   const config = screenDefinitions[section];
   const resource = config.resource;
-  const { team, role, environment } = useWorkspace();
+  const { team, role } = useWorkspace();
   const canWrite = !!team && role !== "viewer";
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -295,6 +362,18 @@ export function RecordsScreen({ section }: { section: string }) {
     reviewStatus,
   ]);
   const result = useApi<ListResponse>(`/api/v1/${resource}?${params}`);
+  // With a vacancy selected, the application board covers the whole pipeline in a stable order.
+  const boardQuery = useMemo(() => {
+    if (resource !== "applications" || mode !== "board" || !vacancy)
+      return null;
+    const query = new URLSearchParams(params);
+    query.delete("page");
+    query.delete("pageSize");
+    query.set("sort", "createdAt");
+    query.set("direction", "asc");
+    return query.toString();
+  }, [resource, mode, vacancy, params]);
+  const board = useWholePipeline(boardQuery);
   const buckets = useApi<ListResponse>(
     resource === "tasks"
       ? "/api/v1/buckets?pageSize=100&sort=position&direction=asc"
@@ -349,6 +428,7 @@ export function RecordsScreen({ section }: { section: string }) {
   }, [team, resource, linkedRecord]);
   const refresh = () => {
     result.refresh();
+    board.refresh();
     buckets.refresh();
     views.refresh();
     setSelected([]);
@@ -437,7 +517,10 @@ export function RecordsScreen({ section }: { section: string }) {
       Array.isArray(q.certifications) ? q.certifications.map(String) : [],
     );
     setShortlisted(q.shortlisted === true || section === "shortlist");
-    setReviewStatus(String(q.reviewStatus || ""));
+    // Source review already shows only records that need review.
+    setReviewStatus(
+      section === "source-review" ? "" : String(q.reviewStatus || ""),
+    );
     setEmirate(String(q.emirate || ""));
     setDegree(String(q.degreeLevel || ""));
     setEducation(String(q.education || ""));
@@ -497,62 +580,15 @@ export function RecordsScreen({ section }: { section: string }) {
     setError("");
     setNotice("");
     try {
-      const rows: RecordDto[] = [];
-      let current = 1;
-      let total = 1;
-      let matched = 0;
-      do {
-        const query = new URLSearchParams(params);
-        query.set("page", String(current));
-        query.set("pageSize", "100");
-        const response = await requestJson<ListResponse>(
-          team.id,
-          `/api/v1/${resource}?${query}`,
-        );
-        rows.push(...response.data);
-        total = response.pagination.totalPages;
-        matched = response.pagination.total;
-        current++;
-        if (rows.length > 100000)
-          throw new Error("This export is too large. Narrow your filters.");
-      } while (current <= total);
-      const fields = RESOURCE_CONFIG[resource].fields;
-      const now = new Date();
-      saveCsv(
-        exportFilename(resource, now),
-        [
-          "Record ID",
-          ...fields.map((f) => f.label),
-          "Created at",
-          "Updated at",
-        ],
-        rows.map((r) => [
-          r.id,
-          ...fields.map((f) => dataOf(r)[f.key]),
-          r.createdAt,
-          r.updatedAt,
-        ]),
-        exportMetadata({
-          title: config.title,
-          now,
-          environment,
-          filters: describeFilters(
-            debounced,
-            filters,
-            resource === "applications"
-              ? "Stage"
-              : resource === "candidates"
-                ? "Follow-up status"
-                : "Status",
-            section === "shortlist",
-          ),
-          written: rows.length,
-          total: matched,
-        }),
+      const query = new URLSearchParams(params);
+      query.delete("page");
+      query.delete("pageSize");
+      const file = await requestExport(
+        team.id,
+        `/api/v1/${resource}/export?${query}`,
       );
-      const summary = exportSummary(rows.length, matched);
-      if (summary.changed) setError(summary.notice);
-      else setNotice(summary.notice);
+      saveBlob(file.filename, file.blob);
+      setNotice(exportSummary(file.rows, file.rows).notice);
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -890,14 +926,18 @@ export function RecordsScreen({ section }: { section: string }) {
                 />
                 My shortlist only
               </label>
-              {section === "source-review" && (
+              {section !== "source-review" && (
                 <label>
                   Review status
-                  <input
+                  <select
                     value={reviewStatus}
-                    placeholder="Any review status"
                     onChange={(e) => setReviewStatus(e.target.value)}
-                  />
+                  >
+                    <option value="">Any review status</option>
+                    {REVIEW_STATUSES.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
                 </label>
               )}
             </>
@@ -973,7 +1013,10 @@ export function RecordsScreen({ section }: { section: string }) {
           <LoadError message={result.error} retry={result.refresh} />
         ) : result.loading ? (
           <Loading />
-        ) : !result.data?.data.length ? (
+        ) : !result.data ||
+          !(boardQuery
+            ? result.data.pagination.total
+            : result.data.data.length) ? (
           <EmptyState
             title={
               filtered
@@ -1016,6 +1059,44 @@ export function RecordsScreen({ section }: { section: string }) {
               )
             }
           />
+        ) : boardQuery ? (
+          board.error ? (
+            <LoadError message={board.error} retry={board.refresh} />
+          ) : !board.data ? (
+            <Loading />
+          ) : board.data.tooMany ? (
+            <div className="notice" role="status">
+              <p>
+                This vacancy has {formatNumber(board.data.total)} matching
+                applications, more than the board shows at once (1,000). Use the
+                table or narrow the filters.
+              </p>
+              <button
+                className="button secondary small"
+                onClick={() => setMode("table")}
+              >
+                Show as table
+              </button>
+            </div>
+          ) : (
+            <>
+              {!board.data.complete && (
+                <p className="notice" role="status">
+                  The pipeline changed while it loaded. Refresh to see every
+                  application.
+                </p>
+              )}
+              <Kanban
+                resource={resource}
+                records={board.data.rows}
+                buckets={[]}
+                onOpen={setDetail}
+                onMove={move}
+                canWrite={canWrite}
+                emptyText="No matching applications"
+              />
+            </>
+          )
         ) : mode === "board" ? (
           <Kanban
             resource={resource}
@@ -1194,7 +1275,15 @@ export function RecordsScreen({ section }: { section: string }) {
             </table>
           </div>
         )}
-        {result.data && (
+        {result.data && boardQuery ? (
+          <div className="pagination">
+            <span className="muted">
+              {board.data && !board.data.tooMany
+                ? `${formatNumber(board.data.rows.length)} matching applications${board.data.complete ? " · board shows all of them" : ""}`
+                : `${formatNumber(board.data?.total ?? result.data.pagination.total)} matching applications`}
+            </span>
+          </div>
+        ) : result.data ? (
           <div className="pagination">
             <div className="row">
               <label>
@@ -1210,7 +1299,11 @@ export function RecordsScreen({ section }: { section: string }) {
               </label>
               <span className="muted">
                 {formatNumber(result.data.pagination.total)} matching records
-                {mode === "board" ? " · board shows this page" : ""}
+                {mode === "board"
+                  ? resource === "applications"
+                    ? " · board shows this page; choose a vacancy to see its whole pipeline"
+                    : " · board shows this page"
+                  : ""}
               </span>
             </div>
             <div className="row">
@@ -1237,7 +1330,7 @@ export function RecordsScreen({ section }: { section: string }) {
               </button>
             </div>
           </div>
-        )}
+        ) : null}
       </section>
       {detail && (
         <RecordDetail
@@ -1548,6 +1641,7 @@ function Kanban({
   onOpen,
   onMove,
   canWrite,
+  emptyText = "No records on this page",
 }: {
   resource: ResourceName;
   records: RecordDto[];
@@ -1555,6 +1649,7 @@ function Kanban({
   onOpen: (r: RecordDto) => void;
   onMove: (r: RecordDto, value: string) => void;
   canWrite: boolean;
+  emptyText?: string;
 }) {
   const columns =
     resource === "tasks"
@@ -1696,9 +1791,7 @@ function Kanban({
                   </footer>
                 </article>
               ))}
-              {!cards.length && (
-                <p className="board-empty">No records on this page</p>
-              )}
+              {!cards.length && <p className="board-empty">{emptyText}</p>}
             </div>
           </section>
         );
@@ -1837,6 +1930,7 @@ export function RecordDetail({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [archiveDestination, setArchiveDestination] = useState("");
+  const [roleReview, setRoleReview] = useState(false);
   const canWrite = role !== "viewer";
   const resource = kindToResource[record.kind];
   const data = dataOf(record);
@@ -1918,7 +2012,15 @@ export function RecordDetail({
         {[
           "details",
           ...(record.kind === "candidate"
-            ? ["resumes", "follow-up", "applications", "tasks"]
+            ? [
+                "resumes",
+                "follow-up",
+                "applications",
+                "tasks",
+                "interviews",
+                "offers",
+                "onboarding",
+              ]
             : record.kind === "vacancy"
               ? ["applications"]
               : []),
@@ -2030,6 +2132,16 @@ export function RecordDetail({
                 >
                   <Plus size={16} aria-hidden="true" />
                   Add candidate
+                </button>
+              )}
+              {record.kind === "vacancy" && record.jobRoleId && (
+                <button
+                  className="button secondary"
+                  disabled={!canWrite || !!record.archivedAt}
+                  onClick={() => setRoleReview(true)}
+                >
+                  <RefreshCw size={16} aria-hidden="true" />
+                  Review changes from role
                 </button>
               )}
               {record.kind === "job-role" && (
@@ -2263,9 +2375,27 @@ export function RecordDetail({
             }
             focusId={tab === "checklist" ? focusChecklistId : undefined}
             onCreate={onCreate}
+            {...(record.kind === "candidate" &&
+            ["interviews", "offers", "onboarding"].includes(tab)
+              ? {
+                  queryKey: "applicationCandidateId",
+                  addNote:
+                    "Add these from one of the candidate's applications.",
+                }
+              : {})}
           />
         )}
       </div>
+      {roleReview && (
+        <RoleRefresh
+          vacancy={record}
+          onClose={() => setRoleReview(false)}
+          onUpdated={(value) => {
+            setRoleReview(false);
+            onUpdated(value);
+          }}
+        />
+      )}
     </>
   );
   return inline ? (
@@ -2277,6 +2407,143 @@ export function RecordDetail({
         <button className="button secondary" onClick={onClose}>
           Close
         </button>
+      </footer>
+    </Dialog>
+  );
+}
+/** Lists the role facts that now differ from the vacancy; only ticked fields are copied. */
+function RoleRefresh({
+  vacancy,
+  onClose,
+  onUpdated,
+}: {
+  vacancy: RecordDto;
+  onClose: () => void;
+  onUpdated: (record: RecordDto) => void;
+}) {
+  const { team } = useWorkspace();
+  const [current, setCurrent] = useState(vacancy);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const role = useApi<{ data: RecordDto }>(
+    `/api/v1/job-roles/${vacancy.jobRoleId}`,
+  );
+  const differences = role.data
+    ? roleDifferences(dataOf(current), dataOf(role.data.data))
+    : [];
+  const apply = async () => {
+    if (!team || !role.data || saving) return;
+    setSaving(true);
+    setError("");
+    const snapshot = roleSnapshot(dataOf(role.data.data));
+    try {
+      const response = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/vacancies/${current.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            version: current.version,
+            data: Object.fromEntries(
+              selected.map((key) => [
+                key,
+                snapshot[key as keyof typeof snapshot],
+              ]),
+            ),
+          }),
+        },
+      );
+      onUpdated(response.data);
+    } catch (e) {
+      setError(humanError(e));
+      if (e instanceof ClientError && e.status === 409) {
+        // Compare again against the latest vacancy and role.
+        setSelected([]);
+        role.refresh();
+        try {
+          const latest = await requestJson<{ data: RecordDto }>(
+            team.id,
+            `/api/v1/vacancies/${current.id}`,
+          );
+          setCurrent(latest.data);
+        } catch (reload) {
+          setError(humanError(reload));
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      title="Review changes from role"
+      wide
+      onClose={onClose}
+      busy={saving}
+    >
+      <div className="dialog-body stack">
+        {error && (
+          <p className="notice error" role="alert">
+            {error}
+          </p>
+        )}
+        {role.error ? (
+          <LoadError message={role.error} retry={role.refresh} />
+        ) : !role.data ? (
+          <Loading />
+        ) : role.data.data.archivedAt ? (
+          <p className="notice">
+            The source role is archived. Its details can no longer be copied.
+          </p>
+        ) : !differences.length ? (
+          <p className="notice">This vacancy already matches its role.</p>
+        ) : (
+          <fieldset className="editor-fieldset stack" disabled={saving}>
+            <legend>
+              These role details differ from {recordLabel(current)}. Tick the
+              ones to copy into the vacancy; nothing else changes.
+            </legend>
+            {differences.map((item) => (
+              <label className="checkbox-label role-difference" key={item.key}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(item.key)}
+                  onChange={(e) =>
+                    setSelected((old) =>
+                      e.target.checked
+                        ? [...old, item.key]
+                        : old.filter((key) => key !== item.key),
+                    )
+                  }
+                />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>Vacancy now: {display(item.vacancy)}</small>
+                  <small>Role now: {display(item.role)}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+      </div>
+      <footer className="dialog-footer">
+        <button
+          className="button secondary"
+          disabled={saving}
+          onClick={onClose}
+        >
+          Cancel
+        </button>
+        {role.data && !role.data.data.archivedAt && differences.length > 0 && (
+          <button
+            className="button"
+            disabled={saving || !selected.length}
+            onClick={apply}
+          >
+            {saving ? "Applying…" : "Apply selected changes"}
+          </button>
+        )}
       </footer>
     </Dialog>
   );
@@ -2597,12 +2864,18 @@ function RelatedRecords({
   resource,
   parentId,
   parentKey,
+  queryKey = parentKey,
+  addNote,
   onCreate,
   focusId,
 }: {
   resource: ResourceName;
   parentId: string;
   parentKey: ReferenceField;
+  /** The list filter naming the parent; defaults to parentKey. */
+  queryKey?: string;
+  /** Shown instead of the Add button, for records that cannot be added from this parent. */
+  addNote?: string;
   focusId?: string;
   onCreate: (
     resource: ResourceName,
@@ -2612,7 +2885,7 @@ function RelatedRecords({
   const { team, role } = useWorkspace();
   const [page, setPage] = useState(1);
   const result = useApi<ListResponse>(
-    `/api/v1/${resource}?${parentKey}=${parentId}&pageSize=100&page=${page}`,
+    `/api/v1/${resource}?${queryKey}=${parentId}&pageSize=100&page=${page}`,
   );
   const [edit, setEdit] = useState<RecordDto | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<RecordDto | null>(null);
@@ -2651,14 +2924,18 @@ function RelatedRecords({
       )}
       <div className="row space-between">
         <h3>{RESOURCE_CONFIG[resource].label}</h3>
-        <button
-          className="button secondary"
-          disabled={role === "viewer"}
-          onClick={() => onCreate(resource, { [parentKey]: parentId })}
-        >
-          <Plus size={16} aria-hidden="true" />
-          Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
-        </button>
+        {addNote ? (
+          <p className="muted">{addNote}</p>
+        ) : (
+          <button
+            className="button secondary"
+            disabled={role === "viewer"}
+            onClick={() => onCreate(resource, { [parentKey]: parentId })}
+          >
+            <Plus size={16} aria-hidden="true" />
+            Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
+          </button>
+        )}
       </div>
       {resource === "checklist" &&
       result.data &&
@@ -2695,6 +2972,17 @@ function RelatedRecords({
             >
               <span>
                 <strong>{recordLabel(record)}</strong>
+                {queryKey === "applicationCandidateId" &&
+                  (resource === "interviews" || resource === "offers") && (
+                    <small>
+                      For{" "}
+                      <ReferenceLabel
+                        resource="applications"
+                        id={record.applicationId}
+                        plain
+                      />
+                    </small>
+                  )}
                 {resource === "tasks" ? (
                   <small>
                     {String(dataOf(record).priority)} ·{" "}

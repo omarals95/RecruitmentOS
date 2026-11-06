@@ -83,7 +83,7 @@ export function templateGrantMatrix(
   }
   const grants = [
     ...sql.matchAll(
-      /\bGRANT ([A-Z]+(?:, [A-Z]+)*) ON (DATABASE|SCHEMA|TABLE|FUNCTION) (%I|[\w."]+(?:\([\w, ]*\))?) TO (\w+(?:, \w+)*)(?=;|')/g,
+      /\bGRANT ([A-Z]+(?:, [A-Z]+)*) ON (DATABASE|SCHEMA|TABLE|FUNCTION) (%I|[\w."]+(?:\([\w, [\]]*\))?) TO (\w+(?:, \w+)*)(?=;|')/g,
     ),
   ];
   if (grants.length !== (sql.match(/\bGRANT\b/g) ?? []).length)

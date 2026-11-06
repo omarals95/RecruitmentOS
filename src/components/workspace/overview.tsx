@@ -755,6 +755,7 @@ export function ActivityScreen() {
               "onboarding",
               "checklist",
               "comment",
+              "export",
             ].map((item) => (
               <option key={item}>{item}</option>
             ))}
@@ -787,6 +788,12 @@ export function ActivityScreen() {
                     <p>
                       <Badge value={item.metadata.fromStage} /> →{" "}
                       <Badge value={item.metadata.toStage} />
+                    </p>
+                  ) : null}
+                  {item.metadata.fromStatus && item.metadata.toStatus ? (
+                    <p>
+                      <Badge value={item.metadata.fromStatus} /> →{" "}
+                      <Badge value={item.metadata.toStatus} />
                     </p>
                   ) : null}
                 </div>

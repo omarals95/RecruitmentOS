@@ -10,6 +10,7 @@ import { SCOPES, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 import { resourceToKind } from "@/domain/records";
+import { EXPORT_RESOURCES } from "@/domain/export";
 import { GET as openApi } from "@/app/api/openapi.json/route";
 import {
   createTestDb,
@@ -76,8 +77,12 @@ function routePaths(file: string) {
     });
     return { path: `/api/${path.join("/")}`, params };
   };
+  // Only the exportable resources have an export operation; the others return 404.
   return segments.includes("[resource]")
-    ? Object.keys(resourceToKind).map(expand)
+    ? (segments.includes("export")
+        ? [...EXPORT_RESOURCES]
+        : Object.keys(resourceToKind)
+      ).map((resource) => expand(resource))
     : [expand()];
 }
 

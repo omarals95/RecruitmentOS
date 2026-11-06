@@ -20,12 +20,21 @@ import {
   initials,
   isFiltered,
   referenceText,
+  roleDifferences,
   roleSnapshot,
+  dataOf,
+  loadAllPages,
 } from "../src/components/workspace/helpers";
 import {
+  calendarCells,
   calendarDays,
   interviewsOnDay,
 } from "../src/components/workspace/calendar";
+import {
+  csvChunks,
+  describeExportQuery,
+  exportTable,
+} from "../src/domain/export";
 import { screenDefinitions } from "../src/components/workspace/records-screen";
 import { cvImportState } from "../src/components/workspace/bulk-cv-import";
 import {
@@ -567,6 +576,273 @@ describe("labelled exports", () => {
       ["Exported at", "5 Nov 2026, 13:07 (Asia/Dubai)"],
       ["Environment", "Production"],
       [],
+    ]);
+  });
+});
+describe("calendar cells and view agreement", () => {
+  const interview = (id: string, startAt: string) =>
+    ({
+      id,
+      kind: "interview",
+      data: { title: id, startAt },
+    }) as unknown as RecordDto;
+  // Dubai is UTC+4: 19:59:59Z is 23:59:59 on 17 Nov, 20:00:00Z is midnight on 18 Nov.
+  const busy = Array.from({ length: 22 }, (_, n) =>
+    interview(
+      `busy-${String(n).padStart(2, "0")}`,
+      `2026-11-18T${String(4 + Math.floor(n / 2)).padStart(2, "0")}:${n % 2 ? "30" : "00"}:00.000Z`,
+    ),
+  );
+  const events = [
+    ...busy,
+    interview("busy-midnight", "2026-11-17T20:00:00.000Z"),
+    interview("before-midnight", "2026-11-17T19:59:59.000Z"),
+    ...[2, 5, 9, 14, 21, 26, 30].map((day) =>
+      interview(
+        `spread-${day}`,
+        `2026-11-${String(day).padStart(2, "0")}T06:00:00.000Z`,
+      ),
+    ),
+    interview("next-month", "2026-12-03T06:00:00.000Z"),
+  ];
+  it("puts every event in exactly one cell and counts what is not shown", () => {
+    for (const view of ["month", "week", "day"] as const) {
+      const days = calendarDays("2026-11-18", view);
+      const cells = calendarCells(events, days, view);
+      const seen = new Map<string, string>();
+      for (const cell of cells) {
+        const all = interviewsOnDay(events, cell.day);
+        expect(cell.shown.length + cell.hidden, `${view} ${cell.day}`).toBe(
+          all.length,
+        );
+        expect(cell.shown).toEqual(all.slice(0, cell.shown.length));
+        for (const record of all) {
+          expect(seen.has(record.id), `${view} ${record.id}`).toBe(false);
+          seen.set(record.id, cell.day);
+        }
+      }
+      for (const record of events) {
+        const day = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Asia/Dubai",
+        }).format(new Date(String(dataOf(record).startAt)));
+        expect(seen.get(record.id), `${view} ${record.id}`).toBe(
+          days.includes(day) ? day : undefined,
+        );
+      }
+    }
+    const busyCell = (view: "month" | "week" | "day") =>
+      calendarCells(events, calendarDays("2026-11-18", view), view).find(
+        (cell) => cell.day === "2026-11-18",
+      )!;
+    expect(interviewsOnDay(events, "2026-11-18")).toHaveLength(23);
+    expect(busyCell("week")).toMatchObject({ hidden: 3 });
+    expect(busyCell("week").shown).toHaveLength(20);
+    expect(busyCell("month")).toMatchObject({ hidden: 20 });
+    expect(busyCell("month").shown).toHaveLength(3);
+    expect(busyCell("day")).toMatchObject({ hidden: 0 });
+    expect(busyCell("day").shown).toHaveLength(23);
+    expect(busyCell("day").shown[0].id).toBe("busy-midnight");
+  });
+  it("gives the list view the same Dubai date as the cell holding each event", () => {
+    const cells = calendarCells(
+      events,
+      calendarDays("2026-11-18", "month"),
+      "month",
+    );
+    for (const cell of cells)
+      for (const record of interviewsOnDay(events, cell.day))
+        expect(
+          formatField(
+            { key: "startAt", type: "datetime-local" },
+            dataOf(record),
+          ).split(", ")[0],
+          record.id,
+        ).toBe(formatDate(cell.day));
+    expect(
+      cells.find((cell) =>
+        interviewsOnDay(events, cell.day).some(
+          (record) => record.id === "before-midnight",
+        ),
+      )?.day,
+    ).toBe("2026-11-17");
+  });
+});
+describe("reviewed role refresh", () => {
+  const role = {
+    title: "Fictional Analyst",
+    department: "Finance",
+    location: "Dubai",
+    employmentType: "Full-time",
+    workMode: "Hybrid",
+    description: "Fictional description",
+    requirements: "Fictional requirements",
+    skills: ["SQL", "Excel"],
+  };
+  it("lists only the differing snapshot fields with their labels", () => {
+    expect(roleDifferences({ ...role, openings: 3 }, role)).toEqual([]);
+    expect(
+      roleDifferences(
+        { ...role, status: "Open" },
+        {
+          ...role,
+          title: "Fictional Senior Analyst",
+          requirements: "Fictional new requirements",
+          extra: "never compared",
+        },
+      ),
+    ).toEqual([
+      {
+        key: "title",
+        label: "Title",
+        vacancy: "Fictional Analyst",
+        role: "Fictional Senior Analyst",
+      },
+      {
+        key: "requirements",
+        label: "Requirements",
+        vacancy: "Fictional requirements",
+        role: "Fictional new requirements",
+      },
+    ]);
+  });
+  it("treats reordered skills as a difference", () => {
+    expect(
+      roleDifferences(role, { ...role, skills: ["Excel", "SQL"] }),
+    ).toEqual([
+      {
+        key: "skills",
+        label: "Skills",
+        vacancy: ["SQL", "Excel"],
+        role: ["Excel", "SQL"],
+      },
+    ]);
+  });
+});
+describe("whole-list loading", () => {
+  const row = (id: string) => ({ id }) as unknown as RecordDto;
+  const page = (ids: string[], number: number, total: number) => ({
+    data: ids.map(row),
+    pagination: {
+      page: number,
+      pageSize: 100,
+      total,
+      totalPages: Math.ceil(total / 100),
+    },
+  });
+  it("combines pages and drops rows repeated across pages", async () => {
+    const pages = [
+      page(["a", "b"], 1, 250),
+      page(["b", "c"], 2, 250),
+      page(["d"], 3, 250),
+    ];
+    const fetched: number[] = [];
+    const result = await loadAllPages(async (number) => {
+      fetched.push(number);
+      return pages[number - 1];
+    }, 1000);
+    expect(fetched).toEqual([1, 2, 3]);
+    expect(result).toMatchObject({ tooMany: false, total: 250 });
+    expect(result.tooMany ? [] : result.rows.map((item) => item.id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
+  });
+  it("stops after the first page when the total exceeds the limit", async () => {
+    const fetched: number[] = [];
+    expect(
+      await loadAllPages(async (number) => {
+        fetched.push(number);
+        return page(["a"], number, 1001);
+      }, 1000),
+    ).toEqual({ tooMany: true, total: 1001 });
+    expect(fetched).toEqual([1]);
+  });
+  it("reports an incomplete list when the last total differs from the unique rows", async () => {
+    const pages = [page(["a", "b"], 1, 101), page(["c", "d"], 2, 102)];
+    expect(
+      await loadAllPages(async (number) => pages[number - 1], 1000),
+    ).toMatchObject({ tooMany: false, total: 102, complete: false });
+    expect(
+      await loadAllPages(async () => page(["a", "b"], 1, 2), 1000),
+    ).toMatchObject({ tooMany: false, total: 2, complete: true });
+  });
+});
+describe("server export file", () => {
+  it("streams exactly the text csvText builds", () => {
+    const headers = ["Record ID", "Name"];
+    const rows = Array.from({ length: 1203 }, (_, n) => [`id-${n}`, `=n${n}`]);
+    const metadata = [["RecruitmentOS export", "Candidates"], []];
+    const chunks = [...csvChunks(headers, rows, metadata, 500)];
+    expect(chunks).toHaveLength(4);
+    expect(chunks.join("")).toBe(csvText(headers, rows, metadata));
+    expect([...csvChunks(headers, [], metadata)].join("")).toBe(
+      csvText(headers, [], metadata),
+    );
+  });
+  it("describes every applied export filter in the list screen's words", () => {
+    expect(describeExportQuery("candidates", new URLSearchParams())).toBe(
+      "None",
+    );
+    expect(
+      describeExportQuery(
+        "candidates",
+        new URLSearchParams({
+          search: "",
+          sort: "name",
+          direction: "asc",
+          status: "Contacted",
+          skills: JSON.stringify(["SQL"]),
+          shortlisted: "true",
+          needsReview: "true",
+          reviewStatus: "Needs review",
+          includeArchived: "true",
+        }),
+      ),
+    ).toBe(
+      "Follow-up status: Contacted; Skills: SQL; My shortlist only; Review status: Needs review; Include archived; Needs source review",
+    );
+    expect(
+      describeExportQuery(
+        "applications",
+        new URLSearchParams({
+          stage: "Screening",
+          vacancyId: "00000000-0000-4000-8000-000000000001",
+        }),
+      ),
+    ).toBe(
+      "Stage: Screening; Vacancy ID: 00000000-0000-4000-8000-000000000001",
+    );
+    expect(
+      describeExportQuery(
+        "interviews",
+        new URLSearchParams({
+          status: "Scheduled",
+          startFrom: "2026-11-01T00:00:00+04:00",
+          shortlisted: "false",
+        }),
+      ),
+    ).toBe(
+      "Status: Scheduled; startFrom: 2026-11-01T00:00:00+04:00; shortlisted: false",
+    );
+  });
+  it("writes the record ID, every field label and the timestamps", () => {
+    const record = {
+      id: "id-1",
+      data: { title: "Fictional role", skills: ["SQL"] },
+      createdAt: "2026-11-01T00:00:00.000Z",
+      updatedAt: "2026-11-02T00:00:00.000Z",
+    } as unknown as RecordDto;
+    const table = exportTable("job-roles", [record]);
+    expect(table.headers[0]).toBe("Record ID");
+    expect(table.headers.slice(-2)).toEqual(["Created at", "Updated at"]);
+    expect(table.headers).toContain("Title");
+    expect(table.rows[0][0]).toBe("id-1");
+    expect(table.rows[0][1]).toBe("Fictional role");
+    expect(table.rows[0].slice(-2)).toEqual([
+      "2026-11-01T00:00:00.000Z",
+      "2026-11-02T00:00:00.000Z",
     ]);
   });
 });
