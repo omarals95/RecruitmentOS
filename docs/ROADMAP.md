@@ -20,6 +20,7 @@ R1.2     Hiring managers & approvals  ── requester role, approvals, intervie
 R1.3     Integrations marketplace v1  ── Outlook, Gmail, Google/Microsoft calendars, Teams, Slack, Discord
 R1.4     Insights                     ── customisable dashboards, widgets, goals, scheduled reports
 R1.5     Compliance & data lifecycle  ── retention, erasure, consent, data requests, Emiratisation tracker
+R1.6     Workflow designer            ── custom hiring pipeline: stages, screens, fields, conditions, approval groups
 R2.0     Reach & region               ── careers page, job boards, WhatsApp/SMS, Arabic/RTL, mobile, live AI
 ```
 
@@ -78,6 +79,8 @@ Closes top gaps 2 and 3 and the "requesting department" perspective.
 | R12-06 | Notification centre and email notifications for approvals, reminders and mentions                        | #5  |
 | R12-07 | Candidate email templates and logged outbound email (sent through the R1.3 email integrations or Resend) | #5  |
 
+**Built on the workflow engine.** R12-02 and R12-03 are implemented as the first two workflows of the R1.6 engine (approval steps and approval groups only), so approvals are not built twice. The visual designer, custom screens, fields and conditions follow in R1.6.
+
 ## R1.3 — Integrations marketplace v1
 
 Closes top gaps 5 and 6. Every integration is installed per team from a **marketplace** page, so admins can see what is connected and what data it gets.
@@ -133,6 +136,29 @@ Closes top gap 9. Requires the owner's privacy and retention policy decisions fi
 | R15-04 | Audit export for administrators                                                                                          |
 | R15-05 | Emiratisation tracker and work permit checklist (if approved; counts only, no automated decisions)                       |
 | R15-06 | Malware scanning and quarantine for uploaded CVs before real untrusted intake at scale                                   |
+
+## R1.6 — Workflow designer
+
+_Owner request, 6 November 2026. Reference: the end-to-end hiring flow in the Sanad recruitment management system (requisition → approval → job posting → applications → shortlisting → interview scheduling → offer letter → onboarding, with hiring manager and recruiter hand-offs)._
+
+**Goal:** each team designs its own hiring pipeline instead of the fixed seven stages: which stages exist, what each stage asks for, who must approve, and which path a record takes depending on its data.
+
+| ID     | Item                                                                                                                                                                                                                                                                                                                                     |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R16-01 | **Workflow engine and versioning.** Workflows are defined per team for requisitions, applications, offers and onboarding. Definitions are versioned: records in flight keep the version they started with; changes apply to new records.                                                                                                 |
+| R16-02 | **Custom stages.** Add, rename, reorder and archive stages; stage types (work, approval, interview, offer, onboarding, closed); each stage maps to a reporting category so analytics stay comparable.                                                                                                                                    |
+| R16-03 | **Custom fields and screens.** A field library (text, number, money, date, dropdown, multi-select, checkbox, person, file, rich text) and a screen designer per stage: which fields show, which are mandatory, optional or read-only, and in which order.                                                                                |
+| R16-04 | **Conditions (if / then / else).** Rules on field values and record data, for example "if salary band above X, then add the finance approval group, else skip"; "if department is Engineering, then require the technical interview stage". Rules can show or hide fields, make them mandatory, add or skip stages, and route approvals. |
+| R16-05 | **Approval groups.** Named groups of users or roles (department heads, finance, HR, executive); approval steps with any-one, all, majority or sequential rules; delegates and out-of-office cover; SLA reminders and escalation.                                                                                                         |
+| R16-06 | **Visual designer.** Drag-and-drop canvas like the reference flow, with lanes or badges for who acts at each step (requester, hiring manager, recruiter, approvers), plus a step list view for keyboard and screen-reader users.                                                                                                         |
+| R16-07 | **Validation and test mode.** The designer blocks unreachable stages, loops, missing approvers and conditions that reference deleted fields; a "test with sample data" preview shows which path a record would take before publishing.                                                                                                   |
+| R16-08 | **Templates.** Ready-made workflows (standard hire, Emiratisation role, executive hire, internal transfer, contractor) that teams copy and adapt.                                                                                                                                                                                        |
+| R16-09 | **Audit and permissions.** Only owners and admins edit workflows; every publish is versioned and audited; every approval, rejection, skipped step and rule decision is recorded with the actor and the rule that applied.                                                                                                                |
+| R16-10 | **Integrations hooks.** Workflow events (stage entered, approval needed, approved, rejected) feed the R1.3 marketplace: Teams/Slack approve buttons, calendar steps, email templates.                                                                                                                                                    |
+
+**Guardrails:** conditions may route work, require approvals or require fields, but never make a hiring decision on their own: moving a candidate to Hired or Rejected is always a person's action, and rules may not use sensitive attributes (gender, nationality, age, national-service status) as conditions. Migrating existing teams maps today's seven stages onto the default template with no data loss.
+
+**Depends on:** R1.1 (users as owners and interviewers), R1.2 (approvals built on this engine), R1.3 (notification and calendar hooks).
 
 ## R2.0 — Reach and region
 
