@@ -18,6 +18,10 @@ const bridge = vi.hoisted(() => ({
   pg: null as PGlite | null,
   databases: new Map<string, PGlite>(),
   users: new Map<PGlite, string>(),
+  /** Every query text sent to a database other than fictional_db, in order. */
+  inspected: [] as string[],
+  /** A query text that fails on such a database, as a refused setting would. */
+  failing: null as string | null,
 }));
 const constructed = bridge.constructed;
 vi.mock("pg", () => ({
@@ -49,6 +53,11 @@ vi.mock("pg", () => ({
     async end() {}
     async query(text: string, params?: unknown[]) {
       const pg = this.target!;
+      if (this.database !== "fictional_db") {
+        bridge.inspected.push(text.replace(/\s+/g, " ").trim());
+        if (text === bridge.failing)
+          throw new Error("fictional refused setting");
+      }
       if (bridge.users.get(pg) !== this.user) {
         await pg.exec(`SET SESSION AUTHORIZATION ${this.user}`);
         bridge.users.set(pg, this.user);
@@ -135,9 +144,10 @@ const expectedIdentity = {
         ["DELETE", "INSERT", "SELECT", "UPDATE"],
       ]),
     ),
-    "auth.oauth_clients": ["INSERT", "SELECT"],
-    "auth.oauth_codes": ["INSERT", "SELECT", "UPDATE"],
-    "auth.oauth_tokens": ["INSERT", "SELECT", "UPDATE"],
+    // DELETE only for the expired-row purge.
+    "auth.oauth_clients": ["DELETE", "INSERT", "SELECT"],
+    "auth.oauth_codes": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+    "auth.oauth_tokens": ["DELETE", "INSERT", "SELECT", "UPDATE"],
     "auth.initial_admin_claim": ["SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
   },
@@ -1241,5 +1251,50 @@ describe("db-role-evidence template drift", () => {
         }
         expect((await evidence()).code).toBe(0);
       });
+
+    it("pins search_path and a statement timeout inside the read-only inspection, and refuses the database if either fails", async () => {
+      const setPath = "SET LOCAL search_path = pg_catalog, pg_temp";
+      const setTimeout = "SET LOCAL statement_timeout = '5s'";
+      for (const failing of [null, setPath, setTimeout]) {
+        await harness.asSuperuser();
+        await harness.client.exec(`CREATE ROLE ${platformOwner} NOLOGIN`);
+        await harness.client.exec(
+          `CREATE DATABASE ${platform} OWNER ${platformOwner}`,
+        );
+        bridge.databases.set(
+          platform,
+          new PGlite({ loadDataDir: platformDataDir, database: platform }),
+        );
+        bridge.inspected = [];
+        bridge.failing = failing;
+        try {
+          const outcome = await report();
+          if (failing === null) {
+            expect(outcome).toEqual(cases[0].expected);
+            expect(bridge.inspected).toEqual([
+              "BEGIN TRANSACTION READ ONLY",
+              setPath,
+              setTimeout,
+              expect.stringMatching(/^SELECT current_user::text = \$1 /),
+              "ROLLBACK",
+            ]);
+          } else {
+            expect(outcome, failing).toEqual(cases.at(-1)!.expected);
+            expect(bridge.inspected, failing).toContain("ROLLBACK");
+            expect(bridge.inspected.join("\n"), failing).not.toContain(
+              "SELECT current_user",
+            );
+          }
+        } finally {
+          bridge.failing = null;
+          await bridge.databases.get(platform)?.close();
+          bridge.databases.delete(platform);
+          await harness.asSuperuser();
+          await harness.client.exec(`DROP DATABASE ${platform}`);
+          await harness.client.exec(`DROP ROLE ${platformOwner}`);
+          await rerunTemplate();
+        }
+      }
+    });
   });
 });

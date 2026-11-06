@@ -599,6 +599,9 @@ async function inspectDatabase(dataUrl: string, database: string) {
     await client.connect();
     await client.query("BEGIN TRANSACTION READ ONLY");
     try {
+      // Transaction-scoped, so safe through a transaction pooler; a failure means not clean.
+      await client.query("SET LOCAL search_path = pg_catalog, pg_temp");
+      await client.query("SET LOCAL statement_timeout = '5s'");
       const { rows } = await client.query(
         `SELECT current_user::text = $1 AND pg_catalog.current_database()::text = $2
             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = ANY ($3::text[]))
