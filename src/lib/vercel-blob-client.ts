@@ -32,6 +32,7 @@ export function createVercelBlobClient({
   )
     throw new StorageConfigurationError(
       "The storage client needs a valid store id, a read-write token for that store and the standard endpoint.",
+      "blob_client_invalid",
     );
   return {
     signer: {

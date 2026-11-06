@@ -529,6 +529,18 @@ export function factualText(value: unknown): string {
     return Object.values(value).map(factualText).join(" ");
   return String(value).toLocaleLowerCase();
 }
+/** An absolute http(s) URL to link to, or null; stored values stay untrusted when rendered. */
+export function safeExternalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 export function matchesSearch(value: unknown, query: string): boolean {
   const haystack = factualText(value);
   return searchTerms(query).every((term) =>

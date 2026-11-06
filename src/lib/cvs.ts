@@ -30,7 +30,7 @@ import {
   resolveStorageBinding,
   storageConfigured,
   StorageConfigurationError,
-  STORAGE_SETUP_REQUIRED_MESSAGE,
+  storageSetupRequired,
   type StorageBinding,
   type StorageGateway,
 } from "@/lib/storage";
@@ -103,11 +103,7 @@ function actorKey(p: Principal) {
 function storageFailure(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof StorageConfigurationError)
-    throw new ApiError(
-      503,
-      "STORAGE_SETUP_REQUIRED",
-      STORAGE_SETUP_REQUIRED_MESSAGE,
-    );
+    throw storageSetupRequired(error);
   if (error instanceof CvValidationError)
     throw new ApiError(400, "INVALID_CV", error.message);
   throw new ApiError(
@@ -149,6 +145,7 @@ function blobGateway(storage: CvStorage): BlobGateway {
   if (!("readVerifiedSlice" in storage))
     throw new StorageConfigurationError(
       "The configured CV storage cannot serve Blob references.",
+      "blob_protocol_mismatch",
     );
   return storage;
 }
@@ -156,6 +153,7 @@ function s3Gateway(storage: CvStorage): StorageGateway {
   if ("readVerifiedSlice" in storage)
     throw new StorageConfigurationError(
       "The configured CV storage cannot serve S3 references.",
+      "aws_protocol_mismatch",
     );
   return storage;
 }

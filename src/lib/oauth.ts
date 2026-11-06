@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, count, eq, gt, isNull, notExists, sql } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
 import { withDeadlines } from "@/db/deadlines";
 import {
@@ -15,7 +15,8 @@ import { getAuthOptions } from "./auth";
 import { ApiError, errorJson, readLimitedBytes } from "./api";
 import { chargeRateWindow, createOAuthGrant, rateWindow } from "./api-tokens";
 import { hashToken } from "./api-token-policy";
-import { clientIp } from "./client-ip";
+import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
+import { clientIp, rateLimitClientKey } from "./client-ip";
 import { cleanClientName } from "./client-name";
 import {
   MCP_SCOPES,
@@ -70,6 +71,8 @@ function oauthError(status: number, error: string, description: string) {
 }
 
 const CLIENT_ID = /^ros_client_[A-Za-z0-9_-]{22}$/;
+/** Registered clients without any grant; registration is refused while this many exist. */
+const UNCONSENTED_CLIENT_CAP = 1000;
 const PKCE_VALUE = /^[A-Za-z0-9._~-]{43,128}$/;
 const GRANT_TYPES = ["authorization_code", "refresh_token"];
 
@@ -129,6 +132,13 @@ function validRedirectUri(value: unknown): value is string {
     return false;
   }
 }
+/** The hashed client address used in rate-limit keys; no raw address is stored. */
+function clientKey(request: Request): string {
+  return rateLimitClientKey(
+    clientIp(request.headers),
+    process.env.BETTER_AUTH_SECRET!,
+  );
+}
 function subsetOf(value: unknown, allowed: string[]): string[] | null {
   if (
     !Array.isArray(value) ||
@@ -158,18 +168,40 @@ export async function registerClient(request: Request): Promise<Response> {
   const unavailable = notReady();
   if (unavailable) return unavailable;
   const db = await getIdentityDb();
+  // There is no client identity before registration, so this budget stays per address.
   const attempts = await withDeadlines(db, (tx) =>
-    rateWindow(
-      tx,
-      `oauth-register:${clientIp(request.headers) ?? "no-client-ip"}`,
-      1,
-    ),
+    rateWindow(tx, `oauth-register:${clientKey(request)}`, 1),
   );
+  await purgeExpiredAuthRowsThrottled(db);
   if (attempts > 5)
     return oauthError(
       429,
       "rate_limited",
       "Too many client registrations. Try again in a minute.",
+    );
+  // Clients nobody approved are purged after a day; this bounds how many can pile up before then.
+  const [unconsented] = await withDeadlines(db, (tx) =>
+    tx.select({ total: count() }).from(
+      tx
+        .select({ id: oauthClients.id })
+        .from(oauthClients)
+        .where(
+          notExists(
+            tx
+              .select({ id: apiTokens.id })
+              .from(apiTokens)
+              .where(eq(apiTokens.oauthClientId, oauthClients.id)),
+          ),
+        )
+        .limit(UNCONSENTED_CLIENT_CAP)
+        .as("unconsented"),
+    ),
+  );
+  if ((unconsented?.total ?? 0) >= UNCONSENTED_CLIENT_CAP)
+    return oauthError(
+      429,
+      "rate_limited",
+      "Too many client registrations. Try again later.",
     );
   if (
     !request.headers
@@ -655,7 +687,9 @@ async function exchange(tx: TeamTx, form: URLSearchParams): Promise<Exchange> {
 
 /**
  * RFC 6749 token endpoint for public clients with S256 PKCE. Every failed exchange costs one
- * unit of the per-IP budget, which is checked before any code or token lookup.
+ * unit of a budget checked before any code or token lookup: per address and registered client,
+ * so one misbehaving connector behind a shared egress address cannot exhaust the others' budget,
+ * or per address alone for a malformed or unregistered client_id.
  */
 export async function exchangeToken(request: Request): Promise<Response> {
   const unavailable = notReady();
@@ -683,14 +717,26 @@ export async function exchangeToken(request: Request): Promise<Response> {
       "invalid_request",
       "Request parameters must not repeat.",
     );
-  const budget = `oauth-token:${clientIp(request.headers) ?? "no-client-ip"}`;
+  const clientId = form.get("client_id");
   const db = await getIdentityDb();
   const result = await withDeadlines(db, async (tx) => {
+    const [client] =
+      clientId && CLIENT_ID.test(clientId)
+        ? await tx
+            .select({ id: oauthClients.id })
+            .from(oauthClients)
+            .where(eq(oauthClients.id, clientId))
+            .limit(1)
+        : [];
+    const budget = client
+      ? `oauth-token:${clientKey(request)}:${client.id}`
+      : `oauth-token:${clientKey(request)}`;
     if ((await rateWindow(tx, budget, 0)) >= 10) return null;
     const outcome = await exchange(tx, form);
     if ("error" in outcome) await chargeRateWindow(tx, budget);
     return outcome;
   });
+  await purgeExpiredAuthRowsThrottled(db);
   // Failures are returned, not thrown, so the budget and any revocation with its audit row commit.
   if (!result)
     return oauthError(

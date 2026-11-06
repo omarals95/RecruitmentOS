@@ -116,8 +116,9 @@ GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_call(text, text) TO recruitme
 GRANT EXECUTE ON FUNCTION tenant_context.audit_export(text, integer, text[]) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.purge_bulk_intake(uuid) TO recruitmentos_data;
 
--- recruitmentos_identity: Better Auth and API token tables, the OAuth tables without DELETE, the
--- setup marker read-only, the connection marker and the three identity helpers.
+-- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
+-- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and
+-- the three identity helpers.
 GRANT USAGE ON SCHEMA auth TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_identity;
@@ -131,9 +132,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.invitation TO recruitmentos_i
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.rate_limit TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.api_tokens TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.api_rate_limits TO recruitmentos_identity;
-GRANT SELECT, INSERT ON TABLE auth.oauth_clients TO recruitmentos_identity;
-GRANT SELECT, INSERT, UPDATE ON TABLE auth.oauth_codes TO recruitmentos_identity;
-GRANT SELECT, INSERT, UPDATE ON TABLE auth.oauth_tokens TO recruitmentos_identity;
+GRANT SELECT, INSERT, DELETE ON TABLE auth.oauth_clients TO recruitmentos_identity;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.oauth_codes TO recruitmentos_identity;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.oauth_tokens TO recruitmentos_identity;
 GRANT SELECT ON TABLE auth.initial_admin_claim TO recruitmentos_identity;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_identity;

@@ -1,8 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
+import { errorResponse } from "../src/lib/api";
 import {
   beginCvUpload,
   completeCvUpload,
@@ -524,6 +533,49 @@ describe("private CV lifecycle against PostgreSQL migrations and fake S3", () =>
     expect((failure as Error).message).not.toMatch(
       /S3|AWS|Blob|Vercel|_NAME|versioning/i,
     );
+  });
+  it("logs one safe storage_configuration_error line whose correlation ID is the response's", async () => {
+    const { gateway } = fakeStorage();
+    const detail = "Enable versioning on fictional S3_BUCKET_NAME=fictional-a";
+    gateway.assertVersioning = async () => {
+      throw new StorageConfigurationError(detail, "aws_versioning_disabled");
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failure = await beginCvUpload(
+        p,
+        candidate,
+        metadata(),
+        gateway,
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      const response = errorResponse(failure);
+      expect(response.status).toBe(503);
+      const body = (await response.json()) as {
+        error: { code: string; message: string; correlationId: string };
+      };
+      expect(body.error).toEqual({
+        code: "STORAGE_SETUP_REQUIRED",
+        message: STORAGE_SETUP_REQUIRED_MESSAGE,
+        correlationId: response.headers.get("x-correlation-id"),
+      });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const line = logged.mock.calls[0].join(" ");
+      const match =
+        /^storage_configuration_error correlationId=([0-9a-f-]{36}) code=STORAGE_SETUP_REQUIRED reason=([a-z_]+)$/.exec(
+          line,
+        );
+      expect(match?.slice(1)).toEqual([
+        body.error.correlationId,
+        "aws_versioning_disabled",
+      ]);
+      expect(line).not.toContain("S3_BUCKET_NAME");
+      expect(line).not.toContain("fictional-a");
+    } finally {
+      logged.mockRestore();
+    }
   });
   it("refuses a switch to Blob with STORAGE_SETUP_REQUIRED before reserving or calling storage", async () => {
     const a = fakeStorage();

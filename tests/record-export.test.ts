@@ -22,6 +22,8 @@ import {
   EXPORT_FILTER_KEYS,
   createRecord,
   exportRecords,
+  getCandidateState,
+  updateCandidateState,
 } from "../src/lib/records";
 import {
   createSplitRoleDb,
@@ -191,6 +193,68 @@ describe("server-side record export over real migrations and RLS", () => {
     expect(refused.status).toBe(403);
     expect((await refused.json()).error.code).toBe("forbidden");
     expect(await exportRows(owner.teamId)).toHaveLength(before);
+  });
+
+  it("applies private shortlist and follow-up filters but leaves them out of the team-visible audit", async () => {
+    signIn(owner);
+    const [one] = await asSuperuser(
+      async () =>
+        (
+          await fixture.client.query<{ id: string }>(
+            "SELECT id FROM app.records WHERE team_id=$1 AND data->>'name'='Fictional Export One'",
+            [owner.teamId],
+          )
+        ).rows,
+    );
+    const state = await getCandidateState(owner, one.id);
+    await updateCandidateState(owner, one.id, {
+      version: state.version,
+      shortlisted: true,
+      status: "Contacted",
+    });
+    const query = new URLSearchParams({
+      shortlisted: "true",
+      status: "Contacted",
+      skills: JSON.stringify(["SQL"]),
+    });
+    const response = await post(`/api/v1/candidates/export?${query}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-export-rows")).toBe("1");
+    const lines = new TextDecoder("utf-8", { ignoreBOM: true })
+      .decode(await response.arrayBuffer())
+      .split("\r\n");
+    // The exporter's own file still names every filter it used.
+    expect(lines[3]).toBe(
+      '"Filters","Follow-up status: Contacted; Skills: SQL; My shortlist only"',
+    );
+    expect(lines.slice(8)).toHaveLength(1);
+    expect(lines[8]).toContain('"Fictional Export One"');
+    const candidates = (await exportRows(owner.teamId)).at(-1)!;
+    expect(candidates.metadata).toEqual({
+      resource: "candidates",
+      rows: 1,
+      filters: ["skills"],
+    });
+    expect(Object.keys(candidates.metadata).sort()).toEqual([
+      "filters",
+      "resource",
+      "rows",
+    ]);
+    expect(JSON.stringify(candidates)).not.toMatch(
+      /shortlist|status|Contacted|SQL/i,
+    );
+
+    await createRecord(owner, "vacancies", {
+      data: { title: "Fictional Open Vacancy", status: "Open" },
+    });
+    const vacancies = await post("/api/v1/vacancies/export?status=Open");
+    expect(vacancies.status).toBe(200);
+    expect(vacancies.headers.get("x-export-rows")).toBe("1");
+    expect((await exportRows(owner.teamId)).at(-1)!.metadata).toEqual({
+      resource: "vacancies",
+      rows: 1,
+      filters: ["status"],
+    });
   });
 
   it("refuses pages, unexportable resources, a missing origin and oversized exports", async () => {

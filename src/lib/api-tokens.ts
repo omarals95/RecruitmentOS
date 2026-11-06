@@ -6,7 +6,6 @@ import {
   eq,
   getTableColumns,
   gt,
-  isNotNull,
   isNull,
   sql,
 } from "drizzle-orm";
@@ -22,6 +21,8 @@ import {
   user,
 } from "@/db/auth-schema";
 import { getAuthOptions } from "./auth";
+import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
+import { rateLimitClientKey } from "./client-ip";
 import { ApiError } from "./errors";
 import { parseRole, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
@@ -122,8 +123,46 @@ export async function chargeRateWindow(tx: TeamTx, key: string) {
     .where(eq(apiRateLimits.key, key));
 }
 
+/** Unknown-hash guesses allowed per client key and minute before every token from it is refused. */
+const GUESS_LIMIT = 10;
+const GUESS_WINDOW_MS = 60_000;
+const PRECHECK_MAX_ENTRIES = 10_000;
+/**
+ * Per-instance copy of the database guess budget, keyed by hashed client key, so a client already
+ * over budget is refused before any identity-database access. The database stays authoritative.
+ */
+const guessPrecheck = new Map<string, { start: number; count: number }>();
+function noteGuesses(client: string, count: number) {
+  const now = Date.now();
+  const entry = guessPrecheck.get(client);
+  if (entry && now - entry.start < GUESS_WINDOW_MS) {
+    entry.count = count;
+    return;
+  }
+  guessPrecheck.delete(client);
+  if (guessPrecheck.size >= PRECHECK_MAX_ENTRIES) {
+    for (const [key, value] of guessPrecheck)
+      if (now - value.start >= GUESS_WINDOW_MS) guessPrecheck.delete(key);
+    // Then the oldest: a Map iterates in insertion order.
+    for (const key of guessPrecheck.keys()) {
+      if (guessPrecheck.size < PRECHECK_MAX_ENTRIES) break;
+      guessPrecheck.delete(key);
+    }
+  }
+  guessPrecheck.set(client, { start: now, count });
+}
+/** Test seam: forget every client's in-process guess count. */
+export function resetGuessPrecheck() {
+  guessPrecheck.clear();
+}
+
 type Authenticated =
-  { guessLimited: true } | { limited: true } | { principal: Principal } | null;
+  | { guessLimited: true; guesses: number }
+  | { guess: true; guesses: number }
+  | { limited: true }
+  | { principal: Principal }
+  | null;
+const MEMBER_ROLES = ["owner", "admin", "recruiter", "viewer"];
 /** Shared by both Bearer authenticators once a live token row and role are found. */
 async function admit(
   tx: TeamTx,
@@ -148,20 +187,21 @@ async function admit(
     },
   };
 }
+const guessLimitedError = () =>
+  new ApiError(
+    429,
+    "token_guess_rate_limited",
+    "Too many invalid API token attempts. Try again in a minute.",
+  );
 // Throw after commit so rejected rate-limit attempts cannot roll back their counter.
 function settle(result: Authenticated): Principal {
-  if (!result)
+  if (!result || "guess" in result)
     throw new ApiError(
       401,
       "invalid_token",
       "The API token is invalid or no longer active.",
     );
-  if ("guessLimited" in result)
-    throw new ApiError(
-      429,
-      "token_guess_rate_limited",
-      "Too many invalid API token attempts. Try again in a minute.",
-    );
+  if ("guessLimited" in result) throw guessLimitedError();
   if ("limited" in result)
     throw new ApiError(
       429,
@@ -185,51 +225,81 @@ function requireReadiness(raw: string, format: RegExp) {
       "The API token is invalid or no longer active.",
     );
 }
+/** After readiness and format, before any identity-database access. Returns the hashed client key. */
+function precheckGuesses(clientIp: string | null): string {
+  const client = rateLimitClientKey(clientIp, process.env.BETTER_AUTH_SECRET!);
+  const entry = guessPrecheck.get(client);
+  if (
+    entry &&
+    Date.now() - entry.start < GUESS_WINDOW_MS &&
+    entry.count >= GUESS_LIMIT
+  )
+    throw guessLimitedError();
+  return client;
+}
+/**
+ * The database guess budget around one token lookup. Over budget, every token from the client is
+ * refused, valid or not: admitting a valid one would tell a guesser which value is real. Only a
+ * hash with no row at all is a guess (`charge`), so stale credentials (revoked, expired, expired
+ * MCP access tokens) cannot lock everyone out behind a shared egress address.
+ */
+async function withGuessBudget(
+  client: string,
+  lookup: (
+    tx: TeamTx,
+    charge: () => Promise<Authenticated>,
+  ) => Promise<Authenticated>,
+): Promise<Principal> {
+  const guessKey = `api-guess:${client}`;
+  const db = await getIdentityDb();
+  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
+    const guesses = await rateWindow(tx, guessKey, 0);
+    if (guesses >= GUESS_LIMIT) return { guessLimited: true, guesses };
+    return lookup(tx, async () => {
+      await chargeRateWindow(tx, guessKey);
+      return { guess: true, guesses: guesses + 1 };
+    });
+  });
+  if (result && "guesses" in result) noteGuesses(client, result.guesses);
+  await purgeExpiredAuthRowsThrottled(db);
+  return settle(result);
+}
 
 export async function authenticateApiToken(
   raw: string,
   clientIp: string | null,
 ): Promise<Principal> {
   requireReadiness(raw, /^ros_live_[A-Za-z0-9_-]{43}$/);
-  const guessKey = `api-guess:${clientIp ?? "no-client-ip"}`;
-  const db = await getIdentityDb();
-  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
-    if ((await rateWindow(tx, guessKey, 0)) >= 10)
-      return { guessLimited: true };
+  const client = precheckGuesses(clientIp);
+  return withGuessBudget(client, async (tx, charge) => {
     const [found] = await tx
       .select({
         token: apiTokens,
+        // An OAuth grant authenticates only through its access tokens.
+        active: sql<boolean>`${apiTokens.revokedAt} is null and ${apiTokens.expiresAt} > current_timestamp and ${apiTokens.oauthClientId} is null`,
         verified: user.emailVerified,
         role: member.role,
       })
       .from(apiTokens)
-      .innerJoin(user, eq(apiTokens.userId, user.id))
-      .innerJoin(
+      .leftJoin(user, eq(apiTokens.userId, user.id))
+      .leftJoin(
         member,
         and(
           eq(member.userId, apiTokens.userId),
           eq(member.organizationId, apiTokens.teamId),
         ),
       )
-      .where(
-        and(
-          eq(apiTokens.tokenHash, hashToken(raw)),
-          isNull(apiTokens.revokedAt),
-          gt(apiTokens.expiresAt, sql`current_timestamp`),
-          // An OAuth grant authenticates only through its access tokens.
-          isNull(apiTokens.oauthClientId),
-        ),
-      );
+      .where(eq(apiTokens.tokenHash, hashToken(raw)));
+    if (!found) return charge();
     if (
-      !found?.verified ||
-      !["owner", "admin", "recruiter", "viewer"].includes(found.role)
-    ) {
-      await chargeRateWindow(tx, guessKey);
+      !found.active ||
+      !found.verified ||
+      !found.role ||
+      !MEMBER_ROLES.includes(found.role)
+    )
       return null;
-    }
     return admit(tx, found.token, found.role);
   });
-  return settle(result);
 }
 
 /**
@@ -242,48 +312,36 @@ export async function authenticateOAuthAccessToken(
   audience: string,
 ): Promise<Principal> {
   requireReadiness(raw, /^ros_oat_[A-Za-z0-9_-]{43}$/);
-  const guessKey = `api-guess:${clientIp ?? "no-client-ip"}`;
-  const db = await getIdentityDb();
-  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
-    if ((await rateWindow(tx, guessKey, 0)) >= 10)
-      return { guessLimited: true };
+  const client = precheckGuesses(clientIp);
+  return withGuessBudget(client, async (tx, charge) => {
     const [found] = await tx
       .select({
         token: getTableColumns(apiTokens),
+        active: sql<boolean>`${oauthTokens.kind} = 'access' and ${oauthTokens.expiresAt} > current_timestamp and ${oauthTokens.audience} = ${audience} and ${apiTokens.revokedAt} is null and ${apiTokens.expiresAt} > current_timestamp and ${apiTokens.oauthClientId} is not null`,
         verified: user.emailVerified,
         role: member.role,
       })
       .from(oauthTokens)
       .innerJoin(apiTokens, eq(apiTokens.id, oauthTokens.grantId))
-      .innerJoin(user, eq(apiTokens.userId, user.id))
-      .innerJoin(
+      .leftJoin(user, eq(apiTokens.userId, user.id))
+      .leftJoin(
         member,
         and(
           eq(member.userId, apiTokens.userId),
           eq(member.organizationId, apiTokens.teamId),
         ),
       )
-      .where(
-        and(
-          eq(oauthTokens.tokenHash, hashToken(raw)),
-          eq(oauthTokens.kind, "access"),
-          gt(oauthTokens.expiresAt, sql`current_timestamp`),
-          eq(oauthTokens.audience, audience),
-          isNull(apiTokens.revokedAt),
-          gt(apiTokens.expiresAt, sql`current_timestamp`),
-          isNotNull(apiTokens.oauthClientId),
-        ),
-      );
+      .where(eq(oauthTokens.tokenHash, hashToken(raw)));
+    if (!found) return charge();
     if (
-      !found?.verified ||
-      !["owner", "admin", "recruiter", "viewer"].includes(found.role)
-    ) {
-      await chargeRateWindow(tx, guessKey);
+      !found.active ||
+      !found.verified ||
+      !found.role ||
+      !MEMBER_ROLES.includes(found.role)
+    )
       return null;
-    }
     return admit(tx, found.token, found.role);
   });
-  return settle(result);
 }
 
 async function assertTokenCap(tx: TeamTx, p: Principal) {

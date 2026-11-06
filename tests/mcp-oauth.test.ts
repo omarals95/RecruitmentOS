@@ -49,6 +49,11 @@ import { GET as resourceRoot } from "../src/app/.well-known/oauth-protected-reso
 import { GET as resourceMcp } from "../src/app/.well-known/oauth-protected-resource/api/mcp/route";
 import { safeNext } from "../src/components/auth/auth-form";
 import {
+  purgeExpiredAuthRows,
+  resetAuthPurgeThrottle,
+} from "../src/lib/auth-purge";
+import { rateLimitClientKey } from "../src/lib/client-ip";
+import {
   mcpScopeDescriptions,
   scopeDescriptions,
 } from "../src/lib/scope-descriptions";
@@ -1358,5 +1363,352 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     });
     expect(capped.status).toBe(409);
     expect((await capped.json()).error.code).toBe("token_limit");
+  });
+
+  describe("rate-limit keys, budgets and retention", () => {
+    const clientKey = (ip: string) =>
+      rateLimitClientKey(ip, process.env.BETTER_AUTH_SECRET!);
+    const keys = () =>
+      asOwner(
+        async () =>
+          (
+            await fixture.client.query<{ key: string; count: number }>(
+              "SELECT key, count FROM auth.api_rate_limits",
+            )
+          ).rows,
+      );
+    const failRefresh = (clientId: string, ip: string) =>
+      tokenRequest(
+        {
+          grant_type: "refresh_token",
+          client_id: clientId,
+          refresh_token: "x",
+        },
+        ip,
+      );
+
+    it("stores registration and token budgets under keyed hashes of the client address", async () => {
+      const ip = "198.51.100.92";
+      expect((await register({ redirect_uris: [REDIRECT] }, ip)).status).toBe(
+        201,
+      );
+      const clientId = await registered();
+      expect((await failRefresh(clientId, ip)).status).toBe(400);
+      expect((await failRefresh("not-a-client", ip)).status).toBe(401);
+      const stored = await keys();
+      expect(stored.map((row) => row.key)).toEqual(
+        expect.arrayContaining([
+          `oauth-register:${clientKey(ip)}`,
+          `oauth-token:${clientKey(ip)}:${clientId}`,
+          `oauth-token:${clientKey(ip)}`,
+        ]),
+      );
+      expect(JSON.stringify(stored)).not.toContain(ip);
+      vi.stubEnv(
+        "BETTER_AUTH_SECRET",
+        "fictional-other-test-secret-0123456789ab",
+      );
+      expect((await register({ redirect_uris: [REDIRECT] }, ip)).status).toBe(
+        201,
+      );
+      const rotated = `oauth-register:${clientKey(ip)}`;
+      expect(rotated).not.toBe(
+        `oauth-register:${rateLimitClientKey(ip, "fictional-valid-test-secret-0123456789")}`,
+      );
+      expect((await keys()).map((row) => row.key)).toContain(rotated);
+    });
+
+    it("gives each registered client its own failed-exchange budget per address", async () => {
+      const ip = "198.51.100.93";
+      const clientA = await registered("Fictional Connector A");
+      const clientB = await registered("Fictional Connector B");
+      for (let n = 0; n < 10; n++)
+        expect((await failRefresh(clientA, ip)).status).toBe(400);
+      const limited = await failRefresh(clientA, ip);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("retry-after")).toBe("60");
+      const flow = await connect(signIn("oauth-owner"), { clientId: clientB });
+      const exchanged = await tokenRequest(
+        {
+          grant_type: "authorization_code",
+          client_id: flow.clientId,
+          code: flow.code,
+          redirect_uri: flow.redirectUri,
+          code_verifier: flow.verifier,
+          resource: RESOURCE,
+        },
+        ip,
+      );
+      expect(exchanged.status).toBe(200);
+      expect((await failRefresh(clientB, ip)).status).toBe(400);
+
+      // Malformed and unregistered client_id values share the address's own budget.
+      const shared = "198.51.100.94";
+      const unregistered = `ros_client_${"F".repeat(22)}`;
+      for (let n = 0; n < 5; n++) {
+        expect((await failRefresh(unregistered, shared)).status).toBe(401);
+        expect((await failRefresh("not-a-client", shared)).status).toBe(401);
+      }
+      expect((await failRefresh("another-unknown", shared)).status).toBe(429);
+      expect((await failRefresh(clientA, shared)).status).toBe(400);
+      expect(
+        (await keys()).find(
+          (row) => row.key === `oauth-token:${clientKey(shared)}`,
+        )?.count,
+      ).toBe(10);
+    });
+
+    it("refuses registration while 1,000 clients have no grant and accepts it at 999", async () => {
+      const unconsented = () =>
+        count(
+          "SELECT count(*)::int AS count FROM auth.oauth_clients c WHERE NOT EXISTS (SELECT 1 FROM auth.api_tokens t WHERE t.oauth_client_id = c.id)",
+        );
+      const clients = () =>
+        count("SELECT count(*)::int AS count FROM auth.oauth_clients");
+      const fill = (total: number) =>
+        asOwner(() =>
+          fixture.client.query(
+            `INSERT INTO auth.oauth_clients(id,name,redirect_uris)
+              SELECT 'ros_client_' || lpad(n::text, 22, 'Z'), 'Fictional filler', '["https://claude.ai/api/mcp/auth_callback"]'
+              FROM generate_series(1, $1::int) n`,
+            [total],
+          ),
+        );
+      try {
+        // Consented clients do not count towards the cap.
+        await connect(signIn("oauth-owner"));
+        await fill(999 - (await unconsented()));
+        expect(await unconsented()).toBe(999);
+        expect(
+          (await register({ redirect_uris: [REDIRECT] }, "198.51.100.95"))
+            .status,
+        ).toBe(201);
+        expect(await unconsented()).toBe(1000);
+        const before = await clients();
+        const refused = await register(
+          { redirect_uris: [REDIRECT] },
+          "198.51.100.96",
+        );
+        expect(refused.status).toBe(429);
+        expect(refused.headers.get("retry-after")).toBe("60");
+        expect(await refused.json()).toEqual({
+          error: "rate_limited",
+          error_description: "Too many client registrations. Try again later.",
+        });
+        expect(await clients()).toBe(before);
+      } finally {
+        await asOwner(() =>
+          fixture.client.query(
+            "DELETE FROM auth.oauth_clients WHERE name='Fictional filler'",
+          ),
+        );
+      }
+    });
+
+    it("purges only rows past their retention, at most 500 per table, and keeps reuse detection", async () => {
+      const owner = signIn("oauth-owner");
+      // A grant whose code and tokens are long expired, and one with a used refresh token still kept.
+      const old = await connect(owner);
+      await tokens(old);
+      const kept = await connect(owner);
+      const issued = await tokens(kept);
+      const rotated = await tokenRequest({
+        grant_type: "refresh_token",
+        client_id: kept.clientId,
+        refresh_token: issued.refresh_token,
+      });
+      expect(rotated.status).toBe(200);
+      const pending = await connect(owner);
+      const [oldGrant] = await grantOf(old.clientId);
+      const [keptGrant] = await grantOf(kept.clientId);
+      const stale = await registered("Fictional Stale Client");
+      const recent = await registered("Fictional Recent Client");
+      await asOwner(() =>
+        fixture.client.exec(`
+          DELETE FROM auth.api_rate_limits;
+          DELETE FROM auth.rate_limit;
+          INSERT INTO auth.api_rate_limits(key, window_start, count)
+            SELECT 'fictional-old-' || n, now() - interval '11 minutes' - n * interval '1 second', 1
+            FROM generate_series(1, 600) n;
+          INSERT INTO auth.api_rate_limits(key, window_start, count)
+            VALUES ('fictional-fresh', now() - interval '9 minutes', 1);
+          INSERT INTO auth.rate_limit(key, count, last_request)
+            VALUES ('ba:fictional-old', 1, (extract(epoch from now()) * 1000)::bigint - 660000),
+                   ('ba:fictional-fresh', 1, (extract(epoch from now()) * 1000)::bigint - 540000);
+          UPDATE auth.oauth_codes SET expires_at = now() - interval '2 days' WHERE grant_id = '${oldGrant.id}';
+          UPDATE auth.oauth_tokens SET expires_at = now() - interval '2 days' WHERE grant_id = '${oldGrant.id}';
+          UPDATE auth.oauth_codes SET expires_at = now() - interval '12 hours' WHERE grant_id = '${keptGrant.id}';
+          UPDATE auth.oauth_tokens SET expires_at = now() - interval '12 hours'
+            WHERE grant_id = '${keptGrant.id}' AND kind = 'access';
+          UPDATE auth.oauth_clients SET created_at = now() - interval '2 days'
+            WHERE id IN ('${stale}', '${old.clientId}');
+          UPDATE auth.oauth_clients SET created_at = now() - interval '12 hours' WHERE id = '${recent}';
+          INSERT INTO auth.oauth_clients(id, name, redirect_uris, created_at)
+            SELECT 'ros_client_' || lpad(n::text, 22, 'Y'), 'Fictional purge filler', '["https://claude.ai/api/mcp/auth_callback"]', now() - interval '3 days' - n * interval '1 second'
+            FROM generate_series(1, 600) n;`),
+      );
+      const remaining = (text: string) => count(text);
+      const oldLimits = () =>
+        remaining(
+          "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key LIKE 'fictional-old-%'",
+        );
+      const fillers = () =>
+        remaining(
+          "SELECT count(*)::int AS count FROM auth.oauth_clients WHERE name = 'Fictional purge filler'",
+        );
+      const clientIds = async () =>
+        asOwner(async () =>
+          (
+            await fixture.client.query<{ id: string }>(
+              "SELECT id FROM auth.oauth_clients WHERE name <> 'Fictional purge filler'",
+            )
+          ).rows.map((row) => row.id),
+        );
+
+      await purgeExpiredAuthRows(fixture.db);
+      expect(await oldLimits()).toBe(100);
+      // Oldest first: the stale client (2 days old) is newer than every filler.
+      expect(await fillers()).toBe(100);
+      expect(await clientIds()).toContain(stale);
+      await purgeExpiredAuthRows(fixture.db);
+      expect(await oldLimits()).toBe(0);
+      expect(await fillers()).toBe(0);
+
+      expect(
+        await remaining(
+          "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key = 'fictional-fresh'",
+        ),
+      ).toBe(1);
+      expect(
+        (
+          await asOwner(
+            async () =>
+              (
+                await fixture.client.query<{ key: string }>(
+                  "SELECT key FROM auth.rate_limit ORDER BY key",
+                )
+              ).rows,
+          )
+        ).map((row) => row.key),
+      ).toEqual(["ba:fictional-fresh"]);
+      const byGrant = (table: string, grantId: string) =>
+        remaining(
+          `SELECT count(*)::int AS count FROM ${table} WHERE grant_id = '${grantId}'`,
+        );
+      expect(await byGrant("auth.oauth_codes", oldGrant.id)).toBe(0);
+      expect(await byGrant("auth.oauth_tokens", oldGrant.id)).toBe(0);
+      // Expired within a day, used, or unexpired: all kept.
+      expect(await byGrant("auth.oauth_codes", keptGrant.id)).toBe(1);
+      expect(await byGrant("auth.oauth_tokens", keptGrant.id)).toBe(4);
+      const [pendingGrant] = await grantOf(pending.clientId);
+      expect(await byGrant("auth.oauth_codes", pendingGrant.id)).toBe(1);
+      const ids = await clientIds();
+      expect(ids).not.toContain(stale);
+      expect(ids).toEqual(
+        expect.arrayContaining([recent, old.clientId, kept.clientId]),
+      );
+
+      // The used refresh token is still recognised, so replaying it revokes the grant.
+      const replay = await tokenRequest({
+        grant_type: "refresh_token",
+        client_id: kept.clientId,
+        refresh_token: issued.refresh_token,
+      });
+      expect((await replay.json()).error).toBe("invalid_grant");
+      expect((await grantOf(kept.clientId))[0].revoked_at).not.toBeNull();
+    });
+
+    it("purges from a request at most once a minute per instance", async () => {
+      const seedOld = (key: string) =>
+        asOwner(() =>
+          fixture.client.query(
+            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ($1, now() - interval '11 minutes', 1)",
+            [key],
+          ),
+        );
+      const present = (key: string) =>
+        count(
+          "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key = $1",
+          [key],
+        );
+      resetAuthPurgeThrottle();
+      await seedOld("fictional-throttle-1");
+      expect((await failRefresh("not-a-client", nextIp())).status).toBe(401);
+      expect(await present("fictional-throttle-1")).toBe(0);
+      await seedOld("fictional-throttle-2");
+      expect((await failRefresh("not-a-client", nextIp())).status).toBe(401);
+      expect(
+        (await register({ redirect_uris: [REDIRECT] }, nextIp())).status,
+      ).toBe(201);
+      expect(await present("fictional-throttle-2")).toBe(1);
+      await asOwner(() =>
+        fixture.client.query(
+          "DELETE FROM auth.api_rate_limits WHERE key = 'fictional-throttle-2'",
+        ),
+      );
+    });
+
+    it("keeps answering normally and logs one safe line when the OAuth DELETE grant is missing", async () => {
+      const grants = (action: "GRANT" | "REVOKE") =>
+        asOwner(() =>
+          fixture.client.exec(
+            `${action} DELETE ON auth.oauth_clients, auth.oauth_codes, auth.oauth_tokens ${action === "GRANT" ? "TO" : "FROM"} recruitment_test_runtime`,
+          ),
+        );
+      const seedOld = () =>
+        asOwner(() =>
+          fixture.client.query(
+            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ('fictional-ungranted', now() - interval '11 minutes', 1)",
+          ),
+        );
+      const oldPresent = () =>
+        count(
+          "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key = 'fictional-ungranted'",
+        );
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      await grants("REVOKE");
+      try {
+        resetAuthPurgeThrottle();
+        await seedOld();
+        const registeredResponse = await register(
+          { redirect_uris: [REDIRECT] },
+          nextIp(),
+        );
+        expect(registeredResponse.status).toBe(201);
+        expect((await registeredResponse.json()).client_id).toMatch(
+          /^ros_client_/,
+        );
+        expect(await oldPresent()).toBe(0);
+        expect(logged.mock.calls).toEqual([
+          [
+            expect.stringMatching(
+              /^auth_purge_failed category=\w+ sqlstate=42501$/,
+            ),
+          ],
+        ]);
+
+        // Registered inside the same minute, so this registration does not purge again.
+        const clientId = await registered();
+        logged.mockClear();
+        resetAuthPurgeThrottle();
+        await seedOld();
+        const exchanged = await failRefresh(clientId, nextIp());
+        expect(exchanged.status).toBe(400);
+        expect((await exchanged.json()).error).toBe("invalid_grant");
+        expect(await oldPresent()).toBe(0);
+        expect(logged.mock.calls).toEqual([
+          [
+            expect.stringMatching(
+              /^auth_purge_failed category=\w+ sqlstate=42501$/,
+            ),
+          ],
+        ]);
+        const line = logged.mock.calls[0][0] as string;
+        expect(line).not.toMatch(/fictional|ros_client|198\.51|203\.0/);
+      } finally {
+        logged.mockRestore();
+        await grants("GRANT");
+      }
+    });
   });
 });

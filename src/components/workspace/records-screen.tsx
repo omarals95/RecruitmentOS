@@ -38,6 +38,7 @@ import {
   APPLICATION_STAGES,
   CANDIDATE_STATUSES,
   REVIEW_STATUSES,
+  safeExternalUrl,
   type RecordDto,
   type ResourceName,
   type ReferenceField,
@@ -1560,7 +1561,7 @@ export function NoTeam() {
     </section>
   );
 }
-function RecordCard({
+export function RecordCard({
   record,
   onOpen,
 }: {
@@ -1934,6 +1935,8 @@ export function RecordDetail({
   const canWrite = role !== "viewer";
   const resource = kindToResource[record.kind];
   const data = dataOf(record);
+  // The write schema allows only http(s), but a stored value is rechecked before it becomes a link.
+  const meetingUrl = safeExternalUrl(data.meetingUrl);
   const archive = async () => {
     if (!team) return;
     setBusy(true);
@@ -2062,10 +2065,10 @@ export function RecordDetail({
         {tab === "details" && (
           <div className="stack">
             <div className="row detail-actions">
-              {record.kind === "interview" && data.meetingUrl ? (
+              {record.kind === "interview" && meetingUrl ? (
                 <a
                   className="button"
-                  href={String(data.meetingUrl)}
+                  href={meetingUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                 >

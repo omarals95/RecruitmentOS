@@ -10,6 +10,7 @@ export const ORIGIN = "http://localhost:3000";
 export const BOOTSTRAP_EMAIL = "owner@example.test";
 export const BOOTSTRAP_TOKEN = "fictional-bootstrap-secret-0123456789abcdefghi";
 export const PASSWORD = "a-long-fictional-password";
+export const TEST_SECRET = "fictional-test-secret-with-at-least-32-characters";
 export type Mail = { to: string; subject: string; text: string };
 
 // The real identity migrations, run as a restricted nonowner role like tests/auth-flows.test.ts.
@@ -54,7 +55,7 @@ export function createTestAuth(
 ) {
   return createAuth(db, {
     baseURL: ORIGIN,
-    secret: "fictional-test-secret-with-at-least-32-characters",
+    secret: TEST_SECRET,
     bootstrapOwnerEmail: BOOTSTRAP_EMAIL,
     bootstrapSetupToken: BOOTSTRAP_TOKEN,
     publicSignup: false,
