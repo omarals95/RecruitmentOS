@@ -97,6 +97,35 @@ export async function sendCvBytes(
   }
 }
 
+/**
+ * Sends the bytes, then calls `complete` once. Blob refuses a replayed ticket after an earlier PUT
+ * that did store the bytes, so a refused PUT is still completed and fails only if completion does.
+ * S3 accepts a repeated POST, so a refused POST fails without completing.
+ */
+export async function storeCv(
+  upload: UploadTicket,
+  file: Blob,
+  complete: () => Promise<unknown>,
+  signal?: AbortSignal,
+  fetchImpl: Fetch = browserFetch,
+): Promise<void> {
+  const stored = await sendCvBytes(upload, file, signal, fetchImpl);
+  const refused = new Error(
+    `Private storage did not accept the CV (HTTP ${stored.status}).`,
+  );
+  if (stored.ok) {
+    await complete();
+    return;
+  }
+  if (upload.protocol !== "blob-put-v1") throw refused;
+  try {
+    await complete();
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw refused;
+  }
+}
+
 async function failure(response: Response): Promise<Error> {
   const body = await response.json().catch(() => null);
   const message = body?.error?.message;

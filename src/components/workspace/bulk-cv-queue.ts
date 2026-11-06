@@ -1,4 +1,7 @@
-import { BULK_INTAKE_MAX_FILES } from "@/domain/records";
+import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+} from "@/domain/records";
 
 export function canStartImport(
   available: boolean,
@@ -32,6 +35,23 @@ export function sameQueue<T extends Contact>(entry: Contact, entries: T[]) {
       other.id !== entry.id &&
       ((email && other.fields.email.trim().toLowerCase() === email) ||
         (phone && other.fields.phone.trim() === phone)),
+  );
+}
+
+/**
+ * An uncertain create may be retried only inside the recovery window counted from the batch
+ * start, which comes before the server batch exists: after it, a purged batch could be recreated.
+ */
+export function uncertainRetryTooOld(
+  entry: { submitted?: string; candidateId?: string },
+  batchStartedAt: number | undefined,
+  now: number,
+) {
+  return (
+    !!entry.submitted &&
+    !entry.candidateId &&
+    batchStartedAt !== undefined &&
+    now - batchStartedAt >= BULK_INTAKE_RECOVERY_HOURS * 3_600_000
   );
 }
 

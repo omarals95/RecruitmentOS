@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { BULK_INTAKE_MAX_FILES } from "../src/domain/records";
+import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+} from "../src/domain/records";
 import {
   canStartImport,
   capSelection,
@@ -7,6 +10,7 @@ import {
   importSummary,
   sameQueue,
   stopsRun,
+  uncertainRetryTooOld,
 } from "../src/components/workspace/bulk-cv-queue";
 
 const draft = (id: string, email = "", phone = "") => ({
@@ -106,5 +110,27 @@ describe("bulk CV queue helpers", () => {
     expect(stopsRun({ status: 409, code: "bulk_duplicates_changed" })).toBe(
       false,
     );
+  });
+
+  it("refuses an uncertain retry once the window has passed since the batch start", () => {
+    const window = BULK_INTAKE_RECOVERY_HOURS * 3_600_000;
+    const batchStartedAt = Date.UTC(2030, 0, 1);
+    // The entry itself started an hour after the batch; the batch start still decides.
+    const uncertain = {
+      submitted: '{"name":"Fictional Late"}',
+      startedAt: batchStartedAt + 3_600_000,
+    };
+    const now = batchStartedAt + window;
+    expect(uncertainRetryTooOld(uncertain, batchStartedAt, now)).toBe(true);
+    expect(uncertainRetryTooOld(uncertain, batchStartedAt, now - 1)).toBe(
+      false,
+    );
+    expect(
+      uncertainRetryTooOld(
+        { ...uncertain, candidateId: "fictional-candidate" },
+        batchStartedAt,
+        now + window,
+      ),
+    ).toBe(false);
   });
 });
