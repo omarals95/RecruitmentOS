@@ -510,38 +510,70 @@ export function GET() {
       },
     ),
   };
+  const batchParam = {
+    name: "batchId",
+    in: "path",
+    required: true,
+    schema: { type: "string", format: "uuid" },
+    description:
+      "Client-chosen import batch ID; one per import session. The batch is private to its creator.",
+  };
   const bulkParams = [
-    {
-      name: "batchId",
-      in: "path",
-      required: true,
-      schema: { type: "string", format: "uuid" },
-      description:
-        "Client-chosen import batch ID; one per import session. The batch is private to its creator.",
-    },
+    batchParam,
     {
       name: "itemId",
       in: "path",
       required: true,
       schema: { type: "string", format: "uuid" },
       description:
-        "Client-chosen item ID, one per selected CV file. It is also the CV upload's clientUploadId.",
+        "Client-chosen item ID, one per selected CV file. It is also the clientUploadId of the item's first CV upload attempt.",
     },
   ];
-  const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended; afterwards the batch returns 409 bulk_batch_expired and is deleted when its user next imports. Another team's or another user's batch or item returns 404.`;
+  const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended. Afterwards the batch returns 409 bulk_batch_expired to item and upload POSTs and is hidden from the GETs until it is purged: the next bulk item POST or list GET in any team deletes expired batches and their items, at most 100 per request. Another team's or another user's batch or item returns 404.`;
+  const batchShape =
+    "{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]} with all of the batch's items (at most 50)";
   paths["/api/v1/cvs/bulk-batches"] = {
     get: operation(
       ["cvs:write", "candidates:write"],
       {
         summary: "List my recent bulk CV imports",
-        description: `Requires cvs:write and candidates:write. Returns the caller's unexpired batches in the selected team, newest first. outcome is derived when read: not-imported (no candidate), cv-pending (candidate without a ready CV), imported (CV ready) or cv-rejected. No candidate field values are stored or returned. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Returns one page of the caller's unexpired batches in the selected team, newest first (createdAt, then id, descending); pagination.total counts all of them. Only page and pageSize are accepted, each at most once, as positive whole decimal numbers; anything else returns 400 invalid_query. outcome is derived when read: not-imported (no candidate), cv-pending (candidate without a ready CV), imported (CV ready) or cv-rejected. No candidate field values are stored or returned. ${bulkLifetime}`,
       },
       {
         "200": {
-          description:
-            "{data: [{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]}]}.",
+          description: `{data: [batch], pagination: {page, pageSize, total, totalPages}}; each batch is ${batchShape}.`,
         },
       },
+      {
+        params: [
+          {
+            name: "page",
+            in: "query",
+            schema: {
+              type: "integer",
+              minimum: 1,
+              maximum: 1000000,
+              default: 1,
+            },
+          },
+          {
+            name: "pageSize",
+            in: "query",
+            schema: { type: "integer", minimum: 1, maximum: 20, default: 10 },
+          },
+        ],
+      },
+    ),
+  };
+  paths["/api/v1/cvs/bulk-batches/{batchId}"] = {
+    get: operation(
+      ["cvs:write", "candidates:write"],
+      {
+        summary: "Read one of my recent bulk CV imports",
+        description: `Requires cvs:write and candidates:write. Returns the caller's own unexpired batch in the list-entry shape. A malformed, unknown, expired, another user's or another team's batch ID returns 404 not_found. This GET does not purge. ${bulkLifetime}`,
+      },
+      { "200": { description: `{data: batch}; the batch is ${batchShape}.` } },
+      { params: [batchParam] },
     ),
   };
   paths["/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}"] = {
@@ -616,7 +648,7 @@ export function GET() {
       ["cvs:write", "candidates:write"],
       {
         summary: "Reserve the CV upload for a bulk item",
-        description: `Requires cvs:write and candidates:write. Reserves the private CV upload for the item's candidate with the item's file metadata, using the item ID as clientUploadId, so a repeat returns the same CV upload. Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Send no body. Reserves the private CV upload for the item's candidate with the item's stored file metadata; the client chooses neither the metadata nor the key. The first attempt uses the item ID as clientUploadId. A repeat while the current attempt is pending and unexpired returns the same CV upload and creates no reservation; a ready attempt returns it with upload:null. When the current attempt is rejected or its reservation expired, the call starts one new attempt for the same file under a new server-chosen clientUploadId, records it on the item and returns 201 with the new ticket; overlapping calls share that one new attempt. The ticket is either protocol of /api/v1/candidates/{id}/cvs/uploads (s3-form-v1 or blob-put-v1), and a ready Blob CV is read through /manifest and /chunks (blob-chunks-v1). Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
       },
       {
         "201": {
