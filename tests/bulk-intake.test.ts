@@ -230,6 +230,24 @@ describe("bulk CV intake recovery and server review evidence", () => {
       "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
       [id],
     ));
+  /** Whether the batch row is a purge tombstone, and how many item rows it still has. */
+  const tombstone = async (id: string) => {
+    const [row] = await asOwner<{ purged_at: Date | null }>(
+      "SELECT purged_at FROM app.bulk_intake_batches WHERE id=$1",
+      [id],
+    );
+    return {
+      purged: row.purged_at !== null,
+      items: await total(
+        "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
+        [id],
+      ),
+    };
+  };
+  const expiredError = {
+    code: "bulk_batch_expired",
+    message: `This import is more than ${BULK_INTAKE_RECOVERY_HOURS} hours old. Check the candidate directory before importing these CVs again.`,
+  };
   const uploadsOf = (candidateId: string) =>
     total("SELECT count(*)::int AS n FROM app.uploads WHERE candidate_id=$1", [
       candidateId,
@@ -469,7 +487,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
     expect(await counts()).toEqual(before);
   });
 
-  it("(f) refuses an expired batch, then a list GET hides and purges it with its items", async () => {
+  it("(f) refuses an expired batch, then a list GET hides it, deletes its items and keeps a tombstone", async () => {
     const bearer = await token(owner);
     const batchId = randomUUID(),
       itemId = randomUUID();
@@ -513,12 +531,26 @@ describe("bulk CV intake recovery and server review evidence", () => {
     expect(lateUpload.body.error.code).toBe("bulk_batch_expired");
     expect(await counts()).toEqual(before);
     expect(await batchRows(batchId)).toBe(2);
+    expect(await tombstone(batchId)).toEqual({ purged: false, items: 1 });
     const listed = await list(bearer);
     expect(listed.status).toBe(200);
     expect(
       listed.body.data.map((entry: { id: string }) => entry.id),
     ).not.toContain(batchId);
-    expect(await batchRows(batchId)).toBe(0);
+    expect(await tombstone(batchId)).toEqual({ purged: true, items: 0 });
+    // The tombstone keeps IDs and timestamps only: no file metadata, hashes or candidate values.
+    const [row] = await asOwner<Record<string, unknown>>(
+      "SELECT * FROM app.bulk_intake_batches WHERE id=$1",
+      [batchId],
+    );
+    expect(Object.keys(row).sort()).toEqual([
+      "created_at",
+      "created_by",
+      "expires_at",
+      "id",
+      "purged_at",
+      "team_id",
+    ]);
   });
 
   it("(g) reserves the CV once per item, reports imported after completion and pending otherwise", async () => {
@@ -683,7 +715,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
     }
   });
 
-  it("(k) purges expired batches of every user and team on a list GET and keeps unexpired ones", async () => {
+  it("(k) purges expired batches of every user and team on a list GET to tombstones and keeps unexpired ones", async () => {
     const expired = [
       await insertBatch(colleague, -1),
       await insertBatch(outsider, -1),
@@ -696,14 +728,16 @@ describe("bulk CV intake recovery and server review evidence", () => {
     const listed = await list(await token(third));
     expect(listed.status).toBe(200);
     expect(listed.body.pagination.total).toBe(0);
-    for (const id of expired) expect(await batchRows(id)).toBe(0);
-    for (const id of live) expect(await batchRows(id)).toBe(2);
+    for (const id of expired)
+      expect(await tombstone(id)).toEqual({ purged: true, items: 0 });
+    for (const id of live)
+      expect(await tombstone(id)).toEqual({ purged: false, items: 1 });
   });
 
-  it("(l) deletes at most 100 expired batches per request, oldest expiry first", async () => {
+  it("(l) purges at most 100 expired batches per request, oldest expiry first", async () => {
     const expiredCount = () =>
       total(
-        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now()",
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now() AND purged_at IS NULL",
       );
     expect(await expiredCount()).toBe(0);
     await asOwner(
@@ -716,7 +750,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
     // The batch that expired most recently is the one left.
     expect(
       await total(
-        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now() AND expires_at > now()-interval '90 seconds'",
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now() AND expires_at > now()-interval '90 seconds' AND purged_at IS NULL",
       ),
     ).toBe(1);
     expect((await list(await token(owner))).status).toBe(200);
@@ -899,5 +933,122 @@ describe("bulk CV intake recovery and server review evidence", () => {
       [itemId],
     );
     expect(row.upload_key).toBeNull();
+  });
+
+  it("(r) refuses a late retry for any client after another team's list GET purged the batch, and never recreates it", async () => {
+    const bearer = await token(owner),
+      other = await token(colleague);
+    const batchId = randomUUID(),
+      itemId = randomUUID();
+    const json = body({ name: "Fictional Late Retry" });
+    expect((await item(bearer, batchId, itemId, json)).status).toBe(201);
+    await asOwner(
+      "UPDATE app.bulk_intake_batches SET created_at=now()-interval '2 days', expires_at=now()-interval '1 day' WHERE id=$1",
+      [batchId],
+    );
+    const expiry = async () =>
+      (
+        await asOwner<{ expires_at: Date }>(
+          "SELECT expires_at FROM app.bulk_intake_batches WHERE id=$1",
+          [batchId],
+        )
+      )[0].expires_at.toISOString();
+    const expiresAt = await expiry();
+    expect((await list(await token(outsider))).status).toBe(200);
+    expect(await tombstone(batchId)).toEqual({ purged: true, items: 0 });
+    const before = await counts();
+    for (const response of [
+      await item(bearer, batchId, itemId, json),
+      await item(
+        bearer,
+        batchId,
+        randomUUID(),
+        body({ name: "Fictional New" }),
+      ),
+      await upload(bearer, batchId, itemId),
+    ]) {
+      expect(response.status).toBe(409);
+      expect(response.body.error).toMatchObject(expiredError);
+    }
+    expect(await counts()).toEqual(before);
+    expect(await tombstone(batchId)).toEqual({ purged: true, items: 0 });
+    expect(await expiry()).toBe(expiresAt);
+    const listed = await list(bearer, "?pageSize=20");
+    expect(
+      listed.body.data.map((entry: { id: string }) => entry.id),
+    ).not.toContain(batchId);
+    expect(listed.body.pagination.total).toBe(
+      await total(
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE created_by=$1 AND expires_at > now() AND purged_at IS NULL",
+        [owner.userId],
+      ),
+    );
+    expect((await batch(bearer, batchId)).status).toBe(404);
+    for (const response of [
+      await item(other, batchId, itemId, json),
+      await item(other, batchId, randomUUID(), json),
+      await upload(other, batchId, itemId),
+    ]) {
+      expect(response.status).toBe(404);
+      expect(response.body.error.code).toBe("not_found");
+    }
+    expect(await counts()).toEqual(before);
+  });
+
+  it("(s) refuses an item POST after a concurrent purge from another team tombstoned the batch", async () => {
+    const bearer = await token(owner);
+    const batchId = await insertBatch(owner, -1);
+    // Stands in for another team's purge between the item POST's own purge step and its insert.
+    await withTeam(outsider, (tx) =>
+      tx.execute(sql`select tenant_context.purge_bulk_intake(null::uuid)`),
+    );
+    expect(await tombstone(batchId)).toEqual({ purged: true, items: 0 });
+    const before = await counts();
+    const late = await item(
+      bearer,
+      batchId,
+      randomUUID(),
+      body({ name: "Fictional After Race" }),
+    );
+    expect(late.status).toBe(409);
+    expect(late.body.error).toMatchObject(expiredError);
+    expect(await counts()).toEqual(before);
+    expect(await tombstone(batchId)).toEqual({ purged: true, items: 0 });
+  });
+
+  it("(t) refuses and hides a purged batch even while its expiry is still in the future", async () => {
+    const bearer = await token(owner);
+    const batchId = randomUUID(),
+      itemId = randomUUID();
+    const json = body({ name: "Fictional Early Tombstone" });
+    expect((await item(bearer, batchId, itemId, json)).status).toBe(201);
+    const shown = await list(bearer, "?pageSize=20");
+    expect(shown.body.data.map((entry: { id: string }) => entry.id)).toContain(
+      batchId,
+    );
+    await asOwner("DELETE FROM app.bulk_intake_items WHERE batch_id=$1", [
+      batchId,
+    ]);
+    await asOwner(
+      "UPDATE app.bulk_intake_batches SET purged_at=now() WHERE id=$1",
+      [batchId],
+    );
+    const before = await counts();
+    for (const response of [
+      await item(bearer, batchId, itemId, json),
+      await upload(bearer, batchId, itemId),
+    ]) {
+      expect(response.status).toBe(409);
+      expect(response.body.error).toMatchObject(expiredError);
+    }
+    expect(await counts()).toEqual(before);
+    const hidden = await list(bearer, "?pageSize=20");
+    expect(
+      hidden.body.data.map((entry: { id: string }) => entry.id),
+    ).not.toContain(batchId);
+    expect(hidden.body.pagination.total).toBe(shown.body.pagination.total - 1);
+    const read = await batch(bearer, batchId);
+    expect(read.status).toBe(404);
+    expect(read.body.error.code).toBe("not_found");
   });
 });

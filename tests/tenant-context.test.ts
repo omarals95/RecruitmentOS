@@ -1118,11 +1118,15 @@ describe("signed tenant context under separate nonowner data and identity roles"
       await expiredBatch(ownerB),
       await expiredBatch(memberB),
     ];
+    /** Each batch ID with whether it is purged, and the batch ID of every item. */
     const remaining = async () => {
       const superuser = await harness.asSuperuser();
       return {
-        batches: (await superuser.select().from(bulkIntakeBatches)).map(
-          (row) => row.id,
+        batches: Object.fromEntries(
+          (await superuser.select().from(bulkIntakeBatches)).map((row) => [
+            row.id,
+            row.purgedAt !== null,
+          ]),
         ),
         items: (await superuser.select().from(bulkIntakeItems)).map(
           (row) => row.batchId,
@@ -1130,6 +1134,10 @@ describe("signed tenant context under separate nonowner data and identity roles"
       };
     };
     const before = await remaining();
+    for (const id of [kept, ...purged]) {
+      expect(before.batches[id]).toBe(false);
+      expect(before.items).toContain(id);
+    }
     const client = await asData();
     await expect(
       client.query("SELECT tenant_context.purge_bulk_intake(NULL)"),
@@ -1154,14 +1162,18 @@ describe("signed tenant context under separate nonowner data and identity roles"
       tx.execute(sql`select tenant_context.purge_bulk_intake(${kept}::uuid)`),
     );
     const after = await remaining();
+    // Other users' and teams' expired batches stay as tombstones without items.
     for (const id of purged) {
-      expect(after.batches).not.toContain(id);
+      expect(after.batches[id]).toBe(true);
       expect(after.items).not.toContain(id);
     }
-    expect(after.batches).toContain(kept);
+    expect(after.batches[kept]).toBe(false);
     expect(after.items).toContain(kept);
-    // Every unexpired seeded batch and its items remain.
-    expect(after.batches).toHaveLength(before.batches.length - 3);
+    // No batch row is deleted, and every unexpired seeded batch and its items are untouched.
+    expect(after.batches).toEqual({
+      ...before.batches,
+      ...Object.fromEntries(purged.map((id) => [id, true])),
+    });
     expect(after.items).toHaveLength(before.items.length - 3);
   });
 });

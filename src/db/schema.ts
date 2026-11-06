@@ -200,6 +200,8 @@ export const bulkIntakeBatches = appSchema.table(
       .references(() => user.id),
     createdAt: time("created_at").notNull(),
     expiresAt: time("expires_at").notNull(),
+    /** Set by the purge, which deletes the items; the row stays so its ID is never reused. */
+    purgedAt: time("purged_at"),
   },
   (t) => [
     unique("bulk_intake_batches_team_id_id_created_by_key").on(
@@ -212,6 +214,9 @@ export const bulkIntakeBatches = appSchema.table(
       t.createdBy,
       t.expiresAt,
     ),
+    index("bulk_intake_batches_purge_idx")
+      .on(t.expiresAt, t.id)
+      .where(sql`${t.purgedAt} IS NULL`),
   ],
 );
 export const bulkIntakeItems = appSchema.table(
