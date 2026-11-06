@@ -978,6 +978,7 @@ input[type="color"] {
   margin-left: 6px;
 }
 .table-wrap {
+  position: relative;
   overflow: auto;
   width: 100%;
   overscroll-behavior-x: contain;
@@ -1487,6 +1488,7 @@ input[type="color"] {
 }
 /* Boards */
 .kanban {
+  position: relative;
   display: flex;
   gap: 18px;
   padding: 24px;
@@ -2078,7 +2080,6 @@ progress::-moz-progress-bar {
 }
 .calendar-day.outside-month .calendar-day-number {
   color: var(--muted);
-  opacity: 0.6;
 }
 .calendar-event {
   display: flex;
@@ -2104,7 +2105,6 @@ progress::-moz-progress-bar {
   text-overflow: ellipsis;
 }
 .calendar-event.cancelled {
-  opacity: 0.55;
   text-decoration: line-through;
 }
 .calendar-more {
@@ -2113,6 +2113,7 @@ progress::-moz-progress-bar {
   background: transparent;
   text-align: left;
   padding: 4px;
+  min-height: 24px;
 }
 .week-view .calendar-day {
   min-height: 350px;
@@ -3166,8 +3167,16 @@ progress::-moz-progress-bar {
     width: 245px;
     transition: transform 0.2s ease;
   }
+  /* Closed: out of the tab order and the accessibility tree once the slide ends. */
+  .workspace-sidebar:not(.is-open) {
+    visibility: hidden;
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+  }
   .workspace-sidebar.is-open {
     transform: translateX(0);
+    visibility: visible;
   }
   .workspace-body {
     margin-left: 0;
