@@ -1,5 +1,12 @@
+import {
+  isValidElement,
+  type ButtonHTMLAttributes,
+  type MouseEvent,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
@@ -188,5 +195,77 @@ describe("Import CVs", () => {
     expect(single).toContain("fictional-cv.pdf");
     expect(single).not.toContain("<nav");
     expect(single).not.toContain("Recent import pages");
+  });
+  const emptyPage = (page: number): RecentImportsPage => ({
+    data: [],
+    pagination: { page, pageSize: 10, total: 3, totalPages: 1 },
+  });
+  /** The button with this label in an element tree; the component has no hooks, so it runs directly. */
+  const buttonIn = (
+    node: ReactNode,
+    label: string,
+  ): ReactElement<ButtonHTMLAttributes<HTMLButtonElement>> | undefined => {
+    if (Array.isArray(node))
+      return node.map((child) => buttonIn(child, label)).find(Boolean);
+    if (!isValidElement<{ children?: ReactNode }>(node)) return undefined;
+    if (node.type === "button" && node.props.children === label)
+      return node as ReactElement<ButtonHTMLAttributes<HTMLButtonElement>>;
+    return buttonIn(node.props.children, label);
+  };
+  it("offers Go to first page when a later Recent imports page is empty", () => {
+    const markup = recent(emptyPage(2));
+    expect(markup).toContain("No recent imports on this page.");
+    expect(markup).not.toContain("No other recent imports.");
+    const button = /<button[^>]*>Go to first page<\/button>/.exec(markup)?.[0];
+    expect(button).toBeDefined();
+    expect(button).toContain('class="button secondary small"');
+    expect(button).not.toContain("disabled");
+    expect(markup).not.toContain("<nav");
+    // A later page holding only the batch this dialog is running counts as empty as well.
+    const onlyCurrent = recent({
+      ...emptyPage(2),
+      data: [
+        {
+          ...recentPage(1).data[0],
+          id: "00000000-0000-4000-8000-0000000000b2",
+        },
+      ],
+    });
+    expect(onlyCurrent).toContain("No recent imports on this page.");
+    expect(onlyCurrent).toContain("Go to first page");
+    expect(onlyCurrent).not.toContain("fictional-cv.pdf");
+
+    const onPage = vi.fn();
+    const tree = RecentImports({
+      page: emptyPage(2),
+      error: "",
+      loading: false,
+      currentBatchId: "00000000-0000-4000-8000-0000000000b2",
+      onPage,
+    });
+    const first = buttonIn(tree, "Go to first page");
+    expect(first).toBeDefined();
+    first!.props.onClick!({} as MouseEvent<HTMLButtonElement>);
+    expect(onPage).toHaveBeenCalledTimes(1);
+    expect(onPage).toHaveBeenCalledWith(1);
+
+    const loading = renderToStaticMarkup(
+      <RecentImports
+        page={emptyPage(2)}
+        error=""
+        loading
+        currentBatchId="00000000-0000-4000-8000-0000000000b2"
+        onPage={() => {}}
+      />,
+    );
+    expect(loading).toMatch(
+      /<button[^>]*disabled=""[^>]*>Go to first page<\/button>/,
+    );
+  });
+  it("keeps the plain empty text on the first Recent imports page", () => {
+    const markup = recent(emptyPage(1));
+    expect(markup).toContain("No other recent imports.");
+    expect(markup).not.toContain("No recent imports on this page.");
+    expect(markup).not.toContain("Go to first page");
   });
 });

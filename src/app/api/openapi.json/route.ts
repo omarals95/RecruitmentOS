@@ -529,7 +529,7 @@ export function GET() {
         "Client-chosen item ID, one per selected CV file. It is also the clientUploadId of the item's first CV upload attempt.",
     },
   ];
-  const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended. Afterwards the batch returns 409 bulk_batch_expired to item and upload POSTs and is hidden from the GETs until it is purged: the next bulk item POST or list GET in any team deletes expired batches and their items, at most 100 per request. Another team's or another user's batch or item returns 404.`;
+  const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended. Afterwards the batch returns 409 bulk_batch_expired to item and upload POSTs and is hidden from the GETs. When an expired batch is purged (the next bulk item POST or list GET in any team, at most 100 per request), its items are deleted. Its batch ID stays reserved, so later item and upload POSTs for it, from any client, still return 409 bulk_batch_expired and never recreate it, and both GETs keep hiding it. Another team's or another user's batch or item returns 404.`;
   const batchShape =
     "{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]} with all of the batch's items (at most 50)";
   paths["/api/v1/cvs/bulk-batches"] = {
@@ -570,7 +570,7 @@ export function GET() {
       ["cvs:write", "candidates:write"],
       {
         summary: "Read one of my recent bulk CV imports",
-        description: `Requires cvs:write and candidates:write. Returns the caller's own unexpired batch in the list-entry shape. A malformed, unknown, expired, another user's or another team's batch ID returns 404 not_found. This GET does not purge. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Returns the caller's own unexpired batch in the list-entry shape. A malformed, unknown, expired, purged, another user's or another team's batch ID returns 404 not_found. This GET does not purge. ${bulkLifetime}`,
       },
       { "200": { description: `{data: batch}; the batch is ${batchShape}.` } },
       { params: [batchParam] },

@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  sql,
+} from "drizzle-orm";
 import { z } from "zod";
 import { bulkIntakeBatches, bulkIntakeItems, uploads } from "@/db/schema";
 import type { TeamTx } from "@/db";
@@ -118,8 +128,9 @@ async function lockBatch(tx: TeamTx, p: Principal, batchId: string) {
   return batch;
 }
 /**
- * Deletes up to 100 expired batches of any team and user, with their items, in its own committed
- * transaction. The owner-run helper returns nothing, so no other team's count is revealed.
+ * Deletes the items of up to 100 expired batches of any team and user and marks those batches
+ * purged, in its own committed transaction. The batch row stays as a tombstone, so its ID is never
+ * recreated. The owner-run helper returns nothing, so no other team's count is revealed.
  */
 async function purgeExpired(p: Principal, keepBatch: string | null) {
   await withTeam(p, (tx) =>
@@ -181,7 +192,8 @@ export async function createBulkItem(
     // Another user's or team's batch id conflicts invisibly and reads as not found.
     const batch = await lockBatch(tx, p, batchId);
     if (!batch) throw notFound();
-    if (batch.expiresAt <= now) throw expired();
+    // A purged batch is refused even if its expiry reads as later on this server's clock.
+    if (batch.purgedAt || batch.expiresAt <= now) throw expired();
     let [item] = await tx
       .select()
       .from(bulkIntakeItems)
@@ -294,32 +306,32 @@ export async function beginBulkItemUpload(
   ids(batchId, itemId);
   requireUploads();
   const item = await withTeam(p, async (tx) => {
+    // The caller's own expired or purged batch is refused as too old, even once its items are gone.
+    const [batch] = await tx
+      .select()
+      .from(bulkIntakeBatches)
+      .where(and(...own(p), eq(bulkIntakeBatches.id, batchId)));
+    if (!batch) throw notFound();
+    if (batch.purgedAt || batch.expiresAt <= new Date()) throw expired();
     const [row] = await tx
-      .select({ item: bulkIntakeItems, expiresAt: bulkIntakeBatches.expiresAt })
+      .select()
       .from(bulkIntakeItems)
-      .innerJoin(
-        bulkIntakeBatches,
-        and(
-          eq(bulkIntakeBatches.teamId, bulkIntakeItems.teamId),
-          eq(bulkIntakeBatches.id, bulkIntakeItems.batchId),
-        ),
-      )
       .where(
         and(
-          ...own(p),
+          eq(bulkIntakeItems.teamId, p.teamId),
+          eq(bulkIntakeItems.createdBy, p.userId),
           eq(bulkIntakeItems.id, itemId),
           eq(bulkIntakeItems.batchId, batchId),
         ),
       );
     if (!row) throw notFound();
-    if (row.expiresAt <= new Date()) throw expired();
-    if (!row.item.candidateId)
+    if (!row.candidateId)
       throw new ApiError(
         409,
         "bulk_candidate_required",
         "Import the candidate for this CV before uploading it.",
       );
-    return { ...row.item, candidateId: row.item.candidateId };
+    return { ...row, candidateId: row.candidateId };
   });
   // The stored file metadata is reused for every attempt; the client chooses neither it nor the key.
   const attempt = (clientUploadId: string) =>
@@ -461,7 +473,7 @@ export function parseBulkBatchQuery(query: URLSearchParams) {
   return parsed.data;
 }
 
-/** One page of the caller's unexpired batches in the selected team, newest first. */
+/** One page of the caller's unexpired, unpurged batches in the selected team, newest first. */
 export async function listBulkBatches(
   p: Principal,
   options: { page: number; pageSize: number },
@@ -469,7 +481,11 @@ export async function listBulkBatches(
   const { page, pageSize } = options;
   await purgeExpired(p, null);
   return withTeam(p, async (tx) => {
-    const where = and(...own(p), gt(bulkIntakeBatches.expiresAt, new Date()));
+    const where = and(
+      ...own(p),
+      gt(bulkIntakeBatches.expiresAt, new Date()),
+      isNull(bulkIntakeBatches.purgedAt),
+    );
     const [{ total }] = await tx
       .select({ total: count() })
       .from(bulkIntakeBatches)
@@ -493,7 +509,7 @@ export async function listBulkBatches(
   });
 }
 
-/** The caller's own unexpired batch; any other ID reads as not found. It does not purge. */
+/** The caller's own unexpired, unpurged batch; any other ID reads as not found. It does not purge. */
 export async function getBulkBatch(p: Principal, batchId: string) {
   if (!uuidSchema.safeParse(batchId).success) throw batchNotFound();
   return withTeam(p, async (tx) => {
@@ -505,6 +521,7 @@ export async function getBulkBatch(p: Principal, batchId: string) {
           ...own(p),
           eq(bulkIntakeBatches.id, batchId),
           gt(bulkIntakeBatches.expiresAt, new Date()),
+          isNull(bulkIntakeBatches.purgedAt),
         ),
       );
     if (!batch) throw batchNotFound();
