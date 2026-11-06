@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   BOOTSTRAP_EMAIL,
@@ -14,6 +15,7 @@ import {
   registerVerified,
   resetPattern,
   setUpAdmin,
+  TEST_SECRET,
   verifyPattern,
   type Mail,
 } from "./helpers/auth";
@@ -338,6 +340,47 @@ describe("auth rate limits", () => {
     expect(t.mail.length).toBe(before + 3);
     expect((await resend("198.51.100.42")).status).toBe(200);
     expect(t.mail.length).toBe(before + 4);
+  });
+
+  it("stores each limiter key only as a keyed hash, never the client address or path", async () => {
+    const ip = "198.51.100.51";
+    for (let attempt = 0; attempt < 10; attempt++)
+      expect(
+        (
+          await t.caller.post(
+            "sign-in/email",
+            { email: BOOTSTRAP_EMAIL, password: "wrong-fictional-password" },
+            { ip },
+          )
+        ).status,
+      ).toBe(401);
+    const refused = await t.caller.post(
+      "sign-in/email",
+      { email: BOOTSTRAP_EMAIL, password: PASSWORD },
+      { ip },
+    );
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("x-retry-after"))).toBeGreaterThan(0);
+    expect(Number(refused.headers.get("x-retry-after"))).toBeLessThanOrEqual(
+      60,
+    );
+    const keys = (
+      await t.h.pg.query<{ key: string; count: number }>(
+        "SELECT key, count FROM auth.rate_limit",
+      )
+    ).rows;
+    expect(keys.length).toBeGreaterThan(0);
+    for (const { key } of keys) {
+      expect(key).toMatch(/^ba:[A-Za-z0-9_-]{43}$/);
+      for (const raw of ["198.51.100.", "sign-in", "sign-up", "|"])
+        expect(key).not.toContain(raw);
+    }
+    const derived = createHmac("sha256", TEST_SECRET)
+      .update("recruitmentos:rate-limit-key:v1")
+      .digest();
+    const expected = `ba:${createHmac("sha256", derived).update(`${ip}|/sign-in/email`).digest("base64url")}`;
+    // The refused attempt leaves the window unchanged and marks it at max + 1.
+    expect(keys.find((row) => row.key === expected)?.count).toBe(11);
   });
 });
 

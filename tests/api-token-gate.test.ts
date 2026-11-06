@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
@@ -18,17 +19,36 @@ vi.mock("@/db", async (importOriginal) => ({
 }));
 
 import { applyMigrations, schema, type AppDb } from "../src/db";
-import { createTokenMaterial } from "../src/lib/api-token-policy";
-import { authenticateApiToken } from "../src/lib/api-tokens";
+import { createTokenMaterial, hashToken } from "../src/lib/api-token-policy";
+import {
+  authenticateApiToken,
+  authenticateOAuthAccessToken,
+  resetGuessPrecheck,
+} from "../src/lib/api-tokens";
+import { rateLimitClientKey } from "../src/lib/client-ip";
 import { installTenantContextKey } from "../src/lib/tenant-context";
 import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 import {
   CLIENT_IP,
+  hostedReadyEnv,
   stubHostedReadiness,
   stubLocalAuthReadiness,
 } from "./helpers/readiness";
 
 const TOKEN_ID = "00000000-0000-4000-8000-000000000031";
+const LOCAL_SECRET = "fictional-valid-test-secret-0123456789";
+const AUDIENCE = "http://localhost:3000/api/mcp";
+/** The stored identity of a client address, derived independently of the helper under test. */
+function expectedClientKey(ip: string, secret = LOCAL_SECRET) {
+  const key = createHmac("sha256", secret)
+    .update("recruitmentos:rate-limit-key:v1")
+    .digest();
+  return createHmac("sha256", key).update(ip).digest("base64url");
+}
+const guessKey = (ip: string, secret = LOCAL_SECRET) =>
+  `api-guess:${expectedClientKey(ip, secret)}`;
+const byKey = (rows: { key: string; count: number }[]) =>
+  [...rows].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
 describe("API tokens are gated on sign-in readiness and a per-client guess budget", () => {
   const pg = new PGlite();
@@ -41,11 +61,13 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     );
   const guess = () => createTokenMaterial().token;
   const limits = async () =>
-    (
-      await pg.query<{ key: string; count: number }>(
-        "SELECT key, count FROM auth.api_rate_limits ORDER BY key",
-      )
-    ).rows;
+    byKey(
+      (
+        await pg.query<{ key: string; count: number }>(
+          "SELECT key, count FROM auth.api_rate_limits",
+        )
+      ).rows,
+    );
   const lastUsed = async () =>
     (
       await pg.query<{ last_used_at: Date | null }>(
@@ -77,6 +99,7 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
   beforeEach(async () => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
+    resetGuessPrecheck();
     await pg.exec(
       "DELETE FROM auth.api_rate_limits; UPDATE auth.api_tokens SET last_used_at=NULL;",
     );
@@ -143,6 +166,7 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     expect((await refused.json()).error.code).toBe("token_guess_rate_limited");
     const validRefused = await request(valid.token, from);
     expect(validRefused.status).toBe(429);
+    expect(validRefused.headers.get("retry-after")).toBe("60");
     expect((await validRefused.json()).error.code).toBe(
       "token_guess_rate_limited",
     );
@@ -150,7 +174,7 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
       authenticateApiToken(valid.token, "198.51.100.40"),
     ).rejects.toMatchObject({ status: 429, code: "token_guess_rate_limited" });
     expect(await limits()).toEqual([
-      { key: "api-guess:198.51.100.40", count: 10 },
+      { key: guessKey("198.51.100.40"), count: 10 },
     ]);
     expect(await lastUsed()).toBeNull();
     const other = await request(valid.token, {
@@ -158,15 +182,49 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     });
     expect(other.status).toBe(200);
     expect(await lastUsed()).not.toBeNull();
-    expect(await limits()).toEqual([
-      { key: "api-guess:198.51.100.40", count: 10 },
-      { key: "api-guess:198.51.100.41", count: 0 },
-      { key: `api-token:${TOKEN_ID}`, count: 1 },
-    ]);
+    expect(await limits()).toEqual(
+      byKey([
+        { key: guessKey("198.51.100.40"), count: 10 },
+        { key: guessKey("198.51.100.41"), count: 0 },
+        { key: `api-token:${TOKEN_ID}`, count: 1 },
+      ]),
+    );
+  });
+
+  it("stores only a keyed hash of the client address, which changes with BETTER_AUTH_SECRET", async () => {
+    stubLocalAuthReadiness();
+    for (let n = 0; n < 3; n++)
+      expect(
+        (await request(guess(), { "x-forwarded-for": "198.51.100.40" })).status,
+      ).toBe(401);
+    const keys = (
+      await pg.query<{ key: string }>("SELECT key FROM auth.api_rate_limits")
+    ).rows.map((row) => row.key);
+    expect(keys).toEqual([guessKey("198.51.100.40")]);
+    expect(keys.join("\n")).not.toContain("198.51.100.40");
+    expect(rateLimitClientKey("198.51.100.40", LOCAL_SECRET)).toBe(
+      expectedClientKey("198.51.100.40"),
+    );
+    const otherSecret = "fictional-other-test-secret-0123456789ab";
+    vi.stubEnv("BETTER_AUTH_SECRET", otherSecret);
+    expect(
+      (await request(guess(), { "x-forwarded-for": "198.51.100.40" })).status,
+    ).toBe(401);
+    expect(guessKey("198.51.100.40", otherSecret)).not.toBe(
+      guessKey("198.51.100.40"),
+    );
+    expect(await limits()).toEqual(
+      byKey([
+        { key: guessKey("198.51.100.40"), count: 3 },
+        { key: guessKey("198.51.100.40", otherSecret), count: 1 },
+      ]),
+    );
+    expect(rateLimitClientKey(null, LOCAL_SECRET)).toBe("no-client-ip");
   });
 
   it("keeps the budget on Vercel while spoofed headers rotate", async () => {
     stubHostedReadiness();
+    const secret = hostedReadyEnv.BETTER_AUTH_SECRET!;
     const from = (n: number) => ({
       "x-vercel-forwarded-for": "203.0.113.40",
       "x-forwarded-for": `198.51.100.${n}`,
@@ -183,11 +241,13 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
       "x-vercel-forwarded-for": "203.0.113.41",
     });
     expect(other.status).toBe(200);
-    expect(await limits()).toEqual([
-      { key: "api-guess:203.0.113.40", count: 10 },
-      { key: "api-guess:203.0.113.41", count: 0 },
-      { key: `api-token:${TOKEN_ID}`, count: 1 },
-    ]);
+    expect(await limits()).toEqual(
+      byKey([
+        { key: guessKey("203.0.113.40", secret), count: 10 },
+        { key: guessKey("203.0.113.41", secret), count: 0 },
+        { key: `api-token:${TOKEN_ID}`, count: 1 },
+      ]),
+    );
   });
 
   it("does not use the budget for valid authentications and shares one bucket without a client IP", async () => {
@@ -202,10 +262,115 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     for (let n = 0; n < 10; n++)
       expect((await request(guess())).status).toBe(401);
     expect((await request(valid.token)).status).toBe(429);
-    expect(await limits()).toEqual([
-      { key: "api-guess:192.0.2.10", count: 1 },
-      { key: "api-guess:no-client-ip", count: 10 },
-      { key: `api-token:${TOKEN_ID}`, count: 12 },
-    ]);
+    expect(await limits()).toEqual(
+      byKey([
+        { key: guessKey(CLIENT_IP), count: 1 },
+        { key: "api-guess:no-client-ip", count: 10 },
+        { key: `api-token:${TOKEN_ID}`, count: 12 },
+      ]),
+    );
+  });
+
+  it("refuses an over-budget client in process, before any identity-database access", async () => {
+    stubLocalAuthReadiness();
+    const from = { "x-forwarded-for": "198.51.100.42" };
+    for (let n = 0; n < 10; n++)
+      expect((await request(guess(), from)).status).toBe(401);
+    const calls = pools.identity.mock.calls.length;
+    for (const token of [guess(), valid.token]) {
+      const refused = await request(token, from);
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("retry-after")).toBe("60");
+      expect((await refused.json()).error.code).toBe(
+        "token_guess_rate_limited",
+      );
+    }
+    expect(pools.identity.mock.calls.length).toBe(calls);
+    // The order holds: readiness, then format, then the pre-check.
+    expect((await request("ros_live_short", from)).status).toBe(401);
+    vi.stubEnv("BETTER_AUTH_SECRET", undefined);
+    expect((await request(valid.token, from)).status).toBe(503);
+    vi.stubEnv("BETTER_AUTH_SECRET", LOCAL_SECRET);
+    expect(pools.identity.mock.calls.length).toBe(calls);
+    // The map is per instance; the database budget still refuses without it.
+    resetGuessPrecheck();
+    expect((await request(valid.token, from)).status).toBe(429);
+    expect(pools.identity.mock.calls.length).toBe(calls + 1);
+    expect(await limits()).toEqual(
+      byKey([{ key: guessKey("198.51.100.42"), count: 10 }]),
+    );
+  });
+
+  describe("stale credentials", () => {
+    const grantId = "00000000-0000-4000-8000-000000000032";
+    const material = () => `ros_oat_${randomBytes(32).toString("base64url")}`;
+    const accessExpired = material();
+    const wrongAudience = material();
+    const refreshRow = material();
+    const refresh = `ros_ort_${randomBytes(32).toString("base64url")}`;
+    const accessValid = material();
+    const revoked = createTokenMaterial();
+    const expired = createTokenMaterial();
+
+    beforeAll(async () => {
+      await pg.query(
+        `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at,revoked_at)
+          VALUES(gen_random_uuid(),'gate-team','gate-user','Revoked',$1,$2,'["candidates:read","recruitment:read"]',now()+interval '1 day',now()),
+                (gen_random_uuid(),'gate-team','gate-user','Expired',$3,$4,'["candidates:read","recruitment:read"]',now()-interval '1 minute',NULL)`,
+        [revoked.tokenHash, revoked.prefix, expired.tokenHash, expired.prefix],
+      );
+      await pg.query(
+        `INSERT INTO auth.oauth_clients(id,name,redirect_uris)
+          VALUES('ros_client_FictionalGateClient000','Fictional','["https://claude.ai/api/mcp/auth_callback"]')`,
+      );
+      await pg.query(
+        `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at,oauth_client_id)
+          VALUES($1,'gate-team','gate-user','Fictional grant',$2,'ros_oauth_fiction','["candidates:read","recruitment:read"]',now()+interval '30 days','ros_client_FictionalGateClient000')`,
+        [grantId, hashToken(material())],
+      );
+      for (const [token, kind, audience, expiry] of [
+        [accessExpired, "access", AUDIENCE, "now()-interval '1 minute'"],
+        [
+          wrongAudience,
+          "access",
+          "http://localhost:3000/api/other",
+          "now()+interval '1 hour'",
+        ],
+        [refreshRow, "refresh", AUDIENCE, "now()+interval '30 days'"],
+        [refresh, "refresh", AUDIENCE, "now()+interval '30 days'"],
+        [accessValid, "access", AUDIENCE, "now()+interval '1 hour'"],
+      ])
+        await pg.query(
+          `INSERT INTO auth.oauth_tokens(grant_id,kind,token_hash,audience,expires_at)
+            VALUES($1,$2,$3,$4,${expiry})`,
+          [grantId, kind, hashToken(token), audience],
+        );
+    });
+
+    it("refuse revoked, expired, wrong-audience and refresh credentials without charging the guess budget", async () => {
+      stubLocalAuthReadiness();
+      const ip = "198.51.100.43";
+      for (let n = 0; n < 20; n++) {
+        for (const token of [revoked.token, expired.token]) {
+          const response = await request(token, { "x-forwarded-for": ip });
+          expect(response.status).toBe(401);
+          expect((await response.json()).error.code).toBe("invalid_token");
+        }
+        for (const token of [accessExpired, wrongAudience, refreshRow, refresh])
+          await expect(
+            authenticateOAuthAccessToken(token, ip, AUDIENCE),
+          ).rejects.toMatchObject({ status: 401, code: "invalid_token" });
+      }
+      expect(await limits()).toEqual([{ key: guessKey(ip), count: 0 }]);
+      expect(
+        (await request(valid.token, { "x-forwarded-for": ip })).status,
+      ).toBe(200);
+      expect(
+        (await authenticateOAuthAccessToken(accessValid, ip, AUDIENCE)).tokenId,
+      ).toBe(grantId);
+      expect(
+        (await limits()).find((row) => row.key === guessKey(ip))?.count,
+      ).toBe(0);
+    });
   });
 });

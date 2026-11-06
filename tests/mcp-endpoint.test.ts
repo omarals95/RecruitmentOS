@@ -30,6 +30,7 @@ import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 import { GET as candidatesRoute } from "../src/app/api/v1/[resource]/route";
 import { activity } from "../src/db/schema";
 import { createTokenMaterial, hashToken } from "../src/lib/api-token-policy";
+import { rateLimitClientKey } from "../src/lib/client-ip";
 import { withTeam } from "../src/lib/db-team";
 import { TOOLS } from "../src/lib/mcp/tools";
 import { NOTICE } from "../src/lib/mcp/results";
@@ -447,8 +448,9 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(sessions.getVerifiedSession).not.toHaveBeenCalled();
   });
 
-  it("rejects malformed, unknown, revoked and expired tokens and charges the guess budget", async () => {
+  it("rejects malformed, unknown, revoked and expired tokens and charges the guess budget only for unknown ones", async () => {
     const ip = { "x-forwarded-for": "198.51.100.71" };
+    const guessKey = `api-guess:${rateLimitClientKey("198.51.100.71", process.env.BETTER_AUTH_SECRET!)}`;
     const revoked = await apiToken(owner.userId, ["candidates:read"]);
     const expired = await apiToken(owner.userId, ["candidates:read"]);
     await fixture.client.query(
@@ -468,7 +470,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
       'error="invalid_token"',
     );
     const guesses = await count(
-      "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key='api-guess:198.51.100.71'",
+      "SELECT count(*)::int AS count FROM auth.api_rate_limits WHERE key=$1",
+      [guessKey],
     );
     expect(guesses).toBe(0);
     for (const token of [
@@ -484,10 +487,12 @@ describe("MCP endpoint over real migrations and RLS", () => {
       );
     }
     const spent = await query<{ count: number }>(
-      "SELECT count FROM auth.api_rate_limits WHERE key='api-guess:198.51.100.71'",
+      "SELECT count FROM auth.api_rate_limits WHERE key=$1",
+      [guessKey],
     );
-    expect(spent).toEqual([{ count: 3 }]);
-    for (let n = 0; n < 7; n++)
+    // Revoked and expired tokens are known hashes, so only the unknown one is a guess.
+    expect(spent).toEqual([{ count: 1 }]);
+    for (let n = 0; n < 9; n++)
       expect(
         (await post(createTokenMaterial().token, message("ping"), ip)).status,
       ).toBe(401);

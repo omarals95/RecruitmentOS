@@ -10,6 +10,7 @@ import {
   TRANSACTION_TIMEOUT_MS,
 } from "../src/db/deadlines";
 import { authenticateApiToken, createToken } from "../src/lib/api-tokens";
+import { resetAuthPurgeThrottle } from "../src/lib/auth-purge";
 import { withTeam } from "../src/lib/db-team";
 import type { Principal } from "../src/lib/principal";
 import { createTestDb, seedIdentity } from "./helpers/db";
@@ -85,8 +86,9 @@ describe("per-transaction database deadlines", () => {
     expect(await outside()).toEqual(before);
   });
 
-  it("sets both deadlines inside identity-pool token transactions", async () => {
+  it("sets both deadlines inside identity-pool token and purge transactions", async () => {
     stubLocalAuthReadiness();
+    resetAuthPurgeThrottle();
     // Observe each transaction's settings after its work, inside the same transaction.
     const original = fixture.db.transaction.bind(fixture.db);
     const observed: unknown[] = [];
@@ -110,7 +112,8 @@ describe("per-transaction database deadlines", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(observed).toEqual([APP_VALUES, APP_VALUES]);
+    // Token creation, authentication, then the purge's rate-limit and OAuth transactions.
+    expect(observed).toEqual([APP_VALUES, APP_VALUES, APP_VALUES, APP_VALUES]);
     expect(await outside()).toEqual(before);
   });
 
