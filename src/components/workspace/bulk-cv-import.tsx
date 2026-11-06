@@ -967,6 +967,19 @@ export function RecentImports({
         </p>
       ) : !page ? (
         <p className="muted">Loading recent imports…</p>
+      ) : others.length === 0 && page.pagination.page > 1 ? (
+        // A later page can empty as batches expire; the user goes back by choice.
+        <div className="row">
+          <p className="muted">No recent imports on this page.</p>
+          <button
+            type="button"
+            className="button secondary small"
+            disabled={loading}
+            onClick={() => onPage(1)}
+          >
+            Go to first page
+          </button>
+        </div>
       ) : others.length === 0 ? (
         <p className="muted">No other recent imports.</p>
       ) : (
