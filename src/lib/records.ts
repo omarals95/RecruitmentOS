@@ -811,6 +811,15 @@ const LIST_QUERY_KEYS = [
 export const EXPORT_FILTER_KEYS: readonly string[] = LIST_QUERY_KEYS.filter(
   (key) => !["page", "pageSize", "sort", "direction"].includes(key),
 );
+/**
+ * Filters on the exporter's own private state, left out of the team-visible export audit so it
+ * never shows that someone filtered by them: `shortlisted` is always the caller's personal
+ * shortlist, and on candidates `status` is the caller's personal follow-up status. They still
+ * filter the rows; on every other resource `status` is a shared field and stays audited.
+ */
+export const PRIVATE_EXPORT_FILTER_KEYS: Readonly<
+  Record<"all" | "candidates", readonly string[]>
+> = { all: ["shortlisted"], candidates: ["shortlisted", "status"] };
 /** Most rows one export may hold; a larger match is refused, never cut short. */
 export const EXPORT_LIMIT = 100000;
 
@@ -1135,7 +1144,7 @@ export async function listRecords(
  * Every matching record and one audit row, in one transaction. A count bounded at EXPORT_LIMIT + 1
  * refuses an oversized match before any row is loaded. Rows and total then come from one statement,
  * so the file and its Rows count agree; its recheck catches rows added between the two statements.
- * The audit names applied filter keys, never values.
+ * The audit names applied filter keys, never values, and leaves out PRIVATE_EXPORT_FILTER_KEYS.
  */
 export async function exportRecords(
   p: Principal,
@@ -1158,10 +1167,14 @@ export async function exportRecords(
     "sort",
     "direction",
   ]);
+  const privateKeys =
+    PRIVATE_EXPORT_FILTER_KEYS[name === "candidates" ? "candidates" : "all"];
   const filters = [...query.entries()]
     .filter(
       ([key, value]) =>
-        EXPORT_FILTER_KEYS.includes(key) && !["", "[]"].includes(value.trim()),
+        EXPORT_FILTER_KEYS.includes(key) &&
+        !privateKeys.includes(key) &&
+        !["", "[]"].includes(value.trim()),
     )
     .map(([key]) => key)
     .sort();
