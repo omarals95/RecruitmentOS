@@ -16,6 +16,7 @@ import type { TeamTx } from "@/db";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
+import { aiReviewEvidence, aiReviewSchema } from "@/lib/ai-extraction";
 import { beginCvUpload } from "@/lib/cvs";
 import { createInside, lockTeam, matchCandidateContacts } from "@/lib/records";
 import {
@@ -61,6 +62,7 @@ export const bulkItemSchema = z
       .array(uuidSchema)
       .max(CANDIDATE_DUPLICATE_LIMIT)
       .default([]),
+    aiReview: aiReviewSchema.optional(),
   })
   .strict();
 export type BulkItemInput = z.infer<typeof bulkItemSchema>;
@@ -204,6 +206,11 @@ export async function createBulkItem(
           eq(bulkIntakeItems.id, itemId),
         ),
       );
+    // AI review provenance is checked before anything is created; a replay ignores it.
+    const aiReview =
+      input.aiReview && !item?.candidateId
+        ? await aiReviewEvidence(tx, p, input.aiReview, file)
+        : undefined;
     if (!item) {
       const [{ total }] = await tx
         .select({ total: count() })
@@ -272,6 +279,7 @@ export async function createBulkItem(
         possibleDuplicates: matches.data.length,
         limited: matches.limited,
       },
+      ...(aiReview ? { aiReview } : {}),
     });
     const [updated] = await tx
       .update(bulkIntakeItems)

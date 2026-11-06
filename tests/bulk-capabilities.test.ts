@@ -5,6 +5,18 @@ vi.mock("@/lib/principal", () => ({
     scopes: ["candidates:write", "cvs:write"],
   })),
 }));
+// The real provider module is used unless a test switches the fictional provider on.
+const ai = vi.hoisted(() => ({ fake: false }));
+vi.mock("@/lib/ai-provider", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/ai-provider")>();
+  const { createFakeExtraction } = await import("./helpers/fake-extraction");
+  const fake = createFakeExtraction();
+  return {
+    ...original,
+    extractionProvider: () =>
+      ai.fake ? fake.provider : original.extractionProvider(),
+  };
+});
 
 const storageKeys = [
   "CV_STORAGE_PROVIDER",
@@ -24,7 +36,23 @@ async function capabilities() {
 }
 
 describe("bulk CV capabilities", () => {
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    ai.fake = false;
+  });
+
+  it("reports AI available only when an extraction provider is configured", async () => {
+    for (const key of storageKeys) vi.stubEnv(key, undefined);
+    expect((await capabilities()).data.aiAvailable).toBe(false);
+    ai.fake = true;
+    expect(await capabilities()).toEqual({
+      data: {
+        uploadsAvailable: false,
+        aiAvailable: true,
+        storageConfigured: false,
+      },
+    });
+  });
 
   it("stays disabled for Blob even when its settings are present", async () => {
     vi.stubEnv("CV_STORAGE_PROVIDER", "blob");

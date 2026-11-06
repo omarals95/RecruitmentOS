@@ -1,3 +1,4 @@
+import { extractionProvider } from "@/lib/ai-provider";
 import { json, runApi } from "@/lib/api";
 import { requireScope } from "@/lib/permissions";
 import { storageConfigured } from "@/lib/storage";
@@ -12,7 +13,8 @@ export async function GET(request: Request) {
     return json({
       data: {
         uploadsAvailable: configured,
-        aiAvailable: false,
+        // True only with an approved extraction provider; none is configured in this build.
+        aiAvailable: extractionProvider() !== null,
         storageConfigured: configured,
       },
     });
