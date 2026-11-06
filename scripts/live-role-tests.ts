@@ -14,8 +14,8 @@
  *   process environment. It never loads an env file.
  * - It writes only fictional fixtures under a random run prefix: users, three teams, members and
  *   API tokens as the owner or the identity role; candidates, a vacancy, saved views, candidate
- *   states, reminder reads, idempotency, activity and pending uploads as the data role under
- *   signed contexts; fixture stores and read leases as the owner. It never changes budgets, keys,
+ *   states, reminder reads, idempotency, activity, pending uploads and bulk intake batches and
+ *   items as the data role under signed contexts; fixture stores and read leases as the owner. It never changes budgets, keys,
  *   roles, grants, policies, migrations or settings.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
@@ -107,6 +107,8 @@ const APP_TABLES = [
   "storage_usage",
   "idempotency",
   "notification_reads",
+  "bulk_intake_batches",
+  "bulk_intake_items",
 ] as const;
 const ALL_SCOPES = [...SCOPES];
 const RECRUITER_SCOPES = SCOPES.filter((scope) => scope !== "imports:write");
@@ -382,6 +384,8 @@ type TeamRows = {
   vacancy: string;
   savedView: string;
   upload: string;
+  batch: string;
+  item: string;
 };
 
 type Run = {
@@ -434,6 +438,8 @@ function fixtureTables(f: Fixtures, variant: Variant) {
   ];
   const tables: [string, string, unknown[]][] = [
     ["app.activity", ...team],
+    ["app.bulk_intake_items", ...team],
+    ["app.bulk_intake_batches", ...team],
     [
       "app.uploads",
       "team_id LIKE $1 OR storage_store = ANY($2::text[])",
@@ -522,6 +528,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         );
         for (const table of [
           "activity",
+          "bulk_intake_items",
+          "bulk_intake_batches",
           "uploads",
           "candidate_states",
           "notification_reads",
@@ -913,7 +921,29 @@ async function seedTeam(
           actor,
         ])
       ).rows[0].id as string;
-      return { candidate, vacancy, savedView, upload };
+      // One unexpired recovery batch and its reviewed item, holding file metadata and a hash only.
+      const batch = (
+        await data.query(
+          "INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) VALUES(gen_random_uuid(),$1,$2,now(),now() + interval '1 hour') RETURNING id::text AS id",
+          [team, actor],
+        )
+      ).rows[0].id as string;
+      const item = (
+        await data.query(
+          "INSERT INTO app.bulk_intake_items(id,team_id,batch_id,created_by,original_name,mime_type,size_bytes,payload_hash,reviewed_at,possible_duplicates,candidate_id,upload_id,created_at,updated_at) VALUES(gen_random_uuid(),$1,$2,$3,$4,'application/pdf',$5,$6,now(),0,$7,$8,now(),now()) RETURNING id::text AS id",
+          [
+            team,
+            batch,
+            actor,
+            `${f.prefix}-${label}-cv.pdf`,
+            UPLOAD_BYTES,
+            createHash("sha256").update(`${team}:bulk`).digest("hex"),
+            candidate,
+            upload,
+          ],
+        )
+      ).rows[0].id as string;
+      return { candidate, vacancy, savedView, upload, batch, item };
     },
     true,
   );
@@ -1008,6 +1038,21 @@ async function runChecks(run: Run) {
           "INSERT INTO app.notification_reads(team_id,user_id,key) VALUES($1,$2,$3)",
           [B, f.users.a1, `${B}:cross`],
         ],
+        [
+          "INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) VALUES(gen_random_uuid(),$1,$2,now(),now() + interval '1 hour')",
+          [B, f.users.a1],
+        ],
+        [
+          "INSERT INTO app.bulk_intake_items(id,team_id,batch_id,created_by,original_name,mime_type,size_bytes,payload_hash,created_at,updated_at) VALUES(gen_random_uuid(),$1,$2,$3,$4,'application/pdf',$5,$6,now(),now())",
+          [
+            B,
+            b.batch,
+            f.users.a1,
+            `${f.prefix}-cross-bulk.pdf`,
+            UPLOAD_BYTES,
+            "0".repeat(64),
+          ],
+        ],
       ];
       const conditions: Condition[] = [];
       for (const [text, params] of inserts)
@@ -1066,6 +1111,22 @@ async function runChecks(run: Run) {
             [b.upload],
           )) === 0,
         ],
+        [
+          "outcome",
+          (await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE id = $1",
+            [b.batch],
+          )) === 0,
+        ],
+        [
+          "outcome",
+          (await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE id = $1",
+            [b.item],
+          )) === 0,
+        ],
       ];
       for (const [text, params] of [
         [
@@ -1078,6 +1139,16 @@ async function runChecks(run: Run) {
           [b.upload],
         ],
         ["DELETE FROM app.uploads WHERE id = $1", [b.upload]],
+        [
+          "UPDATE app.bulk_intake_batches SET expires_at = expires_at WHERE id = $1",
+          [b.batch],
+        ],
+        ["DELETE FROM app.bulk_intake_batches WHERE id = $1", [b.batch]],
+        [
+          "UPDATE app.bulk_intake_items SET original_name = original_name WHERE id = $1",
+          [b.item],
+        ],
+        ["DELETE FROM app.bulk_intake_items WHERE id = $1", [b.item]],
       ] as [string, unknown[]][])
         conditions.push(leftAlone(await attempt(data, text, params)));
       const application = (candidate: string, vacancy: string) =>
@@ -1199,9 +1270,14 @@ async function runChecks(run: Run) {
         "INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary) VALUES($1,$2,'session','created','candidate',$3)",
         [f.teams.a, f.users.a1, `Fictional event ${f.prefix}`],
       );
+      const batch = await attempt(
+        data,
+        "INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) VALUES(gen_random_uuid(),$1,$2,now(),now() + interval '1 hour')",
+        [f.teams.a, f.users.a1],
+      );
       probe.at("positive-control");
       await installAs(data, signer, p.ownerA);
-      return probe.all(["outcome", unseen], denial(insert), [
+      return probe.all(["outcome", unseen], denial(insert), denial(batch), [
         "positive-control",
         (await ownRecords(data, f.teams.a)) > 0,
       ]);
@@ -1355,11 +1431,13 @@ async function runChecks(run: Run) {
   });
 
   // The second member of team A against the first member's private rows; both are positive-controlled.
+  // Each refused statement must fail with an error in the second member's transaction.
   const privateCheck = (
     id: string,
     probes: [string, unknown[]][],
     visible: string,
     own: [string, unknown[]][],
+    refused: [string, unknown[]][] = [],
   ) =>
     check(id, async (probe) => {
       const member = await transaction(data, async () => {
@@ -1372,6 +1450,10 @@ async function runChecks(run: Run) {
         ];
         for (const [text, params] of writes)
           conditions.push(leftAlone(await attempt(data, text, params)));
+        for (const [text, params] of refused) {
+          const outcome = await attempt(data, text, params);
+          conditions.push(outcomeIs(!outcome.ok, outcome));
+        }
         probe.at("positive-control");
         const visibleRows = await count(data, visible, [f.teams.a]);
         const marker = await attempt(
@@ -1481,6 +1563,65 @@ async function runChecks(run: Run) {
     ],
     "SELECT count(*)::int AS n FROM app.activity WHERE team_id = $1 AND action = 'created' AND kind = 'candidate'",
     [],
+  );
+  const teamCandidates =
+    "SELECT count(*)::int AS n FROM app.records WHERE team_id = $1 AND kind = 'candidate'";
+  await privateCheck(
+    "private-bulk-batches",
+    [
+      [
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE id = $1",
+        [a.batch],
+      ],
+      [
+        "UPDATE app.bulk_intake_batches SET expires_at = expires_at WHERE id = $1",
+        [a.batch],
+      ],
+      ["DELETE FROM app.bulk_intake_batches WHERE id = $1", [a.batch]],
+    ],
+    teamCandidates,
+    [
+      [
+        "UPDATE app.bulk_intake_batches SET expires_at = expires_at WHERE id = $1",
+        [a.batch],
+      ],
+      ["DELETE FROM app.bulk_intake_batches WHERE id = $1", [a.batch]],
+    ],
+  );
+  // An item belongs to its batch's creator: the second member cannot add one to the first's batch.
+  const memberItem = (createdBy: string): [string, unknown[]] => [
+    "INSERT INTO app.bulk_intake_items(id,team_id,batch_id,created_by,original_name,mime_type,size_bytes,payload_hash,created_at,updated_at) VALUES(gen_random_uuid(),$1,$2,$3,$4,'application/pdf',$5,$6,now(),now())",
+    [
+      f.teams.a,
+      a.batch,
+      createdBy,
+      `${f.prefix}-member-bulk.pdf`,
+      UPLOAD_BYTES,
+      "0".repeat(64),
+    ],
+  ];
+  await privateCheck(
+    "private-bulk-items",
+    [
+      [
+        "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE id = $1",
+        [a.item],
+      ],
+      [
+        "UPDATE app.bulk_intake_items SET original_name = original_name WHERE id = $1",
+        [a.item],
+      ],
+      ["DELETE FROM app.bulk_intake_items WHERE id = $1", [a.item]],
+    ],
+    teamCandidates,
+    [
+      [
+        "UPDATE app.bulk_intake_items SET original_name = original_name WHERE id = $1",
+        [a.item],
+      ],
+      ["DELETE FROM app.bulk_intake_items WHERE id = $1", [a.item]],
+    ],
+    [memberItem(f.users.a2), memberItem(a1)],
   );
 
   const identityRows = () =>

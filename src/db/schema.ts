@@ -233,6 +233,8 @@ export const bulkIntakeItems = appSchema.table(
     possibleDuplicates: integer("possible_duplicates"),
     candidateId: uuid("candidate_id"),
     uploadId: uuid("upload_id"),
+    /** The current CV upload attempt's clientUploadId; null means the item ID. */
+    uploadKey: uuid("upload_key"),
     createdAt: time("created_at").notNull(),
     updatedAt: time("updated_at").notNull(),
   },

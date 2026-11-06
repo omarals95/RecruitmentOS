@@ -1084,4 +1084,84 @@ describe("signed tenant context under separate nonowner data and identity roles"
       events.data.every((row) => row.actorName === "Fictional Test User"),
     ).toBe(true);
   });
+
+  it("purges expired bulk batches of every user and team only through the owner-run helper", async () => {
+    const expiredBatch = async (p: Principal) => {
+      const id = randomUUID();
+      const created = new Date(Date.now() - 2 * 86_400_000);
+      await withTeam(p, async (tx) => {
+        await tx.insert(bulkIntakeBatches).values({
+          id,
+          teamId: p.teamId,
+          createdBy: p.userId,
+          createdAt: created,
+          expiresAt: new Date(created.getTime() + 86_400_000),
+        });
+        await tx.insert(bulkIntakeItems).values({
+          id: randomUUID(),
+          teamId: p.teamId,
+          batchId: id,
+          createdBy: p.userId,
+          originalName: "fictional-expired.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 10,
+          payloadHash: "0".repeat(64),
+          createdAt: created,
+          updatedAt: created,
+        });
+      });
+      return id;
+    };
+    const kept = await expiredBatch(ownerA);
+    const purged = [
+      await expiredBatch(memberA),
+      await expiredBatch(ownerB),
+      await expiredBatch(memberB),
+    ];
+    const remaining = async () => {
+      const superuser = await harness.asSuperuser();
+      return {
+        batches: (await superuser.select().from(bulkIntakeBatches)).map(
+          (row) => row.id,
+        ),
+        items: (await superuser.select().from(bulkIntakeItems)).map(
+          (row) => row.batchId,
+        ),
+      };
+    };
+    const before = await remaining();
+    const client = await asData();
+    await expect(
+      client.query("SELECT tenant_context.purge_bulk_intake(NULL)"),
+    ).rejects.toMatchObject({ code: "42501" });
+    // A context without cvs:write is refused as well.
+    await expect(
+      withTeam({ ...memberB, scopes: ["candidates:read"] }, (tx) =>
+        tx.execute(sql`select tenant_context.purge_bulk_intake(null::uuid)`),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    // The runtime role alone sees and deletes only its own rows.
+    await withTeam(memberB, async (tx) => {
+      expect(
+        await tx
+          .delete(bulkIntakeBatches)
+          .where(eq(bulkIntakeBatches.id, purged[1]))
+          .returning(),
+      ).toEqual([]);
+    });
+    expect(await remaining()).toEqual(before);
+    await withTeam(memberB, (tx) =>
+      tx.execute(sql`select tenant_context.purge_bulk_intake(${kept}::uuid)`),
+    );
+    const after = await remaining();
+    for (const id of purged) {
+      expect(after.batches).not.toContain(id);
+      expect(after.items).not.toContain(id);
+    }
+    expect(after.batches).toContain(kept);
+    expect(after.items).toContain(kept);
+    // Every unexpired seeded batch and its items remain.
+    expect(after.batches).toHaveLength(before.batches.length - 3);
+    expect(after.items).toHaveLength(before.items.length - 3);
+  });
 });

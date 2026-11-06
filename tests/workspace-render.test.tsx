@@ -5,7 +5,9 @@ import { DisplayModeToggle } from "../src/components/workspace/display-mode-togg
 import {
   BulkCvImport,
   BulkCvImportDialog,
+  RecentImports,
   type CvImportState,
+  type RecentImportsPage,
 } from "../src/components/workspace/bulk-cv-import";
 import {
   BULK_INTAKE_MAX_FILES,
@@ -140,5 +142,51 @@ describe("Import CVs", () => {
     );
     expect(markup).toContain("Import reviewed (0)");
     expect(markup).not.toContain("Cancel import");
+  });
+  const recentPage = (totalPages: number): RecentImportsPage => ({
+    data: [
+      {
+        id: "00000000-0000-4000-8000-0000000000b1",
+        createdAt: "2030-01-01T09:00:00.000Z",
+        expiresAt: "2030-01-02T09:00:00.000Z",
+        items: [
+          {
+            id: "00000000-0000-4000-8000-0000000000c1",
+            originalName: "fictional-cv.pdf",
+            sizeBytes: 200,
+            candidateId: "00000000-0000-4000-8000-0000000000d1",
+            outcome: "cv-rejected",
+          },
+        ],
+      },
+    ],
+    pagination: { page: 1, pageSize: 10, total: totalPages * 10, totalPages },
+  });
+  const recent = (page: RecentImportsPage) =>
+    renderToStaticMarkup(
+      <RecentImports
+        page={page}
+        error=""
+        loading={false}
+        currentBatchId="00000000-0000-4000-8000-0000000000b2"
+        onPage={() => {}}
+      />,
+    );
+  it("pages Recent imports only when there is more than one page", () => {
+    const markup = recent(recentPage(2));
+    const nav =
+      /<nav class="pagination" aria-label="Recent import pages">[\s\S]*?<\/nav>/.exec(
+        markup,
+      )?.[0];
+    expect(nav).toBeDefined();
+    expect(nav).toContain("Page 1 of 2");
+    expect(nav).toContain(">Next</button>");
+    expect(nav).toMatch(/<button[^>]*disabled=""[^>]*>Previous<\/button>/);
+    expect(markup).toContain("Candidate created, CV rejected");
+    expect(markup).toContain("Open the candidate to attach the CV");
+    const single = recent(recentPage(1));
+    expect(single).toContain("fictional-cv.pdf");
+    expect(single).not.toContain("<nav");
+    expect(single).not.toContain("Recent import pages");
   });
 });

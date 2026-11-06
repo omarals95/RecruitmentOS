@@ -4,6 +4,7 @@ import {
   downloadVerifiedCv,
   saveCvBytes,
   sendCvBytes,
+  storeCv,
   UPLOAD_LOCK_BUSY,
   UPLOAD_LOCK_UNSUPPORTED,
   withUploadLock,
@@ -122,6 +123,74 @@ describe("sendCvBytes", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).not.toContain("vercel.com");
     expect((error as Error).message).not.toContain("signature");
+  });
+});
+
+describe("storeCv", () => {
+  const blobTicket: UploadTicket = {
+    protocol: "blob-put-v1",
+    method: "PUT",
+    url: blobUrl,
+    headers: { "content-type": "application/pdf" },
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    maxBytes: file.size,
+  };
+  const s3Ticket: UploadTicket = {
+    protocol: "s3-form-v1",
+    method: "POST",
+    url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+    fields: { key: "teams/t/cvs/fictional.pdf" },
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    maxBytes: file.size,
+  };
+  function completion(fails = false) {
+    const state = { calls: 0 };
+    const complete = async () => {
+      state.calls++;
+      if (fails) throw new Error("This upload was rejected or expired.");
+      return { data: { status: "ready" } };
+    };
+    return { state, complete };
+  }
+
+  it("completes once after a Blob PUT that storage accepted", async () => {
+    const { calls, fetchImpl } = recorder();
+    const { state, complete } = completion();
+    await storeCv(blobTicket, file, complete, undefined, fetchImpl);
+    expect(calls).toHaveLength(1);
+    expect(state.calls).toBe(1);
+  });
+
+  it("still completes after a refused Blob PUT, since an earlier PUT may have stored the bytes", async () => {
+    const { calls, fetchImpl } = recorder(new Response(null, { status: 409 }));
+    const { state, complete } = completion();
+    await expect(
+      storeCv(blobTicket, file, complete, undefined, fetchImpl),
+    ).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(state.calls).toBe(1);
+  });
+
+  it("reports the storage refusal when completion after a refused Blob PUT fails", async () => {
+    const { fetchImpl } = recorder(new Response(null, { status: 409 }));
+    const { state, complete } = completion(true);
+    await expect(
+      storeCv(blobTicket, file, complete, undefined, fetchImpl),
+    ).rejects.toThrow(
+      new Error("Private storage did not accept the CV (HTTP 409)."),
+    );
+    expect(state.calls).toBe(1);
+  });
+
+  it("refuses a refused S3 POST without completing", async () => {
+    const { fetchImpl } = recorder(new Response(null, { status: 403 }));
+    const { state, complete } = completion();
+    await expect(
+      storeCv(s3Ticket, file, complete, undefined, fetchImpl),
+    ).rejects.toThrow(
+      new Error("Private storage did not accept the CV (HTTP 403)."),
+    );
+    expect(state.calls).toBe(0);
   });
 });
 

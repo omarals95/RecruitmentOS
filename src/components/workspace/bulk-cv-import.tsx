@@ -9,7 +9,7 @@ import {
 } from "@/domain/records";
 import type { ExtractedCandidateFields } from "@/domain/cv-extraction";
 import {
-  sendCvBytes,
+  storeCv,
   withUploadLock,
   type UploadTicket,
 } from "@/components/cv-transfer";
@@ -20,6 +20,7 @@ import {
   importSummary,
   sameQueue,
   stopsRun,
+  uncertainRetryTooOld,
 } from "./bulk-cv-queue";
 import {
   hasPendingSuggestions,
@@ -56,7 +57,7 @@ type Match = {
   matches: string[];
 };
 type Entry = {
-  /** Also the server item ID and the CV upload's clientUploadId. */
+  /** Also the server item ID; the server chooses each CV upload's clientUploadId. */
   id: string;
   file: File;
   fields: Fields;
@@ -68,7 +69,6 @@ type Entry = {
   reviewed: boolean;
   candidateId?: string;
   submitted?: string;
-  startedAt?: number;
   /** failed: the server answered with an error; unknown: the request was aborted or lost. */
   result?: "failed" | "unknown";
   phase: string;
@@ -79,7 +79,7 @@ type UploadResponse = {
   data: { id: string };
   upload: UploadTicket | null;
 };
-type RecentBatch = {
+export type RecentBatch = {
   id: string;
   createdAt: string;
   expiresAt: string;
@@ -133,7 +133,6 @@ const tags = (value: string) =>
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
-const recoveryMs = BULK_INTAKE_RECOVERY_HOURS * 3_600_000;
 export const BULK_IMPORT_LIMITS = `Up to ${BULK_INTAKE_MAX_FILES} files per import, 10 MiB each. One CV uploads at a time in this browser. Import progress is kept on the server for ${BULK_INTAKE_RECOVERY_HOURS} hours; selected files and drafts stay only in this browser.`;
 
 export type CvImportState =
@@ -195,8 +194,11 @@ export function BulkCvImportDialog({
   const available = importState === "ready";
   // One server batch per dialog session; recovery rows are kept per batch.
   const [batchId] = useState(() => crypto.randomUUID());
-  const recent = useApi<{ data: RecentBatch[] }>(
-    available ? "/api/v1/cvs/bulk-batches" : null,
+  // Taken just before the first item POST, so it is never later than the server batch's start.
+  const batchStartedAt = useRef<number | undefined>(undefined);
+  const [recentPage, setRecentPage] = useState(1);
+  const recent = useApi<RecentImportsPage>(
+    available ? `/api/v1/cvs/bulk-batches?page=${recentPage}` : null,
   );
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState("");
@@ -313,12 +315,7 @@ export function BulkCvImportDialog({
     signal: AbortSignal,
   ): Promise<boolean> => {
     if (!team || !ready(entry)) return false;
-    if (
-      entry.submitted &&
-      !entry.candidateId &&
-      entry.startedAt &&
-      Date.now() - entry.startedAt >= recoveryMs
-    ) {
+    if (uncertainRetryTooOld(entry, batchStartedAt.current, Date.now())) {
       update(entry.id, {
         error:
           "This uncertain attempt is too old to retry safely. Check the candidate directory before starting a new import.",
@@ -348,11 +345,11 @@ export function BulkCvImportDialog({
       result: undefined,
       phase: candidateId ? "Preparing CV upload" : "Creating candidate",
       submitted,
-      startedAt: entry.startedAt ?? Date.now(),
     });
     try {
       if (!candidateId) {
         sent = true;
+        batchStartedAt.current ??= Date.now();
         const result = await requestJson<{ data: { candidateId: string } }>(
           team.id,
           item,
@@ -389,16 +386,18 @@ export function BulkCvImportDialog({
       );
       if (ticket.upload) {
         update(entry.id, { phase: "Uploading CV" });
-        const stored = await sendCvBytes(ticket.upload, entry.file, signal);
-        if (!stored.ok)
-          throw new Error(
-            `Private storage did not accept the CV (HTTP ${stored.status}).`,
-          );
-        update(entry.id, { phase: "Checking document format" });
-        await requestJson(
-          team.id,
-          `/api/v1/cvs/uploads/${encodeURIComponent(ticket.data.id)}/complete`,
-          { method: "POST", signal },
+        await storeCv(
+          ticket.upload,
+          entry.file,
+          () => {
+            update(entry.id, { phase: "Checking document format" });
+            return requestJson(
+              team.id,
+              `/api/v1/cvs/uploads/${encodeURIComponent(ticket.data.id)}/complete`,
+              { method: "POST", signal },
+            );
+          },
+          signal,
         );
       }
       update(entry.id, { done: true, phase: "", error: "" });
@@ -426,7 +425,6 @@ export function BulkCvImportDialog({
           duplicates: [],
           duplicatesReviewed: false,
           submitted: undefined,
-          startedAt: undefined,
         });
         return false;
       }
@@ -439,7 +437,7 @@ export function BulkCvImportDialog({
         phase: "",
         result: candidateId ? undefined : answered ? "failed" : "unknown",
         error: candidateId
-          ? `${message} The candidate was created; retry to attach this CV.`
+          ? `${message} The candidate was created. Retry to upload this CV again, or open the candidate to attach a different file.`
           : answered
             ? message
             : `${message} The result of candidate creation may be uncertain. Retry this unchanged draft to avoid creating a duplicate.`,
@@ -451,15 +449,11 @@ export function BulkCvImportDialog({
   const reconcile = async () => {
     if (!team) return;
     try {
-      const result = await requestJson<{ data: RecentBatch[] }>(
+      const result = await requestJson<{ data: RecentBatch }>(
         team.id,
-        "/api/v1/cvs/bulk-batches",
+        `/api/v1/cvs/bulk-batches/${encodeURIComponent(batchId)}`,
       );
-      const items = new Map(
-        (result.data.find((batch) => batch.id === batchId)?.items ?? []).map(
-          (item) => [item.id, item],
-        ),
-      );
+      const items = new Map(result.data.items.map((item) => [item.id, item]));
       setEntries((current) =>
         current.map((entry) => {
           const item = items.get(entry.id);
@@ -477,7 +471,8 @@ export function BulkCvImportDialog({
         }),
       );
     } catch {
-      // The summary then shows what this browser saw; unconfirmed items stay unknown.
+      // A missing batch (404) adopts nothing. The summary then shows what this browser saw;
+      // unconfirmed items stay unknown.
     }
   };
   const importReviewed = async (items: Entry[]) => {
@@ -544,9 +539,6 @@ export function BulkCvImportDialog({
     })),
   );
   const imported = entries.filter((item) => item.done).length;
-  const others = (recent.data?.data ?? []).filter(
-    (batch) => batch.id !== batchId,
-  );
   return (
     <Dialog title="Import CVs" wide onClose={close} busy={busy}>
       <div className="dialog-body stack">
@@ -896,48 +888,13 @@ export function BulkCvImportDialog({
                 )}
               </section>
             )}
-            <section className="stack" aria-label="Recent imports">
-              <h3>{`Recent imports (kept for ${BULK_INTAKE_RECOVERY_HOURS} hours)`}</h3>
-              {recent.error ? (
-                <p className="notice error" role="status">
-                  Could not load recent imports.
-                </p>
-              ) : !recent.data ? (
-                <p className="muted">Loading recent imports…</p>
-              ) : others.length === 0 ? (
-                <p className="muted">No other recent imports.</p>
-              ) : (
-                others.map((batch) => (
-                  <div className="stack" key={batch.id}>
-                    <strong>{`Started ${new Date(batch.createdAt).toLocaleString()}`}</strong>
-                    <div className="related-list">
-                      {batch.items.map((item) => (
-                        <div className="related-item" key={item.id}>
-                          <span>
-                            <strong>{item.originalName}</strong>
-                            <small>
-                              {outcomeLabels[item.outcome]}
-                              {(item.outcome === "cv-pending" ||
-                                item.outcome === "cv-rejected") &&
-                                ". Open the candidate to attach the CV"}
-                            </small>
-                          </span>
-                          {item.candidateId && (
-                            <a
-                              href={`/app/candidates/${encodeURIComponent(item.candidateId)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Open candidate
-                            </a>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))
-              )}
-            </section>
+            <RecentImports
+              page={recent.data}
+              error={recent.error}
+              loading={recent.loading}
+              currentBatchId={batchId}
+              onPage={setRecentPage}
+            />
           </>
         )}
       </div>
@@ -972,5 +929,104 @@ export function BulkCvImportDialog({
       </footer>
       {dialog}
     </Dialog>
+  );
+}
+
+export type RecentImportsPage = {
+  data: RecentBatch[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+};
+/** One page of the user's recent imports, without the batch this dialog is running. */
+export function RecentImports({
+  page,
+  error,
+  loading,
+  currentBatchId,
+  onPage,
+}: {
+  page: RecentImportsPage | null;
+  error: string;
+  loading: boolean;
+  currentBatchId: string;
+  onPage: (page: number) => void;
+}) {
+  const others = (page?.data ?? []).filter(
+    (batch) => batch.id !== currentBatchId,
+  );
+  return (
+    <section className="stack" aria-label="Recent imports">
+      <h3>{`Recent imports (kept for ${BULK_INTAKE_RECOVERY_HOURS} hours)`}</h3>
+      {error ? (
+        <p className="notice error" role="status">
+          Could not load recent imports.
+        </p>
+      ) : !page ? (
+        <p className="muted">Loading recent imports…</p>
+      ) : others.length === 0 ? (
+        <p className="muted">No other recent imports.</p>
+      ) : (
+        others.map((batch) => (
+          <div className="stack" key={batch.id}>
+            <strong>{`Started ${new Date(batch.createdAt).toLocaleString()}`}</strong>
+            <div className="related-list">
+              {batch.items.map((item) => (
+                <div className="related-item" key={item.id}>
+                  <span>
+                    <strong>{item.originalName}</strong>
+                    <small>
+                      {outcomeLabels[item.outcome]}
+                      {(item.outcome === "cv-pending" ||
+                        item.outcome === "cv-rejected") &&
+                        ". Open the candidate to attach the CV"}
+                    </small>
+                  </span>
+                  {item.candidateId && (
+                    <a
+                      href={`/app/candidates/${encodeURIComponent(item.candidateId)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open candidate
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+      {!error && page && page.pagination.totalPages > 1 && (
+        <nav className="pagination" aria-label="Recent import pages">
+          <div className="row">
+            <button
+              type="button"
+              className="button secondary small"
+              disabled={page.pagination.page <= 1 || loading}
+              onClick={() => onPage(page.pagination.page - 1)}
+            >
+              Previous
+            </button>
+            <span>
+              Page {page.pagination.page} of {page.pagination.totalPages}
+            </span>
+            <button
+              type="button"
+              className="button secondary small"
+              disabled={
+                page.pagination.page >= page.pagination.totalPages || loading
+              }
+              onClick={() => onPage(page.pagination.page + 1)}
+            >
+              Next
+            </button>
+          </div>
+        </nav>
+      )}
+    </section>
   );
 }

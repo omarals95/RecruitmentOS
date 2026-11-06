@@ -48,9 +48,12 @@ import {
   BULK_INTAKE_RECOVERY_HOURS,
 } from "@/domain/records";
 import { GET as listRoute } from "@/app/api/v1/cvs/bulk-batches/route";
+import { GET as batchRoute } from "@/app/api/v1/cvs/bulk-batches/[batchId]/route";
 import { POST as itemRoute } from "@/app/api/v1/cvs/bulk-batches/[batchId]/items/[itemId]/route";
 import { POST as uploadRoute } from "@/app/api/v1/cvs/bulk-batches/[batchId]/items/[itemId]/upload/route";
 import { POST as completeRoute } from "@/app/api/v1/cvs/uploads/[id]/complete/route";
+import { withTeam } from "@/lib/db-team";
+import { sql } from "drizzle-orm";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 
@@ -101,7 +104,11 @@ const body = (
 
 describe("bulk CV intake recovery and server review evidence", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
-  let owner: Principal, colleague: Principal, outsider: Principal;
+  let owner: Principal,
+    colleague: Principal,
+    outsider: Principal,
+    third: Principal,
+    pager: Principal;
 
   /** Raw SQL through the PGlite owner, outside the runtime role and its policies. */
   async function asOwner<T = Record<string, unknown>>(
@@ -186,8 +193,47 @@ describe("bulk CV intake recovery and server review evidence", () => {
         { params: Promise.resolve({ batchId, itemId }) },
       ),
     );
-  const list = async (bearer: string) =>
-    result(await listRoute(request("/api/v1/cvs/bulk-batches", bearer)));
+  const list = async (bearer: string, query = "") =>
+    result(
+      await listRoute(request(`/api/v1/cvs/bulk-batches${query}`, bearer)),
+    );
+  const batch = async (bearer: string, batchId: string) =>
+    result(
+      await batchRoute(request(`/api/v1/cvs/bulk-batches/${batchId}`, bearer), {
+        params: Promise.resolve({ batchId }),
+      }),
+    );
+  /** A batch with one item, written by the owner connection; expired when hoursLeft is negative. */
+  const insertBatch = async (
+    who: Principal,
+    hoursLeft: number,
+    createdMinutesAgo = 180,
+  ) => {
+    const id = randomUUID();
+    await asOwner(
+      "INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) VALUES($1,$2,$3,now()-make_interval(mins=>$4),now()+make_interval(hours=>$5))",
+      [id, who.teamId, who.userId, createdMinutesAgo, hoursLeft],
+    );
+    await asOwner(
+      "INSERT INTO app.bulk_intake_items(id,team_id,batch_id,created_by,original_name,mime_type,size_bytes,payload_hash,created_at,updated_at) VALUES($1,$2,$3,$4,'fictional-cv.pdf','application/pdf',200,$5,now(),now())",
+      [randomUUID(), who.teamId, id, who.userId, "0".repeat(64)],
+    );
+    return id;
+  };
+  /** The batch row plus its item rows. */
+  const batchRows = async (id: string) =>
+    (await total(
+      "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE id=$1",
+      [id],
+    )) +
+    (await total(
+      "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
+      [id],
+    ));
+  const uploadsOf = (candidateId: string) =>
+    total("SELECT count(*)::int AS n FROM app.uploads WHERE candidate_id=$1", [
+      candidateId,
+    ]);
   const complete = async (bearer: string, id: string) =>
     result(
       await completeRoute(
@@ -221,6 +267,16 @@ describe("bulk CV intake recovery and server review evidence", () => {
     outsider = await seedIdentity(fixture.db, {
       userId: "bulk-outsider",
       teamId: "bulk-other-team",
+    });
+    third = await seedIdentity(fixture.db, {
+      userId: "bulk-third",
+      teamId: "bulk-team",
+      role: "recruiter",
+    });
+    pager = await seedIdentity(fixture.db, {
+      userId: "bulk-pager",
+      teamId: "bulk-team",
+      role: "recruiter",
     });
     await enforceTestRls(fixture.db);
   });
@@ -331,6 +387,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
         "team_id",
         "updated_at",
         "upload_id",
+        "upload_key",
       ].sort(),
     );
     expect(JSON.stringify(row)).not.toMatch(/Newcomer|existing\.fictional/i);
@@ -412,7 +469,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
     expect(await counts()).toEqual(before);
   });
 
-  it("(f) refuses an expired batch, hides it and deletes it on the user's next import", async () => {
+  it("(f) refuses an expired batch, then a list GET hides and purges it with its items", async () => {
     const bearer = await token(owner);
     const batchId = randomUUID(),
       itemId = randomUUID();
@@ -449,43 +506,19 @@ describe("bulk CV intake recovery and server review evidence", () => {
       body({ name: "Fictional Expiring" }),
     );
     expect(replay.body.error.code).toBe("bulk_batch_expired");
+    // An item POST purges other expired batches but keeps the requested one to refuse it.
+    expect(await batchRows(batchId)).toBe(2);
     const lateUpload = await upload(bearer, batchId, itemId);
     expect(lateUpload.status).toBe(409);
     expect(lateUpload.body.error.code).toBe("bulk_batch_expired");
     expect(await counts()).toEqual(before);
+    expect(await batchRows(batchId)).toBe(2);
     const listed = await list(bearer);
     expect(listed.status).toBe(200);
     expect(
-      listed.body.data.map((batch: { id: string }) => batch.id),
+      listed.body.data.map((entry: { id: string }) => entry.id),
     ).not.toContain(batchId);
-    expect(
-      await total(
-        "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
-        [batchId],
-      ),
-    ).toBe(1);
-    expect(
-      (
-        await item(
-          bearer,
-          randomUUID(),
-          randomUUID(),
-          body({ name: "Fictional Next" }),
-        )
-      ).status,
-    ).toBe(201);
-    expect(
-      await total(
-        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE id=$1",
-        [batchId],
-      ),
-    ).toBe(0);
-    expect(
-      await total(
-        "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
-        [batchId],
-      ),
-    ).toBe(0);
+    expect(await batchRows(batchId)).toBe(0);
   });
 
   it("(g) reserves the CV once per item, reports imported after completion and pending otherwise", async () => {
@@ -611,7 +644,14 @@ describe("bulk CV intake recovery and server review evidence", () => {
         expect(response.status, other.userId).toBe(404);
         expect(response.body.error.code).toBe("not_found");
       }
-      expect(await list(bearer)).toEqual({ status: 200, body: { data: [] } });
+      expect(await list(bearer)).toEqual({
+        status: 200,
+        body: {
+          data: [],
+          pagination: { page: 1, pageSize: 10, total: 0, totalPages: 0 },
+        },
+      });
+      expect((await batch(bearer, batchId)).status).toBe(404);
       expect(await counts()).toEqual(before);
       expect(
         await total(
@@ -637,8 +677,227 @@ describe("bulk CV intake recovery and server review evidence", () => {
         ),
         await upload(bearer, randomUUID(), randomUUID()),
         await list(bearer),
+        await batch(bearer, randomUUID()),
       ];
       for (const response of responses) expect(response.status).toBe(403);
     }
+  });
+
+  it("(k) purges expired batches of every user and team on a list GET and keeps unexpired ones", async () => {
+    const expired = [
+      await insertBatch(colleague, -1),
+      await insertBatch(outsider, -1),
+    ];
+    const live = [
+      await insertBatch(colleague, 1),
+      await insertBatch(outsider, 1),
+    ];
+    for (const id of [...expired, ...live]) expect(await batchRows(id)).toBe(2);
+    const listed = await list(await token(third));
+    expect(listed.status).toBe(200);
+    expect(listed.body.pagination.total).toBe(0);
+    for (const id of expired) expect(await batchRows(id)).toBe(0);
+    for (const id of live) expect(await batchRows(id)).toBe(2);
+  });
+
+  it("(l) deletes at most 100 expired batches per request, oldest expiry first", async () => {
+    const expiredCount = () =>
+      total(
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now()",
+      );
+    expect(await expiredCount()).toBe(0);
+    await asOwner(
+      "INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) SELECT gen_random_uuid(),$1,$2,now()-interval '2 days',now()-make_interval(mins=>n) FROM generate_series(1,101) n",
+      [colleague.teamId, colleague.userId],
+    );
+    expect(await expiredCount()).toBe(101);
+    expect((await list(await token(owner))).status).toBe(200);
+    expect(await expiredCount()).toBe(1);
+    // The batch that expired most recently is the one left.
+    expect(
+      await total(
+        "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE expires_at <= now() AND expires_at > now()-interval '90 seconds'",
+      ),
+    ).toBe(1);
+    expect((await list(await token(owner))).status).toBe(200);
+    expect(await expiredCount()).toBe(0);
+  });
+
+  it("(m) runs the purge helper only inside a verified context with cvs:write", async () => {
+    await expect(
+      fixture.client.query("SELECT tenant_context.purge_bulk_intake(NULL)"),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTeam({ ...owner, scopes: ["candidates:read"] }, (tx) =>
+        tx.execute(sql`select tenant_context.purge_bulk_intake(null::uuid)`),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+  });
+
+  it("(n) pages the caller's unexpired batches newest first and refuses other query keys", async () => {
+    const bearer = await token(pager);
+    const ids: string[] = [];
+    // Created one minute apart; index 0 is the oldest.
+    for (let index = 0; index < 12; index++)
+      ids.push(await insertBatch(pager, 1, 120 - index));
+    const newestFirst = [...ids].reverse();
+    await insertBatch(pager, -1);
+    await insertBatch(third, 1);
+    const first = await list(bearer);
+    expect(first.status).toBe(200);
+    expect(first.body.pagination).toEqual({
+      page: 1,
+      pageSize: 10,
+      total: 12,
+      totalPages: 2,
+    });
+    expect(first.body.data.map((entry: { id: string }) => entry.id)).toEqual(
+      newestFirst.slice(0, 10),
+    );
+    expect(Object.keys(first.body.data[0]).sort()).toEqual([
+      "createdAt",
+      "expiresAt",
+      "id",
+      "items",
+    ]);
+    expect(first.body.data[0].items).toHaveLength(1);
+    const second = await list(bearer, "?page=2");
+    expect(second.body.data.map((entry: { id: string }) => entry.id)).toEqual(
+      newestFirst.slice(10),
+    );
+    expect(second.body.pagination).toMatchObject({ page: 2, total: 12 });
+    const wide = await list(bearer, "?pageSize=20");
+    expect(wide.body.data).toHaveLength(12);
+    expect(wide.body.pagination).toEqual({
+      page: 1,
+      pageSize: 20,
+      total: 12,
+      totalPages: 1,
+    });
+    for (const query of [
+      "?pageSize=21",
+      "?page=0",
+      "?page=abc",
+      "?page=1&page=2",
+      "?other=1",
+      "?page=01",
+      "?page=1000001",
+    ]) {
+      const refused = await list(bearer, query);
+      expect(refused.status, query).toBe(400);
+      expect(refused.body.error.code, query).toBe("invalid_query");
+    }
+  });
+
+  it("(o) reads one own unexpired batch in the list-entry shape and 404s every other ID", async () => {
+    const mine = await token(owner);
+    const batchId = randomUUID(),
+      itemId = randomUUID();
+    expect(
+      (await item(mine, batchId, itemId, body({ name: "Fictional Single" })))
+        .status,
+    ).toBe(201);
+    const read = await batch(mine, batchId);
+    expect(read.status).toBe(200);
+    const listed = await list(mine, "?pageSize=20");
+    expect(read.body).toEqual({
+      data: listed.body.data.find(
+        (entry: { id: string }) => entry.id === batchId,
+      ),
+    });
+    expect(read.body.data.items).toEqual([
+      {
+        id: itemId,
+        originalName: file.originalName,
+        sizeBytes: file.sizeBytes,
+        candidateId: expect.any(String),
+        outcome: "cv-pending",
+      },
+    ]);
+    const expired = await insertBatch(owner, -1);
+    for (const id of [
+      await insertBatch(colleague, 1),
+      await insertBatch(outsider, 1),
+      randomUUID(),
+      expired,
+      "not-a-uuid",
+    ]) {
+      const response = await batch(mine, id);
+      expect(response.status, id).toBe(404);
+      expect(response.body.error.code).toBe("not_found");
+    }
+    // The single-batch GET does not purge.
+    expect(await batchRows(expired)).toBe(2);
+  });
+
+  it("(p) starts a new attempt under a new key after the S3 reservation expired", async () => {
+    const bearer = await token(owner);
+    const batchId = randomUUID(),
+      itemId = randomUUID();
+    const created = await item(
+      bearer,
+      batchId,
+      itemId,
+      body({ name: "Fictional Expired Reservation" }),
+    );
+    const candidateId = created.body.data.candidateId;
+    const first = await upload(bearer, batchId, itemId);
+    expect(first.status).toBe(201);
+    const oldId = first.body.data.id;
+    await asOwner(
+      "UPDATE app.uploads SET created_at=now()-interval '2 hours', expires_at=now()-interval '1 minute' WHERE id=$1",
+      [oldId],
+    );
+    const fresh = await upload(bearer, batchId, itemId);
+    expect(fresh.status).toBe(201);
+    expect(fresh.body.upload).toMatchObject({ protocol: "s3-form-v1" });
+    const newId = fresh.body.data.id;
+    expect(newId).not.toBe(oldId);
+    const [old] = await asOwner<{ status: string }>(
+      "SELECT status FROM app.uploads WHERE id=$1",
+      [oldId],
+    );
+    expect(old.status).toBe("rejected");
+    const again = await upload(bearer, batchId, itemId);
+    expect(again.body.data.id).toBe(newId);
+    expect(await uploadsOf(candidateId)).toBe(2);
+    const [row] = await asOwner<{ upload_id: string; upload_key: string }>(
+      "SELECT upload_id, upload_key FROM app.bulk_intake_items WHERE id=$1",
+      [itemId],
+    );
+    expect(row.upload_id).toBe(newId);
+    expect(row.upload_key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(row.upload_key).not.toBe(itemId);
+  });
+
+  it("(q) returns a live or ready attempt again without a new reservation", async () => {
+    const bearer = await token(owner);
+    const batchId = randomUUID(),
+      itemId = randomUUID();
+    const created = await item(
+      bearer,
+      batchId,
+      itemId,
+      body({ name: "Fictional Live Attempt" }),
+    );
+    const candidateId = created.body.data.candidateId;
+    const first = await upload(bearer, batchId, itemId);
+    expect(await uploadsOf(candidateId)).toBe(1);
+    const pending = await upload(bearer, batchId, itemId);
+    expect(pending.status).toBe(201);
+    expect(pending.body.data.id).toBe(first.body.data.id);
+    expect(await uploadsOf(candidateId)).toBe(1);
+    expect((await complete(bearer, first.body.data.id)).body.data.status).toBe(
+      "ready",
+    );
+    const ready = await upload(bearer, batchId, itemId);
+    expect(ready.body.data.id).toBe(first.body.data.id);
+    expect(ready.body.upload).toBeNull();
+    expect(await uploadsOf(candidateId)).toBe(1);
+    const [row] = await asOwner<{ upload_key: string | null }>(
+      "SELECT upload_key FROM app.bulk_intake_items WHERE id=$1",
+      [itemId],
+    );
+    expect(row.upload_key).toBeNull();
   });
 });

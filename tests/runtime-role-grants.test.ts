@@ -322,6 +322,11 @@ describe("split runtime role template", () => {
       expect([...evidence.execute].sort(), kind).toEqual(
         [...expected.helpers].sort(),
       );
+      // Only the data role may run the cross-team bulk intake purge.
+      expect(
+        evidence.execute.includes("tenant_context.purge_bulk_intake(uuid)"),
+        kind,
+      ).toBe(kind === "data");
       for (const [schema, usage] of Object.entries(expected.schemas))
         expect(evidence.schemaPrivileges[schema], `${kind} ${schema}`).toEqual({
           exists: true,
@@ -454,6 +459,7 @@ describe("split runtime role template", () => {
       "SELECT * FROM db_boundary.storage_schema",
       "SELECT tenant_context.lock_storage_allocation('s3','development','fictional-bucket')",
       "SELECT tenant_context.acquire_blob_read('store_fictional0001')",
+      "SELECT tenant_context.purge_bulk_intake(NULL)",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",
       "DELETE FROM auth.initial_admin_claim",

@@ -301,6 +301,7 @@ describe("OpenAPI contract", () => {
   it("documents the bulk intake routes, their limits and the real upload capability", () => {
     const bulk = {
       "/api/v1/cvs/bulk-batches": "get",
+      "/api/v1/cvs/bulk-batches/{batchId}": "get",
       "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}": "post",
       "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload": "post",
     };
@@ -328,6 +329,22 @@ describe("OpenAPI contract", () => {
         ],
       ),
     ).toContain("bulk_candidate_required");
+    const listed = JSON.stringify(document.paths["/api/v1/cvs/bulk-batches"]);
+    for (const text of ["invalid_query", "pagination", "pageSize"])
+      expect(listed).toContain(text);
+    expect(
+      JSON.stringify(document.paths["/api/v1/cvs/bulk-batches/{batchId}"]),
+    ).toContain("404 not_found");
+    const reupload = JSON.stringify(
+      document.paths[
+        "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload"
+      ],
+    );
+    for (const text of ["new server-chosen clientUploadId", "blob-put-v1"])
+      expect(reupload).toContain(text);
+    expect(JSON.stringify(document)).not.toContain(
+      "deleted when its user next imports",
+    );
     const capability = JSON.stringify(
       document.paths["/api/v1/cvs/bulk-capabilities"],
     );
