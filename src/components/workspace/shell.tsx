@@ -292,7 +292,11 @@ function Shell({ children }: { children: React.ReactNode }) {
             <strong>{current?.label || "Settings"}</strong>
           </div>
           <div className="topbar-actions">
-            <button className="search-launcher" onClick={() => setSearch(true)}>
+            <button
+              className="search-launcher"
+              aria-label="Search your workspace"
+              onClick={() => setSearch(true)}
+            >
               <Search size={17} aria-hidden="true" />
               <span>Search your workspace</span>
               <kbd>⌘ K</kbd>

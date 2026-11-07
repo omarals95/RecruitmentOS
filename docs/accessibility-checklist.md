@@ -1,0 +1,68 @@
+# Accessibility and browser checklist (NFR-08)
+
+This is the end-to-end accessibility and browser checklist that BRD NFR-08 asks for. The target is WCAG 2.2 AA (SRS-NFR-06). **No WCAG conformance level or certification is claimed.** The checks below are one local Chromium walkthrough; the conformance level and browser matrix (D-13) are still undecided.
+
+## Environment
+
+- **Date:** 7 November 2026.
+- **Revision:** branch `factory/028-accessibility-responsive`, fixes in commit `e9b17a0` on top of `main` at `ffa342b`.
+- **Server:** local development server (`npm run dev`) with local PGlite, console mail and no CV storage provider.
+- **Browser:** Chromium through `agent-browser` 0.26.0, headless.
+- **Data:** the fictional seed account and team, plus fictional records created in the worktree's local PGlite only: a job role and a vacancy created from it (the role then changed), the candidate "Fictional Søren-Ōkāfor Nguyễn فاطمة" with an application, 23 interviews on 18 Nov 2026, one cancelled interview on 10 Nov 2026, two tasks in the seeded task buckets, and one API token that was revoked during the check. No real names, CVs or credentials.
+
+## Viewports and themes
+
+| Viewport | Stands for                                         |
+| -------- | -------------------------------------------------- |
+| 360×740  | Phone                                              |
+| 640×800  | 200% zoom of a 1280 px window (half the CSS width) |
+| 1280×800 | Desktop                                            |
+
+Each viewport was checked in the light and dark themes (`recruitmentos.theme` set to `light` or `dark`).
+
+## How each column was checked
+
+- **Keyboard:** the journey done with Tab, Shift+Tab, Enter, Space, arrow keys and Escape only; the focused element read from `document.activeElement` after each key.
+- **Focus:** the focused element has the 3 px `:focus-visible` outline and is on screen.
+- **Names:** the `agent-browser snapshot` accessibility tree; no button, link, select or input with an empty name.
+- **Announced:** errors in `role="alert"` or the browser's native validation message, results in `role="status"`.
+- **No sideways scroll:** `window.scrollTo({left: 2000, behavior: "instant"})` leaves `window.scrollX` at 0 and `document.documentElement.scrollWidth <= clientWidth`.
+- **Contrast:** a probe over every visible text element compares the computed colour (with ancestor opacity) against the first opaque background: at least 4.5:1, or 3:1 for large text. Disabled controls are exempt. The probe ran on sign-in, Overview, Candidates, Applications, Vacancies, Interviews, Recruitment tasks and the three settings tabs at 360 and 1280 px in both themes: 0 failures. With the old calendar `opacity` rules injected it reports the outside-month days at 2.44:1, so it does catch that failure.
+
+## Journeys
+
+P = pass, F = fail, n/a = not applicable.
+
+| Journey                                                                    | Keyboard | Focus | Names | Announced | No sideways scroll | Contrast | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------------- | -------- | ----- | ----- | --------- | ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sign in                                                                    | P        | P     | P     | P         | P                  | P        | Tab reaches the RecruitmentOS link, "Email address", "Password" and "Sign in". A wrong password shows "Invalid email or password" in `role="alert"`.                                                                                                                                                                                                                                                                                                                                                                                 |
+| Overview                                                                   | P        | P     | P     | n/a       | P                  | P        | "Skip to content" moves to `#main-content`. **Fixed (job 028):** at 360 and 640 px the search button had no name; it is now `button "Search your workspace"` at every width. The search dialog opens with Enter and Escape returns focus to the button.                                                                                                                                                                                                                                                                              |
+| Candidates: search, Filters, Add candidate with a validation error         | P        | P     | P     | P         | P                  | P        | Typing in "Search candidates" narrows the list. "Filters" reports `aria-expanded` true and false. Add candidate opens a labelled dialog; submitting with an empty name moves focus to "Name" with the browser message "Please fill out this field.", and an invalid email to "Email" with "Please include an '@' …". Escape closes the dialog and focus returns to "Add candidate". **Fixed (job 028):** the table's hidden "Actions" header widened the page at 1280 px.                                                            |
+| Applications board: move a card with the "Move … to" select                | P        | P     | P     | P         | P                  | P        | ArrowDown on "Move Fictional Søren-Ōkāfor Nguyễn فاطمة · Fictional Data Analyst to" moved the card from Screening to Interview, and "Application stage updated." appeared in `role="status"`. Board pagination ("Show", the count text, Previous/Next) stays inside the panel at 360 px. **Fixed (job 028):** the board's hidden "Move … to" labels widened the page to 1335 px at a 345 px client width (360 px viewport); the board now scrolls only inside its panel, with and without a vacancy filter.                          |
+| Vacancy → "Review changes from role"                                       | P        | P     | P     | n/a       | P                  | P        | At 360×740 in both themes the dialog is 17–328 px in a 345 px client width, its `scrollWidth` equals its `clientWidth` and no child sits outside it. Tab reaches both change checkboxes, Cancel and, once a change is ticked, "Apply selected changes". Escape closes it and focus returns to "Review changes from role". No change was needed.                                                                                                                                                                                      |
+| Interviews: month, week and day, plus "+N more"                            | P        | P     | P     | n/a       | P                  | P        | **Fixed (job 028):** "+N more" is named `+3 more interviews on 18 Nov 2026` (week) and `+20 more interviews on 18 Nov 2026` (month); it is 24 px tall; Enter opens the day view for 18 Nov 2026 with all 23 interviews. Outside-month day numbers measure 5.39:1 (light) and 8.43:1 (dark), cancelled interviews 6.85:1 and 7.51:1, still struck through. "Previous/Next month/week" and the Month/Week/Day buttons work with Enter. The grid scrolls inside `.calendar-scroll`.                                                     |
+| Settings: the three tabs, creating an API token, the Revoke confirm dialog | P        | P     | P     | P         | P                  | P        | Enter on each tab link opens it and marks it `aria-current="page"`. The active "API tokens" tab is `rgb(178, 169, 255)` on `rgb(25, 21, 47)` text in dark (8.42:1) and `rgb(67, 56, 202)` with white text in light (7.90:1), as job 017 set. Creating a token announces "Your token is ready. Copy it now; it cannot be displayed again." in `role="status"`. "Revoke" opens the "Revoke token?" alert dialog on Cancel; Escape returns focus to "Revoke"; confirming shows "API token revoked.".                                    |
+| Phone menu: open and close                                                 | P        | P     | P     | P         | P                  | P        | **Fixed (job 028):** with the menu closed, Tab from page load went through about 20 off-screen sidebar controls. Now it goes "Skip to content", then "Open navigation", then "Search your workspace". "Open navigation" sets `aria-expanded="true"`, the sidebar becomes visible at once and its links are reached with Shift+Tab and work with Enter. Closing (the button again, the scrim or a link) slides it out and hides it after the 0.2 s slide. At 1280 px the sidebar links stay in the tab order after "Skip to content". |
+
+Every page in this list passed the sideways-scroll check at 360×740, 640×800 and 1280×800 in both themes: `/app`, `/app/candidates`, a candidate profile, `/app/vacancies`, `/app/roles`, `/app/pipeline` (board, with and without a vacancy filter), `/app/tasks` (board), `/app/interviews` (month and week), `/app/offers`, `/app/onboarding`, `/app/activity`, `/app/notifications`, `/app/settings/profile`, `/app/settings/team` and `/app/settings/api-tokens`. The application board, the task board, the candidates table and the calendar still scroll sideways inside their own panels. At 360 px the snapshot of each page's first view showed no unnamed button, link, select or input.
+
+The fictional name "Fictional Søren-Ōkāfor Nguyễn فاطمة" shows in full at 360 px on `/app/candidates`, on the candidate profile and on the application board card.
+
+## Known gaps
+
+- No real screen reader (NVDA, VoiceOver) was run; names and states come from Chromium's accessibility tree only.
+- Only Chromium was checked. Firefox, Safari and mobile browsers are not covered.
+- D-13 (conformance level and browser matrix) is still undecided.
+- There is no automated accessibility lint or axe check: it needs a new dependency (for example `eslint-plugin-jsx-a11y` or axe-core) that the owner must approve.
+- 640×800 stands in for 200% zoom; browser zoom itself and text-only zoom were not exercised.
+- Observed and not fixed:
+  - After a card is moved with the "Move … to" select, focus falls back to the page body, because the select is rendered again in the new column.
+  - After an API token is revoked, focus falls back to the page body, because the Revoke button is removed.
+  - Opening the phone menu leaves focus on "Open navigation"; the menu links come before it in the tab order and are reached with Shift+Tab. The phone menu has no Escape-to-close.
+  - The workspace search dialog opens with focus on "Close dialog" rather than its search field, because `showModal()` moves focus after React's `autoFocus`.
+  - A list search or filter change updates the count in the heading but does not announce the new result count.
+  - Form validation in the record dialogs relies on the browser's native messages, not in-page error text.
+
+## Statement
+
+This checklist records what was checked and what was found. It is not a WCAG 2.2 AA conformance claim, an audit report or a certification, and none should be inferred from it.

@@ -87,6 +87,10 @@ export function calendarCells(
     return { day, shown, hidden: all.length - shown.length };
   });
 }
+/** The "+N more" button's name: the visible text first, then the day it opens. */
+export function calendarMoreLabel(hidden: number, day: string): string {
+  return `+${hidden} more interviews on ${formatDate(day)}`;
+}
 export function CalendarScreen() {
   const { team, role } = useWorkspace();
   const linkedRecord = useSearchParams().get("record");
@@ -363,6 +367,7 @@ export function CalendarScreen() {
                         {hidden > 0 && (
                           <button
                             className="calendar-more"
+                            aria-label={calendarMoreLabel(hidden, day)}
                             onClick={() => {
                               setAnchor(day);
                               setView("day");

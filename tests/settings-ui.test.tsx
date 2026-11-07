@@ -7,6 +7,7 @@ import {
   deviceListMessage,
   ProfileSettings,
 } from "../src/components/settings/profile-settings";
+import { rules } from "./helpers/css";
 
 const workspace = {
   user: {
@@ -18,14 +19,6 @@ const workspace = {
   role: "owner",
   environment: "Local development",
 };
-/** Innermost `selector { body }` blocks, so rules inside media queries count too. */
-function rules(file: string) {
-  const css = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
-  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({
-    selector: match[1].trim(),
-    body: match[2],
-  }));
-}
 
 describe("settings navigation", () => {
   it("marks one current tab with the primary button style", () => {
