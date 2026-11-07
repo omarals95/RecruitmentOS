@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const LIMIT_MS = 60_000;
 let dataDir: string;
 
-async function run(script: string) {
+async function run(script: string, args: string[] = []) {
   const env: Record<string, string> = {
     DATABASE_MODE: "pglite",
     ALLOW_LOCAL_DB: "true",
@@ -33,12 +34,16 @@ async function run(script: string) {
     stderr: string;
     timedOut: boolean;
   }>((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", script], {
-      cwd: root,
-      // NODE_ENV stays unset, as with npm run db:migrate and db:seed.
-      env: env as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", script, ...args],
+      {
+        cwd: root,
+        // NODE_ENV stays unset, as with npm run db:migrate and db:seed.
+        env: env as NodeJS.ProcessEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let stdout = "",
       stderr = "",
       timedOut = false;
@@ -69,7 +74,7 @@ async function expectExit(script: string, line: string) {
   expect(result.stdout.includes(line), `${script} printed ${line}`).toBe(true);
 }
 
-describe("db:migrate and db:seed exit on their own", () => {
+describe("db:migrate, db:seed and erase:candidate exit on their own", () => {
   beforeAll(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "recruitmentos-scripts-exit-"));
   });
@@ -111,6 +116,29 @@ describe("db:migrate and db:seed exit on their own", () => {
         "scripts/seed-local.ts",
         "Fictional seed account already exists. No records changed.",
       ),
+    LIMIT_MS + 30_000,
+  );
+
+  it(
+    "refuses to erase an unknown candidate for the seed owner and exits 1",
+    async () => {
+      const result = await run("scripts/erase-candidate.ts", [
+        "--team",
+        "fictional-studio",
+        "--candidate",
+        randomUUID(),
+        "--owner",
+        "recruiter@example.test",
+        "--confirm-name",
+        "Fictional Nobody",
+      ]);
+      expect(result.timedOut, "erase-candidate still running").toBe(false);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr.trim()).toBe(
+        "Candidate not found in this team. Nothing was changed.",
+      );
+    },
     LIMIT_MS + 30_000,
   );
 });

@@ -7,6 +7,7 @@ import {
   assertStorageSchema,
   STORAGE_SCHEMA_VERSION,
 } from "../src/db/storage-schema";
+import { eraseCandidate } from "../src/lib/candidate-erasure";
 import { expireCvReservations, getCvDownload } from "../src/lib/cvs";
 import { withTeam } from "../src/lib/db-team";
 import type { Principal } from "../src/lib/principal";
@@ -77,7 +78,7 @@ describe("storage reference migration and startup check", () => {
       status: 503,
       code: "storage_schema_mismatch",
     });
-    expect(STORAGE_SCHEMA_VERSION).toBe(4);
+    expect(STORAGE_SCHEMA_VERSION).toBe(5);
     await expect(assertStorageSchema(pg)).resolves.toBeUndefined();
   });
 
@@ -85,6 +86,7 @@ describe("storage reference migration and startup check", () => {
     "0008_pending_s3_upload_index.sql",
     "0017_bulk_intake_tombstones.sql",
     "0018_blob_storage_enablement.sql",
+    "0020_speed_log.sql",
   ])
     it(`refuses a database migrated only through ${through.slice(0, 4)} and accepts the full set`, async () => {
       const partial = new PGlite();
@@ -102,14 +104,14 @@ describe("storage reference migration and startup check", () => {
     });
 
   it("refuses a marker the owner changed to another version", async () => {
-    await pg.exec("UPDATE db_boundary.storage_schema SET version=5");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version=6");
     try {
       await expect(assertStorageSchema(pg)).rejects.toMatchObject({
         status: 503,
         code: "storage_schema_mismatch",
       });
     } finally {
-      await pg.exec("UPDATE db_boundary.storage_schema SET version=4");
+      await pg.exec("UPDATE db_boundary.storage_schema SET version=5");
     }
   });
 
@@ -201,5 +203,56 @@ describe("storage reference migration and startup check", () => {
         retained_files: 0,
       },
     ]);
+  });
+
+  it("erases the legacy candidate: its ready S3 row releases the team charge and every row loses its name", async () => {
+    const result = await eraseCandidate(p, candidate, {
+      confirmName: "Fictional Legacy Candidate",
+    });
+    expect(result).toMatchObject({
+      alreadyErased: false,
+      removed: { cvFiles: 3 },
+      cvStorage: { deleted: 0, waiting: 0, deleteAfter: null },
+    });
+    expect(
+      (
+        await pg.query(
+          "SELECT id, status, candidate_id, original_name, erasure_id, object_key FROM app.uploads ORDER BY id",
+        )
+      ).rows,
+    ).toEqual(
+      beforeUploads.map((row) => ({
+        id: row.id,
+        status: "rejected",
+        candidate_id: null,
+        original_name: null,
+        erasure_id: result.erasureId,
+        object_key: row.object_key,
+      })),
+    );
+    // Unbound legacy rows were charged to the team only; no store row changes for them.
+    expect(
+      (
+        await pg.query(
+          "SELECT used_bytes::int, reserved_bytes::int, retained_bytes::int, used_files, reserved_files, retained_files FROM app.storage_usage WHERE team_id='legacy-team'",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        used_bytes: 0,
+        reserved_bytes: 0,
+        retained_bytes: 0,
+        used_files: 0,
+        reserved_files: 0,
+        retained_files: 0,
+      },
+    ]);
+    expect(
+      (
+        await pg.query(
+          "SELECT store, used_bytes::int + reserved_bytes::int + retained_bytes::int AS bytes, used_files + reserved_files + retained_files AS files FROM storage_ledger.stores",
+        )
+      ).rows,
+    ).toEqual([{ store: "fictional-a", bytes: 0, files: 0 }]);
   });
 });
