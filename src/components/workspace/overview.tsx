@@ -38,6 +38,7 @@ import {
   useWorkspace,
 } from "./client";
 import { markNotificationsRead } from "./optimistic";
+import { useReadyTiming } from "./speed-log";
 import {
   activityPath,
   analyticsPath,
@@ -111,6 +112,7 @@ interface AnalyticsData extends HiringMetricData {
 export function Overview() {
   const { team, user, role } = useWorkspace();
   const result = useApi<OverviewData>(OVERVIEW_PATH);
+  useReadyTiming("tab.overview", !!result.data);
   const [editor, setEditor] = useState<ResourceName | null>(null);
   if (!team) return <NoTeam />;
   return (
@@ -454,6 +456,7 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
   const result = useApi<AnalyticsData>(analyticsPath(dates.from, dates.to));
+  useReadyTiming(talent ? "tab.insights" : "tab.analytics", !!result.data);
   const overview = useApi<OverviewData>(talent ? OVERVIEW_PATH : null);
   if (!team) return <NoTeam />;
   return (
@@ -716,6 +719,7 @@ export function ActivityScreen() {
     data: ActivityItem[];
     pagination: { total: number; totalPages: number };
   }>(activityPath(page, search, kind));
+  useReadyTiming("tab.activity", !!result.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -858,6 +862,7 @@ export function Notifications() {
     total?: number;
     limited?: boolean;
   }>(NOTIFICATIONS_PATH);
+  useReadyTiming("tab.notifications", !!result.data);
   const identity = useCacheIdentity();
   const [show, setShow] = useState("all");
   const [error, setError] = useState("");

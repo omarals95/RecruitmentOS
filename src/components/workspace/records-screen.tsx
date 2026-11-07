@@ -87,6 +87,8 @@ import {
   humanError,
 } from "./client";
 import { moveRecord, saveFollowup, updateRecord } from "./optimistic";
+import { startSpeedTimer, useReadyTiming } from "./speed-log";
+import type { SpeedTab } from "@/domain/speed";
 
 import { Loading } from "./skeleton";
 import {
@@ -286,6 +288,11 @@ export function RecordsScreen({ section }: { section: string }) {
     ],
   );
   const result = useApi<ListResponse>(listPath(resource, params));
+  // The interviews tab is timed by its calendar, which shows this list only on request.
+  useReadyTiming(
+    section === "interviews" ? null : `tab.${section as SpeedTab}`,
+    !!result.data,
+  );
   // With a vacancy selected, the application board covers the whole pipeline in a stable order.
   const boardQuery = useMemo(() => {
     if (resource !== "applications" || mode !== "board" || !vacancy)
@@ -376,6 +383,9 @@ export function RecordsScreen({ section }: { section: string }) {
     setError("");
     setNotice("");
     setConflict(null);
+    const saved = startSpeedTimer(
+      resource === "tasks" ? "task.move" : "application.stage",
+    );
     // The card moves at once; a failed save puts it back and rereads only this record.
     void moveRecord(dataCache, teamRequester(team.id), {
       teamId: team.id,
@@ -384,6 +394,7 @@ export function RecordsScreen({ section }: { section: string }) {
       target: value,
       label: `Moving ${recordLabel(record)} to ${moveTargetName(value)}`,
     }).then((outcome) => {
+      if (outcome.ok) saved();
       if (outcome.ok)
         setNotice(
           resource === "tasks" ? "Task moved." : "Application stage updated.",

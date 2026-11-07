@@ -256,3 +256,21 @@ export const bulkIntakeItems = appSchema.table(
     index("bulk_intake_items_batch_idx").on(t.teamId, t.batchId, t.createdBy),
   ],
 );
+/** Speed log (0020): action and route timings per team, never ids, names or content; 30 days. */
+export const speedSamples = appSchema.table(
+  "speed_samples",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    kind: text("kind").$type<"action" | "route">().notNull(),
+    name: text("name").notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    dbMs: integer("db_ms"),
+    recordedAt: time("recorded_at")
+      .notNull()
+      .default(sql`date_trunc('hour', now())`),
+  },
+  (t) => [index("speed_samples_team_recorded_idx").on(t.teamId, t.recordedAt)],
+);

@@ -49,6 +49,7 @@ import {
   type WorkspaceIdentity,
 } from "./client";
 import { initials } from "./helpers";
+import { markNavigation } from "./speed-log";
 import { NOTIFICATIONS_PATH, prefetchTabs } from "./tab-requests";
 
 export const navigation: {
@@ -275,6 +276,7 @@ function Shell({ children }: { children: React.ReactNode }) {
                 <Link
                   className={`nav-link ${pathname === item.href || (item.href !== "/app" && pathname.startsWith(item.href + "/")) ? "active" : ""}`}
                   href={item.href}
+                  onClick={markNavigation}
                   aria-current={pathname === item.href ? "page" : undefined}
                 >
                   <Icon size={18} aria-hidden="true" />

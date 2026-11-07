@@ -301,7 +301,7 @@ function TeamSettingsContent() {
         </div>
         <Users size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation active="team" />
+      <SettingsNavigation active="team" role={role} />
       {error && (
         <div className="notice error" role="alert">
           {error} Your unsaved fields are retained.

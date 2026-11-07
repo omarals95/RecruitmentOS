@@ -18,6 +18,7 @@ import {
   humanError,
 } from "./client";
 import { dataOf, formatDate, recordLabel } from "./helpers";
+import { useReadyTiming } from "./speed-log";
 import { calendarDays, interviewRangePath } from "./tab-requests";
 import {
   Badge,
@@ -137,6 +138,7 @@ export function CalendarScreen() {
     loadRange,
   );
   const events = range.data ?? [];
+  useReadyTiming("tab.interviews", !!range.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">

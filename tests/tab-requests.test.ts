@@ -7,6 +7,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { navigation } from "../src/components/workspace/shell";
+import { SPEED_TABS } from "../src/domain/speed";
 import {
   BUCKETS_PATH,
   OVERVIEW_PATH,
@@ -32,6 +33,15 @@ describe("first-load requests of the main tabs", () => {
         .filter((href) => !href.startsWith("/app/settings"))
         .sort(),
     );
+  });
+
+  it("times every navigation tab except settings in the speed log", () => {
+    expect(
+      navigation
+        .map((item) => item.href)
+        .filter((href) => !href.startsWith("/app/settings"))
+        .map((href) => (href === "/app" ? "overview" : href.slice(5))),
+    ).toEqual([...SPEED_TABS]);
   });
 
   it("builds the prefetched tabs' paths with the screens' own default builders", () => {

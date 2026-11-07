@@ -9,12 +9,14 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { useApi } from "./client";
+import { useReadyTiming } from "./speed-log";
 import { candidateProfileRequests } from "./tab-requests";
 import { RecordEditor } from "./editor";
 import { Loading, LoadError, RecordDetail } from "./records-screen";
 
 export function CandidateProfile({ id }: { id: string }) {
   const result = useApi<{ data: RecordDto }>(candidateProfileRequests(id)[0]);
+  useReadyTiming("candidate.open", !!result.data);
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;

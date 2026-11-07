@@ -18,6 +18,7 @@ import {
   type Loader,
 } from "./data-cache";
 import type { Requester } from "./optimistic";
+import { speedLog, startSpeedLog } from "./speed-log";
 
 export interface WorkspaceIdentity {
   user: { id: string; name: string; email: string };
@@ -39,6 +40,7 @@ export function WorkspaceProvider({
   // Children subscribe first; then everything cached for another user or team is dropped.
   useEffect(() => {
     dataCache.setIdentity(teamId ? { userId, teamId } : null);
+    startSpeedLog()?.setTeam(teamId);
   }, [userId, teamId]);
   return (
     <WorkspaceContext.Provider value={value}>
@@ -121,6 +123,13 @@ export async function requestJson<T>(
       credentials: "same-origin",
       cache: "no-store",
     });
+    // One in five responses gives a route timing: method, path pattern and Server-Timing only.
+    if (teamId)
+      speedLog()?.route(
+        init.method ?? "GET",
+        path,
+        response.headers.get("server-timing"),
+      );
     let body: unknown;
     try {
       body = await response.json();
@@ -269,6 +278,7 @@ export function teamRequester(teamId: string): Requester {
 /** Team switch and sign-out: nothing cached for one team may be shown in another. */
 export function clearWorkspaceCache() {
   dataCache.clear();
+  speedLog()?.clear();
 }
 /**
  * Cached data at once (refreshing in the background), or loading without it. `load` replaces the

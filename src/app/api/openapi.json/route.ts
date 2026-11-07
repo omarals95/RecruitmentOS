@@ -931,6 +931,70 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  const speedSummaryShape =
+    "{data:[{kind, name, samples, medianMs, p95Ms, medianDbMs?, p95DbMs?}]}";
+  paths["/api/v1/speed-samples"] = {
+    post: operation(
+      [],
+      {
+        summary: "Record speed log timings",
+        description: `Session only: any signed-in team member, viewers included (Bearer tokens get 403 session_required). Send {samples:[{kind, name, durationMs, dbMs?}]} with 1 to 50 samples and at most 16 KiB. kind "action" takes one of the fixed action names (task.move, application.stage, tab.<section> for each main tab, candidate.open, candidate.save, interview.schedule); kind "route" takes "<METHOD> /api/v1/<pattern>" of at most 80 characters, where every path segment is a plain lowercase word or [id], and may carry dbMs. durationMs and dbMs are whole milliseconds from 0 to 600000. Anything else, including an unknown key, dbMs on an action or a larger body, returns 400 invalid_input. Stores timings and names only, never ids, names or content, with the time rounded to the hour; one write also deletes at most 1000 of the team's rows older than 30 days. Nothing is audited. Returns 202 {accepted}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["samples"],
+            additionalProperties: false,
+            properties: {
+              samples: {
+                type: "array",
+                minItems: 1,
+                maxItems: 50,
+                items: {
+                  type: "object",
+                  required: ["kind", "name", "durationMs"],
+                  additionalProperties: false,
+                  properties: {
+                    kind: { enum: ["action", "route"] },
+                    name: { type: "string", maxLength: 80 },
+                    durationMs: {
+                      type: "integer",
+                      minimum: 0,
+                      maximum: 600000,
+                    },
+                    dbMs: { type: "integer", minimum: 0, maximum: 600000 },
+                  },
+                },
+              },
+            },
+          },
+          {
+            samples: [
+              { kind: "action", name: "task.move", durationMs: 180 },
+              {
+                kind: "route",
+                name: "PATCH /api/v1/tasks/[id]",
+                durationMs: 42,
+                dbMs: 12,
+              },
+            ],
+          },
+        ),
+      },
+      { "202": { description: "{accepted} samples stored." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/teams/speed"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read the team's speed log summary",
+        description: `Session only: a signed-in team owner or admin; others get 403 speed_log_forbidden. Over the team's samples from the last 30 days, one row per kind and name, ordered by kind then name: samples (count), medianMs and p95Ms of the durations and, for routes, medianDbMs and p95DbMs (null when no db time was reported), rounded to whole milliseconds. Holds timings and route names only. Nothing is audited. Returns ${speedSummaryShape}.`,
+      },
+      { "200": { description: speedSummaryShape } },
+      { sessionOnly: true },
+    ),
+  };
   paths["/api/v1/cvs/storage-reconciliation"] = {
     post: operation(
       ["cvs:write"],
