@@ -116,6 +116,8 @@ GRANT EXECUTE ON FUNCTION tenant_context.release_blob_read(uuid) TO recruitmento
 GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_call(text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_export(text, integer, text[]) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.purge_bulk_intake(uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.set_storage_limits(bigint, integer, integer) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.release_blob_charge(text, uuid) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and
