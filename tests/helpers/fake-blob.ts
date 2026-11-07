@@ -144,7 +144,8 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
       const object = objects.get(pathname);
       if (!object) return null;
       return {
-        sizeBytes: object.headSize ?? object.reportedSize ?? object.bytes.length,
+        sizeBytes:
+          object.headSize ?? object.reportedSize ?? object.bytes.length,
         mimeType: object.headMimeType ?? object.mimeType,
         uploadedAt: object.uploadedAt ?? new Date(),
       };
@@ -169,8 +170,7 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
             uploadedAt: object.uploadedAt ?? new Date(),
           };
         }),
-        cursor:
-          start + limit < matching.length ? String(start + limit) : null,
+        cursor: start + limit < matching.length ? String(start + limit) : null,
       };
     },
   };

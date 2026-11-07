@@ -294,7 +294,10 @@ export async function getStorage(): Promise<StorageGateway | BlobGateway> {
     const { createVercelBlobClient } = await import("./vercel-blob-client.ts");
     return createBlobGateway(
       binding,
-      createVercelBlobClient({ storeId: binding.store, oidcToken: currentToken }),
+      createVercelBlobClient({
+        storeId: binding.store,
+        oidcToken: currentToken,
+      }),
     );
   }
   if (provider !== "s3") throw providerUnsupported();

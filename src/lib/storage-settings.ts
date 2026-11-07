@@ -9,7 +9,12 @@ import type { Principal } from "@/lib/principal";
 /** Both storage limits are off (null) or both set; a null rate turns the upload rate limit off. */
 export const storageSettingsSchema = z
   .object({
-    maxBytes: z.number().int().min(1_000_000).max(10_000_000_000_000).nullable(),
+    maxBytes: z
+      .number()
+      .int()
+      .min(1_000_000)
+      .max(10_000_000_000_000)
+      .nullable(),
     maxFiles: z.number().int().min(1).max(1_000_000).nullable(),
     uploadRequestsPerMinute: z.number().int().min(1).max(600).nullable(),
   })
