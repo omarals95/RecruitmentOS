@@ -1,5 +1,29 @@
 # Validation before deployment
 
+## Update: private Vercel Blob CV storage enablement (P1-15a)
+
+**Owner's live run.** On 7 November 2026 the owner ran `scripts/blob-live-verify.ts` against the Preview Blob store; agents did not run it. Results:
+
+- PASS headers.
+- PASS no-overwrite.
+- PASS replay.
+- PASS oversized single PUT refused.
+- PASS PUT started after expiry refused.
+- PASS deleted object reads missing.
+- PASS cleanup.
+- OBSERVED a PUT started before expiry and finished after it was refused (no object).
+- FAIL a wrong content type was accepted by the provider.
+- FAIL multipart with the PUT ticket bypassed the size limit (oversized parts and completion accepted; uncompleted parts cannot be listed).
+- OBSERVED retrying a still-valid ticket after deletion recreated the object.
+
+Mitigations ([blob-security-design.md](blob-security-design.md#live-provider-verification)): completion checks size and type with `head` and never trusts the provider, Blob reservations last 15 minutes with tickets still capped at 300 s, and rejected or abandoned objects are deleted only 10 minutes after their reservation expired, with the retained charge freed only once `head` confirms the object missing. Residual risk: multipart with a valid PUT ticket can bypass the size limit, and uncompleted parts cannot be listed or deleted by the application, so store usage can exceed the ledger until the provider discards them; limits and budgets are application limits, not hard provider or billing caps.
+
+**Local validation.** On 7 November 2026, with Node v24.20.0, the local revision passed `npm run typecheck`, `npm run lint`, `npm test` (886 Vitest tests in 71 files), `npm run test:storage` (57 native storage tests), `npm run build`, Prettier repo-wide (`npx prettier --check . --end-of-line auto`) and `npm audit --audit-level=moderate` (0 vulnerabilities); `tests/runtime-role-grants.test.ts` passed 64 tests on its own. No dependency was added. Migration `0018_blob_storage_enablement.sql` applied to the worktree's PGlite: `db_boundary.storage_schema` reads 3 and `storage_ledger.budgets` still holds 600,000,000 / 2,000 (Production) and 200,000,000 / 500 (Preview and development). On the dev server, signed in with the fictional seed owner, the Team & access **CV storage** panel showed usage, both toggles and Save; 0.5 GB and 100 files saved with "CV storage settings saved.", showed again after a reload, and Activity on Overview listed "Updated CV storage settings".
+
+New and changed tests: `tests/storage.test.ts` (provider selection, OIDC refusals), `tests/blob-client-contract.test.ts` (OIDC mode; head, delete and list for the fake and the real client), `tests/csp.test.ts`, `tests/cv-blob-transfer.test.ts` (oversized and wrong-type rejection without a read, 15-minute reservations), `tests/blob-reconciliation.test.ts` (post-expiry ordering, list pass, caps, counts only, server trigger, endpoint), `tests/team-storage-settings.test.ts` (settings, validation, audit, 429, helper boundary), `tests/tenant-context.test.ts` (helpers under the split data role), `tests/settings-ui.test.tsx`, and the 200-file batch cases in `tests/bulk-intake.test.ts`, `tests/bulk-cv-queue.test.ts` and `tests/workspace-render.test.tsx`.
+
+No remote service was contacted: tests use the fake Blob client, a stub provider and PGlite with fictional data only, and no agent ran the live script. Hosted Preview switch-on waits for the owner: the environment settings in [deployment §5](deployment.md#5-cv-storage), migration `0018` and the role template rerun.
+
 ## Update: documentation and configuration reconciliation (WP-15)
 
 On 7 November 2026, the local revision passed TypeScript, ESLint on the changed component, Prettier on the changed files and repo-wide (`npx prettier --check . --end-of-line auto`), a production build, 829 Vitest tests in 69 files and 55 native storage tests; `tests/runtime-role-grants.test.ts` passed 64 tests on its own. The change is documentation, one role-template comment, one sentence of API-token page copy and one CI step, which now runs `npm run format:check`. The runbooks, the Preview change plan and the identity plan now record the Preview evidence and the precise hosted startup checks, the BRD, SRS and brief carry dated status notes, and [neon-database-runbook.md](neon-database-runbook.md#run-the-migration-against-a-neon-database) documents how to migrate a hosted database without `npm run db:migrate`. That procedure was checked locally only: run from a temporary directory holding only `drizzle/`, against a fictional closed loopback port, `scripts/migrate.ts` skipped PGlite and printed its generic connection failure (exit 1), while `npm run db:migrate` from the checkout migrated local PGlite and printed `Local PostgreSQL migrations applied.` although `MIGRATION_DATABASE_URL` was set. No hosted database or other remote service was contacted.
