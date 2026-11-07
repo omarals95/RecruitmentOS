@@ -16,7 +16,7 @@ import type { Principal } from "@/lib/principal";
 import type { StorageGateway } from "@/lib/storage";
 
 /** No ticket for a pathname is valid after its row's expires_at; this grace covers in-flight PUTs. */
-const DELETE_GRACE_MS = 10 * 60 * 1000;
+export const DELETE_GRACE_MS = 10 * 60 * 1000;
 const MAX_CALL_MS = 5000;
 const LIST_PAGE_SIZE = 1000;
 
@@ -45,11 +45,12 @@ function assertSweep(p: Principal, gateway: BlobGateway) {
  * 10 minutes ago is deleted, then confirmed missing by head, and only then has its retained charge
  * released by the owner-run helper. A failed delete or head, or an object still present, keeps the
  * charge; a later run repeats the deletion. Pathnames, IDs and provider errors are never returned.
+ * erasureId limits the pass to the uploads of one candidate erasure.
  */
 export async function releaseRetainedBlobCharges(
   p: Principal,
   gateway: BlobGateway,
-  options: { maxRows: number; deadline: number; now: Date },
+  options: { maxRows: number; deadline: number; now: Date; erasureId?: string },
 ) {
   assertSweep(p, gateway);
   const { store } = gateway.binding;
@@ -68,6 +69,9 @@ export async function releaseRetainedBlobCharges(
             uploads.expiresAt,
             new Date(options.now.getTime() - DELETE_GRACE_MS),
           ),
+          ...(options.erasureId
+            ? [eq(uploads.erasureId, options.erasureId)]
+            : []),
         ),
       )
       .orderBy(asc(uploads.expiresAt), asc(uploads.id))

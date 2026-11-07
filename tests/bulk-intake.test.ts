@@ -395,6 +395,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
         "candidate_id",
         "created_at",
         "created_by",
+        "erased_at",
         "id",
         "mime_type",
         "original_name",

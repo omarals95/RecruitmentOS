@@ -96,8 +96,15 @@ export const activity = appSchema.table(
       .notNull()
       .default({}),
     createdAt: time("created_at").notNull().defaultNow(),
+    /** Set once by the erasure helper, which also clears recordId and redacts summary and metadata. */
+    erasureId: uuid("erasure_id"),
   },
-  (t) => [index("activity_team_created_idx").on(t.teamId, t.createdAt)],
+  (t) => [
+    index("activity_team_created_idx").on(t.teamId, t.createdAt),
+    index("activity_erasure_idx")
+      .on(t.teamId, t.erasureId)
+      .where(sql`${t.erasureId} IS NOT NULL`),
+  ],
 );
 export const uploads = appSchema.table(
   "uploads",
@@ -106,8 +113,9 @@ export const uploads = appSchema.table(
     teamId: text("team_id")
       .notNull()
       .references(() => organization.id),
-    candidateId: uuid("candidate_id").notNull(),
-    originalName: text("original_name").notNull(),
+    /** Null only on an erased row, as is originalName. */
+    candidateId: uuid("candidate_id"),
+    originalName: text("original_name"),
     mimeType: text("mime_type").notNull(),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     status: text("status").notNull().default("pending"),
@@ -128,6 +136,8 @@ export const uploads = appSchema.table(
     blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
     blobDeletedAt: time("blob_deleted_at"),
     putTicketsIssued: integer("put_tickets_issued").notNull().default(0),
+    /** The candidate erasure that made this row rejected and nameless; set once. */
+    erasureId: uuid("erasure_id"),
   },
   (t) => [
     unique("uploads_team_id_id_key").on(t.teamId, t.id),
@@ -145,6 +155,9 @@ export const uploads = appSchema.table(
       .where(
         sql`${t.storageProvider} = 'blob' AND ${t.status} = 'rejected' AND ${t.blobDeletedAt} IS NULL`,
       ),
+    index("uploads_erasure_idx")
+      .on(t.teamId, t.erasureId)
+      .where(sql`${t.erasureId} IS NOT NULL`),
   ],
 );
 export const storageUsage = appSchema.table("storage_usage", {
@@ -239,10 +252,11 @@ export const bulkIntakeItems = appSchema.table(
     createdBy: text("created_by")
       .notNull()
       .references(() => user.id),
-    originalName: text("original_name").notNull(),
-    mimeType: text("mime_type").notNull(),
-    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
-    payloadHash: text("payload_hash").notNull(),
+    /** The four file and hash values are null only on an erased item. */
+    originalName: text("original_name"),
+    mimeType: text("mime_type"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    payloadHash: text("payload_hash"),
     reviewedAt: time("reviewed_at"),
     possibleDuplicates: integer("possible_duplicates"),
     candidateId: uuid("candidate_id"),
@@ -251,9 +265,33 @@ export const bulkIntakeItems = appSchema.table(
     uploadKey: uuid("upload_key"),
     createdAt: time("created_at").notNull(),
     updatedAt: time("updated_at").notNull(),
+    /** Set by the candidate erasure helper, which clears every value column; the row stays as a tombstone. */
+    erasedAt: time("erased_at"),
   },
   (t) => [
     index("bulk_intake_items_batch_idx").on(t.teamId, t.batchId, t.createdBy),
+  ],
+);
+/** Candidate erasure tombstones (0021): ids, team, erasing owner and time only. Owner-only table. */
+export const candidateErasures = appSchema.table(
+  "candidate_erasures",
+  {
+    id: uuid("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    candidateId: uuid("candidate_id").notNull(),
+    erasedBy: text("erased_by")
+      .notNull()
+      .references(() => user.id),
+    erasedAt: time("erased_at").notNull(),
+  },
+  (t) => [
+    unique("candidate_erasures_team_id_candidate_id_key").on(
+      t.teamId,
+      t.candidateId,
+    ),
+    unique("candidate_erasures_team_id_id_key").on(t.teamId, t.id),
   ],
 );
 /** Speed log (0020): action and route timings per team, never ids, names or content; 30 days. */

@@ -79,6 +79,13 @@ const batchNotFound = () =>
     "not_found",
     "This import is not available in the selected team.",
   );
+/** A tombstoned item: its candidate was erased, so a retry must never create it again. */
+const erased = () =>
+  new ApiError(
+    409,
+    "bulk_item_erased",
+    "This candidate was permanently erased by a team owner. It cannot be imported again from this batch.",
+  );
 const expired = () =>
   new ApiError(
     409,
@@ -206,6 +213,7 @@ export async function createBulkItem(
           eq(bulkIntakeItems.id, itemId),
         ),
       );
+    if (item?.erasedAt) throw erased();
     // AI review provenance is checked before anything is created; a replay ignores it.
     const aiReview =
       input.aiReview && !item?.candidateId
@@ -333,13 +341,21 @@ export async function beginBulkItemUpload(
         ),
       );
     if (!row) throw notFound();
+    if (row.erasedAt) throw erased();
     if (!row.candidateId)
       throw new ApiError(
         409,
         "bulk_candidate_required",
         "Import the candidate for this CV before uploading it.",
       );
-    return { ...row, candidateId: row.candidateId };
+    // Only an erased item has no file values, and it was refused above.
+    return {
+      ...row,
+      candidateId: row.candidateId,
+      originalName: row.originalName!,
+      mimeType: row.mimeType!,
+      sizeBytes: row.sizeBytes!,
+    };
   });
   // The stored file metadata is reused for every attempt; the client chooses neither it nor the key.
   const attempt = (clientUploadId: string) =>
@@ -433,6 +449,7 @@ async function batchEntries(tx: TeamTx, p: Principal, batches: BatchRow[]) {
               bulkIntakeItems.batchId,
               batches.map((batch) => batch.id),
             ),
+            isNull(bulkIntakeItems.erasedAt),
           ),
         )
         .orderBy(asc(bulkIntakeItems.createdAt), asc(bulkIntakeItems.id))

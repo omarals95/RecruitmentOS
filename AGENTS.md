@@ -19,7 +19,7 @@ The product scope and acceptance criteria live in `docs/requirements/`:
 - `recruitmentos-brief.md` for context, `recruitmentos-brd.md` for business rules (FR-_, NFR-_), `recruitmentos-srs.md` for engineering requirements (SRS-*) and release gates.
 - `docs/requirements/register.md` maps every requirement ID to code, tests and status. Update the rows you touch.
 
-Before touching identity, tenancy, storage or deployment code, also read `docs/security.md`, `docs/identity-boundary-plan.md`, `docs/mcp.md`, `docs/blob-security-design.md`, `docs/blob-quota-design.md` and `docs/environment-isolation.md`.
+Before touching identity, tenancy, storage or deployment code, also read `docs/security.md`, `docs/identity-boundary-plan.md`, `docs/mcp.md`, `docs/blob-security-design.md`, `docs/blob-quota-design.md`, `docs/environment-isolation.md` and `docs/erasure-runbook.md`.
 
 ## Runtime and fresh-checkout setup
 
@@ -49,6 +49,8 @@ npm run format:check    # prettier; format only the files you changed
 `npm audit --audit-level=moderate` also runs in CI. Never run a repo-wide `--fix` or `prettier --write .`.
 
 Measurement (local PGlite only, never a hosted database): `npm run bench:round-trips` signs in the fictional seed account in process and prints database round trips, db ms and total ms per common action from the `Server-Timing` header. It refuses to run unless `DATABASE_MODE=pglite` and `ALLOW_LOCAL_DB=true`.
+
+Candidate erasure: `npm run erase:candidate` permanently erases one candidate and is owner-run only, for data-protection requests received outside the app (`docs/erasure-runbook.md`). Agents never run it against anything but a throwaway local PGlite with fictional data.
 
 ## Non-negotiable rules
 

@@ -13,6 +13,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
+import { eraseCandidate } from "../src/lib/candidate-erasure";
 import { listCandidateCvs } from "../src/lib/cvs";
 import { roleScopes, type Role } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
@@ -291,7 +292,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 4 }]);
+    ).toEqual([{ version: 5 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -357,5 +358,156 @@ describe("populated fictional baseline upgrade from 0006", () => {
       cwd.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+// Rows written by the 0020 schema, upgraded through 0021: nothing changes until an owner erases.
+describe("upgrade from 0020 to candidate erasure", () => {
+  const pg = new PGlite();
+  const owner = principal(
+    "erasure-upgrade-owner",
+    "erasure-upgrade-team",
+    "owner",
+  );
+  const candidate = randomUUID(),
+    upload = randomUUID(),
+    batch = randomUUID(),
+    item = randomUUID();
+  const tables = {
+    records: "id, team_id, kind, data, version, candidate_id",
+    activity: activityColumns,
+    uploads:
+      "id, team_id, candidate_id, original_name, mime_type, size_bytes, status, object_key, expires_at",
+    bulk_intake_items:
+      "id, team_id, batch_id, original_name, mime_type, size_bytes, payload_hash, reviewed_at, possible_duplicates, candidate_id, upload_id",
+  };
+  const snapshot = async () =>
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(tables).map(async ([table, columns]) => [
+          table,
+          (await pg.query(`SELECT ${columns} FROM app.${table} ORDER BY id`))
+            .rows,
+        ]),
+      ),
+    );
+  let before: Record<string, unknown>;
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0020_speed_log.sql");
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('erasure-upgrade-owner','Fictional Upgrade Owner','erasure-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('erasure-upgrade-team','Fictional Upgrade Team','erasure-upgrade-team','erasure-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('erasure-upgrade-m','erasure-upgrade-team','erasure-upgrade-owner','owner');
+      INSERT INTO storage_ledger.stores(provider,store,environment) VALUES ('s3','fictional-upgrade','development');
+      INSERT INTO app.storage_usage(team_id) VALUES ('erasure-upgrade-team');`);
+    await pg.query(
+      `INSERT INTO app.records(id,team_id,kind,data,created_by) VALUES($1,'erasure-upgrade-team','candidate','{"name":"Fictional Upgrade Erasure"}','erasure-upgrade-owner')`,
+      [candidate],
+    );
+    await pg.query(
+      `INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary) VALUES
+        ('erasure-upgrade-team',$1,'erasure-upgrade-owner','session','created','candidate','Created candidate')`,
+      [candidate],
+    );
+    await pg.query(
+      `INSERT INTO app.uploads(id,team_id,candidate_id,original_name,mime_type,size_bytes,status,object_key,storage_provider,storage_environment,storage_store,created_by,expires_at)
+        VALUES($1,'erasure-upgrade-team',$2,'fictional-upgrade.pdf','application/pdf',300,'pending','teams/erasure-upgrade-team/cvs/fictional-upgrade.pdf','s3','development','fictional-upgrade','erasure-upgrade-owner',now()+interval '1 hour')`,
+      [upload, candidate],
+    );
+    await pg.query(
+      `INSERT INTO app.bulk_intake_batches(id,team_id,created_by,created_at,expires_at) VALUES($1,'erasure-upgrade-team','erasure-upgrade-owner',now(),now()+interval '1 day')`,
+      [batch],
+    );
+    await pg.query(
+      `INSERT INTO app.bulk_intake_items(id,team_id,batch_id,created_by,original_name,mime_type,size_bytes,payload_hash,reviewed_at,possible_duplicates,candidate_id,upload_id,created_at,updated_at)
+        VALUES($1,'erasure-upgrade-team',$2,'erasure-upgrade-owner','fictional-upgrade.pdf','application/pdf',300,$3,now(),0,$4,$5,now(),now())`,
+      [item, batch, "a".repeat(64), candidate, upload],
+    );
+    before = await snapshot();
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+    setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every row, adds empty erasure columns and sets storage schema 5", async () => {
+    expect(await snapshot()).toEqual(before);
+    for (const table of ["activity", "uploads"])
+      expect(
+        (
+          await pg.query(
+            `SELECT count(*)::int AS n FROM app.${table} WHERE erasure_id IS NOT NULL`,
+          )
+        ).rows,
+      ).toEqual([{ n: 0 }]);
+    expect(
+      (
+        await pg.query(
+          "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE erased_at IS NOT NULL",
+        )
+      ).rows,
+    ).toEqual([{ n: 0 }]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 5 }]);
+    expect(
+      (
+        await pg.query<{ name: string }>(
+          "SELECT name FROM public.recruitment_migrations WHERE name LIKE '0021%'",
+        )
+      ).rows,
+    ).toEqual([{ name: "0021_candidate_erasure.sql" }]);
+  });
+
+  it("erases an upgraded candidate with its pre-existing upload and bulk item", async () => {
+    // No CV storage is configured here, so the erasure skips the Blob pass and logs nothing.
+    const lines: unknown[] = [];
+    const logged = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args) => lines.push(args));
+    const result = await eraseCandidate(owner, candidate, {
+      confirmName: "Fictional Upgrade Erasure",
+    }).finally(() => logged.mockRestore());
+    expect(lines).toEqual([]);
+    expect(result.removed).toMatchObject({
+      bulkItems: 1,
+      cvFiles: 1,
+      activityRedacted: 1,
+    });
+    expect(
+      (
+        await pg.query(
+          "SELECT status, candidate_id, original_name, erasure_id FROM app.uploads WHERE id=$1",
+          [upload],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        status: "rejected",
+        candidate_id: null,
+        original_name: null,
+        erasure_id: result.erasureId,
+      },
+    ]);
+    // A rejected S3 reservation releases its charge, as before.
+    expect(
+      (
+        await pg.query(
+          "SELECT reserved_bytes::int, used_bytes::int, retained_bytes::int FROM app.storage_usage WHERE team_id=$1",
+          [owner.teamId],
+        )
+      ).rows,
+    ).toEqual([{ reserved_bytes: 0, used_bytes: 0, retained_bytes: 0 }]);
+    expect(
+      (
+        await pg.query(
+          "SELECT erased_at IS NOT NULL AS erased, original_name, candidate_id FROM app.bulk_intake_items WHERE id=$1",
+          [item],
+        )
+      ).rows,
+    ).toEqual([{ erased: true, original_name: null, candidate_id: null }]);
   });
 });

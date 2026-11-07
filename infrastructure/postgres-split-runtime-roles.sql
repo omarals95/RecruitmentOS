@@ -91,6 +91,7 @@ BEGIN
 END $connect$;
 
 -- recruitmentos_data: recruitment tables under FORCE RLS, the markers and the allowlisted helpers.
+-- The erasure tombstones in app.candidate_erasures are owner-only: neither runtime role gets a grant.
 GRANT USAGE ON SCHEMA app TO recruitmentos_data;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_data;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_data;
@@ -120,6 +121,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.purge_bulk_intake(uuid) TO recruitmento
 GRANT EXECUTE ON FUNCTION tenant_context.set_storage_limits(bigint, integer, integer) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.release_blob_charge(text, uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.claim_blob_reconciliation(text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.erase_candidate(uuid, text, text) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and

@@ -113,6 +113,8 @@ const authTables = [
   "api_tokens",
   "api_rate_limits",
 ];
+/** Owner-only app tables: neither runtime role holds any privilege on them (0021). */
+const ownerOnlyAppTables = ["app.candidate_erasures"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -334,11 +336,19 @@ describe("split runtime role template", () => {
       expect([...evidence.execute].sort(), kind).toEqual(
         [...expected.helpers].sort(),
       );
-      // Only the data role may run the cross-team bulk intake purge.
-      expect(
-        evidence.execute.includes("tenant_context.purge_bulk_intake(uuid)"),
-        kind,
-      ).toBe(kind === "data");
+      // Only the data role may run the cross-team bulk intake purge and the erasure helper.
+      for (const helper of [
+        "tenant_context.purge_bulk_intake(uuid)",
+        "tenant_context.erase_candidate(uuid,text,text)",
+      ])
+        expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
+          kind === "data",
+        );
+      for (const table of ownerOnlyAppTables)
+        expect(
+          evidence.tablePrivileges[table],
+          `${kind} ${table}`,
+        ).toBeUndefined();
       for (const [schema, usage] of Object.entries(expected.schemas))
         expect(evidence.schemaPrivileges[schema], `${kind} ${schema}`).toEqual({
           exists: true,
@@ -371,8 +381,13 @@ describe("split runtime role template", () => {
       ).rows.map((row) => row.name);
     const data = (await collect("data")).evidence;
     const identity = (await collect("identity")).evidence;
-    // Every app table is in the reviewed matrix, with exactly its privileges.
+    // Every app table is in the reviewed matrix, with exactly its privileges, or owner-only.
     for (const table of await tables("app")) {
+      if (ownerOnlyAppTables.includes(table)) {
+        expect(data.tablePrivileges[table], table).toBeUndefined();
+        expect(identity.tablePrivileges[table], table).toBeUndefined();
+        continue;
+      }
       expect(Object.keys(expectedData.tablePrivileges), table).toContain(table);
       expect(data.tablePrivileges[table], table).toEqual(
         (expectedData.tablePrivileges as Record<string, string[]>)[table],
@@ -455,6 +470,11 @@ describe("split runtime role template", () => {
       "SELECT * FROM storage_ledger.blob_read_leases",
       "SELECT * FROM storage_ledger.blob_reconciliation_claims",
       "DELETE FROM storage_ledger.blob_reconciliation_claims",
+      "SELECT * FROM app.candidate_erasures",
+      "INSERT INTO app.candidate_erasures(id,team_id,candidate_id,erased_by,erased_at) VALUES (gen_random_uuid(),'t',gen_random_uuid(),'u',now())",
+      "TRUNCATE app.candidate_erasures",
+      "DELETE FROM app.records",
+      "DELETE FROM app.activity",
       "SELECT tenant_context.audit_token('fictional','token.created')",
       "SELECT tenant_context.audit_grant_reuse('fictional','refresh_token_reused')",
       "UPDATE db_boundary.connection_marker SET singleton = true",
@@ -480,6 +500,8 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.acquire_blob_read('store_fictional0001')",
       "SELECT tenant_context.claim_blob_reconciliation('store_fictional0001')",
       "SELECT tenant_context.purge_bulk_intake(NULL)",
+      "SELECT tenant_context.erase_candidate(gen_random_uuid(), 'Fictional', 'app')",
+      "SELECT * FROM app.candidate_erasures",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",
       "DELETE FROM auth.initial_admin_claim",

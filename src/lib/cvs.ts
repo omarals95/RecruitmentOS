@@ -77,6 +77,11 @@ export const cvUploadSchema = z
   .strict();
 export type CvUploadInput = z.infer<typeof cvUploadSchema>;
 type UploadRow = typeof uploads.$inferSelect;
+/** A row a candidate still owns; only an erased upload has no candidate and no file name. */
+type LiveUpload = UploadRow & { candidateId: string; originalName: string };
+function live(row: UploadRow | undefined): row is LiveUpload {
+  return !!row && row.erasureId === null;
+}
 type CvStorage = StorageGateway | BlobGateway;
 export type CvDto = ReturnType<typeof cvDto>;
 /** Clients choose the download protocol from the reference, never from a hostname. */
@@ -592,7 +597,7 @@ export async function beginCvUpload(
     } catch {
       // Swallowed: the next upload or an owner's cleanup call retries.
     }
-  const row = await withTeam(p, async (tx) => {
+  const row = await withTeam(p, async (tx): Promise<LiveUpload> => {
     await assertCandidate(tx, p, candidateId);
     await lockAllocation(tx, binding);
     const [previous] = await tx
@@ -639,6 +644,7 @@ export async function beginCvUpload(
         : [];
     if (existing) {
       if (
+        !live(existing) ||
         existing.candidateId !== candidateId ||
         existing.originalName !== metadata.originalName ||
         existing.mimeType !== metadata.mimeType ||
@@ -666,7 +672,7 @@ export async function beginCvUpload(
           .set({ putTicketsIssued: sql`${uploads.putTicketsIssued} + 1` })
           .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, existing.id)))
           .returning();
-        return counted;
+        return counted as LiveUpload;
       }
       throw new ApiError(
         409,
@@ -716,7 +722,8 @@ export async function beginCvUpload(
       createdAt: now,
       expiresAt: new Date(now.getTime() + 7 * 86400_000),
     });
-    return created;
+    // Reserved above for this candidate and file name.
+    return created as LiveUpload;
   });
   if (row.status === "ready") return { data: cvDto(row), upload: null };
   client ??= await storageClient();
@@ -785,7 +792,8 @@ export async function completeCvUpload(
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .limit(1);
-    if (!row)
+    // An erased upload reads as missing; completing it changes nothing and writes no activity.
+    if (!live(row))
       throw new ApiError(
         404,
         "CV_NOT_FOUND",
@@ -831,7 +839,7 @@ export async function completeCvUpload(
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .for("update");
-    if (!row)
+    if (!live(row))
       throw new ApiError(
         404,
         "CV_NOT_FOUND",
@@ -893,7 +901,7 @@ async function readyCv(p: Principal, id: string) {
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .limit(1);
-    if (!cv || cv.status !== "ready")
+    if (!live(cv) || cv.status !== "ready")
       throw new ApiError(
         404,
         "CV_NOT_FOUND",

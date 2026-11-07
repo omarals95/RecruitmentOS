@@ -454,6 +454,31 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents candidate erasure as session-only, owner-only and typed", () => {
+    const erasure = document.paths["/api/v1/candidates/{id}/erasure"].post;
+    expect(erasure["x-session-only"]).toBe(true);
+    expect(erasure["x-required-scopes"]).toEqual([]);
+    const text = JSON.stringify(erasure);
+    for (const code of [
+      "team owner",
+      "confirmName",
+      "erasure_forbidden",
+      "session_required",
+      "erasure_confirmation_mismatch",
+      "invalid_input",
+      "not_found",
+      "idempotency_expired",
+      "alreadyErased",
+      "erasureId",
+      "erasedAt",
+      "removed",
+      "cvStorage",
+      "deleteAfter",
+      "There is no MCP tool",
+    ])
+      expect(text).toContain(code);
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],
@@ -472,6 +497,7 @@ describe("OpenAPI contract", () => {
         "PUT /api/v1/teams/storage-settings",
         "POST /api/v1/speed-samples",
         "GET /api/v1/teams/speed",
+        "POST /api/v1/candidates/{id}/erasure",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {
