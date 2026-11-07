@@ -50,6 +50,20 @@ This runbook covers what to do when a migration fails, when a release has to be 
 - The post-restore policy is an **open owner decision**. It is not implemented, and no script for it exists.
 - Proposal: before traffic resumes on a restored database, delete every `auth.session` and `auth.verification` row (everyone signs in again, and pending email links stop working), and set `revoked_at` on every row in `auth.api_tokens`, which covers API tokens and OAuth grants (every integration must be reconnected).
 
+## Two-step sign-in recovery
+
+Two-step sign-in (job 034) is required for owners and admins. When someone loses their authenticator:
+
+1. **Backup codes first.** On **Enter your sign-in code**, choose **Use a backup code instead** and enter one of the 10 codes saved at setup; each works once. Once signed in, **Turn off** and **Turn on** again in My profile moves to a new authenticator, and **Create new backup codes** replaces the codes.
+2. **Another owner resets them.** An owner who owns every team the member belongs to opens **Team & access** and chooses **Reset two-step sign-in** on that member's row. This removes the member's authenticator key and backup codes, signs them out everywhere and forgets their trusted devices; they set it up again at their next sign-in. It writes one `two_step.reset` row in that team's Activity. An owner cannot reset themselves here, and a member who also belongs to a team that owner does not own is refused (409 `member_in_other_team`); they use a backup code or step 3.
+3. **The last owner, by the database owner only.** When the only owner has neither the authenticator nor a backup code, the RecruitmentOS owner runs, from a trusted machine with the owner (migration) connection of the affected database and never a runtime connection:
+
+   ```
+   MIGRATION_DATABASE_URL=<owner connection> npm run two-step:reset -- --email <address> --confirm
+   ```
+
+   It refuses without `--confirm`, connects with `sslmode=verify-full`, and in one owner transaction removes the account's authenticator key and backup codes, turns two-step sign-in off, deletes its sessions, trusted devices and pending challenges, and writes one `two_step.reset` Activity row per team of the account ("Two-step sign-in reset by the database owner", method `owner-script`). It prints "Two-step sign-in was reset for 1 account." or "No account matched." (exit 1), and never a secret. Verify the person's identity out of band first. The account must set up two-step sign-in again at its next sign-in. Locally (`DATABASE_MODE=pglite` and `ALLOW_LOCAL_DB=true`) the same command acts on the fictional PGlite database.
+
 ## Local rehearsal
 
 Run these in a checkout under Node 24. They use fictional data, PGlite and fake storage only, and contact no remote service.
@@ -62,4 +76,4 @@ npx vitest run tests/migration-upgrade.test.ts tests/backup-restore.test.ts test
 - `tests/backup-restore.test.ts`: a PGlite `dumpDataDir()` dump opened with `loadDataDir` keeps the ledger, records, audit rows, private state and CV reference. It passes the storage-schema check, keeps team and private boundaries, and keeps a revoked token and session revoked. A dump taken before a revocation brings the revoked token and session back.
 - `tests/legacy-import.test.ts`: changed-plan reconciliation, `missing` records and balanced totals for the legacy importer (see [migration.md](migration.md#reconciliation-counts)).
 - `tests/live-role-preview-mark.test.ts`: the live role harness refuses a database without the exact Preview approval mark, and only the schema owner can set it.
-- `tests/db-scripts-exit.test.ts`: `npm run db:migrate` and `npm run db:seed` close the local database and exit on their own.
+- `tests/db-scripts-exit.test.ts`: `npm run db:migrate`, `npm run db:seed` and `npm run two-step:reset` close the local database and exit on their own.

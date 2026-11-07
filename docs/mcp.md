@@ -70,7 +70,7 @@ When a reused authorization code or refresh token revokes a connection, the toke
 
 1. In Claude.ai open **Settings → Connectors → Add custom connector**.
 2. Enter the URL `https://<your-domain>/api/mcp` and add it.
-3. Claude registers itself and opens RecruitmentOS. Sign in if asked.
+3. Claude registers itself and opens RecruitmentOS. Sign in if asked. Approving a connection needs two-step sign-in on your account; without it the page says **Turn on two-step sign-in first** and links to the setup, which returns you here.
 4. The consent page names the app (as the app described itself, with invisible and control characters removed), the host you will return to, the team and each permission. Check the return host, pick the team, untick anything the app does not need, and choose **Approve**. Choose **Deny** if you did not start this connection.
 5. Claude's tools now act as you, limited to the approved permissions and your current role.
 
@@ -88,7 +88,7 @@ If ChatGPT shows a redirect URI, it must be `https://chatgpt.com/connector_platf
 
 ## Claude Code with an API token
 
-1. In RecruitmentOS open **Settings → API tokens** and create a token with only the scopes you need, for example `candidates:read` and `recruitment:read`.
+1. In RecruitmentOS open **Settings → API tokens** and create a token with only the scopes you need (creating a token needs two-step sign-in on your account; without it the page links to the setup instead), for example `candidates:read` and `recruitment:read`.
 2. Keep the token in an environment variable, never in a prompt, a URL or a file in your project:
 
    ```sh
@@ -129,6 +129,8 @@ Revoke the token in Settings → API tokens when you no longer need it.
 | OAuth connection (grant)          | 30 days from approval; revocable in Settings → API tokens |
 | OAuth access token (`ros_oat_…`)  | 1 hour, never beyond the connection                       |
 | OAuth refresh token (`ros_ort_…`) | Until the connection ends; replaced on every use          |
+
+Approving a connection and creating a token need two-step sign-in on the approving account (403 `two_step_required` otherwise; Deny always works). Tokens and connections already issued keep working whatever the account's two-step state: Bearer requests and the token endpoint never check it.
 
 Each credential is limited to 60 requests per minute, counting every MCP request, including `initialize` and `tools/list`. Connections count towards the 50 active tokens per user and team. OAuth access tokens are refused by `/api/v1/*`.
 

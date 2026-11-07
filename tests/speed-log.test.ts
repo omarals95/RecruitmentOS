@@ -52,7 +52,7 @@ describe("speed log routes", () => {
     );
   function signIn(p: Principal) {
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: p.userId },
+      user: { id: p.userId, twoFactorEnabled: true },
       session: { activeOrganizationId: p.teamId },
     } as never);
   }

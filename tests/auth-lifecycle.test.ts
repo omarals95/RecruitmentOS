@@ -135,6 +135,8 @@ describe("atomic team creation", () => {
     expect(
       (await t.caller.session(adminCookie))?.session.activeOrganizationId,
     ).toBe(team.id);
+    // The new owner must turn on two-step sign-in before managing the team.
+    adminCookie = (await t.caller.enableTwoStep(adminCookie)).cookie;
   });
 
   it("rolls back a failed owner-member insert without consuming the slug or the creator's five-team allowance", async () => {
@@ -272,7 +274,11 @@ describe("auth rate limits", () => {
         (
           await t.caller.post(
             "sign-in/email",
-            { email: BOOTSTRAP_EMAIL, password: "wrong-fictional-password" },
+            // A different address each time stays under the per-email backoff.
+            {
+              email: `rate-limit-${attempt}@example.test`,
+              password: "wrong-fictional-password",
+            },
             { ip },
           )
         ).status,
@@ -358,7 +364,11 @@ describe("auth rate limits", () => {
         (
           await t.caller.post(
             "sign-in/email",
-            { email: BOOTSTRAP_EMAIL, password: "wrong-fictional-password" },
+            // A different address each time stays under the per-email backoff.
+            {
+              email: `rate-limit-${attempt}@example.test`,
+              password: "wrong-fictional-password",
+            },
             { ip },
           )
         ).status,

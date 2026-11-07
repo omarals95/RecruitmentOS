@@ -3,8 +3,11 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { expect } from "vitest";
 import type { AppDb } from "@/db";
-import { authTables } from "@/db/auth-schema";
+import { symmetricEncrypt } from "better-auth/crypto";
+import { eq } from "drizzle-orm";
+import { authTables, twoFactor, user } from "@/db/auth-schema";
 import { createAuth, type AppAuth } from "@/lib/auth";
+import { base32Decode } from "../../scripts/totp";
 
 export const ORIGIN = "http://localhost:3000";
 export const BOOTSTRAP_EMAIL = "owner@example.test";
@@ -21,6 +24,7 @@ export async function createAuthDb() {
     "0000_auth.sql",
     "0003_initial_admin.sql",
     "0004_protect_initial_admin_claim.sql",
+    "0021_two_step_sign_in.sql",
   ])
     sql +=
       (await readFile(
@@ -31,7 +35,7 @@ export async function createAuthDb() {
     CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
     GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
     GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;
-    GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
+    GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
     SET ROLE identity_flow_runtime;`);
   const db = drizzle(pg, { schema: authTables }) as unknown as AppDb;
   const count = async (query: string, params: unknown[] = []) =>
@@ -113,7 +117,77 @@ export function authCaller(auth: AppAuth, origin = new URL(ORIGIN).origin) {
     expect(response.status).toBe(200);
     return cookieOf(response);
   };
-  return { post, get, session, signIn };
+  const code = async (secret: string) =>
+    (await auth.api.generateTOTP({ body: { secret } })).code;
+  // Turns two-step sign-in on through the real endpoints; the returned cookie is the new session.
+  const enableTwoStep = async (cookie: string, password = PASSWORD) => {
+    const enabled = await post("two-factor/enable", { password }, { cookie });
+    expect(enabled.status).toBe(200);
+    const { totpURI, backupCodes } = (await enabled.json()) as {
+      totpURI: string;
+      backupCodes: string[];
+    };
+    const secret = totpSecret(totpURI);
+    const verified = await post(
+      "two-factor/verify-totp",
+      { code: await code(secret) },
+      { cookie },
+    );
+    expect(verified.status).toBe(200);
+    return { cookie: cookieOf(verified), secret, backupCodes };
+  };
+  // Password, then the authenticator code: the session cookie of a two-step user.
+  const signInWithCode = async (
+    email: string,
+    secret: string,
+    password = PASSWORD,
+  ) => {
+    const challenged = await post("sign-in/email", { email, password });
+    expect(challenged.status).toBe(200);
+    expect(await challenged.json()).toMatchObject({ twoFactorRedirect: true });
+    const verified = await post(
+      "two-factor/verify-totp",
+      { code: await code(secret) },
+      { cookie: cookieOf(challenged) },
+    );
+    expect(verified.status).toBe(200);
+    return cookieOf(verified);
+  };
+  return {
+    auth,
+    post,
+    get,
+    session,
+    signIn,
+    code,
+    enableTwoStep,
+    signInWithCode,
+  };
+}
+
+/** Gives a seeded user two-step sign-in with a known secret, encrypted as Better Auth stores it. */
+export async function seedTwoFactor(
+  db: AppDb,
+  userId: string,
+  secret = "fictional-two-step-secret-0001",
+) {
+  await db.insert(twoFactor).values({
+    userId,
+    secret: await symmetricEncrypt({ key: TEST_SECRET, data: secret }),
+    backupCodes: await symmetricEncrypt({ key: TEST_SECRET, data: "[]" }),
+  });
+  await db
+    .update(user)
+    .set({ twoFactorEnabled: true })
+    .where(eq(user.id, userId));
+  return secret;
+}
+
+/** The raw secret behind an otpauth:// URI, as Better Auth's generateTOTP takes it. */
+export function totpSecret(totpURI: string) {
+  return Buffer.from(
+    base32Decode(new URL(totpURI).searchParams.get("secret") ?? ""),
+  ).toString("utf8");
 }
 
 export function cookieOf(response: Response) {
@@ -180,7 +254,9 @@ export async function setUpAdmin(
     bootstrapToken: BOOTSTRAP_TOKEN,
   });
   const team = await createTeam(caller, cookie, "fictional-first-team");
-  return { cookie, teamId: team.id };
+  // Owners must use two-step sign-in before anything else.
+  const twoStep = await caller.enableTwoStep(cookie);
+  return { cookie: twoStep.cookie, teamId: team.id, secret: twoStep.secret };
 }
 
 // Invites an address, registers and verifies it, and accepts the invitation as that account.
@@ -208,5 +284,8 @@ export async function addMember(
   expect(accepted.status).toBe(200);
   const memberId = ((await accepted.json()) as { member: { id: string } })
     .member.id;
-  return { cookie, memberId };
+  // Owners and admins must use two-step sign-in before anything else.
+  if (role !== "owner" && role !== "admin") return { cookie, memberId };
+  const twoStep = await caller.enableTwoStep(cookie);
+  return { cookie: twoStep.cookie, memberId, secret: twoStep.secret };
 }

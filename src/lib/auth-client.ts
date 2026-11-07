@@ -1,9 +1,13 @@
 "use client";
 
 import { createAuthClient } from "better-auth/react";
-import { organizationClient } from "better-auth/client/plugins";
+import {
+  organizationClient,
+  twoFactorClient,
+} from "better-auth/client/plugins";
 import { ac, roles } from "./auth-roles";
 
 export const authClient = createAuthClient({
-  plugins: [organizationClient({ ac, roles })],
+  // No twoFactorPage: the sign-in form navigates to the code screen itself.
+  plugins: [organizationClient({ ac, roles }), twoFactorClient()],
 });
