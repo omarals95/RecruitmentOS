@@ -114,7 +114,9 @@ describe("CV routes never return inline content (DEC-07)", () => {
         expect(source).not.toMatch(/\bResponse\s*\(/);
         expect(source).not.toMatch(/\bnew\s+Response\b/);
         expect(source).toMatch(/\brunApi\b/);
-        const route = (await import(`../${API_ROOT}${path}`)) as Record<
+        const route = (await import(
+          /* @vite-ignore */ `../${API_ROOT}${path}`
+        )) as Record<
           string,
           (request: Request, context: unknown) => Promise<Response>
         >;
