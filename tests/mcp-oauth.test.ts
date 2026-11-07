@@ -19,7 +19,7 @@ vi.mock("@/lib/auth-session", async () => {
   const { requireVerifiedIdentity } = await import("../src/lib/auth-policy");
   const getSession = async (headers: Headers) =>
     (auth.sessions.get(headers.get("cookie") ?? "") ?? null) as {
-      user: { id: string; emailVerified: boolean };
+      user: { id: string; emailVerified: boolean; twoFactorEnabled: boolean };
       session: { activeOrganizationId: string | null };
     } | null;
   return {
@@ -118,7 +118,11 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
   /** A fictional browser session for a seeded user. */
   function signIn(
     userId: string,
-    options: { verified?: boolean; team?: string | null } = {},
+    options: {
+      verified?: boolean;
+      team?: string | null;
+      twoStep?: boolean;
+    } = {},
   ) {
     const cookie = `fictional-session=${userId}-${randomBytes(4).toString("hex")}`;
     auth.sessions.set(cookie, {
@@ -127,6 +131,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
         name: "Fictional Person",
         email: `${userId}@example.test`,
         emailVerified: options.verified ?? true,
+        twoFactorEnabled: options.twoStep ?? true,
       },
       session: { activeOrganizationId: options.team ?? TEAM },
     });
@@ -701,6 +706,74 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       code_verifier: pkce().verifier,
     });
     expect((await guessed.json()).error).toBe("invalid_grant");
+  });
+
+  it("needs two-step sign-in to approve a connection, but not to deny one", async () => {
+    const clientId = await registered("Fictional Two-Step App");
+    const params = authorizeParams(clientId, pkce().challenge, {
+      scope: "candidates:read",
+    });
+    const setTwoStep = (enabled: boolean) =>
+      asOwner(() =>
+        fixture.client.query(
+          `UPDATE auth."user" SET two_factor_enabled=$1 WHERE id='oauth-recruiter'`,
+          [enabled],
+        ),
+      );
+    const rows = () =>
+      count(
+        "SELECT count(*)::int AS count FROM auth.api_tokens WHERE oauth_client_id=$1",
+        [clientId],
+      );
+    await setTwoStep(false);
+    try {
+      const recruiter = signIn("oauth-recruiter", { twoStep: false });
+      const next = `/oauth/authorize?${new URLSearchParams(params)}`;
+      const card = await authorize(params, recruiter);
+      expect(card.html).toContain("Turn on two-step sign-in first");
+      expect(card.html).toContain("Fictional Two-Step App");
+      expect(card.html).toContain(
+        `href="/two-step-setup?next=${encodeURIComponent(next)}"`,
+      );
+      expect(card.html).not.toContain("Approve");
+      // An owner or admin without two-step sign-in is sent to set it up first.
+      expect(
+        (await authorize(params, signIn("oauth-owner", { twoStep: false })))
+          .redirect,
+      ).toBe(`/two-step-setup?next=${encodeURIComponent(next)}`);
+      const decision = { ...params, scopes: ["candidates:read"] };
+      const refused = await consent(recruiter, {
+        ...decision,
+        decision: "approve",
+      });
+      expect(refused.status).toBe(403);
+      expect((await refused.json()).error).toMatchObject({
+        code: "two_step_required",
+        message:
+          "Turn on two-step sign-in in your profile before creating API tokens or connecting apps.",
+      });
+      expect(await rows()).toBe(0);
+      const denied = await consent(recruiter, {
+        ...decision,
+        decision: "deny",
+      });
+      expect(denied.status).toBe(200);
+      expect(
+        new URL((await denied.json()).data.redirectTo).searchParams.get(
+          "error",
+        ),
+      ).toBe("access_denied");
+      expect(await rows()).toBe(0);
+      await setTwoStep(true);
+      const approved = await consent(
+        signIn("oauth-recruiter", { twoStep: true }),
+        { ...decision, decision: "approve" },
+      );
+      expect(approved.status).toBe(200);
+      expect(await rows()).toBe(1);
+    } finally {
+      await setTwoStep(true);
+    }
   });
 
   it("matches redirect URIs exactly at authorize and token time", async () => {
@@ -1528,10 +1601,10 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
           DELETE FROM auth.api_rate_limits;
           DELETE FROM auth.rate_limit;
           INSERT INTO auth.api_rate_limits(key, window_start, count)
-            SELECT 'fictional-old-' || n, now() - interval '11 minutes' - n * interval '1 second', 1
+            SELECT 'fictional-old-' || n, now() - interval '16 minutes' - n * interval '1 second', 1
             FROM generate_series(1, 600) n;
           INSERT INTO auth.api_rate_limits(key, window_start, count)
-            VALUES ('fictional-fresh', now() - interval '9 minutes', 1);
+            VALUES ('fictional-fresh', now() - interval '14 minutes', 1);
           INSERT INTO auth.rate_limit(key, count, last_request)
             VALUES ('ba:fictional-old', 1, (extract(epoch from now()) * 1000)::bigint - 660000),
                    ('ba:fictional-fresh', 1, (extract(epoch from now()) * 1000)::bigint - 540000);
@@ -1622,7 +1695,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       const seedOld = (key: string) =>
         asOwner(() =>
           fixture.client.query(
-            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ($1, now() - interval '11 minutes', 1)",
+            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ($1, now() - interval '16 minutes', 1)",
             [key],
           ),
         );
@@ -1658,7 +1731,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       const seedOld = () =>
         asOwner(() =>
           fixture.client.query(
-            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ('fictional-ungranted', now() - interval '11 minutes', 1)",
+            "INSERT INTO auth.api_rate_limits(key, window_start, count) VALUES ('fictional-ungranted', now() - interval '16 minutes', 1)",
           ),
         );
       const oldPresent = () =>

@@ -69,11 +69,16 @@ describe("Better Auth verified invite-only flows", () => {
           ),
           "utf8",
         )) +
+        "\n" +
+        (await readFile(
+          new URL("../drizzle/0021_two_step_sign_in.sql", import.meta.url),
+          "utf8",
+        )) +
         `
           CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
           GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
           GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;
-          GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
+          GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
           SET ROLE identity_flow_runtime;
         `,
     ),
@@ -302,6 +307,10 @@ describe("Better Auth verified invite-only flows", () => {
       )
     ).rows[0];
     expect(creator.email).toBe("owner@example.test");
+    // The new owner must turn on two-step sign-in before managing the team.
+    ownerCookie = (
+      await authCaller(auth).enableTwoStep(ownerCookie, "a-long-test-password")
+    ).cookie;
     const invite = await call(
       "organization/invite-member",
       {

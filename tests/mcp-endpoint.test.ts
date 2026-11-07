@@ -424,7 +424,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
 
   it("requires a Bearer token and never reads a valid session cookie", async () => {
     const identity = {
-      user: { id: owner.userId, emailVerified: true },
+      user: { id: owner.userId, emailVerified: true, twoFactorEnabled: true },
       session: { activeOrganizationId: TEAM },
     };
     sessions.getSession.mockResolvedValue(identity);

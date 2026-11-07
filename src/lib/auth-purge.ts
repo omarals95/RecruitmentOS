@@ -31,7 +31,10 @@ function logPurgeFailure(error: unknown) {
   console.error(`auth_purge_failed category=${category}${sqlState}`);
 }
 
-/** Every window is at most 60 seconds, so a row untouched for 10 minutes is spent. */
+/**
+ * API windows last 60 seconds and the per-email sign-in backoff resets after 15 quiet minutes, so
+ * an API row untouched for 15 minutes is spent. Better Auth's windows are at most 60 seconds: 10.
+ */
 async function purgeRateLimits(tx: TeamTx) {
   await tx.delete(apiRateLimits).where(
     inArray(
@@ -42,7 +45,7 @@ async function purgeRateLimits(tx: TeamTx) {
         .where(
           lt(
             apiRateLimits.windowStart,
-            sql`current_timestamp - interval '10 minutes'`,
+            sql`current_timestamp - interval '15 minutes'`,
           ),
         )
         .orderBy(asc(apiRateLimits.windowStart))

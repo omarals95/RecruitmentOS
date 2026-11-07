@@ -129,7 +129,7 @@ describe("UI, API and importer reject the same invalid writes", () => {
     });
     await enforceTestRls(fixture.db);
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: owner.userId },
+      user: { id: owner.userId, twoFactorEnabled: true },
       session: { activeOrganizationId: owner.teamId },
     } as Awaited<ReturnType<typeof getVerifiedSession>>);
     vi.mocked(authenticateApiToken).mockResolvedValue(

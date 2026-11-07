@@ -28,6 +28,19 @@ export function requireVerifiedIdentity<
   return value;
 }
 
+export const TWO_STEP_SETUP_MESSAGE =
+  "Set up two-step sign-in to continue. Owners and admins must use it.";
+/** Owners and admins in any team must use two-step sign-in; callers pass live values only. */
+export function twoStepSetupRequired(
+  twoFactorEnabled: boolean | null | undefined,
+  roles: readonly string[],
+): boolean {
+  return (
+    !twoFactorEnabled &&
+    roles.some((role) => role === "owner" || role === "admin")
+  );
+}
+
 export function validateInvitationRole(
   role: string,
 ): "owner" | "admin" | "recruiter" | "viewer" {

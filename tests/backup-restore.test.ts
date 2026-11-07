@@ -26,6 +26,7 @@ import {
   authCaller,
   createTestAuth,
   PASSWORD,
+  seedTwoFactor,
   type Mail,
 } from "./helpers/auth";
 import { seedIdentity } from "./helpers/db";
@@ -186,8 +187,15 @@ describe("PGlite dump and restore rehearsal", () => {
       password: await hashPassword(PASSWORD),
     });
     const caller = authCaller(createTestAuth(db, mail));
-    keptCookie = await caller.signIn(`${ownerA.userId}@example.test`);
-    revokedCookie = await caller.signIn(`${ownerA.userId}@example.test`);
+    const secret = await seedTwoFactor(db, ownerA.userId);
+    keptCookie = await caller.signInWithCode(
+      `${ownerA.userId}@example.test`,
+      secret,
+    );
+    revokedCookie = await caller.signInWithCode(
+      `${ownerA.userId}@example.test`,
+      secret,
+    );
     // A backup taken before the revocations below.
     const beforeRevocation = await source.dumpDataDir();
     await revokeToken(ownerA, revoked.data.id);

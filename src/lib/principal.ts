@@ -1,6 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getIdentityDb } from "@/db";
 import { member } from "@/db/auth-schema";
+import { TWO_STEP_SETUP_MESSAGE, twoStepSetupRequired } from "./auth-policy";
 import { getVerifiedSession } from "./auth-session";
 import {
   authenticateApiToken,
@@ -65,16 +66,23 @@ export async function requirePrincipal(
         "Create or select a team first.",
       );
     const db = await getIdentityDb();
-    const [membership] = await db
-      .select()
+    // Every membership in one query: the selected team's, and the roles the two-step gate needs.
+    const memberships = await db
+      .select({ organizationId: member.organizationId, role: member.role })
       .from(member)
-      .where(
-        and(
-          eq(member.organizationId, teamId),
-          eq(member.userId, identity.user.id),
-        ),
+      .where(eq(member.userId, identity.user.id));
+    if (
+      twoStepSetupRequired(
+        identity.user.twoFactorEnabled,
+        memberships.map((row) => row.role),
       )
-      .limit(1);
+    )
+      throw new ApiError(
+        403,
+        "two_step_setup_required",
+        TWO_STEP_SETUP_MESSAGE,
+      );
+    const membership = memberships.find((row) => row.organizationId === teamId);
     if (!membership)
       throw new ApiError(
         403,
