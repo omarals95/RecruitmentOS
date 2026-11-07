@@ -57,7 +57,13 @@ import {
   getBulkBatch,
 } from "@/lib/bulk-intake";
 import { eraseCandidate } from "@/lib/candidate-erasure";
-import { beginCvUpload, completeCvUpload, listCandidateCvs } from "@/lib/cvs";
+import {
+  beginCvUpload,
+  completeCvUpload,
+  getCvChunk,
+  getCvManifest,
+  listCandidateCvs,
+} from "@/lib/cvs";
 import { withTeam } from "@/lib/db-team";
 import { markNotifications, notifications } from "@/lib/insights";
 import { listTools, TOOLS } from "@/lib/mcp/tools";
@@ -911,6 +917,36 @@ describe("candidate erasure", () => {
           object_key: canaryCv.key,
         },
       ]);
+    });
+
+    it("never serves the erased CV and refuses a new upload for the erased candidate", async () => {
+      const missingCv = { status: 404, code: "CV_NOT_FOUND" };
+      await expect(
+        getCvManifest(ownerA, canaryCv.id, fake.gateway),
+      ).rejects.toMatchObject(missingCv);
+      await expect(
+        getCvChunk(ownerA, canaryCv.id, 0, fake.gateway),
+      ).rejects.toMatchObject(missingCv);
+      await expect(
+        completeCvUpload(ownerA, canaryCv.id, fake.gateway),
+      ).rejects.toMatchObject(missingCv);
+      const missingCandidate = { status: 404, code: "CANDIDATE_NOT_FOUND" };
+      await expect(
+        listCandidateCvs(ownerA, canary.candidate),
+      ).rejects.toMatchObject(missingCandidate);
+      await expect(
+        beginCvUpload(
+          ownerA,
+          canary.candidate,
+          {
+            originalName: CANARY.file,
+            mimeType: "application/pdf",
+            sizeBytes: pdf.length,
+            clientUploadId: randomUUID(),
+          },
+          fake.gateway,
+        ),
+      ).rejects.toMatchObject(missingCandidate);
     });
 
     it("deletes the expired CV, confirms it by head, and only then releases the retained charge", async () => {
