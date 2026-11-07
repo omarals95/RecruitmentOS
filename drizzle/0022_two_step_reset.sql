@@ -2,7 +2,8 @@
 -- under a verified session context, and it writes the only audit row of kind account-security.
 
 -- Owner sessions with two-step sign-in only. Team and actor come from the verified context; the
--- target must be another member of that team with something to reset (RQ003 otherwise). Removes the
+-- target must be another member of that team, in no team the actor does not own (RQ004), with
+-- something to reset (RQ003 otherwise). Removes the
 -- target's secret, backup codes, sessions, trusted devices and pending challenges in this transaction.
 CREATE FUNCTION tenant_context.reset_two_step(target_user_id text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -21,6 +22,12 @@ BEGIN
   IF target_user_id IS NULL OR target_user_id = ctx.actor_id OR NOT EXISTS (SELECT 1 FROM auth.member m
        WHERE m.organization_id = ctx.team_id AND m.user_id = target_user_id) THEN
     RAISE EXCEPTION 'Two-step reset rejected' USING ERRCODE = '42501';
+  END IF;
+  -- The reset is account-wide, so the actor must own every team the target belongs to (RQ004).
+  IF EXISTS (SELECT 1 FROM auth.member t WHERE t.user_id = target_user_id AND NOT EXISTS (
+       SELECT 1 FROM auth.member a WHERE a.organization_id = t.organization_id
+         AND a.user_id = ctx.actor_id AND a.role = 'owner')) THEN
+    RAISE EXCEPTION 'Two-step reset rejected' USING ERRCODE = 'RQ004';
   END IF;
   SELECT * INTO target FROM auth."user" u WHERE u.id = target_user_id FOR UPDATE;
   IF NOT target.two_factor_enabled AND NOT EXISTS (SELECT 1 FROM auth.two_factor t WHERE t.user_id = target.id) THEN

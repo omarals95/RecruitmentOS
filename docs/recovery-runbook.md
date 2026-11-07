@@ -55,7 +55,7 @@ This runbook covers what to do when a migration fails, when a release has to be 
 Two-step sign-in (job 034) is required for owners and admins. When someone loses their authenticator:
 
 1. **Backup codes first.** On **Enter your sign-in code**, choose **Use a backup code instead** and enter one of the 10 codes saved at setup; each works once. Once signed in, **Turn off** and **Turn on** again in My profile moves to a new authenticator, and **Create new backup codes** replaces the codes.
-2. **Another owner resets them.** An owner of the same team opens **Team & access** and chooses **Reset two-step sign-in** on that member's row. This removes the member's authenticator key and backup codes, signs them out everywhere and forgets their trusted devices; they set it up again at their next sign-in. It writes one `two_step.reset` row in that team's Activity. An owner cannot reset themselves here.
+2. **Another owner resets them.** An owner who owns every team the member belongs to opens **Team & access** and chooses **Reset two-step sign-in** on that member's row. This removes the member's authenticator key and backup codes, signs them out everywhere and forgets their trusted devices; they set it up again at their next sign-in. It writes one `two_step.reset` row in that team's Activity. An owner cannot reset themselves here, and a member who also belongs to a team that owner does not own is refused (409 `member_in_other_team`); they use a backup code or step 3.
 3. **The last owner, by the database owner only.** When the only owner has neither the authenticator nor a backup code, the RecruitmentOS owner runs, from a trusted machine with the owner (migration) connection of the affected database and never a runtime connection:
 
    ```

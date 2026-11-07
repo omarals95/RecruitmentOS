@@ -8,7 +8,10 @@ vi.mock("@/db", async (original) => ({
 }));
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 
+import { sql } from "drizzle-orm";
 import { getVerifiedSession } from "@/lib/auth-session";
+import { withDeadlinesAndSnapshot } from "@/db/deadlines";
+import { installTenantContext } from "../src/lib/tenant-context";
 import { resetMemberTwoStep } from "../src/lib/two-step";
 import type { Principal } from "../src/lib/principal";
 import { POST as resetRoute } from "../src/app/api/v1/teams/two-step-reset/route";
@@ -172,6 +175,36 @@ describe("an owner resets a member's two-step sign-in under the split identity r
       enabled: true,
       secrets: 1,
     });
+  });
+
+  it("refuses a member who also belongs to a team the owner does not own, in the app and in the helper", async () => {
+    await query(
+      `INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('member:other-team','other-team','member','recruiter')`,
+    );
+    try {
+      const before = await audits();
+      await expect(resetMemberTwoStep(owner, "member")).rejects.toMatchObject({
+        status: 409,
+        code: "member_in_other_team",
+      });
+      // The helper refuses on its own too, even when called directly under a valid owner context.
+      const identity = await harness.identityDb();
+      await expect(
+        withDeadlinesAndSnapshot(identity, async (tx, snapshot) => {
+          await installTenantContext(tx, owner, snapshot);
+          await tx.execute(sql`select tenant_context.reset_two_step('member')`);
+        }),
+      ).rejects.toMatchObject({ cause: { code: "RQ004" } });
+      expect(await audits()).toEqual(before);
+      expect(await state("member")).toEqual({
+        enabled: true,
+        secrets: 1,
+        sessions: 2,
+        challenges: 2,
+      });
+    } finally {
+      await query(`DELETE FROM auth.member WHERE id='member:other-team'`);
+    }
   });
 
   it("answers the session-only route with {data:{reset:true}} and refuses Bearer tokens", async () => {

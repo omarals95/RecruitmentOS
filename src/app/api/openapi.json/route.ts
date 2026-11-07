@@ -889,7 +889,7 @@ export function GET() {
       {
         summary: "Reset a member's two-step sign-in",
         description:
-          "Session only: a signed-in owner of the active team; others get 403 owner_required. Removes the member's authenticator key and backup codes, turns two-step sign-in off, signs them out everywhere and forgets their trusted devices, so they set it up again at their next sign-in when their role requires it. Writes one account-security activity row (two_step.reset) with the targetUserId. 400 cannot_reset_self for your own account (use backup codes or Account settings), 404 member_not_found when the user is not a member of this team, 409 two_step_not_enabled when there is nothing to reset. Body at most 1024 bytes.",
+          "Session only: a signed-in owner of the active team; others get 403 owner_required. Removes the member's authenticator key and backup codes, turns two-step sign-in off, signs them out everywhere and forgets their trusted devices, so they set it up again at their next sign-in when their role requires it. Writes one account-security activity row (two_step.reset) with the targetUserId. 400 cannot_reset_self for your own account (use backup codes or Account settings), 404 member_not_found when the user is not a member of this team, 409 member_in_other_team when they also belong to a team you do not own (the reset is account-wide), 409 two_step_not_enabled when there is nothing to reset. Body at most 1024 bytes.",
         requestBody: jsonBody(
           {
             type: "object",
