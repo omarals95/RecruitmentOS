@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getWorkspaceContext } from "@/lib/workspace";
 import { WorkspaceShell } from "@/components/workspace/shell";
+import { SpeedInsightsReporter } from "@/components/speed-insights";
 
 export const dynamic = "force-dynamic";
 export default async function AppLayout({
@@ -32,5 +33,10 @@ export default async function AppLayout({
     );
   }
   if (!context?.user) redirect("/sign-in");
-  return <WorkspaceShell identity={context}>{children}</WorkspaceShell>;
+  return (
+    <>
+      <WorkspaceShell identity={context}>{children}</WorkspaceShell>
+      <SpeedInsightsReporter />
+    </>
+  );
 }
