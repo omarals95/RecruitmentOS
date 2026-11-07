@@ -495,7 +495,8 @@ function TokenSettingsContent() {
               <code>POST /api/v1/candidates</code> with{" "}
               <code>candidates:write</code> and a stable{" "}
               <code>Idempotency-Key</code>. CVs use a three-step private upload:
-              request a form, upload to S3, then complete validation.
+              reserve an upload, send the file to the configured private
+              storage, then complete validation.
             </p>
             <p>
               AI assistants such as Claude connect to{" "}
