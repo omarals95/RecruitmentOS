@@ -1244,4 +1244,45 @@ describe("signed tenant context under separate nonowner data and identity roles"
       ),
     ).rejects.toMatchObject(denied);
   });
+
+  it("claims a team's Blob cleanup once per 10 minutes only through the cooldown helper", async () => {
+    const claim = (p: Principal, store = "store_fictional") =>
+      withTeam(p, async (tx) => {
+        const { rows } = await tx.execute<{ remaining: number }>(
+          sql`select tenant_context.claim_blob_reconciliation(${store}) as remaining`,
+        );
+        return Number(rows[0].remaining);
+      });
+    const client = await asData();
+    for (const query of [
+      "SELECT tenant_context.claim_blob_reconciliation('store_fictional')",
+      "SELECT * FROM storage_ledger.blob_reconciliation_claims",
+      "INSERT INTO storage_ledger.blob_reconciliation_claims(store,team_id,claimed_at) VALUES ('store_fictional','team-b',now())",
+      "UPDATE storage_ledger.blob_reconciliation_claims SET claimed_at=now()-interval '1 hour'",
+      "DELETE FROM storage_ledger.blob_reconciliation_claims",
+    ])
+      await expect(client.query(query), query).rejects.toMatchObject({
+        code: "42501",
+      });
+    await expect(
+      claim({ ...memberB, scopes: ["candidates:read", "cvs:read"] }),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    await expect(claim(memberB, "not-a-store")).rejects.toMatchObject({
+      cause: { code: "RQ002" },
+    });
+    expect(await claim(memberB)).toBe(0);
+    const remaining = await claim(memberB);
+    expect(remaining).toBeGreaterThanOrEqual(1);
+    expect(remaining).toBeLessThanOrEqual(600);
+    // Another team and another store each keep their own claim.
+    expect(await claim(ownerA)).toBe(0);
+    expect(await claim(memberB, "store_fictionalother")).toBe(0);
+    await harness.asSuperuser();
+    await harness.client.query(
+      "UPDATE storage_ledger.blob_reconciliation_claims SET claimed_at=now()-interval '10 minutes 1 second' WHERE team_id=$1 AND store='store_fictional'",
+      [memberB.teamId],
+    );
+    expect(await claim(memberB)).toBe(0);
+    expect(await claim(memberB)).toBeGreaterThan(0);
+  });
 });

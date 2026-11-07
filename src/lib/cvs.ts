@@ -462,6 +462,68 @@ export async function listCandidateCvs(
   });
 }
 
+/** PUT tickets per Blob reservation, the first included; 0019 holds the same cap. */
+const BLOB_PUT_TICKET_LIMIT = 5;
+
+/** The refusal for one more new reservation under the team's upload rate, or null when it is off. */
+async function uploadRateRefusal(tx: TeamTx, p: Principal, now: Date) {
+  const [usage] = await tx
+    .select({ rate: storageUsage.uploadRequestsPerMinute })
+    .from(storageUsage)
+    .where(eq(storageUsage.teamId, p.teamId));
+  if (!usage?.rate) return null;
+  const [{ recent }] = await tx
+    .select({ recent: count() })
+    .from(uploads)
+    .where(
+      and(
+        eq(uploads.teamId, p.teamId),
+        gt(uploads.createdAt, new Date(now.getTime() - 60_000)),
+      ),
+    );
+  return recent >= usage.rate
+    ? new ApiError(
+        429,
+        "CV_UPLOAD_RATE_LIMITED",
+        `Your team allows ${usage.rate} new CV uploads per minute. Wait a minute, then try again.`,
+      )
+    : null;
+}
+
+/** Whether the request names an existing reservation, which the upload rate never refuses. */
+async function isUploadReplay(
+  tx: TeamTx,
+  p: Principal,
+  operation: string,
+  input: CvUploadInput,
+) {
+  const [previous] = await tx
+    .select({ key: idempotency.key })
+    .from(idempotency)
+    .where(
+      and(
+        eq(idempotency.teamId, p.teamId),
+        eq(idempotency.actorKey, actorKey(p)),
+        eq(idempotency.operation, operation),
+        eq(idempotency.key, input.clientUploadId),
+      ),
+    )
+    .limit(1);
+  if (previous) return true;
+  if (!input.legacySourceId) return false;
+  const [existing] = await tx
+    .select({ id: uploads.id })
+    .from(uploads)
+    .where(
+      and(
+        eq(uploads.teamId, p.teamId),
+        eq(uploads.legacySourceId, input.legacySourceId),
+      ),
+    )
+    .limit(1);
+  return Boolean(existing);
+}
+
 export async function beginCvUpload(
   p: Principal,
   candidateId: string,
@@ -504,10 +566,16 @@ export async function beginCvUpload(
     )
     .digest("hex");
   // Expiry commits independently, even if the following reservation is refused or a retry conflicts.
-  await withTeam(p, async (tx) => {
+  const overRate = await withTeam(p, async (tx) => {
     await assertCandidate(tx, p, candidateId);
     await expireCvReservations(tx, p.teamId, binding, now);
+    // Early, so an over-rate request makes no provider call; the locked check below stays authoritative.
+    const refusal = await uploadRateRefusal(tx, p, now);
+    return refusal && !(await isUploadReplay(tx, p, operation, input))
+      ? refusal
+      : null;
   });
+  if (overRate) throw overRate;
   let client = storage;
   if (binding.provider === "blob")
     try {
@@ -583,8 +651,23 @@ export async function beginCvUpload(
           "This legacy source or upload identifier already refers to a different CV.",
         );
       assertBinding(existing, binding);
-      if (existing.status === "ready" || existing.status === "pending")
-        return existing;
+      if (existing.status === "ready") return existing;
+      if (existing.status === "pending") {
+        if (existing.storageProvider !== "blob") return existing;
+        // Counted under the row lock before the ticket is issued; the guard allows only +1.
+        if (existing.putTicketsIssued >= BLOB_PUT_TICKET_LIMIT)
+          throw new ApiError(
+            409,
+            "CV_UPLOAD_TICKET_LIMIT",
+            "This upload has used all of its upload links. Try again after its reservation expires, within 15 minutes, by selecting the file again.",
+          );
+        const [counted] = await tx
+          .update(uploads)
+          .set({ putTicketsIssued: sql`${uploads.putTicketsIssued} + 1` })
+          .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, existing.id)))
+          .returning();
+        return counted;
+      }
       throw new ApiError(
         409,
         "CV_UPLOAD_REJECTED",
@@ -592,27 +675,8 @@ export async function beginCvUpload(
       );
     }
     // Only a new reservation counts against the team's rate; the ledger lock above serializes it.
-    const [usage] = await tx
-      .select({ rate: storageUsage.uploadRequestsPerMinute })
-      .from(storageUsage)
-      .where(eq(storageUsage.teamId, p.teamId));
-    if (usage?.rate) {
-      const [{ recent }] = await tx
-        .select({ recent: count() })
-        .from(uploads)
-        .where(
-          and(
-            eq(uploads.teamId, p.teamId),
-            gt(uploads.createdAt, new Date(now.getTime() - 60_000)),
-          ),
-        );
-      if (recent >= usage.rate)
-        throw new ApiError(
-          429,
-          "CV_UPLOAD_RATE_LIMITED",
-          `Your team allows ${usage.rate} new CV uploads per minute. Wait a minute, then try again.`,
-        );
-    }
+    const refusal = await uploadRateRefusal(tx, p, now);
+    if (refusal) throw refusal;
     const id = randomUUID();
     // The insert trigger charges the store and team ledgers or refuses over either budget.
     const [created] = await tx
@@ -630,6 +694,8 @@ export async function beginCvUpload(
         createdBy: p.userId,
         legacySourceId: input.legacySourceId ?? null,
         sourcePath: input.sourcePath ?? null,
+        // The first Blob ticket is issued below and counts against the reservation's cap.
+        putTicketsIssued: binding.provider === "blob" ? 1 : 0,
         createdAt: now,
         expiresAt: new Date(
           now.getTime() +
@@ -771,8 +837,9 @@ export async function completeCvUpload(
         "CV_NOT_FOUND",
         "This CV is no longer available.",
       );
-    if (row.status === "ready") return { row, rejected: false };
-    if (row.status === "rejected") return { row, rejected: true };
+    if (row.status === "ready") return { row, rejected: false, settled: false };
+    if (row.status === "rejected")
+      return { row, rejected: true, settled: false };
     await assertCandidate(tx, p, row.candidateId);
     const now = new Date(),
       reject = Boolean(
@@ -799,8 +866,13 @@ export async function completeCvUpload(
       reject ? "cv.rejected" : "cv.uploaded",
       { uploadId: id, sizeBytes: row.sizeBytes, mimeType: row.mimeType },
     );
-    return { row: updated, rejected: reject };
+    return { row: updated, rejected: reject, settled: true };
   });
+  // This call settled a Blob upload: one cooldown-gated cleanup sweep, which never alters the response.
+  if (result.settled && result.row.storageProvider === "blob") {
+    const { sweepAfterBlobUpload } = await import("@/lib/blob-reconcile");
+    await sweepAfterBlobUpload(p, storage);
+  }
   if (result.rejected)
     throw new ApiError(
       400,

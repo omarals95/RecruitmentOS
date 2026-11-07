@@ -22,6 +22,7 @@ export const dataRoleHelpers = [
   "tenant_context.purge_bulk_intake(uuid)",
   "tenant_context.set_storage_limits(bigint,integer,integer)",
   "tenant_context.release_blob_charge(text,uuid)",
+  "tenant_context.claim_blob_reconciliation(text)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",

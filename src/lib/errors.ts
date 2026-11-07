@@ -4,6 +4,8 @@ export class ApiError extends Error {
   code: string;
   /** Set when a log line already names this error; the response then carries the same ID. */
   correlationId?: string;
+  /** Seconds a 429 sends in Retry-After; 60 when unset. */
+  retryAfter?: number;
   constructor(
     status: number,
     code: string,

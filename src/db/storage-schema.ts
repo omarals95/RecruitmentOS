@@ -1,10 +1,10 @@
 import { ApiError } from "../lib/errors";
 
 /**
- * The storage reference, ledger, Blob read-lease, team limit and Blob charge release schema this
- * code was written for (`0018`).
+ * The storage reference, ledger, Blob read-lease, team limit, Blob charge release, PUT ticket count
+ * and cleanup cooldown schema this code was written for (`0019`).
  */
-export const STORAGE_SCHEMA_VERSION = 3;
+export const STORAGE_SCHEMA_VERSION = 4;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {

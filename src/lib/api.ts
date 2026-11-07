@@ -154,7 +154,9 @@ export function errorResponse(error: unknown, request?: Request): Response {
       error.status,
       error.code,
       error.message,
-      error.status === 429 ? { "Retry-After": "60" } : {},
+      error.status === 429
+        ? { "Retry-After": String(error.retryAfter ?? 60) }
+        : {},
       error.correlationId,
     );
   const dbError =

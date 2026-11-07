@@ -23,7 +23,7 @@ const p: Principal = {
   teamId: "legacy-team",
   role: "owner",
   authType: "session",
-  scopes: ["cvs:read", "cvs:write", "imports:write"],
+  scopes: ["candidates:read", "cvs:read", "cvs:write", "imports:write"],
 };
 const references =
   "id, object_key, status, size_bytes::int, created_at, completed_at, expires_at";
@@ -77,13 +77,14 @@ describe("storage reference migration and startup check", () => {
       status: 503,
       code: "storage_schema_mismatch",
     });
-    expect(STORAGE_SCHEMA_VERSION).toBe(3);
+    expect(STORAGE_SCHEMA_VERSION).toBe(4);
     await expect(assertStorageSchema(pg)).resolves.toBeUndefined();
   });
 
   for (const through of [
     "0008_pending_s3_upload_index.sql",
     "0017_bulk_intake_tombstones.sql",
+    "0018_blob_storage_enablement.sql",
   ])
     it(`refuses a database migrated only through ${through.slice(0, 4)} and accepts the full set`, async () => {
       const partial = new PGlite();
@@ -101,14 +102,14 @@ describe("storage reference migration and startup check", () => {
     });
 
   it("refuses a marker the owner changed to another version", async () => {
-    await pg.exec("UPDATE db_boundary.storage_schema SET version=4");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version=5");
     try {
       await expect(assertStorageSchema(pg)).rejects.toMatchObject({
         status: 503,
         code: "storage_schema_mismatch",
       });
     } finally {
-      await pg.exec("UPDATE db_boundary.storage_schema SET version=3");
+      await pg.exec("UPDATE db_boundary.storage_schema SET version=4");
     }
   });
 

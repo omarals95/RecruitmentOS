@@ -285,6 +285,13 @@ describe("populated fictional baseline upgrade from 0006", () => {
       ).rows,
     ).toEqual([{ ...identity, s3_version_id: object_version }]);
     expect(object_version).toBe("fictional-v1");
+    // 0019 starts every existing reservation's PUT ticket count at zero.
+    expect(
+      (await pg.query("SELECT put_tickets_issued FROM app.uploads")).rows,
+    ).toEqual([{ put_tickets_issued: 0 }]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 4 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);

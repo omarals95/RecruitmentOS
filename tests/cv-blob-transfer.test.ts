@@ -267,7 +267,7 @@ describe("private Blob CV transfer behind a fake client", () => {
   beforeEach(async () => {
     configured.current = undefined;
     await fixture.client.exec(
-      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
+      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.blob_reconciliation_claims; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
     );
   });
   afterAll(async () => {
@@ -492,6 +492,100 @@ describe("private Blob CV transfer behind a fake client", () => {
       expect(await counters()).toEqual(ledger(0, 1, 0));
       expect(JSON.stringify(replay)).not.toContain(signingSecret);
     });
+
+    it("issues at most five PUT tickets per Blob reservation, then refuses without a signer call", async () => {
+      const fake = fakeBlob();
+      const input = metadata(1000);
+      const first = await beginCvUpload(
+        owner,
+        candidateId,
+        input,
+        fake.gateway,
+      );
+      for (let replay = 1; replay <= 4; replay++) {
+        const again = await beginCvUpload(
+          owner,
+          candidateId,
+          input,
+          fake.gateway,
+        );
+        expect(again.data.id, `replay ${replay}`).toBe(first.data.id);
+        expect(again.upload?.protocol).toBe("blob-put-v1");
+      }
+      expect(fake.state.signs).toBe(5);
+      const tickets = async () =>
+        (
+          (await rows(
+            "SELECT put_tickets_issued AS issued FROM app.uploads WHERE id=$1",
+            [first.data.id],
+          )) as { issued: number }[]
+        )[0].issued;
+      expect(await tickets()).toBe(5);
+      const before = await counters();
+      expect(before).toEqual(ledger(0, 1, 0));
+      const refused = await beginCvUpload(
+        owner,
+        candidateId,
+        input,
+        fake.gateway,
+      ).catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        status: 409,
+        code: "CV_UPLOAD_TICKET_LIMIT",
+      });
+      expect((refused as Error).message).toMatch(/15 minutes/);
+      expect(fake.state.signs).toBe(5);
+      expect(await tickets()).toBe(5);
+      expect(await counters()).toEqual(before);
+      // A new reservation gets its own five.
+      expect(
+        (await beginCvUpload(owner, candidateId, metadata(1000), fake.gateway))
+          .upload?.protocol,
+      ).toBe("blob-put-v1");
+    });
+
+    it("leaves S3 reservations uncounted and lets the ticket count only grow by one on a pending Blob row", async () => {
+      const s3 = fakeS3();
+      configured.current = { binding: s3Binding, gateway: s3.gateway };
+      const input = metadata(200);
+      for (let call = 0; call < 7; call++)
+        expect(
+          (await beginCvUpload(owner, candidateId, input, s3.gateway)).upload
+            ?.protocol,
+        ).toBe("s3-form-v1");
+      const [s3Row] = (await rows(
+        "SELECT id, put_tickets_issued AS issued FROM app.uploads WHERE storage_provider='s3'",
+      )) as { id: string; issued: number }[];
+      expect(s3Row.issued).toBe(0);
+      const fake = fakeBlob();
+      const blob = await beginCvUpload(
+        owner,
+        candidateId,
+        metadata(1000),
+        fake.gateway,
+      );
+      const set = (id: string, value: number) =>
+        withTeam(owner, (tx) =>
+          tx.execute(
+            sql`update app.uploads set put_tickets_issued=${value} where id=${id}::uuid`,
+          ),
+        );
+      for (const [id, value] of [
+        [blob.data.id, 3],
+        [blob.data.id, 0],
+        [s3Row.id, 1],
+      ] as const)
+        await expect(set(id, value), `${id} ${value}`).rejects.toMatchObject({
+          cause: { code: "23514", message: "Upload reference is immutable" },
+        });
+      await set(blob.data.id, 2);
+      await rows("UPDATE app.uploads SET status='rejected' WHERE id=$1", [
+        blob.data.id,
+      ]);
+      await expect(set(blob.data.id, 3)).rejects.toMatchObject({
+        cause: { code: "23514" },
+      });
+    });
   });
 
   describe("completion", () => {
@@ -608,7 +702,12 @@ describe("private Blob CV transfer behind a fake client", () => {
         ).rejects.toMatchObject({ status: 400, code: "INVALID_CV" });
         expect(await status(id)).toBe("rejected");
         expect(await counters()).toEqual(ledger(0, 0, 1));
-        expect(fake.state.calls).toEqual([`head:${key}`]);
+        // The automatic sweep lists the prefix and deletes nothing inside the grace period.
+        expect(fake.state.calls).toEqual([
+          `head:${key}`,
+          `list:teams/${owner.teamId}/cvs/`,
+        ]);
+        expect(fake.objects.has(key)).toBe(true);
         // A head mismatch never opens the object.
         expect(fake.state.reads).toBe(opens);
       });

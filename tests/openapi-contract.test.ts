@@ -420,9 +420,13 @@ describe("OpenAPI contract", () => {
       "storage_reconciliation_forbidden",
       "STORAGE_RECONCILIATION_UNSUPPORTED",
       "STORAGE_SETUP_REQUIRED",
+      "STORAGE_RECONCILIATION_COOLDOWN",
       "complete",
     ])
       expect(text).toContain(code);
+    expect(cleanup.responses["429"].headers?.["Retry-After"]?.$ref).toBe(
+      "#/components/headers/Retry-After",
+    );
     const settings = JSON.stringify(
       document.paths["/api/v1/teams/storage-settings"],
     );
@@ -440,6 +444,7 @@ describe("OpenAPI contract", () => {
     ]) {
       const upload = document.paths[path].post;
       expect(JSON.stringify(upload), path).toContain("CV_UPLOAD_RATE_LIMITED");
+      expect(JSON.stringify(upload), path).toContain("CV_UPLOAD_TICKET_LIMIT");
       expect(upload.responses["429"].headers?.["Retry-After"]?.$ref).toBe(
         "#/components/headers/Retry-After",
       );
