@@ -38,22 +38,16 @@ describe("Content-Security-Policy connect-src by configured CV storage provider"
       expect(connectSrc).not.toContain("vercel.com");
     });
 
-  for (const provider of [
-    undefined,
-    "",
-    "blob",
-    "vercel-blob",
-    " Vercel-Blob ",
-  ])
-    it(`lists only the Blob upload path for ${JSON.stringify(provider) ?? "an unset provider"}`, async () => {
+  for (const provider of ["blob", "vercel-blob", " Vercel-Blob "])
+    it(`lists only the Blob upload path for ${JSON.stringify(provider)}`, async () => {
       const { connectSrc } = await csp(provider);
       expect(connectSrc).toBe("'self' https://vercel.com/api/blob/");
       expect(connectSrc).not.toContain("amazonaws.com");
     });
 
-  it("lists no upload host for an unsupported provider", async () => {
-    for (const provider of ["other", "unexpected"])
-      expect((await csp(provider)).connectSrc).toBe("'self'");
+  it("lists no upload host for an unset, empty or unsupported provider", async () => {
+    for (const provider of [undefined, "", " ", "other", "unexpected"])
+      expect((await csp(provider)).connectSrc, String(provider)).toBe("'self'");
   });
 
   it("keeps every other directive identical across providers", async () => {
@@ -61,5 +55,22 @@ describe("Content-Security-Policy connect-src by configured CV storage provider"
     expect(Object.keys(baseline)).toContain("default-src");
     for (const provider of ["s3", "blob", " Vercel-Blob ", "other"])
       expect((await csp(provider)).others).toEqual(baseline);
+  });
+
+  it("sends HSTS without preload and an opener isolation policy on every rule, for every provider", async () => {
+    for (const provider of [undefined, "blob", "s3"]) {
+      vi.stubEnv("CV_STORAGE_PROVIDER", provider);
+      const rules = await config.headers!();
+      expect(rules.length).toBeGreaterThan(0);
+      for (const rule of rules) {
+        const header = (key: string) =>
+          rule.headers.find((item) => item.key === key)?.value;
+        expect(header("Strict-Transport-Security")).toBe(
+          "max-age=63072000; includeSubDomains",
+        );
+        expect(header("Cross-Origin-Opener-Policy")).toBe("same-origin");
+      }
+      expect(rules.map((rule) => rule.source)).toContain("/(.*)");
+    }
   });
 });
