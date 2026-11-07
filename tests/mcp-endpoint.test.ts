@@ -546,6 +546,35 @@ describe("MCP endpoint over real migrations and RLS", () => {
     }
   });
 
+  it("keeps an owner's API token and OAuth access token working without two-step sign-in", async () => {
+    const setTwoStep = (enabled: boolean) =>
+      query(`UPDATE auth."user" SET two_factor_enabled=$1 WHERE id=$2`, [
+        enabled,
+        owner.userId,
+      ]);
+    await setTwoStep(false);
+    try {
+      const access = await oauthAccess(owner.userId, ["candidates:read"]);
+      const api = await apiToken(owner.userId, [
+        "candidates:read",
+        "recruitment:read",
+      ]);
+      for (const token of [access.token, api.token])
+        expect(await listNames(token)).toContain("search_candidates");
+      const overview = await overviewRoute(
+        new Request(`${ORIGIN}/api/v1/overview`, {
+          headers: {
+            authorization: `Bearer ${api.token}`,
+            "x-forwarded-for": CLIENT_IP,
+          },
+        }),
+      );
+      expect(overview.status).toBe(200);
+    } finally {
+      await setTwoStep(true);
+    }
+  });
+
   it("initializes statelessly with tools only and limits a token to 60 requests a minute", async () => {
     const valid = await apiToken(owner.userId, ["candidates:read"]);
     const response = await post(
