@@ -296,7 +296,7 @@ Roll-up rule: if every linked SRS ID is locally verified, the row is locally ver
 
 ## 4 Proposed work packages
 
-Ordered per SRS §14 sequencing. Each package is independently testable. "Local" means PGlite, fakes and fictional data only. Hosted guards (the hosted sign-in readiness checks in `getAuthOptions()`, Blob disablement and the precise hosted database startup refusals) stay in place; a guard is relaxed only when the control it protects is complete and reviewed.
+Ordered per SRS §14 sequencing. Each package is independently testable. "Local" means PGlite, fakes and fictional data only. Hosted guards (the hosted sign-in readiness checks in `getAuthOptions()`, the hosted Blob OIDC-only credential checks that refuse a present `BLOB_READ_WRITE_TOKEN`, and the precise hosted database startup refusals) stay in place; a guard is relaxed only when the control it protects is complete and reviewed.
 
 ### WP-01 Trusted tenant and identity context
 
