@@ -11,6 +11,7 @@ import {
 import { formatDate } from "@/components/workspace/helpers";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { SettingsNavigation } from "./settings-navigation";
+import { StorageSettings } from "./storage-settings";
 
 interface TeamSummary {
   id: string;
@@ -645,6 +646,7 @@ function TeamSettingsContent() {
               )}
             </section>
           )}
+          {canAdmin && <StorageSettings busy={busy} onAction={action} />}
         </>
       )}
       <section className="panel">

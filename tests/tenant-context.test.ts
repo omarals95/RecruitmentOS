@@ -1176,4 +1176,72 @@ describe("signed tenant context under separate nonowner data and identity roles"
     });
     expect(after.items).toHaveLength(before.items.length - 3);
   });
+
+  it("lets the data role reach the storage settings and Blob release helpers only through their checks", async () => {
+    const denied = { cause: { code: "42501" } };
+    const setLimits = (
+      p: Principal,
+      bytes: number | null,
+      files: number | null,
+      perMinute: number | null,
+    ) =>
+      withTeam(p, async (tx) => {
+        const { rows } = await tx.execute<{ changed: boolean }>(
+          sql`select tenant_context.set_storage_limits(${bytes}::bigint, ${files}::integer, ${perMinute}::integer) as changed`,
+        );
+        return rows[0].changed;
+      });
+    await expect(setLimits(memberA, null, null, 5)).rejects.toMatchObject(
+      denied,
+    );
+    await expect(
+      setLimits(ownerA, 2_000_000, null, null),
+    ).rejects.toMatchObject({ cause: { code: "22023" } });
+    expect(await setLimits(ownerA, null, null, 5)).toBe(true);
+    expect(await setLimits(ownerA, null, null, 5)).toBe(false);
+    expect(await setLimits(ownerA, null, null, null)).toBe(true);
+    const client = await asData();
+    for (const query of [
+      "SELECT tenant_context.set_storage_limits(NULL, NULL, NULL)",
+      `SELECT tenant_context.release_blob_charge('store_fictional', '${randomUUID()}')`,
+    ])
+      await expect(client.query(query)).rejects.toMatchObject({
+        code: "42501",
+      });
+    const release = (p: Principal, store: string) =>
+      withTeam(p, (tx) =>
+        tx.execute(
+          sql`select tenant_context.release_blob_charge(${store}, ${randomUUID()}::uuid)`,
+        ),
+      );
+    await expect(
+      release({ ...memberB, scopes: ["candidates:read"] }, "store_fictional"),
+    ).rejects.toMatchObject(denied);
+    // A store the ledger has never seen is a binding error, not a release.
+    await expect(release(memberB, "store_fictional")).rejects.toMatchObject({
+      cause: { code: "RQ002" },
+    });
+    await expect(
+      withTeam(ownerA, (tx) =>
+        tx
+          .update(uploads)
+          .set({ blobDeletedAt: new Date() })
+          .where(eq(uploads.teamId, ownerA.teamId)),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "23514" } });
+    await expect(
+      withTeam(ownerA, (tx) =>
+        tx.insert(activity).values({
+          id: randomUUID(),
+          teamId: ownerA.teamId,
+          actorId: ownerA.userId,
+          actorType: "session",
+          action: "storage.settings_updated",
+          kind: "storage-settings",
+          summary: "Updated CV storage settings",
+          metadata: {},
+        }),
+      ),
+    ).rejects.toMatchObject(denied);
+  });
 });

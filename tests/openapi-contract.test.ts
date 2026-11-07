@@ -406,20 +406,61 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents CV storage cleanup, team storage settings and the upload rate limit", () => {
+    const cleanup = document.paths["/api/v1/cvs/storage-reconciliation"].post;
+    expect(cleanup["x-required-scopes"]).toEqual(["cvs:write"]);
+    const text = JSON.stringify(cleanup);
+    for (const code of [
+      "storage_reconciliation_forbidden",
+      "STORAGE_RECONCILIATION_UNSUPPORTED",
+      "STORAGE_SETUP_REQUIRED",
+      "complete",
+    ])
+      expect(text).toContain(code);
+    const settings = JSON.stringify(
+      document.paths["/api/v1/teams/storage-settings"],
+    );
+    for (const text of [
+      "storage_settings_forbidden",
+      "invalid_input",
+      "STORAGE_QUOTA_EXCEEDED",
+      "storage.settings_updated",
+      "application limits, not hard provider caps",
+    ])
+      expect(settings).toContain(text);
+    for (const path of [
+      "/api/v1/candidates/{id}/cvs/uploads",
+      "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload",
+    ]) {
+      const upload = document.paths[path].post;
+      expect(JSON.stringify(upload), path).toContain("CV_UPLOAD_RATE_LIMITED");
+      expect(upload.responses["429"].headers?.["Retry-After"]?.$ref).toBe(
+        "#/components/headers/Retry-After",
+      );
+    }
+    expect(JSON.stringify(document)).not.toContain(
+      "Blob storage is currently disabled",
+    );
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],
     );
-    expect(sessionOnly.map(({ label }) => label).sort()).toEqual([
-      "DELETE /api/settings/tokens/{id}",
-      "GET /api/settings/tokens",
-      "GET /api/v1/extraction-consent",
-      "POST /api/oauth/consent",
-      "POST /api/settings/tokens",
-      "POST /api/v1/extraction-consent",
-      "POST /api/v1/extraction-jobs",
-      "POST /api/v1/teams/bootstrap",
-    ]);
+    expect(sessionOnly.map(({ label }) => label).sort()).toEqual(
+      [
+        "DELETE /api/settings/tokens/{id}",
+        "GET /api/settings/tokens",
+        "GET /api/v1/extraction-consent",
+        "POST /api/oauth/consent",
+        "POST /api/settings/tokens",
+        "POST /api/v1/extraction-consent",
+        "POST /api/v1/extraction-jobs",
+        "POST /api/v1/teams/bootstrap",
+        "GET /api/v1/teams/storage-settings",
+        "PUT /api/v1/teams/storage-settings",
+      ].sort(),
+    );
     for (const { label, operation } of sessionOnly) {
       const response = await probe(label, operation, [...SCOPES]);
       expect(response.status, label).toBe(403);

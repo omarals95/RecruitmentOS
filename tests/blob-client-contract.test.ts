@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Fictional data only. The stub provider replaces the two SDK network calls; the SDK's
+// Fictional data only. The stub provider replaces the SDK network calls; the SDK's
 // real presignUrl (local HMAC, no network) stays in place.
 const provider = vi.hoisted(() => ({
-  objects: new Map<string, { bytes: Buffer; contentType: string }>(),
+  objects: new Map<
+    string,
+    { bytes: Buffer; contentType: string; uploadedAt: Date }
+  >(),
   failWith: undefined as string | undefined,
   override: undefined as undefined | ((pathname: string) => unknown),
 }));
@@ -52,10 +55,44 @@ vi.mock("@vercel/blob", async (importOriginal) => {
         },
       };
     }),
+    head: vi.fn(async (pathname: string) => {
+      if (provider.failWith) throw new Error(provider.failWith);
+      const object = provider.objects.get(pathname);
+      if (!object) throw new original.BlobNotFoundError();
+      return {
+        pathname,
+        size: object.bytes.length,
+        contentType: object.contentType,
+        uploadedAt: object.uploadedAt,
+      };
+    }),
+    del: vi.fn(async (pathname: string) => {
+      if (provider.failWith) throw new Error(provider.failWith);
+      provider.objects.delete(pathname);
+    }),
+    list: vi.fn(
+      async (options: { prefix: string; cursor?: string; limit: number }) => {
+        if (provider.failWith) throw new Error(provider.failWith);
+        const matching = [...provider.objects.keys()]
+          .filter((pathname) => pathname.startsWith(options.prefix))
+          .sort();
+        const start = options.cursor ? Number(options.cursor) : 0;
+        const end = start + options.limit;
+        return {
+          blobs: matching.slice(start, end).map((pathname) => ({
+            pathname,
+            size: provider.objects.get(pathname)!.bytes.length,
+            uploadedAt: provider.objects.get(pathname)!.uploadedAt,
+          })),
+          hasMore: end < matching.length,
+          cursor: end < matching.length ? String(end) : undefined,
+        };
+      },
+    ),
   };
 });
 
-import { get, issueSignedToken } from "@vercel/blob";
+import { del, get, head, issueSignedToken, list } from "@vercel/blob";
 import { createBlobGateway, type BlobGateway } from "@/lib/blob-storage";
 import { StorageConfigurationError } from "@/lib/storage";
 import { createVercelBlobClient } from "@/lib/vercel-blob-client";
@@ -63,6 +100,12 @@ import { blobBinding, fakeBlob, signingSecret } from "./helpers/fake-blob";
 
 const MiB = 1024 * 1024;
 const token = "vercel_blob_rw_fictional_0000000000000000";
+/** A fictional request OIDC token source that counts its reads. */
+const oidc = { reads: 0, token: "e30.e30.fictional_oidc_signature" };
+const oidcToken = () => {
+  oidc.reads++;
+  return oidc.token;
+};
 const secret = "fictional-provider-secret-0001";
 function streamOf(bytes: Buffer) {
   return new ReadableStream<Uint8Array>({
@@ -95,9 +138,21 @@ function reservation(sizeBytes: number) {
 type Harness = {
   gateway: BlobGateway;
   clientSigningToken: string;
-  store(pathname: string, bytes: Buffer): void;
+  store(pathname: string, bytes: Buffer, uploadedAt?: Date): void;
+  has(pathname: string): boolean;
   failWith(message: string): void;
 };
+const stubProvider = (): Omit<Harness, "gateway"> => ({
+  clientSigningToken: "fictional-real-client-signing-key",
+  store: (pathname, bytes, uploadedAt = new Date()) =>
+    provider.objects.set(pathname, {
+      bytes,
+      contentType: "application/pdf",
+      uploadedAt,
+    }),
+  has: (pathname) => provider.objects.has(pathname),
+  failWith: (message) => (provider.failWith = message),
+});
 const harnesses: [string, () => Harness][] = [
   [
     "fake client",
@@ -106,9 +161,19 @@ const harnesses: [string, () => Harness][] = [
       return {
         gateway: fake.gateway,
         clientSigningToken: signingSecret,
-        store: (pathname, bytes) =>
-          fake.objects.set(pathname, { bytes, mimeType: "application/pdf" }),
-        failWith: () => (fake.state.failSigner = true),
+        store: (pathname, bytes, uploadedAt) =>
+          fake.objects.set(pathname, {
+            bytes,
+            mimeType: "application/pdf",
+            uploadedAt,
+          }),
+        has: (pathname) => fake.objects.has(pathname),
+        failWith: () => {
+          fake.state.failSigner = true;
+          fake.state.failHead = true;
+          fake.state.failDelete = true;
+          fake.state.failList = true;
+        },
       };
     },
   ],
@@ -119,13 +184,17 @@ const harnesses: [string, () => Harness][] = [
         blobBinding,
         createVercelBlobClient({ storeId: "store_fictional", token }),
       ),
-      clientSigningToken: "fictional-real-client-signing-key",
-      store: (pathname, bytes) =>
-        provider.objects.set(pathname, {
-          bytes,
-          contentType: "application/pdf",
-        }),
-      failWith: (message) => (provider.failWith = message),
+      ...stubProvider(),
+    }),
+  ],
+  [
+    "real @vercel/blob client in OIDC mode with a stub provider",
+    () => ({
+      gateway: createBlobGateway(
+        blobBinding,
+        createVercelBlobClient({ storeId: "store_fictional", oidcToken }),
+      ),
+      ...stubProvider(),
     }),
   ],
 ];
@@ -134,6 +203,7 @@ afterEach(() => {
   provider.objects.clear();
   provider.failWith = undefined;
   provider.override = undefined;
+  oidc.reads = 0;
   vi.unstubAllEnvs();
   vi.clearAllMocks();
 });
@@ -199,15 +269,151 @@ for (const [name, harness] of harnesses)
     it("never passes provider error text on", async () => {
       const { gateway, failWith } = harness();
       failWith(`provider refused ${secret}`);
-      const failure = await gateway
-        .issuePutTicket(reservation(1000))
-        .catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(Error);
-      expect(String((failure as Error).message)).not.toContain(secret);
-      expect(String((failure as Error).message)).not.toContain(signingSecret);
-      expect((failure as Error).cause).toBeUndefined();
+      const failures = await Promise.all(
+        [
+          gateway.issuePutTicket(reservation(1000)),
+          gateway.inspectUpload(reservation(1000)),
+          gateway.headObject("teams/fictional-team/cvs/a.pdf", 1000),
+          gateway.deleteObject("teams/fictional-team/cvs/a.pdf", 1000),
+          gateway.listObjects(
+            { prefix: "teams/fictional-team/cvs/", cursor: null, limit: 10 },
+            1000,
+          ),
+        ].map((call) => call.catch((error: unknown) => error)),
+      );
+      for (const failure of failures) {
+        expect(failure).toBeInstanceOf(Error);
+        expect(String((failure as Error).message)).not.toContain(secret);
+        expect(String((failure as Error).message)).not.toContain(signingSecret);
+        expect((failure as Error).cause).toBeUndefined();
+      }
+    });
+
+    it("heads an object and reports a missing one as null", async () => {
+      const { gateway, store } = harness();
+      const input = reservation(1000);
+      const uploadedAt = new Date("2030-01-01T09:00:00.000Z");
+      store(input.objectKey, fictionalPdf(1000), uploadedAt);
+      expect(await gateway.headObject(input.objectKey, 1000)).toEqual({
+        sizeBytes: 1000,
+        mimeType: "application/pdf",
+        uploadedAt,
+      });
+      expect(await gateway.headObject(`${input.objectKey}.other`, 1000)).toBe(
+        null,
+      );
+    });
+
+    it("deletes an object and accepts a delete of a missing one", async () => {
+      const { gateway, store, has } = harness();
+      const input = reservation(1000);
+      store(input.objectKey, fictionalPdf(1000));
+      await gateway.deleteObject(input.objectKey, 1000);
+      expect(has(input.objectKey)).toBe(false);
+      expect(await gateway.headObject(input.objectKey, 1000)).toBeNull();
+      await expect(
+        gateway.deleteObject(input.objectKey, 1000),
+      ).resolves.toBeUndefined();
+    });
+
+    it("lists only under the prefix, page by page, to the end", async () => {
+      const { gateway, store } = harness();
+      const uploadedAt = new Date("2030-01-01T09:00:00.000Z");
+      const prefix = "teams/fictional-team/cvs/";
+      const names = ["a", "b", "c"].map((name) => `${prefix}${name}.pdf`);
+      for (const name of names) store(name, fictionalPdf(100), uploadedAt);
+      store("teams/other-team/cvs/x.pdf", fictionalPdf(100), uploadedAt);
+      const first = await gateway.listObjects(
+        { prefix, cursor: null, limit: 2 },
+        1000,
+      );
+      expect(first.objects).toEqual(
+        names
+          .slice(0, 2)
+          .map((pathname) => ({ pathname, sizeBytes: 100, uploadedAt })),
+      );
+      expect(first.cursor).toEqual(expect.any(String));
+      const last = await gateway.listObjects(
+        { prefix, cursor: first.cursor, limit: 2 },
+        1000,
+      );
+      expect(last).toEqual({
+        objects: [{ pathname: names[2], sizeBytes: 100, uploadedAt }],
+        cursor: null,
+      });
     });
   });
+
+describe("real @vercel/blob client in OIDC mode", () => {
+  const gateway = () =>
+    createBlobGateway(
+      blobBinding,
+      createVercelBlobClient({ storeId: blobBinding.store, oidcToken }),
+    );
+
+  it("sends the current OIDC token and the binding's store on every SDK call, and never a read-write token", async () => {
+    const input = reservation(1000);
+    const blob = gateway();
+    await blob.issuePutTicket(input);
+    provider.objects.set(input.objectKey, {
+      bytes: fictionalPdf(1000),
+      contentType: "application/pdf",
+      uploadedAt: new Date(),
+    });
+    await blob.inspectUpload(input);
+    await blob.listObjects(
+      { prefix: "teams/fictional-team/cvs/", cursor: null, limit: 10 },
+      1000,
+    );
+    await blob.deleteObject(input.objectKey, 1000);
+    await blob.headObject(input.objectKey, 1000);
+    const calls = [
+      ...vi.mocked(issueSignedToken).mock.calls.map(([options]) => options),
+      ...vi.mocked(get).mock.calls.map(([, options]) => options),
+      ...vi.mocked(head).mock.calls.map(([, options]) => options),
+      ...vi.mocked(del).mock.calls.map(([, options]) => options),
+      ...vi.mocked(list).mock.calls.map(([options]) => options),
+    ] as Record<string, unknown>[];
+    // issueSignedToken, get, head twice (inspection and the last call), delete and list.
+    expect(calls).toHaveLength(6);
+    for (const options of calls) {
+      expect(options).toMatchObject({
+        oidcToken: oidc.token,
+        storeId: blobBinding.store,
+        abortSignal: expect.any(AbortSignal),
+      });
+      expect(options).not.toHaveProperty("token");
+    }
+    expect(oidc.reads).toBe(6);
+  });
+
+  it("refuses a read-write token in its environment, even an empty one, and the endpoint overrides", () => {
+    for (const [name, value, reason] of [
+      ["BLOB_READ_WRITE_TOKEN", token, "blob_token_present"],
+      ["BLOB_READ_WRITE_TOKEN", "", "blob_token_present"],
+      ["VERCEL_BLOB_API_URL", "https://example.invalid", "blob_client_invalid"],
+      ["VERCEL_BLOB_PROXY_THROUGH_ALTERNATIVE_API", "", "blob_client_invalid"],
+    ] as const) {
+      vi.stubEnv(name, value);
+      let failure: unknown;
+      try {
+        createVercelBlobClient({ storeId: "store_fictional", oidcToken });
+      } catch (error) {
+        failure = error;
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(failure, name).toBeInstanceOf(StorageConfigurationError);
+      expect((failure as StorageConfigurationError).reason, name).toBe(reason);
+      expect(String((failure as Error).message)).not.toContain(token);
+    }
+    for (const storeId of ["fictional", "store_a/b", ""])
+      expect(() => createVercelBlobClient({ storeId, oidcToken })).toThrow(
+        StorageConfigurationError,
+      );
+    expect(oidc.reads).toBe(0);
+  });
+});
 
 describe("real @vercel/blob client only", () => {
   const gateway = () =>
@@ -248,6 +454,7 @@ describe("real @vercel/blob client only", () => {
     provider.objects.set(input.objectKey, {
       bytes: fictionalPdf(1000),
       contentType: "application/pdf",
+      uploadedAt: new Date(),
     });
     await gateway().inspectUpload(input);
     expect(vi.mocked(get)).toHaveBeenCalledTimes(1);
@@ -267,6 +474,12 @@ describe("real @vercel/blob client only", () => {
   it("refuses a 304 result and a pathname mismatch, closing any stream it received", async () => {
     const input = reservation(1000);
     const bytes = fictionalPdf(1000);
+    // Head finds the reserved object; only the read response is wrong.
+    provider.objects.set(input.objectKey, {
+      bytes,
+      contentType: "application/pdf",
+      uploadedAt: new Date(),
+    });
     provider.override = (pathname) => ({
       statusCode: 304,
       stream: null,

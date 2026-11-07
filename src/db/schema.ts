@@ -126,6 +126,7 @@ export const uploads = appSchema.table(
     storageStore: text("storage_store"),
     blobSha256: text("blob_sha256"),
     blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
+    blobDeletedAt: time("blob_deleted_at"),
   },
   (t) => [
     unique("uploads_team_id_id_key").on(t.teamId, t.id),
@@ -137,6 +138,12 @@ export const uploads = appSchema.table(
     index("uploads_pending_s3_expiry_idx")
       .on(t.storageStore, t.expiresAt)
       .where(sql`${t.storageProvider} = 's3' AND ${t.status} = 'pending'`),
+    index("uploads_team_created_idx").on(t.teamId, t.createdAt),
+    index("uploads_blob_cleanup_idx")
+      .on(t.teamId, t.storageStore, t.expiresAt)
+      .where(
+        sql`${t.storageProvider} = 'blob' AND ${t.status} = 'rejected' AND ${t.blobDeletedAt} IS NULL`,
+      ),
   ],
 );
 export const storageUsage = appSchema.table("storage_usage", {
@@ -156,6 +163,7 @@ export const storageUsage = appSchema.table("storage_usage", {
     .notNull()
     .default(0),
   retainedFiles: integer("retained_files").notNull().default(0),
+  uploadRequestsPerMinute: integer("upload_requests_per_minute"),
 });
 export const idempotency = appSchema.table(
   "idempotency",

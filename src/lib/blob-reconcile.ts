@@ -1,0 +1,248 @@
+import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { uploads } from "@/db/schema";
+import type { BlobGateway } from "@/lib/blob-storage";
+import {
+  BLOB_RESERVATION_MS,
+  blobGateway,
+  expireCvReservations,
+  storageBinding,
+  storageClient,
+} from "@/lib/cvs";
+import { withTeam } from "@/lib/db-team";
+import { ApiError } from "@/lib/errors";
+import { requireScope } from "@/lib/permissions";
+import type { Principal } from "@/lib/principal";
+import type { StorageGateway } from "@/lib/storage";
+
+/** No ticket for a pathname is valid after its row's expires_at; this grace covers in-flight PUTs. */
+const DELETE_GRACE_MS = 10 * 60 * 1000;
+const MAX_CALL_MS = 5000;
+const LIST_PAGE_SIZE = 1000;
+
+export type BlobReconciliation = {
+  expiredReservations: number;
+  chargesReleased: number;
+  objectsChecked: number;
+  objectsDeleted: number;
+  failures: number;
+  complete: boolean;
+};
+
+/** A provider call's timeout: the remaining budget, at most 5 s; 0 once the budget is spent. */
+function callTimeout(deadline: number) {
+  return Math.min(MAX_CALL_MS, Math.floor(deadline - Date.now()));
+}
+
+function assertSweep(p: Principal, gateway: BlobGateway) {
+  requireScope(p, "cvs:write");
+  if (gateway.binding.provider !== "blob")
+    throw new Error("Blob cleanup needs a Blob storage binding.");
+}
+
+/**
+ * Row pass. Each rejected Blob upload of the team on this store whose last ticket expired at least
+ * 10 minutes ago is deleted, then confirmed missing by head, and only then has its retained charge
+ * released by the owner-run helper. A failed delete or head, or an object still present, keeps the
+ * charge; a later run repeats the deletion. Pathnames, IDs and provider errors are never returned.
+ */
+export async function releaseRetainedBlobCharges(
+  p: Principal,
+  gateway: BlobGateway,
+  options: { maxRows: number; deadline: number; now: Date },
+) {
+  assertSweep(p, gateway);
+  const { store } = gateway.binding;
+  const rows = await withTeam(p, (tx) =>
+    tx
+      .select({ id: uploads.id, objectKey: uploads.objectKey })
+      .from(uploads)
+      .where(
+        and(
+          eq(uploads.teamId, p.teamId),
+          eq(uploads.storageProvider, "blob"),
+          eq(uploads.storageStore, store),
+          eq(uploads.status, "rejected"),
+          isNull(uploads.blobDeletedAt),
+          lte(
+            uploads.expiresAt,
+            new Date(options.now.getTime() - DELETE_GRACE_MS),
+          ),
+        ),
+      )
+      .orderBy(asc(uploads.expiresAt), asc(uploads.id))
+      .limit(options.maxRows + 1),
+  );
+  let chargesReleased = 0,
+    failures = 0,
+    complete = rows.length <= options.maxRows;
+  for (const row of rows.slice(0, options.maxRows)) {
+    if (callTimeout(options.deadline) < 1) {
+      complete = false;
+      break;
+    }
+    try {
+      await gateway.deleteObject(row.objectKey, callTimeout(options.deadline));
+      const timeout = callTimeout(options.deadline);
+      if (timeout < 1) {
+        complete = false;
+        break;
+      }
+      if (await gateway.headObject(row.objectKey, timeout)) {
+        failures++;
+        continue;
+      }
+      const released = await withTeam(p, async (tx) => {
+        const { rows: result } = await tx.execute<{ released: boolean }>(
+          sql`select tenant_context.release_blob_charge(${store}, ${row.id}::uuid) as released`,
+        );
+        return result[0]?.released === true;
+      });
+      if (released) chargesReleased++;
+    } catch {
+      failures++;
+    }
+  }
+  return { chargesReleased, failures, complete };
+}
+
+/**
+ * One bounded, idempotent sweep of the team's own Blob prefix on this store. It expires the team's
+ * old tickets, releases retained charges whose objects are confirmed deleted (row pass), then lists
+ * teams/<team>/cvs/ and deletes objects with no upload row once older than any ticket could be,
+ * and objects whose row expired at least 10 minutes ago unless it is ready with a matching size
+ * (list pass). Pending unexpired and matching ready objects are never deleted, and charges are
+ * released only in the row pass. It reports counts only.
+ */
+export async function reconcileBlobStorage(
+  p: Principal,
+  gateway: BlobGateway,
+  options: {
+    maxRows: number;
+    maxDeletes: number;
+    maxPages: number;
+    budgetMs: number;
+    now?: Date;
+  },
+): Promise<BlobReconciliation> {
+  assertSweep(p, gateway);
+  const { binding } = gateway;
+  const now = options.now ?? new Date();
+  const deadline = Date.now() + options.budgetMs;
+  const expiredReservations = await withTeam(p, (tx) =>
+    expireCvReservations(tx, p.teamId, binding, now),
+  );
+  const released = await releaseRetainedBlobCharges(p, gateway, {
+    maxRows: options.maxRows,
+    deadline,
+    now,
+  });
+  let objectsChecked = 0,
+    objectsDeleted = 0,
+    failures = released.failures,
+    reachedEnd = false,
+    stopped = !released.complete;
+  const rowCutoff = now.getTime() - DELETE_GRACE_MS;
+  const orphanCutoff = now.getTime() - BLOB_RESERVATION_MS - DELETE_GRACE_MS;
+  const prefix = `teams/${p.teamId}/cvs/`;
+  let cursor: string | null = null;
+  pages: for (let page = 0; page < options.maxPages; page++) {
+    const timeout = callTimeout(deadline);
+    if (timeout < 1) {
+      stopped = true;
+      break;
+    }
+    let listing;
+    try {
+      listing = await gateway.listObjects(
+        { prefix, cursor, limit: LIST_PAGE_SIZE },
+        timeout,
+      );
+    } catch {
+      failures++;
+      stopped = true;
+      break;
+    }
+    const keys = listing.objects.map((object) => object.pathname);
+    const rows = keys.length
+      ? await withTeam(p, (tx) =>
+          tx
+            .select({
+              objectKey: uploads.objectKey,
+              status: uploads.status,
+              blobSizeBytes: uploads.blobSizeBytes,
+              expiresAt: uploads.expiresAt,
+            })
+            .from(uploads)
+            .where(
+              and(
+                eq(uploads.teamId, p.teamId),
+                eq(uploads.storageProvider, "blob"),
+                eq(uploads.storageStore, binding.store),
+                inArray(uploads.objectKey, keys),
+              ),
+            ),
+        )
+      : [];
+    const byKey = new Map(rows.map((row) => [row.objectKey, row]));
+    for (const object of listing.objects) {
+      objectsChecked++;
+      const row = byKey.get(object.pathname);
+      const stale = row
+        ? row.expiresAt.getTime() <= rowCutoff &&
+          !(row.status === "ready" && object.sizeBytes === row.blobSizeBytes)
+        : object.uploadedAt.getTime() <= orphanCutoff;
+      if (!stale) continue;
+      const deleteTimeout = callTimeout(deadline);
+      if (objectsDeleted >= options.maxDeletes || deleteTimeout < 1) {
+        stopped = true;
+        break pages;
+      }
+      try {
+        await gateway.deleteObject(object.pathname, deleteTimeout);
+        objectsDeleted++;
+      } catch {
+        failures++;
+      }
+    }
+    cursor = listing.cursor;
+    if (!cursor) {
+      reachedEnd = true;
+      break;
+    }
+  }
+  return {
+    expiredReservations,
+    chargesReleased: released.chargesReleased,
+    objectsChecked,
+    objectsDeleted,
+    failures,
+    complete: reachedEnd && !stopped,
+  };
+}
+
+/**
+ * The owner or admin cleanup call: one full sweep, inside the route's 30 s limit. The injected
+ * gateway (tests) is used when given.
+ */
+export async function runStorageReconciliation(
+  p: Principal,
+  storage?: StorageGateway | BlobGateway,
+): Promise<BlobReconciliation> {
+  if (p.role !== "owner" && p.role !== "admin")
+    throw new ApiError(
+      403,
+      "storage_reconciliation_forbidden",
+      "Only team owners and admins can run CV storage cleanup.",
+    );
+  if (storageBinding(storage).provider !== "blob")
+    throw new ApiError(
+      409,
+      "STORAGE_RECONCILIATION_UNSUPPORTED",
+      "CV storage cleanup applies only to Vercel Blob storage.",
+    );
+  return reconcileBlobStorage(
+    p,
+    blobGateway(storage ?? (await storageClient())),
+    { maxRows: 50, maxDeletes: 100, maxPages: 3, budgetMs: 20_000 },
+  );
+}

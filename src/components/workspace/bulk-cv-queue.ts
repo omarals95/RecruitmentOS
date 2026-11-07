@@ -55,6 +55,17 @@ export function uncertainRetryTooOld(
   );
 }
 
+/** One page of a list, with the page clamped to 1..totalPages and at least one page. */
+export function pageItems<T>(items: T[], page: number, size = 25) {
+  const totalPages = Math.max(1, Math.ceil(items.length / size));
+  const current = Math.min(totalPages, Math.max(1, Math.floor(page) || 1));
+  return {
+    items: items.slice((current - 1) * size, current * size),
+    page: current,
+    totalPages,
+  };
+}
+
 /** Ends a run before the next item when the session, permission or storage setup is gone. */
 export function stopsRun(error: { status: number; code: string }) {
   return (
@@ -62,6 +73,11 @@ export function stopsRun(error: { status: number; code: string }) {
     error.status === 403 ||
     (error.status === 503 && error.code === "STORAGE_SETUP_REQUIRED")
   );
+}
+
+/** Pauses a run before the next item when the team's CV upload rate limit was reached. */
+export function pausesRun(error: { status: number; code: string }) {
+  return error.status === 429 && error.code === "CV_UPLOAD_RATE_LIMITED";
 }
 
 export type SummaryGroup =

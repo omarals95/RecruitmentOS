@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   return runApi(request, "cvs:write", async (principal) => {
     requireScope(principal, "candidates:write");
-    // Bulk uploads follow single CV upload readiness: Blob and unknown providers stay false.
+    // Bulk uploads follow single CV upload readiness: Blob only when hosted, unknown providers false.
     // storageConfigured reads only the environment; it never contacts a provider.
     const configured = storageConfigured();
     return json({

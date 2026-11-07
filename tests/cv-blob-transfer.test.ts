@@ -328,6 +328,45 @@ describe("private Blob CV transfer behind a fake client", () => {
       expect(fake.state.reads).toBe(0);
     });
 
+    it("reserves Blob uploads for 15 minutes and S3 uploads for 60, with tickets inside both", async () => {
+      const fake = fakeBlob();
+      const input = metadata(1000);
+      const blob = await beginCvUpload(owner, candidateId, input, fake.gateway);
+      const created = Date.parse(blob.data.createdAt);
+      const blobExpiry = Date.parse(blob.data.expiresAt);
+      expect(blobExpiry - created).toBe(15 * 60_000);
+      const ticketExpiry = Date.parse(blob.upload!.expiresAt);
+      expect(ticketExpiry).toBeLessThanOrEqual(Date.now() + 300_000);
+      expect(ticketExpiry).toBeLessThanOrEqual(blobExpiry);
+      // A replay never issues a ticket past the reservation's expiry.
+      await rows(
+        "UPDATE app.uploads SET expires_at=now()+interval '2 minutes' WHERE id=$1",
+        [blob.data.id],
+      );
+      const replay = await beginCvUpload(
+        owner,
+        candidateId,
+        input,
+        fake.gateway,
+      );
+      expect(replay.data.id).toBe(blob.data.id);
+      expect(Date.parse(replay.upload!.expiresAt)).toBeLessThanOrEqual(
+        Date.parse(replay.data.expiresAt),
+      );
+      expect(Date.parse(replay.upload!.expiresAt)).toBeLessThan(
+        Date.now() + 121_000,
+      );
+      const s3 = await beginCvUpload(
+        owner,
+        candidateId,
+        metadata(200),
+        fakeS3().gateway,
+      );
+      expect(
+        Date.parse(s3.data.expiresAt) - Date.parse(s3.data.createdAt),
+      ).toBe(60 * 60_000);
+    });
+
     it("refuses invalid metadata, sources, candidates and permissions before any signer call", async () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
@@ -540,6 +579,37 @@ describe("private Blob CV transfer behind a fake client", () => {
         ).toEqual([{ action: "cv.rejected" }]);
       });
 
+    // The provider let these through (multipart past the size limit, a wrong content type).
+    const providerMismatches: [string, Partial<StoredObject>, number][] = [
+      ["a head size over the reservation", { headSize: 1001 }, 0],
+      ["a head size over 10 MiB", { headSize: 11 * MiB }, 0],
+      ["a head content type", { headMimeType: "text/html" }, 0],
+      [
+        "a read content type",
+        { mimeType: "image/png", headMimeType: "application/pdf" },
+        1,
+      ],
+    ];
+    for (const [label, stored, opens] of providerMismatches)
+      it(`rejects ${label} that differs from the reservation and retains the charge`, async () => {
+        const fake = fakeBlob();
+        const { id, key } = await pendingBlob(fake);
+        fake.objects.set(key, {
+          bytes: fictionalPdf(1000),
+          mimeType: "application/pdf",
+          ...stored,
+        });
+        expect(await counters()).toEqual(ledger(0, 1, 0));
+        await expect(
+          completeCvUpload(owner, id, fake.gateway),
+        ).rejects.toMatchObject({ status: 400, code: "INVALID_CV" });
+        expect(await status(id)).toBe("rejected");
+        expect(await counters()).toEqual(ledger(0, 0, 1));
+        expect(fake.state.calls).toEqual([`head:${key}`]);
+        // A head mismatch never opens the object.
+        expect(fake.state.reads).toBe(opens);
+      });
+
     it("keeps a reservation pending when the object is missing", async () => {
       const fake = fakeBlob();
       const { id } = await pendingBlob(fake);
@@ -570,7 +640,11 @@ describe("private Blob CV transfer behind a fake client", () => {
 
     it("keeps a reservation pending when opening the object never resolves", async () => {
       const fake = fakeBlob();
-      const { id } = await pendingBlob(fake);
+      const { id, key } = await pendingBlob(fake);
+      fake.objects.set(key, {
+        bytes: fictionalPdf(1000),
+        mimeType: "application/pdf",
+      });
       fake.state.hangOpen = true;
       const started = Date.now();
       await expect(
@@ -998,9 +1072,12 @@ describe("private Blob CV transfer behind a fake client", () => {
       ]);
     });
 
-    it("closes the unread stream when a completion finds a different MIME type", async () => {
+    it("closes the unread stream when the read finds a different MIME type than head", async () => {
       const fake = fakeBlob();
-      const id = await pendingWithObject(fake, { mimeType: "image/png" });
+      const id = await pendingWithObject(fake, {
+        mimeType: "image/png",
+        headMimeType: "application/pdf",
+      });
       await expect(
         completeCvUpload(owner, id, fake.gateway),
       ).rejects.toMatchObject({ status: 400, code: "INVALID_CV" });

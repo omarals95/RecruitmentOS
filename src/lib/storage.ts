@@ -6,6 +6,7 @@ import {
   containsControlCharacters,
 } from "./storage-format.ts";
 import { ApiError } from "./errors.ts";
+import type { BlobGateway } from "./blob-storage.ts";
 
 /**
  * A fixed code per setup cause, lowercase letters and underscores only. Only the code is logged,
@@ -13,7 +14,6 @@ import { ApiError } from "./errors.ts";
  */
 export type StorageConfigurationReason =
   | "unspecified"
-  | "provider_disabled"
   | "provider_unsupported"
   | "hosted_environment_invalid"
   | "not_configured"
@@ -26,6 +26,7 @@ export type StorageConfigurationReason =
   | "aws_upload_unversioned"
   | "aws_version_missing"
   | "blob_client_invalid"
+  | "blob_token_present"
   | "blob_protocol_mismatch"
   | "aws_protocol_mismatch";
 export class StorageConfigurationError extends Error {
@@ -86,12 +87,30 @@ export interface StorageGateway {
   signDownload(key: string, version: string, name: string): Promise<string>;
 }
 
+/** Unset or empty selects Blob; s3 stays only as the dormant legacy option. */
+function selectedProvider(env: Record<string, string | undefined>) {
+  const provider = env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "blob";
+  return provider === "vercel-blob" ? "blob" : provider;
+}
+const BLOB_STORE_PATTERN = /^store_[A-Za-z0-9]{1,128}$/;
+
+/**
+ * Blob reads as set up only in a hosted Vercel environment without a static token: there the
+ * gateway can use the request's OIDC token. Locally no Blob gateway can be built.
+ */
 export function storageConfigured(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
+  const provider = selectedProvider(env);
+  if (provider === "blob")
+    return (
+      BLOB_STORE_PATTERN.test(env.BLOB_STORE_ID?.trim() ?? "") &&
+      env.VERCEL === "1" &&
+      (env.VERCEL_ENV === "preview" || env.VERCEL_ENV === "production") &&
+      env.BLOB_READ_WRITE_TOKEN === undefined
+    );
   // Do not silently fall back to S3 when a different provider was requested.
-  if ((env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3") !== "s3")
-    return false;
+  if (provider !== "s3") return false;
   return Boolean(
     env.S3_BUCKET_NAME?.trim() &&
     env.AWS_REGION?.trim() &&
@@ -100,17 +119,11 @@ export function storageConfigured(
   );
 }
 
-function providerDisabled(provider: string) {
-  return provider === "blob" || provider === "vercel-blob"
-    ? new StorageConfigurationError(
-        "Vercel Blob CV storage is disabled until immutable validated downloads can be guaranteed.",
-        "provider_disabled",
-      )
-    : new StorageConfigurationError(
-        "The configured CV storage provider is not supported.",
-        "provider_unsupported",
-      );
-}
+const providerUnsupported = () =>
+  new StorageConfigurationError(
+    "The configured CV storage provider is not supported.",
+    "provider_unsupported",
+  );
 
 /** Reads only the environment; it never contacts a provider. Off Vercel is development. */
 export function resolveStorageBinding(
@@ -128,10 +141,12 @@ export function resolveStorageBinding(
       );
     environment = env.VERCEL_ENV;
   }
-  const provider = env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
-  if (provider !== "s3") throw providerDisabled(provider);
-  const store = env.S3_BUCKET_NAME?.trim();
-  if (!store)
+  const provider = selectedProvider(env);
+  if (provider !== "s3" && provider !== "blob") throw providerUnsupported();
+  const store = (
+    provider === "blob" ? env.BLOB_STORE_ID : env.S3_BUCKET_NAME
+  )?.trim();
+  if (!store || (provider === "blob" && !BLOB_STORE_PATTERN.test(store)))
     throw new StorageConfigurationError(
       STORAGE_SETUP_REQUIRED_MESSAGE,
       "not_configured",
@@ -139,7 +154,7 @@ export function resolveStorageBinding(
   return { provider, environment, store };
 }
 
-/** This is a freshness gate only. AWS STS verifies the token signature and IAM trust. */
+/** This is a freshness gate only. AWS STS or the Blob API verifies the token signature and trust. */
 export function assertHostedOidcToken(
   env: Record<string, string | undefined>,
   requestToken: unknown,
@@ -147,7 +162,7 @@ export function assertHostedOidcToken(
 ): string {
   if (env.VERCEL !== "1")
     throw new StorageConfigurationError(
-      "AWS role authentication requires a hosted Vercel request. Use explicit test IAM credentials for local development.",
+      "OIDC storage authentication requires a hosted Vercel request. Use explicit test credentials for local development.",
       "oidc_not_hosted",
     );
   if (
@@ -237,11 +252,55 @@ export async function inspectStoredCv(
   return head.version;
 }
 
+/**
+ * The current request's OIDC token, checked once now and again on every later call. It is read
+ * from the request context only; the async Vercel helper, which can refresh via local CLI
+ * config, is never called.
+ */
+async function requestOidcToken(): Promise<() => string> {
+  const { getContext, getVercelOidcTokenSync } = await import("@vercel/oidc");
+  const currentToken = () => {
+    const requestToken = assertHostedOidcToken(
+      process.env,
+      getContext().headers?.["x-vercel-oidc-token"],
+    );
+    if (getVercelOidcTokenSync() !== requestToken)
+      throw new StorageConfigurationError(
+        "The hosted request OIDC context changed. Retry the request.",
+        "oidc_context_changed",
+      );
+    return requestToken;
+  };
+  currentToken();
+  return currentToken;
+}
+
 /** Created within an authenticated request with explicit credentials; no CLI credential refresh. */
-export async function getStorage(): Promise<StorageGateway> {
-  const provider =
-    process.env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "s3";
-  if (provider !== "s3") throw providerDisabled(provider);
+export async function getStorage(): Promise<StorageGateway | BlobGateway> {
+  const provider = selectedProvider(process.env);
+  if (provider === "blob") {
+    if (process.env.VERCEL !== "1")
+      assertHostedOidcToken(process.env, undefined);
+    // Presence refuses, even empty: hosted Blob uses only the request's OIDC token.
+    if (process.env.BLOB_READ_WRITE_TOKEN !== undefined)
+      throw new StorageConfigurationError(
+        "Hosted Blob CV storage refuses a static read-write token. Remove BLOB_READ_WRITE_TOKEN.",
+        "blob_token_present",
+      );
+    const binding = resolveStorageBinding();
+    const currentToken = await requestOidcToken();
+    // Dynamic imports keep this module free of an import cycle with the Blob modules.
+    const { createBlobGateway } = await import("./blob-storage.ts");
+    const { createVercelBlobClient } = await import("./vercel-blob-client.ts");
+    return createBlobGateway(
+      binding,
+      createVercelBlobClient({
+        storeId: binding.store,
+        oidcToken: currentToken,
+      }),
+    );
+  }
+  if (provider !== "s3") throw providerUnsupported();
   if (!storageConfigured())
     throw new StorageConfigurationError(
       STORAGE_SETUP_REQUIRED_MESSAGE,
@@ -251,24 +310,10 @@ export async function getStorage(): Promise<StorageGateway> {
   if (process.env.AWS_ROLE_ARN) {
     if (process.env.VERCEL !== "1")
       assertHostedOidcToken(process.env, undefined);
-    const { getContext, getVercelOidcTokenSync } = await import("@vercel/oidc");
-    const currentToken = () => {
-      const requestToken = assertHostedOidcToken(
-        process.env,
-        getContext().headers?.["x-vercel-oidc-token"],
-      );
-      if (getVercelOidcTokenSync() !== requestToken)
-        throw new StorageConfigurationError(
-          "The hosted request OIDC context changed. Retry the request.",
-          "oidc_context_changed",
-        );
-      return requestToken;
-    };
-    currentToken();
+    const currentToken = await requestOidcToken();
     const { fromWebToken } =
       await import("@aws-sdk/credential-provider-web-identity");
     const roleArn = process.env.AWS_ROLE_ARN;
-    // The async Vercel helper can refresh via local CLI config. This path never calls it.
     credentials = async () =>
       fromWebToken({
         roleArn,

@@ -1,6 +1,6 @@
 # RecruitmentOS
 
-A React and TypeScript recruitment workspace, built with Next.js for Vercel, Neon PostgreSQL and private Amazon S3 CV storage.
+A React and TypeScript recruitment workspace, built with Next.js for Vercel, Neon PostgreSQL and private Vercel Blob CV storage.
 
 ## What is included
 
@@ -57,7 +57,7 @@ With the fictional development server running, `npm run test:local` checks the a
 
 1. Follow [Vercel and Neon deployment](docs/deployment.md).
    For distinct Preview and Production resources, use [environment isolation](docs/environment-isolation.md).
-2. Configure [private S3 storage and Vercel OIDC](docs/s3-setup.md).
+2. Configure [private Vercel Blob CV storage with Vercel OIDC](docs/deployment.md#5-cv-storage).
 3. Review [security and data flows](docs/security.md).
 4. Run the [legacy migration](docs/migration.md) in dry-run mode first.
 5. Use [API tokens and examples](docs/api-examples.md) for authorised AI integrations, and the [MCP endpoint guide](docs/mcp.md) to connect Claude.ai, Claude Code or ChatGPT.

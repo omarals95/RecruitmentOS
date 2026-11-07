@@ -20,6 +20,8 @@ export const dataRoleHelpers = [
   "tenant_context.audit_mcp_call(text,text)",
   "tenant_context.audit_export(text,integer,text[])",
   "tenant_context.purge_bulk_intake(uuid)",
+  "tenant_context.set_storage_limits(bigint,integer,integer)",
+  "tenant_context.release_blob_charge(text,uuid)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",

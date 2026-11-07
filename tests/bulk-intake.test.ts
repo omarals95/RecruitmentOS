@@ -482,8 +482,15 @@ describe("bulk CV intake recovery and server review evidence", () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toMatchObject({
       code: "bulk_batch_limit",
-      message: `A batch can include up to ${BULK_INTAKE_MAX_FILES} files. Start a new import for the rest.`,
+      message:
+        "A batch can include up to 200 files. Start a new import for the rest.",
     });
+    expect(
+      await total(
+        "SELECT count(*)::int AS n FROM app.bulk_intake_items WHERE batch_id=$1",
+        [batchId],
+      ),
+    ).toBe(200);
     expect(await counts()).toEqual(before);
   });
 

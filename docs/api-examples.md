@@ -68,7 +68,7 @@ CV uploads bypass Vercel's small request-body limit by uploading directly to the
 1. `POST /api/v1/candidates/{candidateId}/cvs/uploads` with JSON containing `originalName`, `mimeType`, `sizeBytes` and a stable `clientUploadId` UUID. Requires `cvs:write`. A ready replay returns `upload: null`.
 2. Switch on `upload.protocol`; never guess it from the URL's hostname, and reject any value you do not know. Send no RecruitmentOS token, cookie or `X-Team-Id` to `upload.url`, and do not log it: it is a secret capability.
    - `s3-form-v1` (`method: "POST"`): send a multipart form to `upload.url` with every value in `upload.fields` unchanged, followed by the file part.
-   - `blob-put-v1` (`method: "PUT"`): send the file bytes as the body to `upload.url` with exactly the headers in `upload.headers` (`content-type`). Vercel Blob is currently disabled; the reservation returns 503 `STORAGE_SETUP_REQUIRED` for it.
+   - `blob-put-v1` (`method: "PUT"`): send the file bytes as the body to `upload.url` with exactly the headers in `upload.headers` (`content-type`). This is the hosted protocol: private Vercel Blob. Send the whole file in one PUT; multipart is not supported, and an object whose size or type differs from the reservation is rejected at completion.
 
    Both variants carry `expiresAt` and `maxBytes`, which equals the reserved `sizeBytes`.
 
@@ -78,11 +78,22 @@ CV uploads bypass Vercel's small request-body limit by uploading directly to the
    - `blob-chunks-v1`: read `GET /api/v1/cvs/{cvId}/manifest` for `{uploadId, originalName, contentType, sizeBytes, sha256, chunkSize, chunkCount}`, then fetch `GET /api/v1/cvs/{cvId}/chunks?index=0` up to `chunkCount - 1`, one at a time. Each 200 response is the raw slice with `X-CV-Upload-Id`, `X-CV-Chunk-Index`, `X-CV-Chunk-Offset`, `X-CV-Size-Bytes` and `X-CV-SHA256` headers; check them against the manifest, join the slices and verify the final SHA-256 before using the file. A 409 `CV_INTEGRITY_FAILED` means the stored object no longer matches; discard every chunk.
    - The wrong route for a reference returns 409 `CV_DOWNLOAD_PROTOCOL_MISMATCH`.
 
-Uploads are limited to 10 MiB and team storage quotas. The upload ticket expires within five minutes. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
+Uploads are limited to 10 MiB, the team's storage limit and the store-wide budget, all application limits counting pending uploads and files waiting for cleanup; over them the reservation returns 409 `STORAGE_QUOTA_EXCEEDED`. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 `CV_UPLOAD_RATE_LIMITED` with `Retry-After: 60`; a replay with the same `clientUploadId` is not refused. The upload ticket expires within five minutes; a Blob reservation lasts 15 minutes and an S3 one 60. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
+
+## Clean up CV storage
+
+Owners and admins can run one bounded cleanup of the team's private Blob CV storage with a token holding `cvs:write` (or a session):
+
+```bash
+curl -sS -X POST "$RECRUITMENTOS_URL/api/v1/cvs/storage-reconciliation" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"
+```
+
+Send no body. It expires old reservations, deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago, frees each retained charge only after the object is confirmed missing, and deletes stray or mismatched objects under the team's own CV prefix; pending uploads and matching ready CVs are never touched. The response holds counts only: `{"data":{"expiredReservations","chargesReleased","objectsChecked","objectsDeleted","failures","complete"}}`. Call it again while `complete` is `false`. Other roles get 403 `storage_reconciliation_forbidden`; with S3 storage it returns 409 `STORAGE_RECONCILIATION_UNSUPPORTED`, and with Blob not set up 503 `STORAGE_SETUP_REQUIRED`.
 
 ## Errors
 
-The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
+The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) it is 60. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
 
 Every error response has a fresh `error.correlationId` and an identical `X-Correlation-Id` header. Quote it when reporting a failure: for a 500 the server logs that ID with a safe error category, never the request or record contents.
 

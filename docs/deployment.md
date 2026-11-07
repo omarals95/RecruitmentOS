@@ -1,12 +1,12 @@
 # Deploying RecruitmentOS
 
-> **Deployment is not authorized.** Release needs the owner's decision; independent review (DEC-02/DEC-03) and Production verification are still open. Hosted sign-in opens only when every readiness condition in [authentication.md](authentication.md#hosted-sign-in-readiness) holds, and Blob CV storage stays disabled. Hosted database startup no longer has a blanket block: it fails closed on the precise checks in [§2](#2-neon-postgresql). In the owner's run on the Neon Preview database, the split runtime role template [postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql) is applied, `scripts/db-role-evidence.ts` passes with zero drift, and `npm run test:live-roles` passes 27/27 through the transaction-mode pooler and 27/27 direct, with all fixtures removed. Do not run the template against Production before it is reviewed and approved, enable Blob, import real candidate data, or remove these gates. Follow [identity-boundary-plan.md](identity-boundary-plan.md) and [neon-database-runbook.md](neon-database-runbook.md) for the outstanding implementation and verification work.
+> **Deployment is not authorized.** Release needs the owner's decision; independent review (DEC-02/DEC-03) and Production verification are still open. Hosted sign-in opens only when every readiness condition in [authentication.md](authentication.md#hosted-sign-in-readiness) holds, and Blob CV storage switches on only after the owner's steps in [§5](#5-cv-storage). Hosted database startup no longer has a blanket block: it fails closed on the precise checks in [§2](#2-neon-postgresql). In the owner's run on the Neon Preview database, the split runtime role template [postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql) is applied, `scripts/db-role-evidence.ts` passes with zero drift, and `npm run test:live-roles` passes 27/27 through the transaction-mode pooler and 27/27 direct, with all fixtures removed. Do not run the template against Production before it is reviewed and approved, switch Blob on in Production before Preview passes the checks in §5 and §6, import real candidate data, or remove these gates. Follow [identity-boundary-plan.md](identity-boundary-plan.md) and [neon-database-runbook.md](neon-database-runbook.md) for the outstanding implementation and verification work.
 
-The project is prepared for Vercel. No Neon database, S3 bucket, mail account, OAuth client or Vercel project is created by cloning or building the repository. Deployment uses the services you configure below.
+The project is prepared for Vercel. No Neon database, Blob store, mail account, OAuth client or Vercel project is created by cloning or building the repository. Deployment uses the services you configure below.
 
 ## 1. Separate environments
 
-Use separate Neon branches/databases, S3 buckets, email settings and auth secrets for production and previews. Do not attach preview deployments to production candidate data. Protect preview deployments in Vercel; a preview URL is not an access-control boundary. Use Node.js **24.x** and the Next.js framework preset. No static export is used: authentication, database operations and signed CV URLs require the server.
+Use separate Neon branches/databases, private Blob stores, email settings and auth secrets for production and previews. Do not attach preview deployments to production candidate data. Protect preview deployments in Vercel; a preview URL is not an access-control boundary. Use Node.js **24.x** and the Next.js framework preset. No static export is used: authentication, database operations and signed CV URLs require the server.
 
 ## 2. Neon PostgreSQL
 
@@ -32,6 +32,8 @@ Bulk retry safety (WP-09c) adds migration `0017_bulk_intake_tombstones.sql`: a n
 
 Observability hardening (WP-11, job 026) adds no migration. The role template grants `recruitmentos_identity` `DELETE` on `auth.oauth_clients`, `auth.oauth_codes` and `auth.oauth_tokens`, used only by the expired-row purge ([authentication.md](authentication.md#rate-limit-keys-and-retention)). After merge the owner must re-apply [postgres-split-runtime-roles.sql](../infrastructure/postgres-split-runtime-roles.sql) on Preview (and later Production) as the database owner, then rerun `scripts/db-role-evidence.ts` and confirm both roles report no drift. Until the template is re-applied the app keeps working: the OAuth purge fails with `42501`, logs one `auth_purge_failed … sqlstate=42501` line at most once a minute per instance and changes no response, and rate-limit rows are still purged. Rate-limit keys become keyed hashes from deploy; rows with raw addresses are removed by the same purge once their window has passed.
 
+Blob CV storage enablement (P1-15a, job 030) adds migration `0018_blob_storage_enablement.sql`. It drops the two team-limit row checks on `app.storage_usage` so a limit can sit below current usage, adds `app.storage_usage.upload_requests_per_minute` and `app.uploads.blob_deleted_at` with two indexes, replaces `storage_ledger.guard_upload` so only the owner-run helper sets `blob_deleted_at`, once, adds the owner-run `SECURITY DEFINER` helpers `tenant_context.set_storage_limits(bigint, integer, integer)` and `tenant_context.release_blob_charge(text, uuid)`, recreates the `app.activity` insert policy so `storage-settings` audit rows come only from the first helper, and sets the storage schema marker to 3. It does not change `storage_ledger.budgets`. The role template gains two data-role grants, `EXECUTE` on both helpers. The owner must apply migration `0018` after `0017`, rerun the updated role template on Preview, then rerun `scripts/db-role-evidence.ts` and `npm run test:live-roles`; none of this has been done yet. This release requires storage schema 3: until `0018` is applied, hosted startup refuses with 503 `storage_schema_mismatch`, so apply it before deploying the release. Until the template is rerun, saving team storage settings and releasing Blob charges fail closed (`42501`, which the cleanup counts as a failure).
+
 Hosted startup (`createDbPair()` in `src/db/index.ts`) fails closed with 503, and no environment variable bypasses it. Before any pool exists it refuses `DATABASE_MODE=pglite` or `ALLOW_LOCAL_DB=true` (`local_db_disabled`), `DEV_MAIL_MODE=console` or any `DEV_SEED_PASSWORD` (`development_setting_refused`), a missing or malformed `TENANT_CONTEXT_SIGNING_KEY` (`tenant_context_unavailable`), and a missing `DATABASE_URL` or `IDENTITY_DATABASE_URL`, URLs for different endpoints or databases, unsupported URL parameters or a non-empty `PGOPTIONS` (`unsafe_database_connections`). Remote pools use `sslmode=verify-full` with certificate verification. After connecting it refuses a session login that differs from the effective role, or an unsafe result from the runtime role safety query (including a role that owns or can assume the database owner) or the marker and per-role boundary queries (`unsafe_database_role`); a missing or mismatched connection marker, the same role on both pools, or a role able to assume the other (`unsafe_database_connections`); and a missing or different storage schema version (`storage_schema_mismatch`). Keep owner credentials out of the application runtime and use TLS with certificate verification for remote connections.
 
 The staged startup checks reject several unsafe role privileges, but they are not a complete privilege audit or proof of tenant isolation. Team policies now derive their context from a signed per-transaction assertion rather than caller-set settings, verified on local PGlite and a throwaway local PostgreSQL 18 cluster, and the adversarial live harness passed on Neon Preview in the owner's run. Do not claim isolation against a compromised runtime SQL role until independent review (DEC-02/DEC-03) and Production verification pass.
@@ -42,29 +44,31 @@ Set server-only environment variables from `.env.example`. Preview and Productio
 
 - **Required for sign-in:** `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `DATABASE_URL`, `IDENTITY_DATABASE_URL`, `TENANT_CONTEXT_SIGNING_KEY`, `RESEND_API_KEY`, `EMAIL_FROM`.
 - **Required for first-administrator setup:** `BOOTSTRAP_OWNER_EMAIL`, `BOOTSTRAP_SETUP_TOKEN`.
-- **Optional:** `ALLOW_PUBLIC_SIGNUP`; Google `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; Microsoft `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`; storage `CV_STORAGE_PROVIDER`, `S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN`.
+- **Required for CV storage:** `BLOB_STORE_ID`, this environment's own private store; `CV_STORAGE_PROVIDER` defaults to `blob` (leave it unset or set `blob`). Access uses the request's Vercel OIDC token.
+- **Optional:** `ALLOW_PUBLIC_SIGNUP`; Google `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; Microsoft `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`.
 - **Platform-provided:** `VERCEL`, `NODE_ENV` (and `VERCEL_ENV`, which CV storage reads). Do not set them yourself.
 - **MCP endpoint:** no new variables. `/api/mcp` and the OAuth endpoints derive every URL from `BETTER_AUTH_URL` and are available exactly when hosted sign-in is ready.
-- **Must not be set:** `DATABASE_MODE`, `ALLOW_LOCAL_DB`, `DEV_MAIL_MODE`, `DEV_SEED_PASSWORD`, `PGOPTIONS`, `MIGRATION_DATABASE_URL`, `ALLOW_UNSAFE_TENANT_ISOLATION`.
+- **Must not be set:** `DATABASE_MODE`, `ALLOW_LOCAL_DB`, `DEV_MAIL_MODE`, `DEV_SEED_PASSWORD`, `PGOPTIONS`, `MIGRATION_DATABASE_URL`, `ALLOW_UNSAFE_TENANT_ISOLATION`, and `BLOB_READ_WRITE_TOKEN` in Preview or Production. Blob is refused while it is present, even empty, including a value Vercel adds automatically when a store is connected; remove it. The S3 variables (`S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN`) belong only to the dormant legacy option.
 
 Hosted sign-in stays unavailable unless the sign-in variables pass the readiness checks in [authentication.md](authentication.md#hosted-sign-in-readiness) on the Vercel production runtime; `DATABASE_MODE`, `ALLOW_LOCAL_DB`, `DEV_MAIL_MODE`, `DEV_SEED_PASSWORD` and `PGOPTIONS` also make it refuse. Each variable's purpose:
 
-| Setting                                        | Purpose                                                                |
-| ---------------------------------------------- | ---------------------------------------------------------------------- |
-| `DATABASE_URL`                                 | Pooled restricted runtime Neon connection                              |
-| `IDENTITY_DATABASE_URL`                        | Separate restricted identity connection to the same database           |
-| `TENANT_CONTEXT_SIGNING_KEY`                   | The tenant context key `npm run db:migrate` installed in this database |
-| `BETTER_AUTH_URL`                              | Exact canonical HTTPS application origin, without a path               |
-| `BETTER_AUTH_SECRET`                           | Unique cryptographically random secret, at least 32 characters         |
-| `BOOTSTRAP_OWNER_EMAIL`                        | Email allowed to register the first owner account                      |
-| `BOOTSTRAP_SETUP_TOKEN`                        | High-entropy initial setup token, unique per environment               |
-| `ALLOW_PUBLIC_SIGNUP`                          | Keep `false` for invitation-only registration                          |
-| `RESEND_API_KEY`, `EMAIL_FROM`                 | Verified sender for verification, invitations and resets               |
-| `S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN` | Private versioned CV bucket and Vercel OIDC role                       |
+| Setting                        | Purpose                                                                |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| `DATABASE_URL`                 | Pooled restricted runtime Neon connection                              |
+| `IDENTITY_DATABASE_URL`        | Separate restricted identity connection to the same database           |
+| `TENANT_CONTEXT_SIGNING_KEY`   | The tenant context key `npm run db:migrate` installed in this database |
+| `BETTER_AUTH_URL`              | Exact canonical HTTPS application origin, without a path               |
+| `BETTER_AUTH_SECRET`           | Unique cryptographically random secret, at least 32 characters         |
+| `BOOTSTRAP_OWNER_EMAIL`        | Email allowed to register the first owner account                      |
+| `BOOTSTRAP_SETUP_TOKEN`        | High-entropy initial setup token, unique per environment               |
+| `ALLOW_PUBLIC_SIGNUP`          | Keep `false` for invitation-only registration                          |
+| `RESEND_API_KEY`, `EMAIL_FROM` | Verified sender for verification, invitations and resets               |
+| `CV_STORAGE_PROVIDER`          | Unset or `blob` (the default); `s3` only for the dormant legacy option |
+| `BLOB_STORE_ID`                | This environment's private Blob store id (`store_…`)                   |
 
 Never expose these through `NEXT_PUBLIC_*`. The deployed `TENANT_CONTEXT_SIGNING_KEY` must be the key `npm run db:migrate` installed in that database; otherwise every team transaction is denied (403 `tenant_context_denied`). `ALLOW_LOCAL_DB=true`, `DEV_MAIL_MODE=console`, `DATABASE_MODE=pglite` and any `DEV_SEED_PASSWORD` make hosted startup refuse; do not configure them in a deployed environment. The build succeeds without credentials; private routes show setup-required until runtime services are configured. A successful build does not prove cloud credentials or provider permissions are correct.
 
-Import `omarals95/RecruitmentOS` into Vercel and select the reviewed implementation branch. Run `npm ci` for install and `npm run build` for build. The repository includes Vercel's Node function duration configuration. Use a stable canonical production domain matching `BETTER_AUTH_URL`. Preview origins need their own corresponding isolated configuration; do not add arbitrary origins to auth or S3 CORS.
+Import `omarals95/RecruitmentOS` into Vercel and select the reviewed implementation branch. Run `npm ci` for install and `npm run build` for build. The repository includes Vercel's Node function duration configuration. Use a stable canonical production domain matching `BETTER_AUTH_URL`. Preview origins need their own corresponding isolated configuration; do not add arbitrary origins to auth.
 
 ## 4. Email and sign-in
 
@@ -74,7 +78,13 @@ For Google, configure the OAuth client and callback `https://YOUR-DOMAIN/api/aut
 
 ## 5. CV storage
 
-Complete [s3-setup.md](s3-setup.md). Public access must be blocked and versioning enabled. Apply bucket CORS only for the exact approved application origins and scope the Vercel AWS trust policy to the intended organisation, project and environment. Do not expire noncurrent CV object versions indiscriminately: a ready database reference can point to one. The application uses immutable version IDs after format validation.
+Hosted CVs are stored in private Vercel Blob only (DEC-01, resolved by the owner on 7 November 2026). The S3 path in [s3-setup.md](s3-setup.md) is legacy and dormant. The owner switches Blob on per environment, Preview first; none of these steps has been done yet:
+
+1. Create a separate **private** Blob store for Preview and for Production, and connect each to the project for its own environment only. Never share a store between environments.
+2. Set `BLOB_STORE_ID` to that environment's store id and leave `CV_STORAGE_PROVIDER` unset or `blob`. Remove `BLOB_READ_WRITE_TOKEN` from Preview and Production, including the value Vercel adds when a store is connected: the server then refuses Blob (503 `STORAGE_SETUP_REQUIRED`, reason `blob_token_present`). Hosted Blob uses only the request's Vercel OIDC token with the store named explicitly, never a static token or the SDK's fallback. Redeploy after changing the provider, because the CSP is fixed at build time.
+3. Apply migration `0018_blob_storage_enablement.sql` after `0017`, rerun the role template, then rerun `scripts/db-role-evidence.ts` and `npm run test:live-roles` (see [§2](#2-neon-postgresql)).
+4. Review the store-wide budgets in `storage_ledger.budgets` (Preview 200,000,000 bytes / 500 files, Production 600,000,000 bytes / 2,000 files); the owner changes them only with the SQL in [neon-database-runbook.md](neon-database-runbook.md#change-the-store-wide-cv-storage-budgets). Team limits and the upload rate limit are off by default and set by owners and admins in Team & access. All of these are application limits, not hard provider or billing caps ([residual risk](blob-security-design.md#residual-risk)).
+5. Rejected, expired and abandoned uploads are deleted only after their tickets expired. There is no scheduler: the next Blob reservation of a team frees a few charges, and an owner or admin runs the full cleanup with `POST /api/v1/cvs/storage-reconciliation` ([api-examples.md](api-examples.md#clean-up-cv-storage)); repeat it while `complete` is false.
 
 ## 6. Launch checks with fictional data
 
@@ -82,7 +92,9 @@ Complete [s3-setup.md](s3-setup.md). Public access must be blocked and versionin
 - Create two teams; confirm a user/token from one cannot access the other's records, source metadata, CV tickets or downloads.
 - Invite a recruiter and viewer; check role changes, removal and last-owner protection.
 - Create/edit candidates, vacancies, application stages, task buckets/fields, interviews, offers and onboarding checklists. Verify conflicts preserve drafts.
-- Upload a small fictional CV, complete its validation and download it. Check S3 versioning, exact-origin CORS and expired links. Unconfigured storage must fail closed.
+- Upload a small fictional CV to the Preview Blob store, complete its validation and download it through the verified chunks; also import a few fictional CVs in one bulk import. Unconfigured storage, and a present `BLOB_READ_WRITE_TOKEN`, must fail closed with the setup message.
+- In Team & access, as an owner, set and clear a team storage limit and an upload rate; check the usage figures, the "Updated CV storage settings" activity rows, a 409 over the limit and a 429 over the rate.
+- Call `POST /api/v1/cvs/storage-reconciliation` as an owner and check that it returns counts only and, after an abandoned upload's reservation expired more than 10 minutes ago, frees its retained charge.
 - Create a narrowly scoped token; confirm read/write/upload limits, expiration, revocation and rate limiting. Confirm tokens cannot manage teams or mint other tokens.
 - Verify no secrets or candidate payloads appear in public pages, logs, analytics services or the repository.
 
@@ -90,4 +102,4 @@ Then run the migration dry-run, review its candidate/file/duplicate/exception co
 
 ## Operations
 
-Enable Neon backup/restore appropriate to your retention policy and S3 recovery protections. The [recovery runbook](recovery-runbook.md) covers failed migrations, release rollback and restoring into an isolated database. Monitor application failures, provider costs, upload reservations and rate limits without logging CV contents, passwords, tokens or signed URLs. Define retention, deletion, offboarding and incident response before real use. CV format validation is not antivirus scanning; if malware scanning is required, add a private quarantine/scanning gate before making files ready. See [security.md](security.md) for implementation limits and authorised network flows.
+Enable Neon backup/restore appropriate to your retention policy, and keep each Blob store private and limited to its environment. The [recovery runbook](recovery-runbook.md) covers failed migrations, release rollback and restoring into an isolated database. Monitor application failures, provider costs, upload reservations and rate limits without logging CV contents, passwords, tokens or signed URLs. Define retention, deletion, offboarding and incident response before real use. CV format validation is not antivirus scanning; if malware scanning is required, add a private quarantine/scanning gate before making files ready. See [security.md](security.md) for implementation limits and authorised network flows.

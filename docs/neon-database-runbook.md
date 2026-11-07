@@ -124,4 +124,27 @@ No application defect was found. Locally, every outcome, positive control and en
 
 If the pooled Preview rerun fails only `pooled-connection-reuse` in phase `backend-identity`, Neon's pooler ran the later transaction on another backend, so the check could not observe reuse. Report it rather than relaxing the check.
 
+## Change the store-wide CV storage budgets
+
+`storage_ledger.budgets` holds one row per environment: the most bytes and CV files the application lets all teams together charge to that environment's store. The migrations set Production to 600,000,000 bytes / 2,000 files and Preview and development to 200,000,000 bytes / 500 files. The app has no control for them, and no migration changes them; only the owner does, in each environment's own database, as the migration owner over that database's direct (non-pooler) connection, as in [§2](#2-migrate-one-database-at-a-time):
+
+```sql
+-- As the migration owner, over the direct (non-pooler) connection to this environment's own database.
+BEGIN;
+SELECT environment, max_bytes, max_files FROM storage_ledger.budgets ORDER BY environment;
+SELECT provider, store, environment,
+       used_bytes + reserved_bytes + retained_bytes AS charged_bytes,
+       used_files + reserved_files + retained_files AS charged_files
+  FROM storage_ledger.stores ORDER BY provider, store;
+-- Decimal bytes and a file count; use the environment this database serves.
+UPDATE storage_ledger.budgets SET max_bytes = <new_bytes>, max_files = <new_files> WHERE environment = '<preview|production>';
+SELECT environment, max_bytes, max_files FROM storage_ledger.budgets ORDER BY environment;
+COMMIT;
+```
+
+- Budgets are decimal bytes (1 MB = 1,000,000 bytes) and a number of files.
+- Lowering a budget below the current charges keeps every existing charge and CV; new reservations are then refused with 409 `STORAGE_QUOTA_EXCEEDED` until charges fall below it.
+- Keep the sum of the Preview and Production budgets below the account's remaining Blob storage allowance after the Pro upgrade, minus any other use of the account; check the allowance in the Vercel account, as no figure is assumed here. A budget is an application limit, not a provider or billing cap.
+- Team limits, set by owners and admins in Team & access, apply inside the budget; the budget always applies.
+
 Reference: [Neon connection pooling](https://neon.com/docs/connect/connection-pooling), [Neon roles and managed privileges](https://neon.com/docs/manage/roles), [limited database access](https://neon.com/docs/manage/database-access), and [deployment guidance](deployment.md).

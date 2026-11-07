@@ -4,7 +4,7 @@ import {
   type BlobTicketSigner,
 } from "./blob-put-ticket.ts";
 import { inspectBlobUpload } from "./blob-upload-validation.ts";
-import { CvValidationError } from "./storage-format.ts";
+import { CvValidationError, MAX_CV_BYTES } from "./storage-format.ts";
 import type { StorageBinding } from "./storage.ts";
 
 const BLOB_API_ORIGIN = "https://vercel.com";
@@ -15,7 +15,17 @@ export type BlobObject = {
   mimeType: string;
   stream: AsyncIterable<Uint8Array>;
 };
-/** Provider-neutral seam; only tests and the live verification script build a real client. */
+export type BlobMetadata = {
+  sizeBytes: number;
+  mimeType: string;
+  uploadedAt: Date;
+};
+export type BlobListing = {
+  objects: { pathname: string; sizeBytes: number; uploadedAt: Date }[];
+  /** Null once the listing reached its end. */
+  cursor: string | null;
+};
+/** Provider-neutral seam; getStorage builds the real client in OIDC mode, tests use a fake. */
 export interface BlobClient {
   readonly signer: BlobTicketSigner;
   /** Opens a private object by pathname, uncached; resolves null when it does not exist. */
@@ -23,6 +33,19 @@ export interface BlobClient {
     pathname: string,
     options: { cache: "no-store"; signal: AbortSignal },
   ): Promise<BlobObject | null>;
+  /** The object's stored metadata; null when it does not exist. */
+  head(
+    pathname: string,
+    options: { signal: AbortSignal },
+  ): Promise<BlobMetadata | null>;
+  /** Resolves for a missing object as well. */
+  delete(pathname: string, options: { signal: AbortSignal }): Promise<void>;
+  list(options: {
+    prefix: string;
+    cursor?: string | null;
+    limit: number;
+    signal: AbortSignal;
+  }): Promise<BlobListing>;
 }
 type BlobReservation = {
   teamId: string;
@@ -59,6 +82,52 @@ export interface BlobGateway {
     length: number,
     timeoutMs?: number,
   ): Promise<Buffer | null>;
+  /** Cleanup calls; each gets its own deadline and keeps provider error text inside. */
+  headObject(pathname: string, timeoutMs: number): Promise<BlobMetadata | null>;
+  deleteObject(pathname: string, timeoutMs: number): Promise<void>;
+  listObjects(
+    options: { prefix: string; cursor: string | null; limit: number },
+    timeoutMs: number,
+  ): Promise<BlobListing>;
+}
+
+function assertDeadline(timeoutMs: number) {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_BLOB_READ_MS
+  )
+    throw new Error("Invalid private Blob read deadline.");
+}
+
+/**
+ * One metadata call under its own controller and deadline. Provider errors can contain
+ * capabilities, so any failure becomes the given plain message.
+ */
+async function withDeadline<T>(
+  timeoutMs: number,
+  failure: string,
+  call: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  assertDeadline(timeoutMs);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => call(controller.signal)),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Private Blob call exceeded its deadline."));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch {
+    controller.abort();
+    throw new Error(failure);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Fire-and-forget: a provider that ignores cancellation is never awaited. */
@@ -82,12 +151,7 @@ async function withObject<T>(
   timeoutMs: number,
   read: (object: BlobObject, controller: AbortController) => Promise<T>,
 ): Promise<T | null> {
-  if (
-    !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 1 ||
-    timeoutMs > MAX_BLOB_READ_MS
-  )
-    throw new Error("Invalid private Blob read deadline.");
+  assertDeadline(timeoutMs);
   const controller = new AbortController();
   const deadline = Date.now() + timeoutMs;
   let expired = false;
@@ -143,7 +207,7 @@ async function withObject<T>(
   }
 }
 
-/** Built only by tests and the live verification script; getStorage never returns a Blob gateway. */
+/** getStorage builds it for a Blob binding; tests and the live verification script build their own. */
 export function createBlobGateway(
   binding: StorageBinding,
   client: BlobClient,
@@ -171,17 +235,37 @@ export function createBlobGateway(
         throw new Error("Private Blob upload ticket could not be issued.");
       }
     },
-    inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
+    async inspectUpload(reservation, timeoutMs = MAX_BLOB_READ_MS) {
+      // The provider's size and type limits are not trusted: a multipart upload can bypass the
+      // ticket's size limit and a wrong type was accepted. Head first, under the same deadline.
+      const started = Date.now();
+      const stored = await withDeadline(
+        timeoutMs,
+        "Private Blob object could not be inspected.",
+        (signal) => client.head(reservation.objectKey, { signal }),
+      );
+      if (!stored) return null;
+      if (
+        stored.sizeBytes !== reservation.sizeBytes ||
+        stored.sizeBytes > MAX_CV_BYTES ||
+        stored.mimeType !== reservation.mimeType
+      )
+        throw new CvValidationError(
+          "Uploaded size or file type differs from the reserved CV upload.",
+        );
+      const remaining = timeoutMs - (Date.now() - started);
+      if (remaining < 1)
+        throw new Error("Private Blob read exceeded its deadline.");
       return withObject(
         client,
         reservation.objectKey,
-        timeoutMs,
+        remaining,
         (object, controller) =>
           inspectBlobUpload(
             reservation,
             { mimeType: object.mimeType, sizeBytes: object.sizeBytes },
             object.stream,
-            { controller, timeoutMs },
+            { controller, timeoutMs: remaining },
           ),
       );
     },
@@ -207,6 +291,27 @@ export function createBlobGateway(
             { controller, timeoutMs },
           );
         },
+      );
+    },
+    headObject(pathname, timeoutMs) {
+      return withDeadline(
+        timeoutMs,
+        "Private Blob object could not be inspected.",
+        (signal) => client.head(pathname, { signal }),
+      );
+    },
+    deleteObject(pathname, timeoutMs) {
+      return withDeadline(
+        timeoutMs,
+        "Private Blob object could not be deleted.",
+        (signal) => client.delete(pathname, { signal }),
+      );
+    },
+    listObjects(options, timeoutMs) {
+      return withDeadline(
+        timeoutMs,
+        "Private Blob objects could not be listed.",
+        (signal) => client.list({ ...options, signal }),
       );
     },
   };
