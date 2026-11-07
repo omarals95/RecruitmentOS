@@ -41,6 +41,17 @@ export function validateInvitationRole(
   return role;
 }
 
+/** Only the initial administrator and owners of an existing team may create a team. */
+export function canCreateTeam(
+  user: { emailVerified: boolean; initialAdmin?: boolean | null },
+  roles: readonly string[],
+): boolean {
+  return (
+    user.emailVerified === true &&
+    (user.initialAdmin === true || roles.includes("owner"))
+  );
+}
+
 export function isUsableAuthSecret(secret?: string): boolean {
   return Boolean(
     secret &&

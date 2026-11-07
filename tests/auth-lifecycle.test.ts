@@ -138,10 +138,19 @@ describe("atomic team creation", () => {
   });
 
   it("rolls back a failed owner-member insert without consuming the slug or the creator's five-team allowance", async () => {
-    const cookie = await registerVerified(
-      t.open,
+    // Only owners and the initial administrator create teams; the creator owns the first team.
+    const firstTeam = (
+      await t.h.pg.query<{ id: string }>(
+        `SELECT id FROM auth.organization WHERE slug='first-team'`,
+      )
+    ).rows[0].id;
+    const { cookie } = await addMember(
+      t.caller,
       t.mail,
+      adminCookie,
+      firstTeam,
       "creator@example.test",
+      "owner",
     );
     const creator = await userId(t.h, "creator@example.test");
     await t.h.asOwner(failOwnerMember);

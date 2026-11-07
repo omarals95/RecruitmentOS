@@ -22,7 +22,7 @@ Set each value only for its matching Vercel environment; do not publish secrets 
 | Variable                                         | Preview                                            | Production                                                   |
 | ------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------ |
 | `DATABASE_URL`                                   | Restricted runtime connection for preview database | Restricted runtime connection for production database        |
-| `CV_STORAGE_PROVIDER`                            | Unset or `blob`                                    | Unset or `blob`                                              |
+| `CV_STORAGE_PROVIDER`                            | `blob`, set before the build                       | `blob`, set before the build                                 |
 | `BLOB_STORE_ID`                                  | Preview store id (`store_…`)                       | Production store id (`store_…`)                              |
 | `BLOB_READ_WRITE_TOKEN`                          | Must not be set; remove the value Vercel adds      | Must not be set; remove the value Vercel adds                |
 | `BETTER_AUTH_URL`                                | Exact stable preview HTTPS origin                  | Exact production HTTPS origin                                |
@@ -36,6 +36,8 @@ Use a separate migration-owner connection for each database, held by the operato
 The current authentication implementation accepts one exact origin per environment. Preview deployment URLs change across commits; select a stable branch-specific preview origin, set it as the preview `BETTER_AUTH_URL`, and use precisely that origin in the preview OAuth callback settings. Other generated preview URLs are not automatically trusted. Production must use its own exact origin.
 
 Both Blob stores must be private and connected only to their own environment. The server refuses Blob while `BLOB_READ_WRITE_TOKEN` is present, and names the store explicitly from `BLOB_STORE_ID` on every call with the request's OIDC token; the separation of Preview and Production stores under OIDC still needs hosted verification. Team limits and store budgets are application limits, not hard Blob or billing caps: configure usage monitoring and spend alerts after confirming account options.
+
+`CV_STORAGE_PROVIDER=blob` must be set in each hosted environment before its build. The CSP is fixed at build time and, since job 031, an unset or empty provider allows no upload host in `connect-src`, so a build without it blocks every browser CV upload until the variable is set and the app rebuilt.
 
 ## Planned verification
 

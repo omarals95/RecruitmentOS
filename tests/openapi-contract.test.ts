@@ -279,9 +279,15 @@ describe("OpenAPI contract", () => {
       expect(schemas).toContain(`{"const":"${protocol}"}`);
     }
     expect(reservation).toContain('"propertyName":"protocol"');
-    for (const path of ["/api/v1/cvs/{id}/manifest", "/api/v1/cvs/{id}/chunks"])
+    for (const path of [
+      "/api/v1/candidates/{id}/cvs",
+      "/api/v1/cvs/{id}/download",
+      "/api/v1/cvs/{id}/manifest",
+      "/api/v1/cvs/{id}/chunks",
+    ])
       expect(document.paths[path].get["x-required-scopes"], path).toEqual([
         "cvs:read",
+        "candidates:read",
       ]);
     const chunks = document.paths["/api/v1/cvs/{id}/chunks"]
       .get as Operation & {
@@ -414,9 +420,13 @@ describe("OpenAPI contract", () => {
       "storage_reconciliation_forbidden",
       "STORAGE_RECONCILIATION_UNSUPPORTED",
       "STORAGE_SETUP_REQUIRED",
+      "STORAGE_RECONCILIATION_COOLDOWN",
       "complete",
     ])
       expect(text).toContain(code);
+    expect(cleanup.responses["429"].headers?.["Retry-After"]?.$ref).toBe(
+      "#/components/headers/Retry-After",
+    );
     const settings = JSON.stringify(
       document.paths["/api/v1/teams/storage-settings"],
     );
@@ -434,6 +444,7 @@ describe("OpenAPI contract", () => {
     ]) {
       const upload = document.paths[path].post;
       expect(JSON.stringify(upload), path).toContain("CV_UPLOAD_RATE_LIMITED");
+      expect(JSON.stringify(upload), path).toContain("CV_UPLOAD_TICKET_LIMIT");
       expect(upload.responses["429"].headers?.["Retry-After"]?.$ref).toBe(
         "#/components/headers/Retry-After",
       );

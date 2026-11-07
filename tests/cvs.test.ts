@@ -39,7 +39,7 @@ const p: Principal = {
   teamId: "team",
   role: "owner",
   authType: "session",
-  scopes: ["cvs:read", "cvs:write", "imports:write"],
+  scopes: ["candidates:read", "cvs:read", "cvs:write", "imports:write"],
 };
 const other: Principal = { ...p, userId: "other", teamId: "other-team" };
 const bucketA: StorageBinding = {

@@ -1,3 +1,4 @@
+import { waitUntil } from "@vercel/functions";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { uploads } from "@/db/schema";
 import type { BlobGateway } from "@/lib/blob-storage";
@@ -110,8 +111,9 @@ export async function releaseRetainedBlobCharges(
  * old tickets, releases retained charges whose objects are confirmed deleted (row pass), then lists
  * teams/<team>/cvs/ and deletes objects with no upload row once older than any ticket could be,
  * and objects whose row expired at least 10 minutes ago unless it is ready with a matching size
- * (list pass). Pending unexpired and matching ready objects are never deleted, and charges are
- * released only in the row pass. It reports counts only.
+ * (list pass), counting a deletion only once head confirms the object missing. Pending unexpired
+ * and matching ready objects are never deleted, and charges are released only in the row pass. It
+ * reports counts only.
  */
 export async function reconcileBlobStorage(
   p: Principal,
@@ -199,7 +201,15 @@ export async function reconcileBlobStorage(
       }
       try {
         await gateway.deleteObject(object.pathname, deleteTimeout);
-        objectsDeleted++;
+        // A replayed ticket or a delete that did not take leaves the object: confirm it is gone.
+        const headTimeout = callTimeout(deadline);
+        if (headTimeout < 1) {
+          failures++;
+          stopped = true;
+          break pages;
+        }
+        if (await gateway.headObject(object.pathname, headTimeout)) failures++;
+        else objectsDeleted++;
       } catch {
         failures++;
       }
@@ -221,8 +231,22 @@ export async function reconcileBlobStorage(
 }
 
 /**
- * The owner or admin cleanup call: one full sweep, inside the route's 30 s limit. The injected
- * gateway (tests) is used when given.
+ * Claims the team's sweep on this store through the owner-run helper: at most one sweep per
+ * 10 minutes across instances, whatever triggers it. Returns 0 when claimed, else the seconds left.
+ */
+async function claimSweep(p: Principal, store: string): Promise<number> {
+  return withTeam(p, async (tx) => {
+    const { rows } = await tx.execute<{ remaining: number }>(
+      sql`select tenant_context.claim_blob_reconciliation(${store}) as remaining`,
+    );
+    return Number(rows[0]?.remaining ?? 600);
+  });
+}
+
+/**
+ * The owner or admin cleanup call: one full sweep, inside the route's 30 s limit. Role and provider
+ * refusals come first and do not use the team's cooldown. The injected gateway (tests) is used
+ * when given.
  */
 export async function runStorageReconciliation(
   p: Principal,
@@ -240,9 +264,53 @@ export async function runStorageReconciliation(
       "STORAGE_RECONCILIATION_UNSUPPORTED",
       "CV storage cleanup applies only to Vercel Blob storage.",
     );
-  return reconcileBlobStorage(
-    p,
-    blobGateway(storage ?? (await storageClient())),
-    { maxRows: 50, maxDeletes: 100, maxPages: 3, budgetMs: 20_000 },
-  );
+  const gateway = blobGateway(storage ?? (await storageClient()));
+  requireScope(p, "cvs:write");
+  const remaining = await claimSweep(p, gateway.binding.store);
+  if (remaining > 0) {
+    const cooldown = new ApiError(
+      429,
+      "STORAGE_RECONCILIATION_COOLDOWN",
+      "CV storage cleanup ran for this team in the last 10 minutes. Try again after Retry-After seconds.",
+    );
+    cooldown.retryAfter = remaining;
+    throw cooldown;
+  }
+  return reconcileBlobStorage(p, gateway, {
+    maxRows: 50,
+    maxDeletes: 100,
+    maxPages: 3,
+    budgetMs: 20_000,
+  });
+}
+
+/**
+ * The sweep after this request settled a Blob upload ready or rejected, as the uploading principal:
+ * claimed under the shared team cooldown, within the manual caps and a 10 s budget, so completion
+ * and sweep fit the route's 30 s. On Vercel it runs after the response through waitUntil; elsewhere
+ * it is awaited. It never throws and never changes the completion response.
+ */
+export async function sweepAfterBlobUpload(
+  p: Principal,
+  storage?: StorageGateway | BlobGateway,
+): Promise<void> {
+  const work = (async () => {
+    const gateway = blobGateway(storage ?? (await storageClient()));
+    if ((await claimSweep(p, gateway.binding.store)) > 0) return;
+    await reconcileBlobStorage(p, gateway, {
+      maxRows: 50,
+      maxDeletes: 100,
+      maxPages: 3,
+      budgetMs: 10_000,
+    });
+  })().catch(() => {
+    console.error(
+      "Automatic CV storage cleanup failed; the next upload retries.",
+    );
+  });
+  if (process.env.VERCEL) {
+    waitUntil(work);
+    return;
+  }
+  await work;
 }

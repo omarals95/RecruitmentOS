@@ -20,6 +20,7 @@ export interface WorkspaceIdentity {
   team: { id: string; name: string; slug: string } | null;
   role: string | null;
   environment: string;
+  canCreateTeam: boolean;
 }
 const WorkspaceContext = createContext<WorkspaceIdentity | null>(null);
 export function WorkspaceProvider({

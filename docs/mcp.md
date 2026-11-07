@@ -17,18 +17,18 @@ RecruitmentOS offers a remote [Model Context Protocol](https://modelcontextproto
 
 `tools/list` shows only the tools your token's effective scopes allow. Effective scopes are the token's scopes intersected with your **current** team role, checked again on every request. Every tool checks its scope on the server again when it is called.
 
-| Tool                | Required scope(s)                                     | Writes?                               |
-| ------------------- | ----------------------------------------------------- | ------------------------------------- |
-| `search_candidates` | `candidates:read`                                     | no                                    |
-| `get_candidate`     | `candidates:read` (CV metadata also needs `cvs:read`) | no                                    |
-| `list_vacancies`    | `recruitment:read`                                    | no                                    |
-| `get_vacancy`       | `recruitment:read`                                    | no                                    |
-| `list_applications` | `recruitment:read`                                    | no                                    |
-| `list_tasks`        | `recruitment:read`                                    | no                                    |
-| `list_interviews`   | `recruitment:read`                                    | no                                    |
-| `get_overview`      | `candidates:read` and `recruitment:read`              | no                                    |
-| `create_candidate`  | `candidates:write`                                    | yes, with a required `idempotencyKey` |
-| `add_comment`       | `recruitment:write`                                   | yes, append-only, with a required key |
+| Tool                | Required scope(s)                                                                 | Writes?                               |
+| ------------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
+| `search_candidates` | `candidates:read`                                                                 | no                                    |
+| `get_candidate`     | `candidates:read` (CV metadata also needs `cvs:read`)                             | no                                    |
+| `list_vacancies`    | `recruitment:read`                                                                | no                                    |
+| `get_vacancy`       | `recruitment:read`                                                                | no                                    |
+| `list_applications` | `recruitment:read`                                                                | no                                    |
+| `list_tasks`        | `recruitment:read`                                                                | no                                    |
+| `list_interviews`   | `recruitment:read`                                                                | no                                    |
+| `get_overview`      | `candidates:read` and `recruitment:read`                                          | no                                    |
+| `create_candidate`  | `candidates:write`                                                                | yes, with a required `idempotencyKey` |
+| `add_comment`       | `recruitment:write`; on a candidate also `candidates:read` and `candidates:write` | yes, append-only, with a required key |
 
 - `search_candidates` filters active candidates by stated facts (the same word, `"quoted phrase"` and `-exclusion` search as the app) and by skills, certifications (every listed certification), folder categories, emirate, degree level, education (text in the degree name, major or university), stated years of experience (`minYearsExperience`/`maxYearsExperience`, 0–100; candidates without stated experience never match, and a minimum above the maximum is a tool error) and review status (`Needs review` or `Reviewed`). Its `query` never matches `explicitGender`, `nationalServiceStatus`, `rawSource`, `evidence` or `sourceReviews`: a word found only there finds nothing, and a `-word` found only there excludes nothing. The REST and in-app search are unchanged.
 - `get_candidate` returns stated facts, an evidence summary (counts and at most 10 shortened entries) and, with `cvs:read`, CV file metadata. It never returns personal shortlists, follow-up statuses, private notes, saved views, imported source rows (`rawSource`, `evidence`, `sourceReviews`), the sensitive fields `explicitGender` and `nationalServiceStatus`, or CV contents. Evidence entries whose keys or text mention `gender`, `national service`, `nationalservice` or `male/female` (any case) are dropped before the 10-entry cap, and `evidenceCount` counts only the entries kept. Email and phone are still returned.
@@ -111,13 +111,13 @@ Revoke the token in Settings → API tokens when you no longer need it.
 - **Issuer identification (RFC 9207):** both redirects to the app carry `iss` set to the metadata `issuer`: approve sends `code`, `state` (when sent) and `iss`; deny sends `error=access_denied`, `state` (when sent) and `iss`. Clients compare `iss` with the metadata `issuer` by exact string. The error page is not a response to the app and carries no `iss`.
 - **Scopes offered:** `cvs:write` and `imports:write` are never offered. Write scopes are granted only when the app asks for them and you keep them ticked. The consent page describes each scope by what the MCP tools do:
 
-  | Scope               | Consent page text                                                    |
-  | ------------------- | -------------------------------------------------------------------- |
-  | `candidates:read`   | Search candidates and read their stated facts and evidence summaries |
-  | `recruitment:read`  | Read vacancies, applications, tasks and interviews                   |
-  | `cvs:read`          | See CV file names, types and sizes, but not CV contents              |
-  | `candidates:write`  | Add new candidates                                                   |
-  | `recruitment:write` | Add comments to candidates, vacancies and applications               |
+  | Scope               | Consent page text                                                                                                 |
+  | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+  | `candidates:read`   | Search candidates and read their stated facts and evidence summaries                                              |
+  | `recruitment:read`  | Read vacancies, applications, tasks and interviews                                                                |
+  | `cvs:read`          | See CV file names, types and sizes, but not CV contents                                                           |
+  | `candidates:write`  | Add new candidates                                                                                                |
+  | `recruitment:write` | Add comments to vacancies and applications; comments on candidates also need candidates:read and candidates:write |
 
 - **Tokens:** `POST /oauth/token`. `resource`, if sent with either grant (`authorization_code` or `refresh_token`), must be exactly `https://<your-domain>/api/mcp`; any other value is refused with 400 `invalid_target` before the code or refresh token is looked up, so it stays usable. Access and refresh tokens are bound to the `/api/mcp` audience: `/api/mcp` accepts only access tokens with that audience, and a refresh token whose stored audience differs gets `invalid_grant`. Codes last 120 seconds and work once; reusing a code or a used refresh token revokes the whole connection and writes the `token.revoked` audit row described under [Audit](#audit). 10 failed token requests per minute per client address and registered `client_id`, so one connector's failures do not block another app behind the same address; a malformed or unregistered `client_id` shares the address's own budget. Used codes and refresh tokens are kept until a day after they expire, so a replay is still detected.
 
@@ -132,7 +132,7 @@ Revoke the token in Settings → API tokens when you no longer need it.
 
 Each credential is limited to 60 requests per minute, counting every MCP request, including `initialize` and `tools/list`. Connections count towards the 50 active tokens per user and team. OAuth access tokens are refused by `/api/v1/*`.
 
-**Shared egress:** only unknown tokens count as guesses. Revoked or expired API tokens, expired access tokens (which MCP clients send before they refresh) and refresh tokens sent as access tokens get 401 `invalid_token` and count for nothing. After 10 unknown tokens from one client address in a minute, every token from that address, valid or not, is refused with 429 for the rest of the minute; a valid token is not let through, because that would tell a guesser which value is real. Hosted assistants such as Claude.ai and ChatGPT may reach RecruitmentOS from shared addresses, so another client's guesses can still briefly block a valid connection. Retry after the `Retry-After` delay. Rate-limit rows store only a keyed hash of the address.
+**Shared egress:** only unknown tokens count as guesses. Revoked or expired API tokens, expired access tokens (which MCP clients send before they refresh) and refresh tokens sent as access tokens get 401 `invalid_token` and count for nothing. After 10 unknown tokens from one client address in a minute, every token from that address that does not authenticate (unknown, revoked, expired or for the wrong audience) is refused with 429 `token_guess_rate_limited` for the rest of the minute, and the count does not grow. A live, valid API token or OAuth access token is still admitted (job 031): tokens carry 256 random bits, so admitting one tells a guesser nothing usable. Hosted assistants such as Claude.ai and ChatGPT may reach RecruitmentOS from shared addresses, so another client's guesses no longer block a valid connection behind the same address. Rate-limit rows store only a keyed hash of the address.
 
 ## Not supported
 

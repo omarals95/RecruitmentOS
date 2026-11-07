@@ -6,7 +6,8 @@ export const scopeDescriptions: Record<Scope, string> = {
   "candidates:write": "Create and edit candidates",
   "recruitment:read": "Read jobs, pipeline and tasks",
   "recruitment:write": "Manage recruitment records",
-  "cvs:read": "Read CVs and private download links",
+  "cvs:read":
+    "Read CVs and private download links (also needs candidates:read)",
   "cvs:write": "Upload CVs",
   "imports:write": "Import legacy identifiers and source evidence",
 };
@@ -18,5 +19,6 @@ export const mcpScopeDescriptions: Record<McpScope, string> = {
   "recruitment:read": "Read vacancies, applications, tasks and interviews",
   "cvs:read": "See CV file names, types and sizes, but not CV contents",
   "candidates:write": "Add new candidates",
-  "recruitment:write": "Add comments to candidates, vacancies and applications",
+  "recruitment:write":
+    "Add comments to vacancies and applications; comments on candidates also need candidates:read and candidates:write",
 };

@@ -194,12 +194,16 @@ export function GET() {
       },
     };
     const scope = resource === "candidates" ? "candidates" : "recruitment";
+    const candidateCommentRead =
+      kind === "comment"
+        ? " Comments on a candidate also need candidates:read: without it they are left out of lists and pagination.total and answered as 404 not_found."
+        : "";
     paths[`/api/v1/${resource}`] = {
       get: operation(
         [`${scope}:read`],
         {
           summary: `List ${resource}`,
-          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.`,
+          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.${candidateCommentRead}`,
         },
         {
           "200": {
@@ -234,7 +238,7 @@ export function GET() {
         [`${scope}:write`],
         {
           summary: `Create ${kind}`,
-          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.`,
+          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.${kind === "comment" ? " A comment on a candidate also needs candidates:read and candidates:write: without candidates:read the parent is answered as 400 invalid_reference, as for a missing record; without candidates:write it returns 403." : ""}`,
           requestBody: jsonBody(input, createExamples[kind]),
         },
         {
@@ -260,7 +264,12 @@ export function GET() {
     paths[`/api/v1/${resource}/{id}`] = {
       get: operation(
         [`${scope}:read`],
-        { summary: `Get ${kind}` },
+        {
+          summary: `Get ${kind}`,
+          ...(candidateCommentRead
+            ? { description: `Requires ${scope}:read.${candidateCommentRead}` }
+            : {}),
+        },
         { "200": { description: "{data:record}." } },
         { params: [idParameter] },
       ),
@@ -851,7 +860,7 @@ export function GET() {
       ["cvs:write", "candidates:write"],
       {
         summary: "Reserve the CV upload for a bulk item",
-        description: `Requires cvs:write and candidates:write. Send no body. Reserves the private CV upload for the item's candidate with the item's stored file metadata; the client chooses neither the metadata nor the key. The first attempt uses the item ID as clientUploadId. A repeat while the current attempt is pending and unexpired returns the same CV upload and creates no reservation; a ready attempt returns it with upload:null. When the current attempt is rejected or its reservation expired, the call starts one new attempt for the same file under a new server-chosen clientUploadId, records it on the item and returns 201 with the new ticket; overlapping calls share that one new attempt. The ticket is either protocol of /api/v1/candidates/{id}/cvs/uploads (s3-form-v1 or blob-put-v1), and a ready Blob CV is read through /manifest and /chunks (blob-chunks-v1). Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Send no body. Reserves the private CV upload for the item's candidate with the item's stored file metadata; the client chooses neither the metadata nor the key. The first attempt uses the item ID as clientUploadId. A repeat while the current attempt is pending and unexpired returns the same CV upload and creates no reservation; a ready attempt returns it with upload:null. When the current attempt is rejected or its reservation expired, the call starts one new attempt for the same file under a new server-chosen clientUploadId, records it on the item and returns 201 with the new ticket; overlapping calls share that one new attempt. The ticket is either protocol of /api/v1/candidates/{id}/cvs/uploads (s3-form-v1 or blob-put-v1), and a ready Blob CV is read through /manifest and /chunks (blob-chunks-v1). Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. A Blob attempt gets at most 5 upload tickets; after that a repeat returns 409 CV_UPLOAD_TICKET_LIMIT until the attempt's reservation expires. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
       },
       {
         "201": {
@@ -928,7 +937,7 @@ export function GET() {
       {
         summary: "Clean up the team's private Blob CV storage",
         description:
-          "Requires cvs:write and a team owner or admin (others get 403 storage_reconciliation_forbidden). Send no body. Runs one bounded, idempotent sweep of the team's own Blob objects: it expires old reservations; deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago and frees each retained charge only after the object is confirmed missing; and lists the team's CV prefix to delete objects with no upload row once older than any ticket could be, oversized or mismatched objects and objects of rejected rows. Pending unexpired uploads and ready CVs that still match are never deleted. A run stops after 50 rows, 100 deletions, 3 list pages or 20 seconds; complete is false when it stopped early, so call it again. Returns 409 STORAGE_RECONCILIATION_UNSUPPORTED when the configured storage is S3 and 503 STORAGE_SETUP_REQUIRED when Blob storage is not set up. Only counts are returned, never pathnames, file names or IDs.",
+          "Requires cvs:write and a team owner or admin (others get 403 storage_reconciliation_forbidden). Send no body. Runs one bounded, idempotent sweep of the team's own Blob objects: it expires old reservations; deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago and frees each retained charge only after the object is confirmed missing; and lists the team's CV prefix to delete objects with no upload row once older than any ticket could be, oversized or mismatched objects and objects of rejected rows. Pending unexpired uploads and ready CVs that still match are never deleted. Every deleted object is confirmed missing with a head request before it counts in objectsDeleted; an object still present counts as a failure. A run stops after 50 rows, 100 deletions, 3 list pages or 20 seconds; complete is false when it stopped early, so call it again. A team's cleanup runs at most once per 10 minutes, shared with the automatic sweep after each completed or rejected Blob upload: inside that time it returns 429 STORAGE_RECONCILIATION_COOLDOWN with Retry-After set to the seconds left (1 to 600) and makes no storage call. Returns 409 STORAGE_RECONCILIATION_UNSUPPORTED when the configured storage is S3 and 503 STORAGE_SETUP_REQUIRED when Blob storage is not set up; these and the 403 are checked first and do not start the cooldown. Only counts are returned, never pathnames, file names or IDs.",
       },
       {
         "200": {
@@ -1095,11 +1104,11 @@ export function GET() {
   };
   paths["/api/v1/candidates/{id}/cvs"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "List private CV references",
         description:
-          "Requires cvs:read; returns {data,pagination} with the full total. Each reference has downloadProtocol: s3-url-v1 (use /download), blob-chunks-v1 (use /manifest and /chunks) or null when not ready. Storage keys, object versions, digests and store ids are not exposed.",
+          "Requires cvs:read and candidates:read (without candidates:read, 403 scope_required before any storage call); returns {data,pagination} with the full total. Each reference has downloadProtocol: s3-url-v1 (use /download), blob-chunks-v1 (use /manifest and /chunks) or null when not ready. Storage keys, object versions, digests and store ids are not exposed.",
       },
       { "200": { description: "{data: CV references, pagination}." } },
       {
@@ -1125,7 +1134,7 @@ export function GET() {
       {
         summary: "Reserve a direct private CV upload",
         description:
-          "Requires cvs:write. Clients must switch on upload.protocol and never infer it from a hostname: s3-form-v1 is a multipart form POST of the fields plus file; blob-put-v1 is a PUT of the file with exactly the returned headers. Send no credentials, cookies or X-Team-Id to the upload URL, then complete the upload. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API. A Blob reservation lasts 15 minutes and each ticket at most 300 seconds; an S3 reservation lasts 60 minutes. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. A reservation over the team's storage limit or the store-wide budget, counting pending uploads and files waiting for cleanup, returns 409 STORAGE_QUOTA_EXCEEDED. These are application limits, not hard provider caps. Returns 503 STORAGE_SETUP_REQUIRED when CV storage is not set up.",
+          "Requires cvs:write. Clients must switch on upload.protocol and never infer it from a hostname: s3-form-v1 is a multipart form POST of the fields plus file; blob-put-v1 is a PUT of the file with exactly the returned headers. Send no credentials, cookies or X-Team-Id to the upload URL, then complete the upload. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API. A Blob reservation lasts 15 minutes and each ticket at most 300 seconds; it gets at most 5 tickets in all, the first and every replay included, and then returns 409 CV_UPLOAD_TICKET_LIMIT until the reservation expires, so select the file again after that. An S3 reservation lasts 60 minutes. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. A reservation over the team's storage limit or the store-wide budget, counting pending uploads and files waiting for cleanup, returns 409 STORAGE_QUOTA_EXCEEDED. These are application limits, not hard provider caps. Returns 503 STORAGE_SETUP_REQUIRED when CV storage is not set up.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -1203,7 +1212,7 @@ export function GET() {
       {
         summary: "Validate the uploaded immutable CV",
         description:
-          "Requires cvs:write. Idempotent. Reads the stored object itself and returns a ready reference only after size, type and format checks plus an S3 version, or, for Blob, a SHA-256 of the exact reserved size computed by the server. Any request body is ignored; no client hash, size or type is accepted.",
+          "Requires cvs:write. Idempotent. Reads the stored object itself and returns a ready reference only after size, type and format checks plus an S3 version, or, for Blob, a SHA-256 of the exact reserved size computed by the server. Any request body is ignored; no client hash, size or type is accepted. When this call settles a Blob upload ready or rejected, it also starts the team's cooldown-gated storage cleanup (see /api/v1/cvs/storage-reconciliation), which never changes this response.",
       },
       { "200": { description: "{data: CV reference}." } },
       { params: [idParameter] },
@@ -1211,11 +1220,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/download"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Get a short-lived private CV download",
         description:
-          "Requires cvs:read. S3 references only (downloadProtocol s3-url-v1); Blob references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. S3 references only (downloadProtocol s3-url-v1); Blob references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
       },
       { "200": { description: "{url, expiresAt}." } },
       { params: [idParameter] },
@@ -1223,11 +1232,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/manifest"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Read a Blob CV download manifest",
         description:
-          "Requires cvs:read. Disabled until Blob CV storage is enabled. For downloadProtocol blob-chunks-v1 only; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. For downloadProtocol blob-chunks-v1 only; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.",
       },
       {
         "200": {
@@ -1250,11 +1259,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/chunks"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Read one verified Blob CV chunk",
         description:
-          "Requires cvs:read. Disabled until Blob CV storage is enabled. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. The bytes are always sent as application/octet-stream with Content-Disposition: attachment and nosniff, never as the stored type. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
       },
       {
         "200": {

@@ -1,5 +1,6 @@
 import { runApi } from "@/lib/api";
 import { getCvChunk, parseCvChunkQuery } from "@/lib/cvs";
+import { requireScope } from "@/lib/permissions";
 import { attachmentDisposition } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -9,6 +10,8 @@ export async function GET(
 ) {
   const { id } = await context.params;
   return runApi(request, "cvs:read", async (principal) => {
+    // The scope refusal comes before query validation; getCvChunk checks it again.
+    requireScope(principal, "candidates:read");
     const chunk = await getCvChunk(
       principal,
       id,

@@ -6,17 +6,17 @@ The token's permissions are checked against your current verified account and li
 
 Tokens expire after 30 days by default; a shorter or longer duration up to 365 days can be chosen. Owners and admins can revoke team tokens; everyone can revoke their own. Revocation does not delete records already created by that token. Change history identifies API token actions without recording the secret.
 
-| Scope               | Access                                                                   |
-| ------------------- | ------------------------------------------------------------------------ |
-| `candidates:read`   | Read the candidate directory and candidate facts                         |
-| `candidates:write`  | Create or update candidates                                              |
-| `recruitment:read`  | Read vacancies, applications, tasks and recruitment operations           |
-| `recruitment:write` | Create or update recruitment records                                     |
-| `cvs:read`          | List CV metadata and request temporary private download links            |
-| `cvs:write`         | Reserve, upload and complete a CV upload                                 |
-| `imports:write`     | Preserve legacy import identifiers and source metadata; owner/admin only |
+| Scope               | Access                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `candidates:read`   | Read the candidate directory and candidate facts                                            |
+| `candidates:write`  | Create or update candidates                                                                 |
+| `recruitment:read`  | Read vacancies, applications, tasks and recruitment operations                              |
+| `recruitment:write` | Create or update recruitment records                                                        |
+| `cvs:read`          | List CV metadata and request temporary private download links; also needs `candidates:read` |
+| `cvs:write`         | Reserve, upload and complete a CV upload                                                    |
+| `imports:write`     | Preserve legacy import identifiers and source metadata; owner/admin only                    |
 
-Write scopes do not implicitly grant the corresponding read scope. Choose both when an integration needs to read its results. A viewer can create a read-only token. A recruiter cannot request import privileges. AI integrations are explicit clients: RecruitmentOS does not send candidate records to an AI provider automatically.
+Write scopes do not implicitly grant the corresponding read scope. Every CV read (`/api/v1/candidates/{id}/cvs`, `/download`, `/manifest`, `/chunks`) needs `candidates:read` as well as `cvs:read`, and returns 403 `scope_required` without it. A comment on a candidate is candidate data: without `candidates:read`, `GET /api/v1/comments` leaves it out of the list and its total, `GET /api/v1/comments/{id}` answers 404, and `POST /api/v1/comments` with a candidate `parentRecordId` answers 400 `invalid_reference`, as for a missing record; with `candidates:read` but no `candidates:write`, that `POST` answers 403. Choose both when an integration needs to read its results. A viewer can create a read-only token. A recruiter cannot request import privileges. AI integrations are explicit clients: RecruitmentOS does not send candidate records to an AI provider automatically.
 
 AI assistants that speak the Model Context Protocol, such as Claude Code and Claude.ai, can use `/api/mcp` instead of these REST calls. See [mcp.md](mcp.md) for its tools, scopes and setup.
 
@@ -78,7 +78,7 @@ CV uploads bypass Vercel's small request-body limit by uploading directly to the
    - `blob-chunks-v1`: read `GET /api/v1/cvs/{cvId}/manifest` for `{uploadId, originalName, contentType, sizeBytes, sha256, chunkSize, chunkCount}`, then fetch `GET /api/v1/cvs/{cvId}/chunks?index=0` up to `chunkCount - 1`, one at a time. Each 200 response is the raw slice with `X-CV-Upload-Id`, `X-CV-Chunk-Index`, `X-CV-Chunk-Offset`, `X-CV-Size-Bytes` and `X-CV-SHA256` headers; check them against the manifest, join the slices and verify the final SHA-256 before using the file. A 409 `CV_INTEGRITY_FAILED` means the stored object no longer matches; discard every chunk.
    - The wrong route for a reference returns 409 `CV_DOWNLOAD_PROTOCOL_MISMATCH`.
 
-Uploads are limited to 10 MiB, the team's storage limit and the store-wide budget, all application limits counting pending uploads and files waiting for cleanup; over them the reservation returns 409 `STORAGE_QUOTA_EXCEEDED`. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 `CV_UPLOAD_RATE_LIMITED` with `Retry-After: 60`; a replay with the same `clientUploadId` is not refused. The upload ticket expires within five minutes; a Blob reservation lasts 15 minutes and an S3 one 60. Reuse `clientUploadId` when recovering an uncertain reservation result. File format validation is not malware scanning; integrate a separate scanning/quarantine workflow before accepting untrusted public intake at scale.
+Uploads are limited to 10 MiB, the team's storage limit and the store-wide budget, all application limits counting pending uploads and files waiting for cleanup; over them the reservation returns 409 `STORAGE_QUOTA_EXCEEDED`. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 `CV_UPLOAD_RATE_LIMITED` with `Retry-After: 60`; a replay with the same `clientUploadId` is not refused. The upload ticket expires within five minutes; a Blob reservation lasts 15 minutes and an S3 one 60. Reuse `clientUploadId` when recovering an uncertain reservation result; a Blob reservation gives at most 5 tickets in all, after which a replay returns 409 `CV_UPLOAD_TICKET_LIMIT` until the reservation expires and the file must be selected again. File format validation is not malware scanning; under DEC-07 CVs are downloaded only as attachments and scanned by the user's endpoint antivirus ([security.md](security.md#cv-handling)).
 
 ## Clean up CV storage
 
@@ -89,11 +89,11 @@ curl -sS -X POST "$RECRUITMENTOS_URL/api/v1/cvs/storage-reconciliation" \
   -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"
 ```
 
-Send no body. It expires old reservations, deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago, frees each retained charge only after the object is confirmed missing, and deletes stray or mismatched objects under the team's own CV prefix; pending uploads and matching ready CVs are never touched. The response holds counts only: `{"data":{"expiredReservations","chargesReleased","objectsChecked","objectsDeleted","failures","complete"}}`. Call it again while `complete` is `false`. Other roles get 403 `storage_reconciliation_forbidden`; with S3 storage it returns 409 `STORAGE_RECONCILIATION_UNSUPPORTED`, and with Blob not set up 503 `STORAGE_SETUP_REQUIRED`.
+Send no body. It expires old reservations, deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago, frees each retained charge only after the object is confirmed missing, and deletes stray or mismatched objects under the team's own CV prefix; pending uploads and matching ready CVs are never touched. The response holds counts only: `{"data":{"expiredReservations","chargesReleased","objectsChecked","objectsDeleted","failures","complete"}}`. Call it again while `complete` is `false`. A team's cleanup runs at most once per 10 minutes, shared with the automatic cleanup after each completed or rejected Blob upload: inside that time it returns 429 `STORAGE_RECONCILIATION_COOLDOWN` with `Retry-After` set to the seconds left. Other roles get 403 `storage_reconciliation_forbidden`; with S3 storage it returns 409 `STORAGE_RECONCILIATION_UNSUPPORTED`, and with Blob not set up 503 `STORAGE_SETUP_REQUIRED`.
 
 ## Errors
 
-The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) it is 60. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
+The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) and `token_guess_rate_limited` it is 60, and for 429 `STORAGE_RECONCILIATION_COOLDOWN` it is the seconds left of the team's 10-minute cleanup cooldown. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
 
 Every error response has a fresh `error.correlationId` and an identical `X-Correlation-Id` header. Quote it when reporting a failure: for a 500 the server logs that ID with a safe error category, never the request or record contents.
 

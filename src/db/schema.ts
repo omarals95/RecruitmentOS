@@ -127,6 +127,7 @@ export const uploads = appSchema.table(
     blobSha256: text("blob_sha256"),
     blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
     blobDeletedAt: time("blob_deleted_at"),
+    putTicketsIssued: integer("put_tickets_issued").notNull().default(0),
   },
   (t) => [
     unique("uploads_team_id_id_key").on(t.teamId, t.id),

@@ -591,7 +591,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     for (const text of Object.values(mcpScopeDescriptions))
       expect(text).not.toMatch(/download|edit/i);
     expect(scopeDescriptions["cvs:read"]).toBe(
-      "Read CVs and private download links",
+      "Read CVs and private download links (also needs candidates:read)",
     );
     const clientId = await registered();
     const page = await authorize(
@@ -603,7 +603,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       "Read vacancies, applications, tasks and interviews",
       "See CV file names, types and sizes, but not CV contents",
       "Add new candidates",
-      "Add comments to candidates, vacancies and applications",
+      "Add comments to vacancies and applications; comments on candidates also need candidates:read and candidates:write",
     ])
       expect(page.html, text).toContain(text);
     expect(page.html).not.toContain("private download links");
