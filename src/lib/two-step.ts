@@ -62,8 +62,7 @@ export async function resetMemberTwoStep(
     } catch (error) {
       const code = (
         (error instanceof DrizzleQueryError ? error.cause : error) as
-          | { code?: unknown }
-          | undefined
+          { code?: unknown } | undefined
       )?.code;
       if (code === "RQ003")
         throw new ApiError(

@@ -43,10 +43,9 @@ export function totpCode(key: Uint8Array, at = Date.now()): string {
   counter.writeBigUInt64BE(BigInt(Math.floor(at / 30_000)));
   const digest = createHmac("sha1", key).update(counter).digest();
   const offset = digest[digest.length - 1] & 15;
-  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(
-    6,
-    "0",
-  );
+  return String(
+    (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000,
+  ).padStart(6, "0");
 }
 
 /** The fictional seed owner's current code; refuses outside explicitly enabled local PGlite. */
