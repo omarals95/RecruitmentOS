@@ -13,6 +13,8 @@ This is a preparation checklist. No migration, role creation, grant, credential 
 - The runtime guard also refuses a missing protected schema or setup marker, or effective direct, inherited, or PUBLIC write privileges on that marker, including column grants. Checking for schemas and the marker does not verify the entire migration ledger or database schema. It runs only when the database pool is initialized; after any role, membership, grant or ownership change, review the effective privileges and recycle the deployments so the check runs again.
 - Stop on unexpected project, branch, database, role, privilege, migration state, connection failure, or authentication behavior. Investigate before retrying. Never log, commit, or put connection strings, passwords, setup tokens, or verification links into chat.
 
+For compute autosuspend, see [deployment.md](deployment.md#2-neon-postgresql): scale-to-zero should be off for the Production compute (owner decision, paid plan).
+
 ## 1. Identify and prepare both environments
 
 1. In the Neon and Vercel consoles, confirm that the Preview resource points to its own empty database and the Production resource to a different database. Verify project and branch identifiers as well as database names; do not rely on display names alone. Verify that any automated Neon preview branching cannot copy Production candidate data.
