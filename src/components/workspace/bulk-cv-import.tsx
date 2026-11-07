@@ -22,6 +22,8 @@ import {
   capSelection,
   fileProblem,
   importSummary,
+  pageItems,
+  pausesRun,
   sameQueue,
   stopsRun,
   uncertainRetryTooOld,
@@ -242,6 +244,8 @@ export function BulkCvImportDialog({
   );
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState("");
+  // The entry an import run is working on; the selected list shows its page.
+  const [current, setCurrent] = useState("");
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState("");
@@ -445,11 +449,14 @@ export function BulkCvImportDialog({
       item.reviewed,
       item.checked && item.duplicatesReviewed,
     );
-  /** Imports one entry; resolves true when the run must stop before the next one. */
+  /**
+   * Imports one entry; resolves true when the run must stop before the next one, and "pause"
+   * when the team's upload rate limit was reached.
+   */
   const importEntry = async (
     entry: Entry,
     signal: AbortSignal,
-  ): Promise<boolean> => {
+  ): Promise<boolean | "pause"> => {
     if (!team || !ready(entry)) return false;
     if (uncertainRetryTooOld(entry, batchStartedAt.current, Date.now())) {
       update(entry.id, {
@@ -579,6 +586,7 @@ export function BulkCvImportDialog({
             ? message
             : `${message} The result of candidate creation may be uncertain. Retry this unchanged draft to avoid creating a duplicate.`,
       });
+      if (answered && pausesRun(error)) return "pause";
       return answered && stopsRun(error);
     }
   };
@@ -622,12 +630,19 @@ export function BulkCvImportDialog({
     setRunning(true);
     setShowSummary(false);
     setNotice("");
-    let stopped = false;
+    let stopped = false,
+      paused = false;
     try {
       const refused = await withUploadLock(async () => {
         for (const item of queue) {
           if (controller.signal.aborted) break;
-          if (await importEntry(item, controller.signal)) {
+          setCurrent(item.id);
+          const outcome = await importEntry(item, controller.signal);
+          if (outcome === "pause") {
+            paused = true;
+            break;
+          }
+          if (outcome) {
             stopped = !controller.signal.aborted;
             break;
           }
@@ -643,12 +658,15 @@ export function BulkCvImportDialog({
           ? "Import cancelled. Candidates already created stay in your directory."
           : stopped
             ? "Import stopped because CV import is no longer available to you. The remaining CVs were not started."
-            : "",
+            : paused
+              ? "Your team's CV upload rate limit was reached. Wait a minute, then select Import reviewed again to continue with the remaining CVs."
+              : "",
       );
       await reconcile();
       setShowSummary(true);
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null;
+      setCurrent("");
       setBusy(false);
       setRunning(false);
     }
@@ -843,25 +861,14 @@ export function BulkCvImportDialog({
               </p>
             )}
             {entries.length > 0 && (
-              <div className="related-list" aria-label="Selected CVs">
-                {entries.map((item) => (
-                  <div className="related-item" key={item.id}>
-                    <span>
-                      <strong>{item.file.name}</strong>
-                      <small>{status(item)}</small>
-                    </span>
-                    <button
-                      type="button"
-                      className="button secondary small"
-                      aria-pressed={selected === item.id}
-                      disabled={busy}
-                      onClick={() => setSelected(item.id)}
-                    >
-                      Review
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <SelectedCvList
+                entries={entries}
+                focusId={current || selected}
+                selected={selected}
+                busy={busy}
+                status={status}
+                onSelect={setSelected}
+              />
             )}
             {entry && (
               <section
@@ -1165,6 +1172,151 @@ export function BulkCvImportDialog({
   );
 }
 
+const LIST_PAGE_SIZE = 25;
+/** Previous / Page X of Y / Next, as for Recent imports. */
+function ListPages({
+  label,
+  page,
+  totalPages,
+  onPage,
+}: {
+  label: string;
+  page: number;
+  totalPages: number;
+  onPage: (page: number) => void;
+}) {
+  return (
+    <nav className="pagination" aria-label={label}>
+      <div className="row">
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={page <= 1}
+          onClick={() => onPage(page - 1)}
+        >
+          Previous
+        </button>
+        <span>
+          Page {page} of {totalPages}
+        </span>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={page >= totalPages}
+          onClick={() => onPage(page + 1)}
+        >
+          Next
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+/** The selected files, 25 per page; the page follows the entry under review or being imported. */
+export function SelectedCvList<
+  T extends { id: string; file: { name: string } },
+>({
+  entries,
+  focusId,
+  selected,
+  busy,
+  status,
+  onSelect,
+}: {
+  entries: T[];
+  focusId: string;
+  selected: string;
+  busy: boolean;
+  status: (item: T) => string;
+  onSelect: (id: string) => void;
+}) {
+  const pageOf = (id: string) => {
+    const index = entries.findIndex((item) => item.id === id);
+    return index < 0 ? undefined : Math.floor(index / LIST_PAGE_SIZE) + 1;
+  };
+  const [page, setPage] = useState(() => pageOf(focusId) ?? 1);
+  const [shown, setShown] = useState(focusId);
+  if (shown !== focusId) {
+    setShown(focusId);
+    const next = pageOf(focusId);
+    if (next) setPage(next);
+  }
+  const view = pageItems(entries, page, LIST_PAGE_SIZE);
+  return (
+    <>
+      <div className="related-list" aria-label="Selected CVs">
+        {view.items.map((item) => (
+          <div className="related-item" key={item.id}>
+            <span>
+              <strong>{item.file.name}</strong>
+              <small>{status(item)}</small>
+            </span>
+            <button
+              type="button"
+              className="button secondary small"
+              aria-pressed={selected === item.id}
+              disabled={busy}
+              onClick={() => onSelect(item.id)}
+            >
+              Review
+            </button>
+          </div>
+        ))}
+      </div>
+      {view.totalPages > 1 && (
+        <ListPages
+          label="Selected CV pages"
+          page={view.page}
+          totalPages={view.totalPages}
+          onPage={setPage}
+        />
+      )}
+    </>
+  );
+}
+
+/** One batch's items, 25 per page, with a page control only when it has more. */
+function RecentBatchItems({ items }: { items: RecentBatch["items"] }) {
+  const [page, setPage] = useState(1);
+  const view = pageItems(items, page, LIST_PAGE_SIZE);
+  return (
+    <>
+      <div className="related-list">
+        {view.items.map((item) => (
+          <div className="related-item" key={item.id}>
+            <span>
+              <strong>{item.originalName}</strong>
+              <small>
+                {outcomeLabels[item.outcome]}
+                {(item.outcome === "cv-pending" ||
+                  item.outcome === "cv-rejected") &&
+                  ". Open the candidate to attach the CV"}
+              </small>
+            </span>
+            {item.candidateId && (
+              <a
+                href={`/app/candidates/${encodeURIComponent(item.candidateId)}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open candidate
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+      {view.totalPages > 1 && (
+        <ListPages
+          label="Import file pages"
+          page={view.page}
+          totalPages={view.totalPages}
+          onPage={setPage}
+        />
+      )}
+    </>
+  );
+}
+
 export type RecentImportsPage = {
   data: RecentBatch[];
   pagination: {
@@ -1219,30 +1371,7 @@ export function RecentImports({
         others.map((batch) => (
           <div className="stack" key={batch.id}>
             <strong>{`Started ${new Date(batch.createdAt).toLocaleString()}`}</strong>
-            <div className="related-list">
-              {batch.items.map((item) => (
-                <div className="related-item" key={item.id}>
-                  <span>
-                    <strong>{item.originalName}</strong>
-                    <small>
-                      {outcomeLabels[item.outcome]}
-                      {(item.outcome === "cv-pending" ||
-                        item.outcome === "cv-rejected") &&
-                        ". Open the candidate to attach the CV"}
-                    </small>
-                  </span>
-                  {item.candidateId && (
-                    <a
-                      href={`/app/candidates/${encodeURIComponent(item.candidateId)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open candidate
-                    </a>
-                  )}
-                </div>
-              ))}
-            </div>
+            <RecentBatchItems items={batch.items} />
           </div>
         ))
       )}

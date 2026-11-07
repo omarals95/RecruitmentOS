@@ -8,6 +8,8 @@ import {
   capSelection,
   fileProblem,
   importSummary,
+  pageItems,
+  pausesRun,
   sameQueue,
   stopsRun,
   uncertainRetryTooOld,
@@ -47,6 +49,46 @@ describe("bulk CV queue helpers", () => {
       added: [],
       skipped: 30,
     });
+    expect(BULK_INTAKE_MAX_FILES).toBe(200);
+    const many = Array.from({ length: 250 }, (_, index) => `cv-${index}.pdf`);
+    const large = capSelection(0, many);
+    expect(large.added).toEqual(many.slice(0, 200));
+    expect(large.skipped).toBe(50);
+  });
+
+  it("pages 200 entries as 8 pages of 25 and clamps out-of-range pages", () => {
+    const items = Array.from({ length: 200 }, (_, index) => index);
+    expect(pageItems(items, 1)).toEqual({
+      items: items.slice(0, 25),
+      page: 1,
+      totalPages: 8,
+    });
+    expect(pageItems(items, 8).items).toEqual(items.slice(175));
+    for (const [page, clamped] of [
+      [0, 1],
+      [-3, 1],
+      [9, 8],
+      [Number.NaN, 1],
+    ])
+      expect(pageItems(items, page).page, String(page)).toBe(clamped);
+    expect(pageItems([], 3)).toEqual({ items: [], page: 1, totalPages: 1 });
+    expect(pageItems(items, 2, 100)).toMatchObject({ page: 2, totalPages: 2 });
+  });
+
+  it("pauses a run only for the team's CV upload rate limit", () => {
+    expect(pausesRun({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" })).toBe(
+      true,
+    );
+    for (const error of [
+      { status: 429, code: "rate_limited" },
+      { status: 429, code: "ai_rate_limited" },
+      { status: 409, code: "CV_UPLOAD_RATE_LIMITED" },
+      { status: 503, code: "STORAGE_SETUP_REQUIRED" },
+    ])
+      expect(pausesRun(error), error.code).toBe(false);
+    expect(stopsRun({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" })).toBe(
+      false,
+    );
   });
 
   it("flags other drafts with the same email in any case or the same phone", () => {

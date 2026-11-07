@@ -405,7 +405,7 @@ function outcome(
 }
 
 type BatchRow = typeof bulkIntakeBatches.$inferSelect;
-/** Each batch with all its items (at most 50) and each item's outcome. */
+/** Each batch with all its items (at most BULK_INTAKE_MAX_FILES) and each item's outcome. */
 async function batchEntries(tx: TeamTx, p: Principal, batches: BatchRow[]) {
   const items = batches.length
     ? await tx

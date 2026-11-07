@@ -20,6 +20,7 @@ import {
   BulkCvImport,
   BulkCvImportDialog,
   RecentImports,
+  SelectedCvList,
   type CvImportState,
   type RecentImportsPage,
 } from "../src/components/workspace/bulk-cv-import";
@@ -218,6 +219,7 @@ describe("Import CVs", () => {
   });
   it("shows the limits before any work once uploads are ready", () => {
     const markup = dialog("ready");
+    expect(BULK_INTAKE_MAX_FILES).toBe(200);
     const limits = `Up to ${BULK_INTAKE_MAX_FILES} files per import, 10 MiB each. One CV uploads at a time in this browser. Import progress is kept on the server for ${BULK_INTAKE_RECOVERY_HOURS} hours; selected files and drafts stay only in this browser.`;
     expect(markup).toContain(`<p>${limits}</p>`);
     expect(markup.indexOf(limits)).toBeLessThan(markup.indexOf('type="file"'));
@@ -453,5 +455,90 @@ describe("Import CVs", () => {
     expect(markup).toContain("No other recent imports.");
     expect(markup).not.toContain("No recent imports on this page.");
     expect(markup).not.toContain("Go to first page");
+  });
+  describe("200-file batches", () => {
+    const entries = Array.from({ length: 200 }, (_, index) => ({
+      id: `entry-${index}`,
+      file: { name: `fictional-cv-${String(index).padStart(3, "0")}.pdf` },
+    }));
+    const selected = (focusId: string) =>
+      renderToStaticMarkup(
+        <SelectedCvList
+          entries={entries}
+          focusId={focusId}
+          selected={focusId}
+          busy={false}
+          status={() => "Awaiting review"}
+          onSelect={() => {}}
+        />,
+      );
+    const rows = (markup: string) =>
+      [...markup.matchAll(/fictional-cv-(\d{3})\.pdf/g)].map((match) =>
+        Number(match[1]),
+      );
+    it("shows 25 selected CVs per page with a page control", () => {
+      const markup = selected("");
+      expect(rows(markup)).toEqual(Array.from({ length: 25 }, (_, n) => n));
+      expect(markup).toContain(
+        '<nav class="pagination" aria-label="Selected CV pages">',
+      );
+      expect(markup).toContain("Page 1 of 8");
+      expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Previous<\/button>/);
+      // The page follows the entry under review or being imported.
+      const later = selected("entry-130");
+      expect(rows(later)).toEqual(
+        Array.from({ length: 25 }, (_, n) => 125 + n),
+      );
+      expect(later).toContain("Page 6 of 8");
+      const few = renderToStaticMarkup(
+        <SelectedCvList
+          entries={entries.slice(0, 25)}
+          focusId=""
+          selected=""
+          busy={false}
+          status={() => "Awaiting review"}
+          onSelect={() => {}}
+        />,
+      );
+      expect(rows(few)).toHaveLength(25);
+      expect(few).not.toContain("<nav");
+    });
+    const batch = (count: number, id: string) => ({
+      id,
+      createdAt: "2030-01-01T09:00:00.000Z",
+      expiresAt: "2030-01-02T09:00:00.000Z",
+      items: Array.from({ length: count }, (_, index) => ({
+        id: `${id}-item-${index}`,
+        originalName: `fictional-cv-${String(index).padStart(3, "0")}.pdf`,
+        sizeBytes: 200,
+        candidateId: null,
+        outcome: "not-imported" as const,
+      })),
+    });
+    it("pages a 200-item recent import by 25 and shows no control for 10 items", () => {
+      const render = (count: number) =>
+        renderToStaticMarkup(
+          <RecentImports
+            page={{
+              data: [batch(count, "00000000-0000-4000-8000-0000000000e1")],
+              pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 },
+            }}
+            error=""
+            loading={false}
+            currentBatchId="00000000-0000-4000-8000-0000000000e2"
+            onPage={() => {}}
+          />,
+        );
+      const large = render(200);
+      expect(rows(large)).toEqual(Array.from({ length: 25 }, (_, n) => n));
+      expect(large).toContain(
+        '<nav class="pagination" aria-label="Import file pages">',
+      );
+      expect(large).toContain("Page 1 of 8");
+      expect(large).not.toContain("Recent import pages");
+      const small = render(10);
+      expect(rows(small)).toHaveLength(10);
+      expect(small).not.toContain("<nav");
+    });
   });
 });
