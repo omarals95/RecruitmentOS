@@ -600,10 +600,10 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     );
     for (const text of [
       "Search candidates and read their stated facts and evidence summaries",
-      "Read vacancies, applications, tasks and interviews",
+      "Read job roles, vacancies, applications, tasks, interviews, offers and onboarding",
       "See CV file names, types and sizes, but not CV contents",
       "Add new candidates",
-      "Add comments to vacancies and applications; comments on candidates also need candidates:read and candidates:write",
+      "Create, update, archive and restore job roles, vacancies, applications, interviews, offers and onboarding, move application stages and add comments; comments on candidates also need candidates:read and candidates:write",
     ])
       expect(page.html, text).toContain(text);
     expect(page.html).not.toContain("private download links");
