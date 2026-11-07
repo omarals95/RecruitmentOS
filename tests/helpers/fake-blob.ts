@@ -16,6 +16,10 @@ export type StoredObject = {
   mimeType: string;
   reportedSize?: number;
   stall?: boolean;
+  /** What head reports when it differs from the read: a size or type the provider let through. */
+  headSize?: number;
+  headMimeType?: string;
+  uploadedAt?: Date;
 };
 
 /** Records whether the gateway closed a stream it opened but did not read to the end. */
@@ -51,7 +55,21 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
     /** Every open resolves only after this delay, even when its read already gave up. */
     openDelayMs: 0,
     streams: [] as { pathname: string; closed: boolean }[],
+    /** Every head, delete and list call in order, as "head:<pathname>" or "list:<prefix>". */
+    calls: [] as string[],
+    failHead: false,
+    failDelete: false,
+    failList: false,
+    /** A delete that resolves but leaves the object in place. */
+    keepOnDelete: false,
+    /** Runs before each head, delete and list, for ordering checks or a slow provider. */
+    beforeCall: undefined as undefined | ((call: string) => Promise<void>),
   };
+  async function track(call: string, fail: boolean) {
+    state.calls.push(call);
+    await state.beforeCall?.(call);
+    if (fail) throw new Error(`provider refused ${signingSecret}`);
+  }
   let gate: { match: (pathname: string) => boolean; opened: Promise<void> } = {
     match: () => false,
     opened: Promise.resolve(),
@@ -119,6 +137,40 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
         sizeBytes: object.reportedSize ?? object.bytes.length,
         mimeType: object.mimeType,
         stream: recordedStream(object.bytes, object.stall, record),
+      };
+    },
+    async head(pathname) {
+      await track(`head:${pathname}`, state.failHead);
+      const object = objects.get(pathname);
+      if (!object) return null;
+      return {
+        sizeBytes: object.headSize ?? object.reportedSize ?? object.bytes.length,
+        mimeType: object.headMimeType ?? object.mimeType,
+        uploadedAt: object.uploadedAt ?? new Date(),
+      };
+    },
+    async delete(pathname) {
+      await track(`delete:${pathname}`, state.failDelete);
+      if (!state.keepOnDelete) objects.delete(pathname);
+    },
+    async list({ prefix, cursor, limit }) {
+      await track(`list:${prefix}`, state.failList);
+      const matching = [...objects.keys()]
+        .filter((pathname) => pathname.startsWith(prefix))
+        .sort();
+      const start = cursor ? Number(cursor) : 0;
+      const page = matching.slice(start, start + limit);
+      return {
+        objects: page.map((pathname) => {
+          const object = objects.get(pathname)!;
+          return {
+            pathname,
+            sizeBytes: object.headSize ?? object.bytes.length,
+            uploadedAt: object.uploadedAt ?? new Date(),
+          };
+        }),
+        cursor:
+          start + limit < matching.length ? String(start + limit) : null,
       };
     },
   };

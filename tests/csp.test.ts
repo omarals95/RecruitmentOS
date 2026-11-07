@@ -31,22 +31,29 @@ describe("Content-Security-Policy connect-src by configured CV storage provider"
     expect(process.env.NODE_ENV).not.toBe("development");
   });
 
-  for (const provider of [undefined, "s3"])
-    it(`lists only the S3 upload hosts for ${provider ?? "an unset provider"}`, async () => {
+  for (const provider of ["s3", " S3 "])
+    it(`lists only the S3 upload hosts for "${provider}"`, async () => {
       const { connectSrc } = await csp(provider);
       expect(connectSrc.split(" ")).toEqual(["'self'", ...s3Hosts]);
       expect(connectSrc).not.toContain("vercel.com");
     });
 
-  for (const provider of ["blob", " Vercel-Blob "])
-    it(`lists only the Blob upload path for "${provider}"`, async () => {
+  for (const provider of [
+    undefined,
+    "",
+    "blob",
+    "vercel-blob",
+    " Vercel-Blob ",
+  ])
+    it(`lists only the Blob upload path for ${JSON.stringify(provider) ?? "an unset provider"}`, async () => {
       const { connectSrc } = await csp(provider);
       expect(connectSrc).toBe("'self' https://vercel.com/api/blob/");
       expect(connectSrc).not.toContain("amazonaws.com");
     });
 
   it("lists no upload host for an unsupported provider", async () => {
-    expect((await csp("other")).connectSrc).toBe("'self'");
+    for (const provider of ["other", "unexpected"])
+      expect((await csp(provider)).connectSrc).toBe("'self'");
   });
 
   it("keeps every other directive identical across providers", async () => {
