@@ -496,11 +496,54 @@ describe("MCP endpoint over real migrations and RLS", () => {
       expect(
         (await post(createTokenMaterial().token, message("ping"), ip)).status,
       ).toBe(401);
-    const valid = await apiToken(owner.userId, ["candidates:read"]);
-    const refused = await post(valid.token, message("initialize"), ip);
-    expect(refused.status).toBe(429);
-    expect(refused.headers.get("retry-after")).toBe("60");
-    expect((await refused.json()).error.code).toBe("token_guess_rate_limited");
+    // Over budget, unknown and revoked tokens get 429 and the budget does not grow.
+    for (const token of [createTokenMaterial().token, revoked.token]) {
+      const refused = await post(token, message("initialize"), ip);
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("retry-after")).toBe("60");
+      expect((await refused.json()).error.code).toBe(
+        "token_guess_rate_limited",
+      );
+    }
+    expect(
+      await query<{ count: number }>(
+        "SELECT count FROM auth.api_rate_limits WHERE key=$1",
+        [guessKey],
+      ),
+    ).toEqual([{ count: 10 }]);
+  });
+
+  it("admits a live API token and OAuth access token from a shared egress address over its guess budget", async () => {
+    const ip = { "x-forwarded-for": "198.51.100.72" };
+    for (let n = 0; n < 10; n++)
+      expect(
+        (await post(createTokenMaterial().token, message("ping"), ip)).status,
+      ).toBe(401);
+    const initialize = () =>
+      message("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "fictional-client", version: "0.0.1" },
+      });
+    const access = await oauthAccess(owner.userId, ["candidates:read"]);
+    const viaOAuth = await post(access.token, initialize(), ip);
+    expect(viaOAuth.status).toBe(200);
+    expect((await viaOAuth.json()).result.protocolVersion).toBe("2025-06-18");
+    const api = await apiToken(owner.userId, ["candidates:read"]);
+    expect((await post(api.token, initialize(), ip)).status).toBe(200);
+    const revoked = await apiToken(owner.userId, ["candidates:read"]);
+    await fixture.client.query(
+      "UPDATE auth.api_tokens SET revoked_at=now() WHERE id=$1",
+      [revoked.id],
+    );
+    for (const token of [createTokenMaterial().token, revoked.token]) {
+      const refused = await post(token, initialize(), ip);
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("retry-after")).toBe("60");
+      expect((await refused.json()).error.code).toBe(
+        "token_guess_rate_limited",
+      );
+    }
   });
 
   it("initializes statelessly with tools only and limits a token to 60 requests a minute", async () => {

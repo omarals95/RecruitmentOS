@@ -23,7 +23,6 @@ import { createTokenMaterial, hashToken } from "../src/lib/api-token-policy";
 import {
   authenticateApiToken,
   authenticateOAuthAccessToken,
-  resetGuessPrecheck,
 } from "../src/lib/api-tokens";
 import { rateLimitClientKey } from "../src/lib/client-ip";
 import { installTenantContextKey } from "../src/lib/tenant-context";
@@ -99,7 +98,6 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
   beforeEach(async () => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
-    resetGuessPrecheck();
     await pg.exec(
       "DELETE FROM auth.api_rate_limits; UPDATE auth.api_tokens SET last_used_at=NULL;",
     );
@@ -152,7 +150,7 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     expect(await limits()).toEqual([]);
   });
 
-  it("refuses the 11th failed attempt from one client and then its valid token, while another client authenticates", async () => {
+  it("refuses the 11th unknown token from one client but still admits its valid token, without growing the budget", async () => {
     stubLocalAuthReadiness();
     const from = { "x-forwarded-for": "198.51.100.40" };
     for (let n = 0; n < 10; n++) {
@@ -164,29 +162,21 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     expect(refused.status).toBe(429);
     expect(refused.headers.get("retry-after")).toBe("60");
     expect((await refused.json()).error.code).toBe("token_guess_rate_limited");
-    const validRefused = await request(valid.token, from);
-    expect(validRefused.status).toBe(429);
-    expect(validRefused.headers.get("retry-after")).toBe("60");
-    expect((await validRefused.json()).error.code).toBe(
-      "token_guess_rate_limited",
-    );
-    await expect(
-      authenticateApiToken(valid.token, "198.51.100.40"),
-    ).rejects.toMatchObject({ status: 429, code: "token_guess_rate_limited" });
-    expect(await limits()).toEqual([
-      { key: guessKey("198.51.100.40"), count: 10 },
-    ]);
     expect(await lastUsed()).toBeNull();
-    const other = await request(valid.token, {
-      "x-forwarded-for": "198.51.100.41",
-    });
-    expect(other.status).toBe(200);
+    const admitted = await request(valid.token, from);
+    expect(admitted.status).toBe(200);
     expect(await lastUsed()).not.toBeNull();
+    expect(
+      (await authenticateApiToken(valid.token, "198.51.100.40")).tokenId,
+    ).toBe(TOKEN_ID);
+    const again = await request(guess(), from);
+    expect(again.status).toBe(429);
+    expect(again.headers.get("retry-after")).toBe("60");
+    expect((await again.json()).error.code).toBe("token_guess_rate_limited");
     expect(await limits()).toEqual(
       byKey([
         { key: guessKey("198.51.100.40"), count: 10 },
-        { key: guessKey("198.51.100.41"), count: 0 },
-        { key: `api-token:${TOKEN_ID}`, count: 1 },
+        { key: `api-token:${TOKEN_ID}`, count: 2 },
       ]),
     );
   });
@@ -232,19 +222,19 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     });
     for (let n = 1; n <= 10; n++)
       expect((await request(guess(), from(n))).status).toBe(401);
-    const refused = await request(valid.token, from(11));
+    const refused = await request(guess(), from(11));
     expect(refused.status).toBe(429);
     expect((await refused.json()).error.code).toBe("token_guess_rate_limited");
-    expect(await lastUsed()).toBeNull();
-    const other = await request(valid.token, {
+    const other = await request(guess(), {
       ...from(12),
       "x-vercel-forwarded-for": "203.0.113.41",
     });
-    expect(other.status).toBe(200);
+    expect(other.status).toBe(401);
+    expect((await request(valid.token, from(13))).status).toBe(200);
     expect(await limits()).toEqual(
       byKey([
         { key: guessKey("203.0.113.40", secret), count: 10 },
-        { key: guessKey("203.0.113.41", secret), count: 0 },
+        { key: guessKey("203.0.113.41", secret), count: 1 },
         { key: `api-token:${TOKEN_ID}`, count: 1 },
       ]),
     );
@@ -261,43 +251,42 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
     ).rejects.toMatchObject({ status: 401, code: "invalid_token" });
     for (let n = 0; n < 10; n++)
       expect((await request(guess())).status).toBe(401);
-    expect((await request(valid.token)).status).toBe(429);
+    expect((await request(guess())).status).toBe(429);
+    expect((await request(valid.token)).status).toBe(200);
     expect(await limits()).toEqual(
       byKey([
         { key: guessKey(CLIENT_IP), count: 1 },
         { key: "api-guess:no-client-ip", count: 10 },
-        { key: `api-token:${TOKEN_ID}`, count: 12 },
+        { key: `api-token:${TOKEN_ID}`, count: 13 },
       ]),
     );
   });
 
-  it("refuses an over-budget client in process, before any identity-database access", async () => {
+  it("looks every well-formed token up in the database over budget, after the readiness and format checks", async () => {
     stubLocalAuthReadiness();
     const from = { "x-forwarded-for": "198.51.100.42" };
     for (let n = 0; n < 10; n++)
       expect((await request(guess(), from)).status).toBe(401);
     const calls = pools.identity.mock.calls.length;
-    for (const token of [guess(), valid.token]) {
-      const refused = await request(token, from);
-      expect(refused.status).toBe(429);
-      expect(refused.headers.get("retry-after")).toBe("60");
-      expect((await refused.json()).error.code).toBe(
-        "token_guess_rate_limited",
-      );
-    }
-    expect(pools.identity.mock.calls.length).toBe(calls);
-    // The order holds: readiness, then format, then the pre-check.
+    const refused = await request(guess(), from);
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("60");
+    expect((await refused.json()).error.code).toBe("token_guess_rate_limited");
+    expect((await request(valid.token, from)).status).toBe(200);
+    // No in-process refusal: each well-formed token costs one identity lookup.
+    expect(pools.identity.mock.calls.length).toBeGreaterThan(calls + 1);
+    const lookups = pools.identity.mock.calls.length;
+    // The order holds: readiness, then format, then the database budget.
     expect((await request("ros_live_short", from)).status).toBe(401);
     vi.stubEnv("BETTER_AUTH_SECRET", undefined);
     expect((await request(valid.token, from)).status).toBe(503);
     vi.stubEnv("BETTER_AUTH_SECRET", LOCAL_SECRET);
-    expect(pools.identity.mock.calls.length).toBe(calls);
-    // The map is per instance; the database budget still refuses without it.
-    resetGuessPrecheck();
-    expect((await request(valid.token, from)).status).toBe(429);
-    expect(pools.identity.mock.calls.length).toBe(calls + 1);
+    expect(pools.identity.mock.calls.length).toBe(lookups);
     expect(await limits()).toEqual(
-      byKey([{ key: guessKey("198.51.100.42"), count: 10 }]),
+      byKey([
+        { key: guessKey("198.51.100.42"), count: 10 },
+        { key: `api-token:${TOKEN_ID}`, count: 1 },
+      ]),
     );
   });
 
@@ -371,6 +360,44 @@ describe("API tokens are gated on sign-in readiness and a per-client guess budge
       expect(
         (await limits()).find((row) => row.key === guessKey(ip))?.count,
       ).toBe(0);
+    });
+
+    it("admits live API and OAuth tokens from a shared egress address over budget and refuses every other token with 429", async () => {
+      stubLocalAuthReadiness();
+      const ip = "198.51.100.44";
+      const from = { "x-forwarded-for": ip };
+      for (let n = 0; n < 12; n++) await request(guess(), from);
+      expect((await limits()).find((row) => row.key === guessKey(ip))).toEqual({
+        key: guessKey(ip),
+        count: 10,
+      });
+      expect((await request(valid.token, from)).status).toBe(200);
+      expect(
+        (await authenticateOAuthAccessToken(accessValid, ip, AUDIENCE)).tokenId,
+      ).toBe(grantId);
+      for (const token of [guess(), revoked.token, expired.token]) {
+        const response = await request(token, from);
+        expect(response.status).toBe(429);
+        expect(response.headers.get("retry-after")).toBe("60");
+        expect((await response.json()).error.code).toBe(
+          "token_guess_rate_limited",
+        );
+      }
+      for (const token of [
+        material(),
+        accessExpired,
+        wrongAudience,
+        refreshRow,
+      ])
+        await expect(
+          authenticateOAuthAccessToken(token, ip, AUDIENCE),
+        ).rejects.toMatchObject({
+          status: 429,
+          code: "token_guess_rate_limited",
+        });
+      expect(
+        (await limits()).find((row) => row.key === guessKey(ip))?.count,
+      ).toBe(10);
     });
   });
 });

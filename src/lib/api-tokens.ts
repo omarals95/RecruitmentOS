@@ -123,42 +123,12 @@ export async function chargeRateWindow(tx: TeamTx, key: string) {
     .where(eq(apiRateLimits.key, key));
 }
 
-/** Unknown-hash guesses allowed per client key and minute before every token from it is refused. */
+/** Unknown-hash guesses allowed per client key and minute before non-live tokens from it get 429. */
 const GUESS_LIMIT = 10;
-const GUESS_WINDOW_MS = 60_000;
-const PRECHECK_MAX_ENTRIES = 10_000;
-/**
- * Per-instance copy of the database guess budget, keyed by hashed client key, so a client already
- * over budget is refused before any identity-database access. The database stays authoritative.
- */
-const guessPrecheck = new Map<string, { start: number; count: number }>();
-function noteGuesses(client: string, count: number) {
-  const now = Date.now();
-  const entry = guessPrecheck.get(client);
-  if (entry && now - entry.start < GUESS_WINDOW_MS) {
-    entry.count = count;
-    return;
-  }
-  guessPrecheck.delete(client);
-  if (guessPrecheck.size >= PRECHECK_MAX_ENTRIES) {
-    for (const [key, value] of guessPrecheck)
-      if (now - value.start >= GUESS_WINDOW_MS) guessPrecheck.delete(key);
-    // Then the oldest: a Map iterates in insertion order.
-    for (const key of guessPrecheck.keys()) {
-      if (guessPrecheck.size < PRECHECK_MAX_ENTRIES) break;
-      guessPrecheck.delete(key);
-    }
-  }
-  guessPrecheck.set(client, { start: now, count });
-}
-/** Test seam: forget every client's in-process guess count. */
-export function resetGuessPrecheck() {
-  guessPrecheck.clear();
-}
 
 type Authenticated =
-  | { guessLimited: true; guesses: number }
-  | { guess: true; guesses: number }
+  | { guessLimited: true }
+  | { guess: true }
   | { limited: true }
   | { principal: Principal }
   | null;
@@ -225,42 +195,34 @@ function requireReadiness(raw: string, format: RegExp) {
       "The API token is invalid or no longer active.",
     );
 }
-/** After readiness and format, before any identity-database access. Returns the hashed client key. */
-function precheckGuesses(clientIp: string | null): string {
-  const client = rateLimitClientKey(clientIp, process.env.BETTER_AUTH_SECRET!);
-  const entry = guessPrecheck.get(client);
-  if (
-    entry &&
-    Date.now() - entry.start < GUESS_WINDOW_MS &&
-    entry.count >= GUESS_LIMIT
-  )
-    throw guessLimitedError();
-  return client;
-}
 /**
- * The database guess budget around one token lookup. Over budget, every token from the client is
- * refused, valid or not: admitting a valid one would tell a guesser which value is real. Only a
+ * The database guess budget around one token lookup, keyed by the hashed client address. Only a
  * hash with no row at all is a guess (`charge`), so stale credentials (revoked, expired, expired
- * MCP access tokens) cannot lock everyone out behind a shared egress address.
+ * MCP access tokens) cannot spend a shared egress address's budget. Over budget, a token that
+ * matches a live row is still admitted: tokens carry 256 random bits, so admission tells a guesser
+ * nothing usable, and a shared address must not lock out its valid tokens. Every other token gets
+ * 429 and charges nothing further.
  */
 async function withGuessBudget(
-  client: string,
+  clientIp: string | null,
   lookup: (
     tx: TeamTx,
     charge: () => Promise<Authenticated>,
   ) => Promise<Authenticated>,
 ): Promise<Principal> {
-  const guessKey = `api-guess:${client}`;
+  const guessKey = `api-guess:${rateLimitClientKey(clientIp, process.env.BETTER_AUTH_SECRET!)}`;
   const db = await getIdentityDb();
   const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
-    const guesses = await rateWindow(tx, guessKey, 0);
-    if (guesses >= GUESS_LIMIT) return { guessLimited: true, guesses };
-    return lookup(tx, async () => {
+    const over = (await rateWindow(tx, guessKey, 0)) >= GUESS_LIMIT;
+    const found = await lookup(tx, async () => {
+      if (over) return { guessLimited: true };
       await chargeRateWindow(tx, guessKey);
-      return { guess: true, guesses: guesses + 1 };
+      return { guess: true };
     });
+    if (over && !(found && ("principal" in found || "limited" in found)))
+      return { guessLimited: true };
+    return found;
   });
-  if (result && "guesses" in result) noteGuesses(client, result.guesses);
   await purgeExpiredAuthRowsThrottled(db);
   return settle(result);
 }
@@ -270,8 +232,7 @@ export async function authenticateApiToken(
   clientIp: string | null,
 ): Promise<Principal> {
   requireReadiness(raw, /^ros_live_[A-Za-z0-9_-]{43}$/);
-  const client = precheckGuesses(clientIp);
-  return withGuessBudget(client, async (tx, charge) => {
+  return withGuessBudget(clientIp, async (tx, charge) => {
     const [found] = await tx
       .select({
         token: apiTokens,
@@ -312,8 +273,7 @@ export async function authenticateOAuthAccessToken(
   audience: string,
 ): Promise<Principal> {
   requireReadiness(raw, /^ros_oat_[A-Za-z0-9_-]{43}$/);
-  const client = precheckGuesses(clientIp);
-  return withGuessBudget(client, async (tx, charge) => {
+  return withGuessBudget(clientIp, async (tx, charge) => {
     const [found] = await tx
       .select({
         token: getTableColumns(apiTokens),
