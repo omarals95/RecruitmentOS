@@ -704,8 +704,7 @@ export function GET() {
     },
   ];
   const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended. Afterwards the batch returns 409 bulk_batch_expired to item and upload POSTs and is hidden from the GETs. When an expired batch is purged (the next bulk item POST or list GET in any team, at most 100 per request), its items are deleted. Its batch ID stays reserved, so later item and upload POSTs for it, from any client, still return 409 bulk_batch_expired and never recreate it, and both GETs keep hiding it. Another team's or another user's batch or item returns 404.`;
-  const batchShape =
-    "{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]} with all of the batch's items (at most 50)";
+  const batchShape = `{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]} with all of the batch's items (at most ${BULK_INTAKE_MAX_FILES})`;
   paths["/api/v1/cvs/bulk-batches"] = {
     get: operation(
       ["cvs:write", "candidates:write"],
@@ -852,7 +851,7 @@ export function GET() {
       ["cvs:write", "candidates:write"],
       {
         summary: "Reserve the CV upload for a bulk item",
-        description: `Requires cvs:write and candidates:write. Send no body. Reserves the private CV upload for the item's candidate with the item's stored file metadata; the client chooses neither the metadata nor the key. The first attempt uses the item ID as clientUploadId. A repeat while the current attempt is pending and unexpired returns the same CV upload and creates no reservation; a ready attempt returns it with upload:null. When the current attempt is rejected or its reservation expired, the call starts one new attempt for the same file under a new server-chosen clientUploadId, records it on the item and returns 201 with the new ticket; overlapping calls share that one new attempt. The ticket is either protocol of /api/v1/candidates/{id}/cvs/uploads (s3-form-v1 or blob-put-v1), and a ready Blob CV is read through /manifest and /chunks (blob-chunks-v1). Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
+        description: `Requires cvs:write and candidates:write. Send no body. Reserves the private CV upload for the item's candidate with the item's stored file metadata; the client chooses neither the metadata nor the key. The first attempt uses the item ID as clientUploadId. A repeat while the current attempt is pending and unexpired returns the same CV upload and creates no reservation; a ready attempt returns it with upload:null. When the current attempt is rejected or its reservation expired, the call starts one new attempt for the same file under a new server-chosen clientUploadId, records it on the item and returns 201 with the new ticket; overlapping calls share that one new attempt. The ticket is either protocol of /api/v1/candidates/{id}/cvs/uploads (s3-form-v1 or blob-put-v1), and a ready Blob CV is read through /manifest and /chunks (blob-chunks-v1). Returns 503 STORAGE_SETUP_REQUIRED when CV uploads are unavailable and 409 bulk_candidate_required before the item's candidate exists. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. Send the bytes as described for /api/v1/candidates/{id}/cvs/uploads, then complete through /api/v1/cvs/uploads/{id}/complete. ${bulkLifetime}`,
       },
       {
         "201": {
@@ -873,6 +872,70 @@ export function GET() {
       },
       { "200": { description: "{data: buckets, created}." } },
       { sessionOnly: true },
+    ),
+  };
+  const storageSettings = {
+    type: "object",
+    required: ["maxBytes", "maxFiles", "uploadRequestsPerMinute"],
+    additionalProperties: false,
+    properties: {
+      maxBytes: {
+        type: ["integer", "null"],
+        minimum: 1_000_000,
+        maximum: 10_000_000_000_000,
+        description:
+          "Decimal bytes; null with maxFiles null turns the limit off.",
+      },
+      maxFiles: { type: ["integer", "null"], minimum: 1, maximum: 1_000_000 },
+      uploadRequestsPerMinute: {
+        type: ["integer", "null"],
+        minimum: 1,
+        maximum: 600,
+        description: "New CV upload reservations per minute; null is off.",
+      },
+    },
+  };
+  const storageSettingsShape =
+    "{data:{maxBytes, maxFiles, uploadRequestsPerMinute, usage:{usedBytes, usedFiles, reservedBytes, reservedFiles, retainedBytes, retainedFiles}}}";
+  paths["/api/v1/teams/storage-settings"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read the team's CV storage settings and usage",
+        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Returns the team's storage limit, upload rate limit and current usage: stored (used), uploads in progress (reserved) and rejected or abandoned files waiting for cleanup (retained). Nulls mean off; a team that never reserved storage reads as nulls and zeros. These are application limits, not hard provider caps; the store-wide budget set by the RecruitmentOS owner always applies.`,
+      },
+      { "200": { description: storageSettingsShape } },
+      { sessionOnly: true },
+    ),
+    put: operation(
+      [],
+      {
+        summary: "Change the team's CV storage settings",
+        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Send all three fields: maxBytes and maxFiles are both null (limit off) or both set; uploadRequestsPerMinute is null (off) or 1 to 600. Anything else, including an unknown key, returns 400 invalid_input. A limit below current usage is accepted: existing CVs stay available, but new reservations return 409 STORAGE_QUOTA_EXCEEDED until usage is below it. Each change writes one storage-settings activity row (storage.settings_updated) with the before and after values; an unchanged request writes none. Returns ${storageSettingsShape}.`,
+        requestBody: jsonBody(storageSettings, {
+          maxBytes: 500_000_000,
+          maxFiles: 100,
+          uploadRequestsPerMinute: null,
+        }),
+      },
+      { "200": { description: storageSettingsShape } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/cvs/storage-reconciliation"] = {
+    post: operation(
+      ["cvs:write"],
+      {
+        summary: "Clean up the team's private Blob CV storage",
+        description:
+          "Requires cvs:write and a team owner or admin (others get 403 storage_reconciliation_forbidden). Send no body. Runs one bounded, idempotent sweep of the team's own Blob objects: it expires old reservations; deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago and frees each retained charge only after the object is confirmed missing; and lists the team's CV prefix to delete objects with no upload row once older than any ticket could be, oversized or mismatched objects and objects of rejected rows. Pending unexpired uploads and ready CVs that still match are never deleted. A run stops after 50 rows, 100 deletions, 3 list pages or 20 seconds; complete is false when it stopped early, so call it again. Returns 409 STORAGE_RECONCILIATION_UNSUPPORTED when the configured storage is S3 and 503 STORAGE_SETUP_REQUIRED when Blob storage is not set up. Only counts are returned, never pathnames, file names or IDs.",
+      },
+      {
+        "200": {
+          description:
+            "{data:{expiredReservations, chargesReleased, objectsChecked, objectsDeleted, failures, complete}}.",
+        },
+      },
     ),
   };
   paths["/api/settings/tokens"] = {
@@ -1062,7 +1125,7 @@ export function GET() {
       {
         summary: "Reserve a direct private CV upload",
         description:
-          "Requires cvs:write. Clients must switch on upload.protocol and never infer it from a hostname: s3-form-v1 is a multipart form POST of the fields plus file; blob-put-v1 is a PUT of the file with exactly the returned headers. Send no credentials, cookies or X-Team-Id to the upload URL, then complete the upload. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API. Blob storage is currently disabled: the server returns 503 STORAGE_SETUP_REQUIRED for it.",
+          "Requires cvs:write. Clients must switch on upload.protocol and never infer it from a hostname: s3-form-v1 is a multipart form POST of the fields plus file; blob-put-v1 is a PUT of the file with exactly the returned headers. Send no credentials, cookies or X-Team-Id to the upload URL, then complete the upload. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Never send CV bytes through the Vercel JSON API. A Blob reservation lasts 15 minutes and each ticket at most 300 seconds; an S3 reservation lasts 60 minutes. When the team's CV upload rate limit is on, a new reservation beyond its requests per minute returns 429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60; a replay of an existing reservation is not refused. A reservation over the team's storage limit or the store-wide budget, counting pending uploads and files waiting for cleanup, returns 409 STORAGE_QUOTA_EXCEEDED. These are application limits, not hard provider caps. Returns 503 STORAGE_SETUP_REQUIRED when CV storage is not set up.",
         requestBody: jsonBody(
           {
             type: "object",
