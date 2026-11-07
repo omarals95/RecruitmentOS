@@ -20,10 +20,12 @@ import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
 import {
+  canCreateTeam,
   canRegisterEmail,
   isUsableAuthSecret,
   validateInvitationRole,
 } from "./auth-policy";
+import { cleanClientName } from "./client-name";
 import { clientIpHeader, keyedRateLimitHash } from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
 
@@ -168,12 +170,36 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         },
       },
     },
-    allowUserToCreateOrganization: (user) => user.emailVerified,
+    // Read the creator's row and owner memberships from the database, never from the request.
+    allowUserToCreateOrganization: async (sessionUser) => {
+      const ctx = tryGetCurrentAuthEndpointContext();
+      if (!ctx) return false;
+      const adapter = await getCurrentAdapter(ctx.context.adapter);
+      const row = await adapter.findOne<{
+        emailVerified: boolean;
+        initialAdmin: boolean | null;
+      }>({
+        model: "user",
+        where: [{ field: "id", value: sessionUser.id }],
+      });
+      if (!row) return false;
+      const owned = await adapter.count({
+        model: "member",
+        where: [
+          { field: "userId", value: sessionUser.id },
+          { field: "role", value: "owner" },
+        ],
+      });
+      return canCreateTeam(row, owned > 0 ? ["owner"] : []);
+    },
     sendInvitationEmail: async (data) => {
+      // Team names are user-chosen; mail never carries their control, bidi or invisible characters.
+      const teamName =
+        cleanClientName(data.organization.name) || "a RecruitmentOS team";
       await mail(
         data.email,
-        `Invitation to ${data.organization.name} on RecruitmentOS`,
-        `You have been invited to join ${data.organization.name}. Sign in using this email address, verify it, and accept the invitation:\n${config.baseURL}/accept-invitation?id=${encodeURIComponent(data.id)}\nThis invitation expires in 48 hours.`,
+        `Invitation to ${teamName} on RecruitmentOS`,
+        `You have been invited to join ${teamName}. Sign in using this email address, verify it, and accept the invitation:\n${config.baseURL}/accept-invitation?id=${encodeURIComponent(data.id)}\nThis invitation expires in 48 hours.`,
       );
     },
     organizationHooks: {

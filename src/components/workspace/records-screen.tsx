@@ -1546,16 +1546,23 @@ export function EmptyState({
   );
 }
 export function NoTeam() {
+  const { canCreateTeam } = useWorkspace();
   return (
     <section className="panel">
       <EmptyState
         title="A workspace for your team"
-        description="Create your first team or accept an invitation to start managing recruitment."
+        description={
+          canCreateTeam
+            ? "Create your first team or accept an invitation to start managing recruitment."
+            : "You have not joined a team yet. Accept the email invitation from your team owner."
+        }
         action={
-          <Link className="button" href="/app/settings/team">
-            <Users size={17} aria-hidden="true" />
-            Create or join a team
-          </Link>
+          canCreateTeam ? (
+            <Link className="button" href="/app/settings/team">
+              <Users size={17} aria-hidden="true" />
+              Create or join a team
+            </Link>
+          ) : undefined
         }
       />
     </section>

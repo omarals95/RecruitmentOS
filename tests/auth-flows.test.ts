@@ -5,6 +5,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppDb } from "../src/db";
 import { authTables } from "../src/db/auth-schema";
 import { createAuth } from "../src/lib/auth";
+import {
+  addMember,
+  authCaller,
+  createAuthDb,
+  createTeam,
+  createTestAuth,
+  setUpAdmin,
+  type Mail,
+} from "./helpers/auth";
 
 describe("Better Auth verified invite-only flows", () => {
   const pg = new PGlite();
@@ -462,5 +471,155 @@ describe("Better Auth verified invite-only flows", () => {
         query: { disableCookieCache: true },
       }),
     ).toBeNull();
+  });
+});
+
+describe("owner role and team creation through the handler", () => {
+  let h: Awaited<ReturnType<typeof createAuthDb>>;
+  let caller: ReturnType<typeof authCaller>;
+  const mail: Mail[] = [];
+  let ownerCookie = "";
+  let teamId = "";
+  let admin = { cookie: "", memberId: "" };
+  let recruiter = { cookie: "", memberId: "" };
+  const ownerLike = [" owner", "Owner", "OWNER", "owner ", "owner\n"];
+  const ownerLikeInvitations = () =>
+    h.count(
+      `SELECT count(*) FROM auth.invitation WHERE lower(trim(both E' \t\r\n' FROM role)) LIKE '%owner%'`,
+    );
+  const roleOf = async (memberId: string) =>
+    (
+      await h.pg.query<{ role: string }>(
+        `SELECT role FROM auth.member WHERE id=$1`,
+        [memberId],
+      )
+    ).rows[0]?.role;
+  beforeAll(async () => {
+    h = await createAuthDb();
+    caller = authCaller(createTestAuth(h.db, mail));
+    ({ cookie: ownerCookie, teamId } = await setUpAdmin(caller, mail));
+    admin = await addMember(
+      caller,
+      mail,
+      ownerCookie,
+      teamId,
+      "team-admin@example.test",
+      "admin",
+    );
+    recruiter = await addMember(
+      caller,
+      mail,
+      ownerCookie,
+      teamId,
+      "team-recruiter@example.test",
+      "recruiter",
+    );
+  });
+  afterAll(async () => h.pg.close());
+
+  it("refuses padded or differently cased owner roles from an admin, for invitations and role changes", async () => {
+    for (const role of ownerLike) {
+      const invite = await caller.post(
+        "organization/invite-member",
+        { organizationId: teamId, email: "padded@example.test", role },
+        { cookie: admin.cookie },
+      );
+      expect(invite.status, JSON.stringify(role)).toBeGreaterThanOrEqual(400);
+      expect(invite.status, JSON.stringify(role)).toBeLessThan(500);
+      const promote = await caller.post(
+        "organization/update-member-role",
+        { organizationId: teamId, memberId: recruiter.memberId, role },
+        { cookie: admin.cookie },
+      );
+      expect(promote.status, JSON.stringify(role)).toBeGreaterThanOrEqual(400);
+      expect(promote.status, JSON.stringify(role)).toBeLessThan(500);
+    }
+    expect(await ownerLikeInvitations()).toBe(0);
+    expect(await roleOf(recruiter.memberId)).toBe("recruiter");
+  });
+
+  it("refuses a padded owner role from an owner, because only exact role names are valid", async () => {
+    const invite = await caller.post(
+      "organization/invite-member",
+      { organizationId: teamId, email: "padded@example.test", role: " owner" },
+      { cookie: ownerCookie },
+    );
+    expect(invite.status).toBe(400);
+    const promote = await caller.post(
+      "organization/update-member-role",
+      { organizationId: teamId, memberId: recruiter.memberId, role: " owner" },
+      { cookie: ownerCookie },
+    );
+    expect(promote.status).toBe(400);
+    expect(await ownerLikeInvitations()).toBe(0);
+    expect(await roleOf(recruiter.memberId)).toBe("recruiter");
+  });
+
+  it("refuses team creation by a verified recruiter or an admin who owns no team", async () => {
+    const before = await h.count(`SELECT count(*) FROM auth.organization`);
+    for (const [slug, cookie] of [
+      ["recruiter-team", recruiter.cookie],
+      ["admin-team", admin.cookie],
+    ]) {
+      const response = await caller.post(
+        "organization/create",
+        { name: "Fictional refused team", slug },
+        { cookie },
+      );
+      expect(response.status, slug).toBe(403);
+    }
+    expect(await h.count(`SELECT count(*) FROM auth.organization`)).toBe(
+      before,
+    );
+  });
+
+  it("lets the initial administrator and an owner of one team create another team", async () => {
+    await createTeam(caller, ownerCookie, "initial-admin-second");
+    const owner = await addMember(
+      caller,
+      mail,
+      ownerCookie,
+      teamId,
+      "second-owner@example.test",
+      "owner",
+    );
+    expect(owner.memberId).toBeTruthy();
+    await createTeam(caller, owner.cookie, "owned-second-team");
+    expect(
+      await h.count(
+        `SELECT count(*) FROM auth.organization o JOIN auth."user" u ON u.id=o.created_by WHERE o.slug='owned-second-team' AND u.email='second-owner@example.test'`,
+      ),
+    ).toBe(1);
+  });
+
+  it("removes control, bidi and zero-width characters from the team name in invitation mail", async () => {
+    const created = await caller.post(
+      "organization/create",
+      {
+        name: "Fictional\r\nUrgent\u202Eteam\u200Bname",
+        slug: "unsafe-name-team",
+      },
+      { cookie: ownerCookie },
+    );
+    expect(created.status).toBe(200);
+    const organizationId = ((await created.json()) as { id: string }).id;
+    const invite = await caller.post(
+      "organization/invite-member",
+      { organizationId, email: "named-invite@example.test", role: "viewer" },
+      { cookie: ownerCookie },
+    );
+    expect(invite.status).toBe(200);
+    const message = mail.findLast(
+      (item) => item.to === "named-invite@example.test",
+    )!;
+    expect(message.subject).toBe(
+      "Invitation to FictionalUrgentteamname on RecruitmentOS",
+    );
+    for (const text of [message.subject, message.text])
+      expect(text).not.toMatch(/[\r\u202E\u200B]/);
+    expect(message.subject).not.toContain("\n");
+    expect(message.text).toContain(
+      "You have been invited to join FictionalUrgentteamname.",
+    );
   });
 });

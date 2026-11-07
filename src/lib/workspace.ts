@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { getSession } from "./auth-session";
 import { getAuthOptions } from "./auth";
+import { canCreateTeam } from "./auth-policy";
 import { getIdentityDb } from "@/db";
 import { member, organization } from "@/db/auth-schema";
 import { parseRole, type Role } from "./permissions";
@@ -11,6 +12,7 @@ export interface WorkspaceContext {
   team: { id: string; name: string; slug: string } | null;
   role: Role | null;
   environment: string;
+  canCreateTeam: boolean;
 }
 /** Export label from the same signals resolveStorageBinding trusts; off Vercel is local. */
 export function workspaceEnvironment(
@@ -47,5 +49,9 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
       : null,
     role: active ? parseRole(active.role) : null,
     environment: workspaceEnvironment(process.env),
+    canCreateTeam: canCreateTeam(
+      identity.user,
+      memberships.map((m) => m.role),
+    ),
   };
 }

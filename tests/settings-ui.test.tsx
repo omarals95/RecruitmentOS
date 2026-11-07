@@ -25,6 +25,7 @@ const workspace = {
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "owner",
   environment: "Local development",
+  canCreateTeam: true,
 };
 
 describe("settings navigation", () => {
@@ -131,6 +132,20 @@ describe("CV storage settings", () => {
       const admin = role === "owner" || role === "admin";
       expect(markup.includes("CV storage</h2>"), role).toBe(admin);
       expect(markup.includes(sentence), role).toBe(admin);
+    }
+  });
+
+  it("shows the Create a team panel only when the user may create a team", () => {
+    for (const canCreateTeam of [true, false]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={{ ...workspace, canCreateTeam }}>
+          <TeamSettings />
+        </WorkspaceProvider>,
+      );
+      expect(markup.includes("Create a team</h2>"), String(canCreateTeam)).toBe(
+        canCreateTeam,
+      );
+      expect(markup.includes(">Create team</button>")).toBe(canCreateTeam);
     }
   });
 

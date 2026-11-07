@@ -22,6 +22,7 @@ const workspace = {
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "recruiter",
   environment: "Local development",
+  canCreateTeam: true,
 };
 const SCRIPT = "<script>alert(1)</script>";
 const IMAGE = "<img src=x onerror=alert(1)>";

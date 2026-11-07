@@ -63,7 +63,7 @@ export function TeamSettings() {
 }
 
 function TeamSettingsContent() {
-  const { team, user, role } = useWorkspace();
+  const { team, user, role, canCreateTeam } = useWorkspace();
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [details, setDetails] = useState<TeamDetails | null>(null);
   const [loading, setLoading] = useState(true);
@@ -330,8 +330,9 @@ function TeamSettingsContent() {
           <p role="status">Loading teams…</p>
         ) : teams.length === 0 ? (
           <p className="muted">
-            You have not joined a team yet. Create your first workspace below,
-            or accept an email invitation.
+            {canCreateTeam
+              ? "You have not joined a team yet. Create your first workspace below, or accept an email invitation."
+              : "You have not joined a team yet. Accept the email invitation from your team owner."}
           </p>
         ) : (
           <div className="form-grid">
@@ -649,60 +650,62 @@ function TeamSettingsContent() {
           {canAdmin && <StorageSettings busy={busy} onAction={action} />}
         </>
       )}
-      <section className="panel">
-        <h2>
-          <Plus
-            size={20}
-            aria-hidden="true"
-            style={{ verticalAlign: "middle" }}
-          />{" "}
-          Create a team
-        </h2>
-        <p className="muted">
-          A separate team has its own candidate records, CVs, workflow and
-          tokens. You can create up to five teams.
-        </p>
-        <form className="stack" onSubmit={createTeam}>
-          <div className="form-grid">
-            <label className="field">
-              <span>Team name</span>
-              <input
-                required
-                maxLength={100}
-                value={newName}
-                onChange={(e) => {
-                  setNewName(e.target.value);
-                  if (!slugEdited) setNewSlug(slugFor(e.target.value));
-                }}
-                placeholder="e.g. Talent acquisition"
-              />
-            </label>
-            <label className="field">
-              <span>Team identifier</span>
-              <input
-                required
-                minLength={2}
-                maxLength={70}
-                pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-                value={newSlug}
-                onChange={(e) => {
-                  setNewSlug(e.target.value);
-                  setSlugEdited(true);
-                }}
-                placeholder="talent-acquisition"
-              />
-              <small className="muted">
-                Lowercase letters, numbers and hyphens.
-              </small>
-            </label>
-          </div>
-          <div>
-            <button type="submit" className="button" disabled={!!busy}>
-              {busy === "create" ? "Creating team…" : "Create team"}
-            </button>
-          </div>
-        </form>
-      </section>
+      {canCreateTeam && (
+        <section className="panel">
+          <h2>
+            <Plus
+              size={20}
+              aria-hidden="true"
+              style={{ verticalAlign: "middle" }}
+            />{" "}
+            Create a team
+          </h2>
+          <p className="muted">
+            A separate team has its own candidate records, CVs, workflow and
+            tokens. You can create up to five teams.
+          </p>
+          <form className="stack" onSubmit={createTeam}>
+            <div className="form-grid">
+              <label className="field">
+                <span>Team name</span>
+                <input
+                  required
+                  maxLength={100}
+                  value={newName}
+                  onChange={(e) => {
+                    setNewName(e.target.value);
+                    if (!slugEdited) setNewSlug(slugFor(e.target.value));
+                  }}
+                  placeholder="e.g. Talent acquisition"
+                />
+              </label>
+              <label className="field">
+                <span>Team identifier</span>
+                <input
+                  required
+                  minLength={2}
+                  maxLength={70}
+                  pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+                  value={newSlug}
+                  onChange={(e) => {
+                    setNewSlug(e.target.value);
+                    setSlugEdited(true);
+                  }}
+                  placeholder="talent-acquisition"
+                />
+                <small className="muted">
+                  Lowercase letters, numbers and hyphens.
+                </small>
+              </label>
+            </div>
+            <div>
+              <button type="submit" className="button" disabled={!!busy}>
+                {busy === "create" ? "Creating team…" : "Create team"}
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
       {dialog}
     </div>
   );

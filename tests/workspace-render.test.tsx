@@ -45,6 +45,7 @@ const workspace = {
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "recruiter",
   environment: "Local development",
+  canCreateTeam: true,
 };
 const buttonSvg = (markup: string, label: string) =>
   new RegExp(`aria-label="${label}"[^>]*>(<svg[\\s\\S]*?</svg>)`).exec(
