@@ -253,126 +253,107 @@ function TokenSettingsContent() {
               </div>
             </section>
           )}
-          {!user.twoStepEnabled ? (
-            <section className="panel">
-              <h2>Create a personal token</h2>
-              <p>
-                Turn on two-step sign-in in your profile before creating API
-                tokens or connecting apps.
-              </p>
-              <div>
-                <Link
-                  className="button"
-                  href="/two-step-setup?next=/app/settings/api-tokens"
-                >
-                  Turn on two-step sign-in
-                </Link>
+          <section className="panel">
+            <h2>Create a personal token</h2>
+            <p className="muted">
+              Team: <strong>{team.name}</strong>. Access follows your current
+              role and stops if your membership is removed. Default expiry is 30
+              days.
+            </p>
+            <form className="stack" onSubmit={create}>
+              <div className="form-grid">
+                <label className="field">
+                  <span>Token name</span>
+                  <input
+                    required
+                    maxLength={100}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="e.g. Candidate import assistant"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="field">
+                  <span>Expires in days</span>
+                  <input
+                    required
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={days}
+                    onChange={(e) => setDays(Number(e.target.value))}
+                  />
+                </label>
               </div>
-            </section>
-          ) : (
-            <section className="panel">
-              <h2>Create a personal token</h2>
-              <p className="muted">
-                Team: <strong>{team.name}</strong>. Access follows your current
-                role and stops if your membership is removed. Default expiry is
-                30 days.
-              </p>
-              <form className="stack" onSubmit={create}>
+              <fieldset
+                style={{
+                  border: "1px solid var(--border, #e2e4eb)",
+                  borderRadius: 10,
+                  padding: 16,
+                }}
+              >
+                <legend>Permissions</legend>
                 <div className="form-grid">
-                  <label className="field">
-                    <span>Token name</span>
-                    <input
-                      required
-                      maxLength={100}
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="e.g. Candidate import assistant"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Expires in days</span>
-                    <input
-                      required
-                      type="number"
-                      min={1}
-                      max={365}
-                      value={days}
-                      onChange={(e) => setDays(Number(e.target.value))}
-                    />
-                  </label>
-                </div>
-                <fieldset
-                  style={{
-                    border: "1px solid var(--border, #e2e4eb)",
-                    borderRadius: 10,
-                    padding: 16,
-                  }}
-                >
-                  <legend>Permissions</legend>
-                  <div className="form-grid">
-                    {SCOPES.filter((scope) => available.includes(scope)).map(
-                      (scope) => (
-                        <label
-                          key={scope}
-                          style={{
-                            display: "flex",
-                            alignItems: "flex-start",
-                            gap: 10,
-                            padding: 8,
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={scopes.includes(scope)}
-                            onChange={(e) =>
-                              setScopes((previous) =>
-                                e.target.checked
-                                  ? [...previous, scope]
-                                  : previous.filter((item) => item !== scope),
-                              )
-                            }
-                          />
-                          <span>
-                            <strong>{scope}</strong>
-                            <br />
-                            <span className="muted">
-                              {scopeDescriptions[scope]}
-                            </span>
+                  {SCOPES.filter((scope) => available.includes(scope)).map(
+                    (scope) => (
+                      <label
+                        key={scope}
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: 8,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={scopes.includes(scope)}
+                          onChange={(e) =>
+                            setScopes((previous) =>
+                              e.target.checked
+                                ? [...previous, scope]
+                                : previous.filter((item) => item !== scope),
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{scope}</strong>
+                          <br />
+                          <span className="muted">
+                            {scopeDescriptions[scope]}
                           </span>
-                        </label>
-                      ),
-                    )}
-                  </div>
-                </fieldset>
-                <p className="muted">
-                  <ShieldCheck
-                    size={16}
-                    aria-hidden="true"
-                    style={{ verticalAlign: "middle" }}
-                  />{" "}
-                  Tokens cannot administer users, teams, roles or other tokens.
-                  Read and write scopes are selected separately.
-                </p>
-                <div>
-                  <button
-                    type="submit"
-                    className="button"
-                    disabled={!!busy || scopes.length === 0 || !!secret}
-                  >
-                    {busy === "create" ? "Creating token…" : "Create token"}
-                  </button>
-                  {secret && (
-                    <span className="muted">
-                      {" "}
-                      Save and dismiss the previous token before creating
-                      another.
-                    </span>
+                        </span>
+                      </label>
+                    ),
                   )}
                 </div>
-              </form>
-            </section>
-          )}
+              </fieldset>
+              <p className="muted">
+                <ShieldCheck
+                  size={16}
+                  aria-hidden="true"
+                  style={{ verticalAlign: "middle" }}
+                />{" "}
+                Tokens cannot administer users, teams, roles or other tokens.
+                Read and write scopes are selected separately.
+              </p>
+              <div>
+                <button
+                  type="submit"
+                  className="button"
+                  disabled={!!busy || scopes.length === 0 || !!secret}
+                >
+                  {busy === "create" ? "Creating token…" : "Create token"}
+                </button>
+                {secret && (
+                  <span className="muted">
+                    {" "}
+                    Save and dismiss the previous token before creating another.
+                  </span>
+                )}
+              </div>
+            </form>
+          </section>
           <section className="panel">
             <div className="row" style={{ justifyContent: "space-between" }}>
               <div>

@@ -21,7 +21,7 @@ import type { Requester } from "./optimistic";
 import { speedLog, startSpeedLog } from "./speed-log";
 
 export interface WorkspaceIdentity {
-  user: { id: string; name: string; email: string; twoStepEnabled: boolean };
+  user: { id: string; name: string; email: string };
   team: { id: string; name: string; slug: string } | null;
   role: string | null;
   environment: string;

@@ -58,72 +58,6 @@ const roleDescriptions: Record<TeamRole, string> = {
   viewer: "Read-only recruitment access",
 };
 
-/** Only an owner resets two-step sign-in, and never their own (they use backup codes or Account settings). */
-export function canResetTwoStep(
-  role: string | null,
-  memberUserId: string,
-  userId: string,
-) {
-  return role === "owner" && memberUserId !== userId;
-}
-
-/** Row actions in the members table. */
-export function MemberActions({
-  canEdit,
-  canResetTwoStep,
-  busy,
-  saveDisabled,
-  removeDisabled,
-  onSave,
-  onRemove,
-  onResetTwoStep,
-}: {
-  canEdit: boolean;
-  canResetTwoStep: boolean;
-  busy: boolean;
-  saveDisabled: boolean;
-  removeDisabled: boolean;
-  onSave: () => void;
-  onRemove: () => void;
-  onResetTwoStep: () => void;
-}) {
-  if (!canEdit && !canResetTwoStep) return null;
-  return (
-    <div className="row">
-      {canEdit && (
-        <>
-          <button
-            type="button"
-            className="button secondary"
-            disabled={busy || saveDisabled}
-            onClick={onSave}
-          >
-            Save role
-          </button>
-          <button
-            type="button"
-            className="button secondary"
-            disabled={busy || removeDisabled}
-            onClick={onRemove}
-          >
-            Remove
-          </button>
-        </>
-      )}
-      {canResetTwoStep && (
-        <button
-          type="button"
-          className="button secondary"
-          disabled={busy}
-          onClick={onResetTwoStep}
-        >
-          Reset two-step sign-in
-        </button>
-      )}
-    </div>
-  );
-}
-
 export function TeamSettings() {
   const { team } = useWorkspace();
   return <TeamSettingsContent key={team?.id ?? "no-team"} />;
@@ -301,7 +235,7 @@ function TeamSettingsContent() {
     if (
       !(await confirm({
         title: "Change member role?",
-        message: `Change ${person.user.name} from ${person.role} to ${next}? This changes their access and API token permissions.${next === "owner" || next === "admin" ? " They will need to set up two-step sign-in before they can continue." : ""}`,
+        message: `Change ${person.user.name} from ${person.role} to ${next}? This changes their access and API token permissions.`,
         confirmLabel: "Change role",
         destructive: true,
       }))
@@ -346,28 +280,6 @@ function TeamSettingsContent() {
         else await load();
       },
       "Member removed.",
-    );
-  }
-  async function resetTwoStep(person: TeamMember) {
-    if (
-      !team ||
-      !(await confirm({
-        title: "Reset two-step sign-in?",
-        message: `Reset ${person.user.name}'s two-step sign-in? Their authenticator key and backup codes stop working, they are signed out everywhere and their trusted devices are forgotten. If their role requires it, they must set it up again at their next sign-in.`,
-        confirmLabel: "Reset two-step sign-in",
-        destructive: true,
-      }))
-    )
-      return;
-    await action(
-      `two-step-${person.id}`,
-      async () => {
-        await requestJson(team.id, "/api/v1/teams/two-step-reset", {
-          method: "POST",
-          body: JSON.stringify({ userId: person.userId }),
-        });
-      },
-      `${person.user.name}'s two-step sign-in was reset. They have been signed out everywhere.`,
     );
   }
   const ownerCount =
@@ -588,24 +500,31 @@ function TeamSettingsContent() {
                             )}
                           </td>
                           <td>
-                            <MemberActions
-                              canEdit={canEdit}
-                              canResetTwoStep={canResetTwoStep(
-                                role,
-                                person.userId,
-                                user.id,
-                              )}
-                              busy={!!busy}
-                              saveDisabled={
-                                lastOwner ||
-                                !roleDrafts[person.id] ||
-                                roleDrafts[person.id] === person.role
-                              }
-                              removeDisabled={lastOwner}
-                              onSave={() => void changeRole(person)}
-                              onRemove={() => void removeMember(person)}
-                              onResetTwoStep={() => void resetTwoStep(person)}
-                            />
+                            {canEdit && (
+                              <div className="row">
+                                <button
+                                  type="button"
+                                  className="button secondary"
+                                  disabled={
+                                    !!busy ||
+                                    lastOwner ||
+                                    !roleDrafts[person.id] ||
+                                    roleDrafts[person.id] === person.role
+                                  }
+                                  onClick={() => void changeRole(person)}
+                                >
+                                  Save role
+                                </button>
+                                <button
+                                  type="button"
+                                  className="button secondary"
+                                  disabled={!!busy || lastOwner}
+                                  onClick={() => void removeMember(person)}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );

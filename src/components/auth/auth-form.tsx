@@ -5,7 +5,6 @@ import { useState, type FormEvent } from "react";
 import { ArrowRight, ShieldCheck } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import type { AuthOptions } from "@/lib/auth";
-import { safeNext } from "@/lib/safe-next";
 
 type Mode =
   | "sign-in"
@@ -43,7 +42,18 @@ const headings: Record<Mode, [string, string]> = {
   ],
 };
 
-export { safeNext };
+export function safeNext(value?: string) {
+  if (!value?.startsWith("/") || value.startsWith("//") || value.includes("\\"))
+    return "/app";
+  const url = new URL(value, "https://recruitment.invalid");
+  return url.origin === "https://recruitment.invalid" &&
+    (url.pathname === "/app" ||
+      url.pathname.startsWith("/app/") ||
+      url.pathname === "/accept-invitation" ||
+      url.pathname === "/oauth/authorize")
+    ? `${url.pathname}${url.search}`
+    : "/app";
+}
 
 export function AuthForm({
   mode,
@@ -104,32 +114,13 @@ export function AuthForm({
     ) as HTMLInputElement | null;
     const email = String(fields.get("email") ?? "").trim();
     const password = String(fields.get("password") ?? "");
-    if (mode === "sign-in") {
-      let challenged = false;
+    if (mode === "sign-in")
       return action(
-        async () => {
-          const result = await authClient.signIn.email({
-            email,
-            password,
-            callbackURL: target,
-          });
-          challenged = Boolean(
-            result.data &&
-            "twoFactorRedirect" in result.data &&
-            result.data.twoFactorRedirect,
-          );
-          return result;
-        },
+        () => authClient.signIn.email({ email, password, callbackURL: target }),
         () => {
-          // A two-step account continues on the code screen, then reaches the same target.
-          window.location.assign(
-            challenged
-              ? `/two-step?next=${encodeURIComponent(target)}`
-              : target,
-          );
+          window.location.assign(target);
         },
       );
-    }
     if (mode === "sign-up" || mode === "create-admin")
       return action(
         () =>

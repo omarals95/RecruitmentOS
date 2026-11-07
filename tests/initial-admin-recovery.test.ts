@@ -10,11 +10,7 @@ describe("initial administrator recovery", () => {
   it("recovers from delivery failure without reopening setup", async () => {
     const pg = new PGlite();
     try {
-      for (const file of [
-        "0000_auth.sql",
-        "0003_initial_admin.sql",
-        "0021_two_step_sign_in.sql",
-      ])
+      for (const file of ["0000_auth.sql", "0003_initial_admin.sql"])
         await pg.exec(
           await readFile(
             new URL(`../drizzle/${file}`, import.meta.url),

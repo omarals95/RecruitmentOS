@@ -6,29 +6,16 @@ import {
   getAuthoritativeSessionFromCtx,
 } from "better-auth/api";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
+import { organization as organizationPlugin } from "better-auth/plugins";
 import {
-  organization as organizationPlugin,
-  twoFactor,
-} from "better-auth/plugins";
-import {
-  defineRequestState,
   getCurrentAdapter,
-  hasRequestState,
   runWithTransaction,
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
 import type { BetterAuthRateLimitStorage } from "@better-auth/core";
-import { isAPIError } from "@better-auth/core/utils/is-api-error";
-import { and, eq, like, sql, type SQLWrapper } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getIdentityDb, prepareDbPairTargets, type AppDb } from "@/db";
-import {
-  apiRateLimits,
-  authTables,
-  member,
-  rateLimit,
-  user,
-  verification,
-} from "@/db/auth-schema";
+import { authTables, member, rateLimit, user } from "@/db/auth-schema";
 import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
@@ -36,8 +23,6 @@ import {
   canCreateTeam,
   canRegisterEmail,
   isUsableAuthSecret,
-  TWO_STEP_SETUP_MESSAGE,
-  twoStepSetupRequired,
   validateInvitationRole,
 } from "./auth-policy";
 import { cleanClientName } from "./client-name";
@@ -158,75 +143,6 @@ function hashedRateLimitStorage(
     },
   };
 }
-
-const SIGN_IN_BACKOFF_MESSAGE =
-  "Too many sign-in attempts. Wait a few minutes and try again.";
-/** Seconds a sign-in waits after `count` counted attempts: none for 1-4, then 1, 2, 4, 8, then 15 minutes. */
-const signInDelay = (count: SQLWrapper) =>
-  sql`(CASE WHEN ${count} < 5 THEN 0 WHEN ${count} < 9 THEN 60 * (1 << (${count} - 5)) ELSE 900 END) * interval '1 second'`;
-const signInBackoffKey = (email: string, secret: string) =>
-  `sign-in-email:${keyedRateLimitHash(email.trim().toLowerCase(), secret)}`;
-
-/**
- * Per-email sign-in backoff in auth.api_rate_limits under a keyed hash of the address. One atomic
- * upsert charges the attempt before the password is checked: window_start is the last counted
- * attempt and count the attempts since the last success. A refused attempt changes nothing and
- * returns no row. Existing and unknown addresses are treated identically.
- */
-async function chargeSignInAttempt(db: AppDb, key: string) {
-  const quiet = sql`${apiRateLimits.windowStart} <= current_timestamp - interval '15 minutes'`;
-  const [charged] = await db
-    .insert(apiRateLimits)
-    .values({ key, windowStart: sql`current_timestamp`, count: 1 })
-    .onConflictDoUpdate({
-      target: apiRateLimits.key,
-      set: {
-        count: sql`CASE WHEN ${quiet} THEN 1 ELSE LEAST(${apiRateLimits.count} + 1, 1000000) END`,
-        windowStart: sql`current_timestamp`,
-      },
-      setWhere: sql`${quiet} OR ${apiRateLimits.count} < 5 OR ${apiRateLimits.windowStart} + ${signInDelay(apiRateLimits.count)} <= current_timestamp`,
-    })
-    .returning({ count: apiRateLimits.count });
-  if (charged) return;
-  const [waiting] = await db
-    .select({
-      seconds: sql<string>`ceil(extract(epoch from ${apiRateLimits.windowStart} + ${signInDelay(apiRateLimits.count)} - current_timestamp))`,
-    })
-    .from(apiRateLimits)
-    .where(eq(apiRateLimits.key, key));
-  throw new APIError(
-    "TOO_MANY_REQUESTS",
-    { code: "sign_in_backoff", message: SIGN_IN_BACKOFF_MESSAGE },
-    { "Retry-After": String(Math.max(1, Number(waiting?.seconds ?? 60))) },
-  );
-}
-
-/** A trusted device is honoured for 30 days after its code was last entered, never longer. */
-const TRUST_DEVICE_SECONDS = 60 * 60 * 24 * 30;
-/** Expiry of the trust row a trusted sign-in presented; the row it is re-issued as may not outlive it. */
-const presentedTrustExpiry = defineRequestState<Date | null>(() => null);
-/** Set when this request turns two-step sign-in on, so the user's other sessions end. */
-const twoStepTurnedOn = defineRequestState<boolean>(() => false);
-/** Turning two-step off or replacing the backup codes forgets every trusted device of this user. */
-const forgetTrustedDevicesOf = defineRequestState<string | null>(() => null);
-const FORGET_TRUSTED_DEVICE_PATHS = new Set([
-  "/two-factor/disable",
-  "/two-factor/generate-backup-codes",
-]);
-/** Only these paths may create a session for a user with two-step sign-in. */
-const TWO_STEP_SESSION_PATHS = new Set([
-  "/sign-in/email",
-  "/two-factor/verify-totp",
-  "/two-factor/verify-backup-code",
-  "/change-password",
-]);
-/** What a setup-required owner or admin may still call. */
-const TWO_STEP_SETUP_PATHS = new Set([
-  "/get-session",
-  "/sign-out",
-  "/two-factor/enable",
-  "/two-factor/verify-totp",
-]);
 
 export function createAuth(db: AppDb, config: FactoryConfig) {
   const mail = (to: string, subject: string, text: string) =>
@@ -426,62 +342,7 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         : {}),
     },
     databaseHooks: {
-      session: {
-        create: {
-          // A two-step user's session comes only from a path that challenged or checked the code.
-          before: async (row, ctx) => {
-            if (ctx && TWO_STEP_SESSION_PATHS.has(ctx.path)) return;
-            const [owner] = ctx
-              ? [
-                  await (
-                    await getCurrentAdapter(ctx.context.adapter)
-                  ).findOne<{ twoFactorEnabled: boolean }>({
-                    model: "user",
-                    where: [{ field: "id", value: row.userId }],
-                  }),
-                ]
-              : await db
-                  .select({ twoFactorEnabled: user.twoFactorEnabled })
-                  .from(user)
-                  .where(eq(user.id, row.userId));
-            if (owner?.twoFactorEnabled)
-              throw new APIError("FORBIDDEN", {
-                code: "two_step_sign_in_required",
-                message:
-                  "Sign in with your email, password and authenticator code.",
-              });
-          },
-        },
-      },
-      verification: {
-        create: {
-          before: async (row) => {
-            if (
-              !row.identifier.startsWith("trust-device-") ||
-              !(await hasRequestState())
-            )
-              return;
-            const limit = await presentedTrustExpiry.get();
-            if (limit && row.expiresAt > limit)
-              return { data: { ...row, expiresAt: limit } };
-          },
-        },
-      },
       user: {
-        update: {
-          before: async (data) => {
-            if (data.twoFactorEnabled === true && (await hasRequestState()))
-              await twoStepTurnedOn.set(true);
-          },
-          // A password-only session never survives turning two-step sign-in on; the plugin
-          // creates the request's replacement session after this.
-          after: async (updated, ctx) => {
-            if (!updated || !ctx || !(await hasRequestState())) return;
-            if (!(await twoStepTurnedOn.get())) return;
-            await twoStepTurnedOn.set(false);
-            await ctx.context.internalAdapter.deleteUserSessions(updated.id);
-          },
-        },
         create: {
           before: async (user, ctx) => {
             if (!ctx)
@@ -556,64 +417,8 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
                 "Authentication requests must come from this application.",
             });
         }
-        // The plugin can return the stored secret again; it is shown only once, during setup.
-        if (ctx.path === "/two-factor/get-totp-uri")
-          throw new APIError("FORBIDDEN", {
-            code: "two_step_key_hidden",
-            message:
-              "The authenticator key is shown only once, during setup. Turn two-step sign-in off and on again to add a new authenticator.",
-          });
-        // Owners and admins without two-step sign-in may only set it up or sign out.
-        const gated =
-          !TWO_STEP_SETUP_PATHS.has(ctx.path) &&
-          Boolean(ctx.getCookie(ctx.context.authCookies.sessionToken.name));
-        const session = gated
-          ? await getAuthoritativeSessionFromCtx(ctx)
-          : undefined;
-        if (session && !session.user.twoFactorEnabled) {
-          const memberships = await db
-            .select({ role: member.role })
-            .from(member)
-            .where(eq(member.userId, session.user.id));
-          if (
-            twoStepSetupRequired(
-              false,
-              memberships.map((row) => row.role),
-            )
-          )
-            throw new APIError("FORBIDDEN", {
-              code: "two_step_setup_required",
-              message: TWO_STEP_SETUP_MESSAGE,
-            });
-        }
-        if (session && FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path))
-          await forgetTrustedDevicesOf.set(session.user.id);
-        if (ctx.path === "/sign-in/email") {
-          const email = (ctx.body as { email?: unknown } | undefined)?.email;
-          if (typeof email === "string")
-            await chargeSignInAttempt(
-              db,
-              signInBackoffKey(email, config.secret),
-            );
-          // The trust row a trusted sign-in re-issues may not outlive this one.
-          const presented = await ctx.getSignedCookie(
-            ctx.context.createAuthCookie("trust_device").name,
-            ctx.context.secret,
-          );
-          const identifier =
-            typeof presented === "string" ? presented.split("!")[1] : "";
-          if (identifier?.startsWith("trust-device-")) {
-            const row =
-              await ctx.context.internalAdapter.findVerificationValue(
-                identifier,
-              );
-            if (row) await presentedTrustExpiry.set(new Date(row.expiresAt));
-          }
-        }
         if (!ctx.path.startsWith("/organization/")) return;
-        const identity = gated
-          ? session
-          : await getAuthoritativeSessionFromCtx(ctx);
+        const identity = await getAuthoritativeSessionFromCtx(ctx);
         if (!identity?.user.emailVerified)
           throw new APIError("FORBIDDEN", {
             message: "Sign in with a verified email to manage teams.",
@@ -684,51 +489,8 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
             });
         }
       }),
-      after: createAuthMiddleware(async (ctx) => {
-        if (isAPIError(ctx.context.returned)) return;
-        if (FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path)) {
-          const userId = await forgetTrustedDevicesOf.get();
-          if (userId)
-            await db
-              .delete(verification)
-              .where(
-                and(
-                  like(verification.identifier, "trust-device-%"),
-                  eq(verification.value, userId),
-                ),
-              );
-          return;
-        }
-        // A correct password (including a two-step challenge) clears the address's backoff.
-        if (ctx.path !== "/sign-in/email") return;
-        const email = (ctx.body as { email?: unknown } | undefined)?.email;
-        if (typeof email !== "string") return;
-        // A failure must not stop the plugin's after hook, which ends a challenged password session.
-        try {
-          await db
-            .delete(apiRateLimits)
-            .where(
-              eq(apiRateLimits.key, signInBackoffKey(email, config.secret)),
-            );
-        } catch (error) {
-          const code = (
-            (error as { cause?: { code?: unknown } } | null)?.cause ??
-            (error as { code?: unknown } | null)
-          )?.code;
-          console.error(
-            `sign_in_backoff_clear_failed${typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? ` sqlstate=${code}` : ""}`,
-          );
-        }
-      }),
     },
-    plugins: [
-      plugin,
-      twoFactor({
-        issuer: "RecruitmentOS",
-        totpOptions: { digits: 6, period: 30 },
-        trustDeviceMaxAge: TRUST_DEVICE_SECONDS,
-      }),
-    ],
+    plugins: [plugin],
   });
 }
 

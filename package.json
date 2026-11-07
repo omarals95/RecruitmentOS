@@ -15,8 +15,6 @@
     "test:storage": "node --test tests/storage*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed-local.ts",
-    "dev:totp": "tsx scripts/dev-totp.ts",
-    "two-step:reset": "tsx scripts/reset-two-step.ts",
     "import:legacy": "tsx scripts/import-legacy.ts",
     "test:local": "tsx scripts/smoke-local.ts",
     "test:live-roles": "tsx scripts/live-role-tests.ts",
@@ -46,7 +44,6 @@
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "read-excel-file": "9.3.14",
-    "uqr": "0.1.3",
     "zod": "4.6.7"
   },
   "devDependencies": {

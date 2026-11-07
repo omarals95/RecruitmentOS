@@ -1,35 +1,11 @@
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  it,
-  expect,
-  vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-vi.mock("@/lib/auth-session", () => ({
-  getSession: vi.fn(),
-  getVerifiedSession: vi.fn(),
-}));
+vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
-vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
-vi.mock("next/navigation", () => ({
-  redirect: (url: string) => {
-    throw Object.assign(new Error("NEXT_REDIRECT"), { url });
-  },
-}));
 import { checkOrigin, readBody, errorResponse, json, runApi } from "@/lib/api";
 import { authenticateApiToken } from "@/lib/api-tokens";
-import { getSession, getVerifiedSession } from "@/lib/auth-session";
 import { ApiError } from "@/lib/errors";
 import { StorageConfigurationError } from "@/lib/storage";
-import { getWorkspaceContext } from "@/lib/workspace";
-import { GET as overviewRoute } from "@/app/api/v1/overview/route";
-import { member } from "@/db/auth-schema";
-import { createTestDb, seedIdentity } from "./helpers/db";
-import { stubLocalAuthReadiness } from "./helpers/readiness";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -257,94 +233,6 @@ describe("request boundaries", () => {
       expect(logged.mock.calls[0]).toEqual([
         `storage_configuration_error correlationId=${error.correlationId} code=STORAGE_SETUP_REQUIRED reason=not_configured`,
       ]);
-    });
-  });
-});
-
-describe("two-step gate on API routes and /app pages", () => {
-  let fixture: Awaited<ReturnType<typeof createTestDb>>;
-  const identity = (userId: string, twoFactorEnabled: boolean) => ({
-    user: {
-      id: userId,
-      name: "Fictional Person",
-      email: `${userId}@example.test`,
-      emailVerified: true,
-      twoFactorEnabled,
-    },
-    session: { activeOrganizationId: "gate-team" },
-  });
-  const overview = () =>
-    overviewRoute(
-      new Request("http://localhost:3000/api/v1/overview", {
-        headers: { "x-team-id": "gate-team" },
-      }),
-    );
-  beforeAll(async () => {
-    stubLocalAuthReadiness();
-    fixture = await createTestDb();
-    await seedIdentity(fixture.db, {
-      userId: "gate-owner",
-      teamId: "gate-other-team",
-    });
-    // Recruiter in the active team but admin of another one: the gate counts every team.
-    await seedIdentity(fixture.db, {
-      userId: "gate-admin-elsewhere",
-      teamId: "gate-team",
-      role: "recruiter",
-      twoFactorEnabled: false,
-    });
-    await fixture.db.insert(member).values({
-      id: "gate-admin-elsewhere:gate-other-team",
-      organizationId: "gate-other-team",
-      userId: "gate-admin-elsewhere",
-      role: "admin",
-    });
-    await seedIdentity(fixture.db, {
-      userId: "gate-viewer",
-      teamId: "gate-team",
-      role: "viewer",
-      twoFactorEnabled: false,
-    });
-  });
-  afterAll(async () => {
-    vi.unstubAllEnvs();
-    await fixture?.close();
-  });
-
-  it("refuses a setup-required session with 403 two_step_setup_required and admits recruiters and viewers", async () => {
-    vi.mocked(getVerifiedSession).mockResolvedValue(
-      identity("gate-admin-elsewhere", false) as never,
-    );
-    const refused = await overview();
-    expect(refused.status).toBe(403);
-    expect((await refused.json()).error).toMatchObject({
-      code: "two_step_setup_required",
-      message:
-        "Set up two-step sign-in to continue. Owners and admins must use it.",
-    });
-    vi.mocked(getVerifiedSession).mockResolvedValue(
-      identity("gate-admin-elsewhere", true) as never,
-    );
-    expect((await overview()).status).toBe(200);
-    vi.mocked(getVerifiedSession).mockResolvedValue(
-      identity("gate-viewer", false) as never,
-    );
-    expect((await overview()).status).toBe(200);
-  });
-
-  it("redirects every /app page of a setup-required user to the setup screen", async () => {
-    vi.mocked(getSession).mockResolvedValue(
-      identity("gate-admin-elsewhere", false) as never,
-    );
-    await expect(getWorkspaceContext()).rejects.toMatchObject({
-      url: "/two-step-setup?next=/app",
-    });
-    vi.mocked(getSession).mockResolvedValue(
-      identity("gate-viewer", false) as never,
-    );
-    expect((await getWorkspaceContext()).user).toMatchObject({
-      id: "gate-viewer",
-      twoStepEnabled: false,
     });
   });
 });

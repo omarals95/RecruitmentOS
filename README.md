@@ -35,7 +35,7 @@ npm run db:seed
 npm run dev
 ```
 
-Open `http://localhost:3000`. The seed command prints the fictional local login and its authenticator key: the seed owner uses two-step sign-in, so add the printed `DEV_SEED_TOTP_KEY` to `.env.local` (or set one before seeding) and get the current sign-in code with `npm run dev:totp`. The local seed is disabled in production and never creates a cloud account or uploads a CV. Email links appear only in the development terminal. CV upload controls show a setup message until private storage is configured.
+Open `http://localhost:3000`. The seed command prints the fictional local login. The local seed is disabled in production and never creates a cloud account or uploads a CV. Email links appear only in the development terminal. CV upload controls show a setup message until private storage is configured.
 
 ## Validation
 
@@ -51,7 +51,7 @@ The SQL integration tests apply the actual migrations to local PostgreSQL-compat
 
 `npm run test:live-roles` is an opt-in, owner-run multi-connection isolation harness for a real PostgreSQL database (see the [Neon database runbook](docs/neon-database-runbook.md)); it is not part of `npm test` or CI.
 
-With the fictional development server running, `npm run test:local` checks the assembled HTTP routes, workflows and token permissions. It requires the local database flags, `DEV_SEED_PASSWORD` and `DEV_SEED_TOTP_KEY` (it completes the seed owner's two-step sign-in with a code from that key), archives its own fictional records, and revokes its test token. It never targets a remote server.
+With the fictional development server running, `npm run test:local` checks the assembled HTTP routes, workflows and token permissions. It requires the local database flags and `DEV_SEED_PASSWORD`, archives its own fictional records, and revokes its test token. It never targets a remote server.
 
 ## Deployment and migration
 

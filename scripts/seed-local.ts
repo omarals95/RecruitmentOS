@@ -1,20 +1,12 @@
 import "./load-env";
 import { randomBytes, randomUUID } from "node:crypto";
-import { hashPassword, symmetricEncrypt } from "better-auth/crypto";
+import { hashPassword } from "better-auth/crypto";
 import { eq } from "drizzle-orm";
 import { closeDb, getDb } from "../src/db";
-import {
-  user,
-  account,
-  organization,
-  member,
-  twoFactor,
-} from "../src/db/auth-schema";
-import { isUsableAuthSecret } from "../src/lib/auth-policy";
+import { user, account, organization, member } from "../src/db/auth-schema";
 import { bootstrapTeam, createRecord } from "../src/lib/records";
 import { roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
-import { base32Decode, base32Encode } from "./totp";
 async function main() {
   try {
     await seed();
@@ -43,19 +35,6 @@ async function seed() {
     process.env.DEV_SEED_PASSWORD || randomBytes(18).toString("base64url");
   if (password.length < 12)
     throw new Error("DEV_SEED_PASSWORD must contain at least 12 characters.");
-  // The owner must use two-step sign-in; Better Auth reads the key encrypted with its secret.
-  const authSecret = process.env.BETTER_AUTH_SECRET;
-  if (!isUsableAuthSecret(authSecret))
-    throw new Error(
-      "Set BETTER_AUTH_SECRET in .env.local before seeding; it encrypts the fictional authenticator key.",
-    );
-  const totpKey = (
-    process.env.DEV_SEED_TOTP_KEY || base32Encode(randomBytes(20))
-  )
-    .replace(/[\s=]/g, "")
-    .toUpperCase();
-  if (base32Decode(totpKey).length < 10)
-    throw new Error("DEV_SEED_TOTP_KEY must be base32 of at least 10 bytes.");
   const userId = randomUUID(),
     teamId = randomUUID();
   await db.transaction(async (tx) => {
@@ -65,7 +44,6 @@ async function seed() {
       email,
       emailVerified: true,
       initialAdmin: true,
-      twoFactorEnabled: true,
     });
     await tx.insert(account).values({
       id: randomUUID(),
@@ -73,15 +51,6 @@ async function seed() {
       providerId: "credential",
       userId,
       password: await hashPassword(password),
-    });
-    // No backup codes: create them in Account settings when needed.
-    await tx.insert(twoFactor).values({
-      userId,
-      secret: await symmetricEncrypt({
-        key: authSecret!,
-        data: `base32:${totpKey}`,
-      }),
-      backupCodes: await symmetricEncrypt({ key: authSecret!, data: "[]" }),
     });
     await tx.insert(organization).values({
       id: teamId,
@@ -199,7 +168,7 @@ async function seed() {
     }
   }
   console.log(
-    `Fictional local workspace ready.\nEmail: ${email}\nPassword: ${password}\nAuthenticator key: ${totpKey}${process.env.DEV_SEED_TOTP_KEY ? "" : `\nAdd DEV_SEED_TOTP_KEY=${totpKey} to .env.local`}\nSign-in codes: npm run dev:totp\nUse only for local testing. Real CV storage remains unconfigured.`,
+    `Fictional local workspace ready.\nEmail: ${email}\nPassword: ${password}\nUse only for local testing. Real CV storage remains unconfigured.`,
   );
 }
 main().catch((error) => {

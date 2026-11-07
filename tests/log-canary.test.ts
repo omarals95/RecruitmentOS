@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { hashPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
 import {
   afterAll,
@@ -15,16 +13,8 @@ import { POST as exportRoute } from "../src/app/api/v1/[resource]/export/route";
 import { readBody, json, runApi } from "../src/lib/api";
 import { createTokenMaterial } from "../src/lib/api-token-policy";
 import { StorageConfigurationError } from "../src/lib/storage";
-import { account } from "../src/db/auth-schema";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
-import {
-  PASSWORD,
-  authCaller,
-  cookieOf,
-  createTestAuth,
-  totpSecret,
-  type Mail,
-} from "./helpers/auth";
+import { authCaller, createTestAuth, type Mail } from "./helpers/auth";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 import { z } from "zod";
 
@@ -232,105 +222,5 @@ describe("logs, rate-limit keys and export audits never carry contact, note, tok
     expect(stored.rows.length).toBeGreaterThan(2);
     for (const canary of canaries())
       for (const { value } of stored.rows) expect(value).not.toContain(canary);
-  });
-});
-
-describe("two-step secrets, codes and backup codes never reach a log line", () => {
-  let fixture: Awaited<ReturnType<typeof createTestDb>>;
-  const spies: MockInstance[] = [];
-  beforeAll(async () => {
-    stubLocalAuthReadiness();
-    fixture = await createTestDb();
-    await seedIdentity(fixture.db, {
-      userId: "canary-two-step",
-      teamId: "canary-two-step-team",
-      role: "viewer",
-      twoFactorEnabled: false,
-    });
-    await fixture.db.insert(account).values({
-      id: randomUUID(),
-      accountId: "canary-two-step",
-      providerId: "credential",
-      userId: "canary-two-step",
-      password: await hashPassword(PASSWORD),
-    });
-    await enforceTestRls(fixture.db);
-    for (const method of ["log", "info", "warn", "error", "debug"] as const)
-      spies.push(vi.spyOn(console, method).mockImplementation(() => {}));
-  });
-  afterAll(async () => {
-    vi.restoreAllMocks();
-    vi.unstubAllEnvs();
-    await fixture?.close();
-  });
-
-  it("covers enable, verify and failed verification", async () => {
-    const caller = authCaller(createTestAuth(fixture.db, []));
-    const email = "canary-two-step@example.test";
-    const cookie = await caller.signIn(email);
-    const enabled = await caller.post(
-      "two-factor/enable",
-      { password: PASSWORD },
-      { cookie },
-    );
-    expect(enabled.status).toBe(200);
-    const { totpURI, backupCodes } = (await enabled.json()) as {
-      totpURI: string;
-      backupCodes: string[];
-    };
-    const secret = totpSecret(totpURI);
-    const code = await caller.code(secret);
-    const answers: Response[] = [];
-    const verified = await caller.post(
-      "two-factor/verify-totp",
-      { code },
-      { cookie },
-    );
-    expect(verified.status).toBe(200);
-    answers.push(verified);
-    const challenged = await caller.post("sign-in/email", {
-      email,
-      password: PASSWORD,
-    });
-    const pending = cookieOf(challenged);
-    const wrong = code === "000000" ? "111111" : "000000";
-    for (const [path, value] of [
-      ["two-factor/verify-totp", wrong],
-      ["two-factor/verify-backup-code", `${backupCodes[0]}x`],
-    ]) {
-      const refused = await caller.post(
-        path,
-        { code: value },
-        { cookie: pending },
-      );
-      expect(refused.status).toBe(401);
-      answers.push(refused);
-    }
-    const canaries = [
-      secret,
-      new URL(totpURI).searchParams.get("secret")!,
-      totpURI,
-      code,
-      wrong,
-      ...backupCodes,
-    ];
-    const lines = spies
-      .flatMap((spy) => spy.mock.calls)
-      .map((call) =>
-        call
-          .map((part) =>
-            part instanceof Error
-              ? `${part.message}\n${part.stack}`
-              : typeof part === "string"
-                ? part
-                : JSON.stringify(part),
-          )
-          .join(" "),
-      );
-    // Failed verifications log nothing; any line that does appear must hold no canary.
-    const bodies = await Promise.all(answers.map((answer) => answer.text()));
-    for (const canary of canaries)
-      for (const line of [...lines, ...bodies])
-        expect(line).not.toContain(canary);
   });
 });

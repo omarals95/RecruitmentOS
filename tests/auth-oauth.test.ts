@@ -238,25 +238,6 @@ describe("OAuth sign-in without implicit linking or invitation bypass", () => {
     expect((await rows(email)).memberships).toBe(0);
   });
 
-  it("gives a user with two-step sign-in no session from the Google callback", async () => {
-    const email = "two-step-google@example.test";
-    await invite(email);
-    const first = await google(email, true);
-    expect(first.status).toBe(302);
-    expect(cookieOf(first)).toContain("session_token");
-    await h.asOwner(
-      `UPDATE auth."user" SET two_factor_enabled = true WHERE email = '${email}';`,
-    );
-    const before = await rows(email);
-    const callback = await google(email, true);
-    expect(callback.status).toBe(302);
-    expect(callback.headers.get("location")).toContain(
-      "error=two_step_sign_in_required",
-    );
-    expect(cookieOf(callback)).not.toContain("session_token");
-    expect(await rows(email)).toEqual(before);
-  });
-
   it("keeps a Google-asserted invited email with email_verified false unverified, signed out and unable to accept the invitation", async () => {
     const email = "invited-google@example.test";
     const invitationId = await invite(email);

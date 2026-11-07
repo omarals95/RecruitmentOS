@@ -25,14 +25,13 @@ Before touching identity, tenancy, storage or deployment code, also read `docs/s
 
 - Node.js 24 and npm only (`engines: >=24 <25`). On this Windows machine Node 26 is earlier on PATH: prefix every shell command with `export PATH="/c/Program Files/nodejs:$PATH" &&` and confirm `node --version` prints v24.
 - Fresh checkout or worktree: `npm ci`, then copy `.env.local` from the main checkout (`C:/Users/omara/Hermes/RecruitmentOS/.env.local`) into the worktree. Never commit it, and never edit the main checkout's `.env.local`; change only the worktree's copy. It enables the fictional local database (`DATABASE_MODE=pglite`, `ALLOW_LOCAL_DB=true`, `DEV_MAIL_MODE=console`) and already holds a fictional `TENANT_CONTEXT_SIGNING_KEY` (required by `withTeam`, `db:migrate` and PGlite startup). Only for a checkout without one, append a fictional key to that checkout's own `.env.local`: `echo "TENANT_CONTEXT_SIGNING_KEY=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))")" >> .env.local`.
-- The fictional seed owner uses two-step sign-in. If the worktree's `.env.local` has no `DEV_SEED_TOTP_KEY`, append a fictional one before seeding: `echo "DEV_SEED_TOTP_KEY=$(node -e "const a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';console.log(Array.from(require('node:crypto').randomBytes(32),(b)=>a[b%32]).join(''))")" >> .env.local`.
 - Each worktree uses its own PGlite directory: in the worktree's `.env.local` replace the `PGLITE_DATA_DIR` line with `PGLITE_DATA_DIR=.data/pglite` (gitignored), run `mkdir -p .data`, then `npm run db:migrate && npm run db:seed`. Both close the database and exit on their own after printing; the seed prints the fictional login.
 - Worktree paths are native Windows paths (`C:/Users/...`). Never pass `/c/Users/...` to `git worktree add` or other native tools; that creates a stray `C:/c/Users/...` folder.
 - Before finishing, stop every dev server, seed and other node process you started.
 
 ## Dev server
 
-`npm run dev -- --port <port>` serves `http://127.0.0.1:<port>`. Start it in the background, wait for the port, stop it when done. Sign in with the fictional seed account: its password, then the current code from `npm run dev:totp` on the "Enter your sign-in code" screen. Use the `agent-browser` CLI for pages (`agent-browser skills get core` first); it lives under `C:/Users/omara/AppData/Local/hermes/tools/agent-browser-0.26.0-win32-x64/bin/`.
+`npm run dev -- --port <port>` serves `http://127.0.0.1:<port>`. Start it in the background, wait for the port, stop it when done. Sign in with the fictional seed account. Use the `agent-browser` CLI for pages (`agent-browser skills get core` first); it lives under `C:/Users/omara/AppData/Local/hermes/tools/agent-browser-0.26.0-win32-x64/bin/`.
 
 ## Validation commands
 

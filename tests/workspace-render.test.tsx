@@ -44,7 +44,6 @@ const workspace = {
     id: "fictional-user",
     name: "Fictional Recruiter",
     email: "recruiter@example.test",
-    twoStepEnabled: true,
   },
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "recruiter",

@@ -72,19 +72,11 @@ function human(p: Principal) {
       "Sign in to manage API tokens.",
     );
 }
-async function liveHuman(
-  tx: TeamTx,
-  p: Principal,
-  requireTwoStep = false,
-): Promise<Role> {
+async function liveHuman(tx: TeamTx, p: Principal): Promise<Role> {
   human(p);
   // Lock this user's row while creating a token, making the active-token cap atomic.
   const [current] = await tx
-    .select({
-      verified: user.emailVerified,
-      twoStep: user.twoFactorEnabled,
-      role: member.role,
-    })
+    .select({ verified: user.emailVerified, role: member.role })
     .from(user)
     .innerJoin(
       member,
@@ -97,13 +89,6 @@ async function liveHuman(
       403,
       "membership_required",
       "A verified account and current team membership are required.",
-    );
-  // New credentials come only from a session that passed two-step sign-in.
-  if (requireTwoStep && !current.twoStep)
-    throw new ApiError(
-      403,
-      "two_step_required",
-      "Turn on two-step sign-in in your profile before creating API tokens or connecting apps.",
     );
   return parseRole(current.role);
 }
@@ -354,7 +339,7 @@ export async function createToken(
   assertTenantContextKey();
   const db = await getIdentityDb();
   return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
-    const role = await liveHuman(tx, p, true);
+    const role = await liveHuman(tx, p);
     // Lock the user row first; the context lets the audit helper pass activity RLS.
     await installTenantContext(tx, p, snapshot);
     const scopes = effectiveTokenScopes(parsed.data.scopes, role);
@@ -405,7 +390,7 @@ export async function createOAuthGrant(
   assertTenantContextKey();
   const db = await getIdentityDb();
   return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
-    const role = await liveHuman(tx, p, true);
+    const role = await liveHuman(tx, p);
     await installTenantContext(tx, p, snapshot);
     const scopes = effectiveTokenScopes(input.scopes, role);
     if (!scopes.length || scopes.length !== new Set(input.scopes).size)

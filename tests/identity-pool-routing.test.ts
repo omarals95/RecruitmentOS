@@ -13,7 +13,7 @@ vi.mock("@/db", async (original) => ({
 }));
 vi.mock("@/lib/auth-session", () => ({
   getVerifiedSession: vi.fn(async () => ({
-    user: { id: "fictional-user", emailVerified: true, twoFactorEnabled: true },
+    user: { id: "fictional-user", emailVerified: true },
     session: { activeOrganizationId: "fictional-team" },
   })),
   getSession: vi.fn(async () => ({

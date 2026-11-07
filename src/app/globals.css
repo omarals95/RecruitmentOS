@@ -2918,56 +2918,6 @@ progress::-moz-progress-bar {
   flex: none;
   color: var(--primary-text);
 }
-/* Two-step sign-in setup and code screens */
-.auth-card h2 {
-  font-size: 15px;
-}
-.two-step-qr {
-  display: block;
-  width: 100%;
-  max-width: 232px;
-  /* Black on white in both themes, with the quiet zone drawn inside the image. */
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.two-step-details {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 6px 14px;
-  font-size: 12px;
-  margin: 0;
-}
-.two-step-details dt {
-  font-weight: 600;
-}
-.two-step-details dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.two-step-key,
-.two-step-codes code {
-  font-family: Consolas, monospace;
-  font-size: 13px;
-  word-spacing: 4px;
-}
-.two-step-codes {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
-  list-style: none;
-  padding: 12px;
-  margin: 0;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.two-step-check {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-}
 .onboarding-progress {
   display: flex;
   flex-direction: column;

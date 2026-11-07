@@ -151,7 +151,7 @@ describe("AI extraction contract with consent, provenance and review", () => {
     );
   const signIn = (p: Principal) =>
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: p.userId, twoFactorEnabled: true },
+      user: { id: p.userId },
       session: { activeOrganizationId: p.teamId },
     } as never);
   async function call(

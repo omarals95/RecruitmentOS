@@ -103,9 +103,8 @@ describe("Better Auth rate limits use the Vercel client IP", () => {
             "x-forwarded-for": `198.51.100.${n}`,
             "x-real-ip": `192.0.2.${n}`,
           },
-          // A different address each time stays under the per-email backoff.
           body: JSON.stringify({
-            email: `nobody-${n}@example.test`,
+            email: "nobody@example.test",
             password: "a-wrong-fictional-password",
           }),
         }),

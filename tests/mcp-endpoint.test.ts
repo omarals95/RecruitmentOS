@@ -424,7 +424,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
 
   it("requires a Bearer token and never reads a valid session cookie", async () => {
     const identity = {
-      user: { id: owner.userId, emailVerified: true, twoFactorEnabled: true },
+      user: { id: owner.userId, emailVerified: true },
       session: { activeOrganizationId: TEAM },
     };
     sessions.getSession.mockResolvedValue(identity);
@@ -543,35 +543,6 @@ describe("MCP endpoint over real migrations and RLS", () => {
       expect((await refused.json()).error.code).toBe(
         "token_guess_rate_limited",
       );
-    }
-  });
-
-  it("keeps an owner's API token and OAuth access token working without two-step sign-in", async () => {
-    const setTwoStep = (enabled: boolean) =>
-      query(`UPDATE auth."user" SET two_factor_enabled=$1 WHERE id=$2`, [
-        enabled,
-        owner.userId,
-      ]);
-    await setTwoStep(false);
-    try {
-      const access = await oauthAccess(owner.userId, ["candidates:read"]);
-      const api = await apiToken(owner.userId, [
-        "candidates:read",
-        "recruitment:read",
-      ]);
-      for (const token of [access.token, api.token])
-        expect(await listNames(token)).toContain("search_candidates");
-      const overview = await overviewRoute(
-        new Request(`${ORIGIN}/api/v1/overview`, {
-          headers: {
-            authorization: `Bearer ${api.token}`,
-            "x-forwarded-for": CLIENT_IP,
-          },
-        }),
-      );
-      expect(overview.status).toBe(200);
-    } finally {
-      await setTwoStep(true);
     }
   });
 

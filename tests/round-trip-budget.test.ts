@@ -59,7 +59,7 @@ describe("database round trips per request", () => {
       teamId: "budget-team",
     });
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: owner.userId, twoFactorEnabled: true },
+      user: { id: owner.userId },
       session: { activeOrganizationId: owner.teamId },
     } as never);
     await bootstrapTeam(owner);

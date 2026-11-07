@@ -123,7 +123,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.claim_blob_reconciliation(text) TO recr
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and
--- the four identity helpers.
+-- the three identity helpers.
 GRANT USAGE ON SCHEMA auth TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_identity;
@@ -132,7 +132,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.organization TO recruitmentos
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.session TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.account TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.verification TO recruitmentos_identity;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.two_factor TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.member TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.invitation TO recruitmentos_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.rate_limit TO recruitmentos_identity;
@@ -146,7 +145,6 @@ GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text, text) TO recruitmentos_identity;
-GRANT EXECUTE ON FUNCTION tenant_context.reset_two_step(text) TO recruitmentos_identity;
 
 -- A revoke by a role that does not own the database or the public schema only warns; refuse instead.
 DO $closed$

@@ -107,7 +107,6 @@ const authTables = [
   "session",
   "account",
   "verification",
-  "two_factor",
   "member",
   "invitation",
   "rate_limit",
