@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  useEffect,
   useRef,
   useState,
   type FormEvent,
@@ -44,6 +45,17 @@ function Frame({
       </div>
     </main>
   );
+}
+
+/** Focus moves to the step heading after every change of `step`, but not on the first render. */
+function useStepFocus(step: string) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const previous = useRef(step);
+  useEffect(() => {
+    if (previous.current !== step) heading.current?.focus();
+    previous.current = step;
+  }, [step]);
+  return heading;
 }
 
 /** The base32 key from an otpauth:// URI, in groups of four for typing. */
@@ -186,11 +198,8 @@ export function TwoStepSetup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
-  const heading = useRef<HTMLHeadingElement>(null);
-  const moveTo = (next: typeof step) => {
-    setStep(next);
-    requestAnimationFrame(() => heading.current?.focus());
-  };
+  const heading = useStepFocus(step);
+  const moveTo = (next: typeof step) => setStep(next);
   async function run(work: () => Promise<AuthResult>, done: () => void) {
     setBusy(true);
     setError("");
@@ -374,7 +383,7 @@ export function TwoStepCode({ next }: { next: string }) {
   const [trust, setTrust] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ReactNode>("");
-  const heading = useRef<HTMLHeadingElement>(null);
+  const heading = useStepFocus(method);
   const signInAgain = (
     <>
       Sign in again.{" "}
@@ -488,7 +497,6 @@ export function TwoStepCode({ next }: { next: string }) {
             setMethod(method === "totp" ? "backup" : "totp");
             setCode("");
             setError("");
-            requestAnimationFrame(() => heading.current?.focus());
           }}
         >
           {method === "totp"

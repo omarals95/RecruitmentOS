@@ -57,16 +57,8 @@ export async function requirePrincipal(
       );
   } else {
     const identity = await getVerifiedSession(request.headers);
-    const teamId =
-      request.headers.get("x-team-id") || identity.session.activeOrganizationId;
-    if (!teamId)
-      throw new ApiError(
-        409,
-        "team_required",
-        "Create or select a team first.",
-      );
     const db = await getIdentityDb();
-    // Every membership in one query: the selected team's, and the roles the two-step gate needs.
+    // Every membership in one query: the roles the two-step gate needs, and the selected team's.
     const memberships = await db
       .select({ organizationId: member.organizationId, role: member.role })
       .from(member)
@@ -81,6 +73,14 @@ export async function requirePrincipal(
         403,
         "two_step_setup_required",
         TWO_STEP_SETUP_MESSAGE,
+      );
+    const teamId =
+      request.headers.get("x-team-id") || identity.session.activeOrganizationId;
+    if (!teamId)
+      throw new ApiError(
+        409,
+        "team_required",
+        "Create or select a team first.",
       );
     const membership = memberships.find((row) => row.organizationId === teamId);
     if (!membership)

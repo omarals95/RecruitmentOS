@@ -181,7 +181,7 @@ export function TwoStepPanel({
             password. Both forget your trusted devices.
           </p>
           <label className="field">
-            <span>Current password</span>
+            <span>Confirm with your password</span>
             <input
               required
               type="password"
