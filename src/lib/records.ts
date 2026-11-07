@@ -1394,12 +1394,17 @@ export async function createRecord(
   });
 }
 
+/**
+ * `options.comment` appends a comment on the record in the same transaction, after the update and
+ * its audit row; if the comment cannot be written, nothing changes. REST and the UI never pass it.
+ */
 export async function updateRecord(
   p: Principal,
   resource: ResourceName,
   recordId: string,
   raw: unknown,
-): Promise<RecordDto> {
+  options: { comment?: string } = {},
+): Promise<RecordDto & { commentId?: string }> {
   const kind = kindOf(resource);
   permission(p, resource, true);
   id(recordId);
@@ -1555,7 +1560,19 @@ export async function updateRecord(
           ? { fromStatus: existing.data.status, toStatus: data.status }
           : {};
     await audit(tx, p, row, action, metadata, imported);
-    return (await decorate(tx, p, [dto(row)]))[0];
+    const updated = (await decorate(tx, p, [dto(row)]))[0];
+    if (options.comment === undefined) return updated;
+    const comment = await createInside(
+      tx,
+      p,
+      "comment",
+      {
+        parentRecordId: recordId,
+        data: parse(recordDataSchemas.comment, { body: options.comment }),
+      },
+      false,
+    );
+    return { ...updated, commentId: comment.id };
   });
 }
 
