@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useApi } from "./client";
+import { formatDate, formatNumber } from "./helpers";
 
 interface Count {
   name: string;
@@ -30,7 +31,7 @@ export function BarChart({
               className={`bar-color-${index % 5}`}
             />
           </div>
-          <strong>{item.count.toLocaleString()}</strong>
+          <strong>{formatNumber(item.count)}</strong>
         </div>
       ))}
     </div>
@@ -176,6 +177,16 @@ export function aggregateSeries(
   }
   return [...groups.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
+/** Day and week periods use the shared date format; months read "Nov 2026". */
+export function seriesLabel(date: string, period: "day" | "week" | "month") {
+  return period === "month"
+    ? new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Dubai",
+        month: "short",
+        year: "numeric",
+      }).format(new Date(`${date}-01T12:00:00Z`))
+    : formatDate(date);
+}
 export function SeriesChart({ rows }: { rows: SeriesRow[] }) {
   const [period, setPeriod] = useState<"day" | "week" | "month">("month");
   const data = aggregateSeries(rows, period);
@@ -231,7 +242,7 @@ export function SeriesChart({ rows }: { rows: SeriesRow[] }) {
                     <b>{item.hired}</b>
                   </span>
                 </div>
-                <small>{item.date}</small>
+                <small>{seriesLabel(item.date, period)}</small>
               </div>
             ))}
           </div>
@@ -251,7 +262,7 @@ export function SeriesChart({ rows }: { rows: SeriesRow[] }) {
                 <tbody>
                   {data.map((item) => (
                     <tr key={item.date}>
-                      <td>{item.date}</td>
+                      <td>{seriesLabel(item.date, period)}</td>
                       <td>{item.applications}</td>
                       <td>{item.hired}</td>
                     </tr>

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ApiError } from "./errors";
 import { requirePrincipal, type Principal } from "./principal";
 import type { Scope } from "./permissions";
+import { StorageConfigurationError, storageSetupRequired } from "./storage";
 export { ApiError } from "./errors";
 export function json(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -52,36 +53,11 @@ export async function readBody<T>(
       .startsWith("application/json")
   )
     throw new ApiError(415, "json_required", "Send application/json.");
-  const size = request.headers.get("content-length");
-  if (size && (!/^\d+$/.test(size) || Number(size) > maxBytes))
-    throw new ApiError(413, "body_too_large", "The request is too large.");
-  const reader = request.body?.getReader();
-  if (!reader)
+  const bytes = await readLimitedBytes(request, maxBytes);
+  if (!bytes)
     throw new ApiError(400, "invalid_json", "A JSON body is required.");
-  let length = 0;
-  const chunks: Uint8Array[] = [];
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > maxBytes) {
-        await reader.cancel();
-        throw new ApiError(413, "body_too_large", "The request is too large.");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
   let value: unknown;
   try {
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new ApiError(
@@ -102,56 +78,119 @@ export async function readBody<T>(
     );
   return parsed.data;
 }
-export function errorResponse(error: unknown): Response {
-  if (error instanceof ApiError) {
-    const response = json(
-      { error: { code: error.code, message: error.message } },
-      error.status,
-    );
-    if (error.status === 429) response.headers.set("Retry-After", "60");
-    return response;
+/** A client that aborted or reset its connection; nothing is logged for it. */
+function requestCancelled() {
+  return new ApiError(
+    499,
+    "request_cancelled",
+    "The request was cancelled before it finished.",
+  );
+}
+/**
+ * Streams at most maxBytes; a larger declared or observed body is refused with 413. Null without a
+ * body. A failing read means the client went away, so it is a cancelled request.
+ */
+export async function readLimitedBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  const size = request.headers.get("content-length");
+  if (size && (!/^\d+$/.test(size) || Number(size) > maxBytes))
+    throw new ApiError(413, "body_too_large", "The request is too large.");
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  let length = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        throw requestCancelled();
+      }
+      const { done, value } = chunk;
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        throw new ApiError(413, "body_too_large", "The request is too large.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
   }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+/** Every error body and X-Correlation-Id header share one fresh ID for support reports. */
+export function errorJson(
+  status: number,
+  code: string,
+  message: string,
+  headers: Record<string, string> = {},
+  correlationId: string = crypto.randomUUID(),
+): Response {
+  const response = json({ error: { code, message, correlationId } }, status);
+  response.headers.set("X-Correlation-Id", correlationId);
+  for (const [name, value] of Object.entries(headers))
+    response.headers.set(name, value);
+  return response;
+}
+/** Pass the request so an error caused by the client going away is a quiet cancelled outcome. */
+export function errorResponse(error: unknown, request?: Request): Response {
+  if (!(error instanceof ApiError) && request?.signal.aborted)
+    error = requestCancelled();
+  if (error instanceof StorageConfigurationError)
+    error = storageSetupRequired(error);
+  if (error instanceof ApiError)
+    return errorJson(
+      error.status,
+      error.code,
+      error.message,
+      error.status === 429 ? { "Retry-After": "60" } : {},
+      error.correlationId,
+    );
   const dbError =
     (error as { cause?: { code?: string }; code?: string })?.cause ??
     (error as { code?: string });
   if (dbError?.code === "23505")
-    return json(
-      {
-        error: {
-          code: "duplicate",
-          message: "A record with these unique details already exists.",
-        },
-      },
+    return errorJson(
       409,
+      "duplicate",
+      "A record with these unique details already exists.",
     );
   if (dbError?.code === "23503" || dbError?.code === "23514")
-    return json(
-      {
-        error: {
-          code: "constraint",
-          message:
-            "This change conflicts with a linked record or a required workflow rule.",
-        },
-      },
+    return errorJson(
       409,
+      "constraint",
+      "This change conflicts with a linked record or a required workflow rule.",
     );
   if (error instanceof z.ZodError)
-    return json(
-      {
-        error: { code: "invalid_input", message: "Check the supplied fields." },
-      },
-      400,
-    );
-  return json(
-    {
-      error: {
-        code: "internal_error",
-        message:
-          "The request could not be completed. Refresh the record before retrying a save.",
-      },
-    },
+    return errorJson(400, "invalid_input", "Check the supplied fields.");
+  const response = errorJson(
     500,
+    "internal_error",
+    "The request could not be completed. Refresh the record before retrying a save.",
   );
+  // Log only a safe category; messages, stacks and request data can hold record contents.
+  const sqlState =
+    typeof dbError?.code === "string" && /^[0-9A-Z]{5}$/.test(dbError.code)
+      ? ` sqlstate=${dbError.code}`
+      : "";
+  const category =
+    (error as { constructor?: { name?: string } } | null)?.constructor?.name ||
+    typeof error;
+  console.error(
+    `internal_error correlationId=${response.headers.get("X-Correlation-Id")} category=${category}${sqlState}`,
+  );
+  return response;
 }
 export async function runApi(
   request: Request,
@@ -165,6 +204,6 @@ export async function runApi(
       await requirePrincipal(request, scope, options?.humanOnly),
     );
   } catch (error) {
-    return errorResponse(error);
+    return errorResponse(error, request);
   }
 }

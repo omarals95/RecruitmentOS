@@ -1,0 +1,195 @@
+# RecruitmentOS release roadmap
+
+_Last updated: 6 November 2026. Owner: Omar Alshair. Status: approved direction, dates not committed._
+
+This roadmap turns the requirement register (`docs/requirements/register.md`), the factory backlog (`factory/backlog.md`) and the competitive gap analysis of 15 recruitment products into releases. **Phase 1 makes RecruitmentOS usable in production for the internal team.** Later releases close the gaps against market leaders and add an integrations marketplace.
+
+Principles that apply to every release:
+
+- **Facts, not verdicts.** No automated ranking, scoring, rejection or inference of sensitive traits. AI only suggests; a person reviews.
+- **Private stays private.** Personal notes, shortlists and saved views are never shared through any screen, API, MCP tool or integration.
+- **Gated by evidence.** A feature ships only when its tests pass on the exact release and, where it touches live services, after a live check on Preview.
+- **Owner approval** for deploys, new data recipients (integrations, AI providers), paid services and real-data migration.
+
+## At a glance
+
+```
+Phase 1  Usable core (go-live)        ── in progress, factory backlog
+R1.1     Feedback loop                ── scorecards, real users, pipeline speed, duplicates
+R1.2     Hiring managers & approvals  ── requester role, approvals, interview kits, debrief
+R1.3     Integrations marketplace v1  ── Outlook, Gmail, Google/Microsoft calendars, Teams, Slack, Discord
+R1.4     Insights                     ── customisable dashboards, widgets, goals, scheduled reports
+R1.5     Compliance & data lifecycle  ── retention, erasure, consent, data requests, Emiratisation tracker
+R1.6     Workflow designer            ── custom hiring pipeline: stages, screens, fields, conditions, approval groups
+R2.0     Reach & region               ── careers page, job boards, WhatsApp/SMS, Arabic/RTL, mobile, live AI
+```
+
+## Phase 1 — Usable core (go-live release)
+
+**Goal:** the recruitment team can use RecruitmentOS every day on Production with fictional data first, then real data after the separate migration approval.
+
+**Progress (6 November 2026):** 23 factory jobs merged. Preview runs release commit `4bb8ec4` at https://recruitmentos-preview.vercel.app (protected), with database migrations up to `0016`; `0017` (bulk retry tombstones, job 023) is merged and goes to Preview with the next update. Remaining before go-live: WP-10, WP-13, WP-11, WP-12, WP-15, then P1-15 (live CV storage) and P1-16 (Production).
+
+| ID    | Item                                                                                                                                                                                                                | Status                                                                                                                                                  | Why it is in Phase 1                    |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| P1-01 | Trusted tenant isolation, restricted database roles, live isolation tests                                                                                                                                           | Done (Preview verified: evidence zero drift, live-role tests 29/29 pooled)                                                                              | Security foundation                     |
+| P1-02 | Hosted sign-in, first administrator setup, invitations, password reset                                                                                                                                              | Done (Preview verified; first administrator created)                                                                                                    | People must be able to sign in          |
+| P1-03 | Private CV storage foundations (Blob upload/download, quotas, read limits)                                                                                                                                          | Done locally; live Blob switch-on is P1-15                                                                                                              | Core intake                             |
+| P1-04 | MCP endpoint for Claude and ChatGPT with OAuth consent                                                                                                                                                              | Done locally, on Preview behind protection; live connector test waits for Production                                                                    | Owner request                           |
+| P1-05 | WP-17 bug fixes from the app review (settings tab, session error, comment authors, overdue logic, calendar order, vacancy counts, icons, formats, import dialog, phone layout)                                      | Done (job 017, on Preview)                                                                                                                              | Visible defects undermine trust         |
+| P1-06 | WP-07 core workflow and UI gaps                                                                                                                                                                                     | Done (jobs 019 and 020, on Preview)                                                                                                                     | Daily journeys must work end to end     |
+| P1-07 | WP-09 bulk CV intake with review, duplicate check and safe retry; WP-09b (Blob, CV re-upload, purge, paging, live roles) and WP-09c (retry safety) done locally; Preview migrations `0015`-`0017` pending           | Done locally (jobs 021, 022, 023); live test waits for P1-15                                                                                            | Most requested intake path              |
+| P1-08 | WP-10 AI extraction contract with consent and review (test adapter only; live provider stays off)                                                                                                                   | Done locally (job 024) with a test adapter only; the live provider waits for D-09 and D-10                                                              | Ready for R2.0 without blocking go-live |
+| P1-09 | WP-13 database deadlines and capacity                                                                                                                                                                               | Done locally (job 025); load, concurrency, query plans and D-12 measurement remain                                                                      | Reliability under the pooler            |
+| P1-10 | WP-11 logging, monitoring and security hardening                                                                                                                                                                    | Done locally (job 026); Preview role template re-apply pending; monitoring waits for D-17                                                               | Operate safely                          |
+| P1-11 | WP-12 migration, release and recovery operations                                                                                                                                                                    | Done locally (job 027); backups, timed restore, Preview mark, D-12 and D-18 remain                                                                      | Backup, restore, rollback               |
+| P1-12 | WP-08 accessibility and responsive acceptance (WCAG 2.2 AA target)                                                                                                                                                  | Done locally (job 028); D-13, screen-reader and cross-browser checks remain                                                                             | Usable on desktop, phone and keyboard   |
+| P1-13 | WP-15 documentation and configuration reconciliation                                                                                                                                                                | Done locally (job 029); DEC-01 resolved by the owner on 7 November 2026 (Blob only, S3 dormant legacy); the S3/Blob deployment docs followed in job 030 | Accurate handover                       |
+| P1-14 | **Added to Phase 1:** inline "possible duplicate" warning when adding a candidate (the API already exists)                                                                                                          | Done (job 018, on Preview)                                                                                                                              | Prevents duplicate records from day one |
+| P1-15 | **Added to Phase 1:** switch on live Blob CV storage on Preview, then Production. P1-15a (job 030): Blob through Vercel OIDC, post-expiry cleanup, team storage limits and upload rate, 200-file bulk batches       | Done locally (job 030); Preview switch-on waits for the owner (environment, migration `0018`, role template)                                            | CV upload is part of the daily workflow |
+| P1-16 | **Added to Phase 1:** Production environment: migrations, restricted roles, evidence and live-role tests, secrets, custom domain (for example `app.recruitmentos.ae`), DMARC for `recruitmentos.ae`, guarded deploy | Waiting: needs owner OK at each step                                                                                                                    | Nothing reaches users without it        |
+
+**Go-live gate:** all Phase 1 items done; full CI green on the release commit; Preview smoke checks; Production evidence script and live-role tests pass; backup and restore rehearsed; owner approval to deploy.
+
+## R1.1 — Feedback loop
+
+Closes top gaps 1, 2, 7 and 8 from the analysis.
+
+| ID     | Item                                                                                                                                          | Gap |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| R11-01 | Owners, recruiters, hiring managers and interviewers become real user references (imported free-text names kept as labels)                    | #2  |
+| R11-02 | Competency library and scorecard templates per job role, copied to vacancies                                                                  | #1  |
+| R11-03 | Scorecards per interviewer: rating per competency, evidence, overall recommendation including "no decision"; hidden until you submit your own | #1  |
+| R11-04 | Feedback-due reminders (in-app 1 hour after the interview, then next UAE business day)                                                        | #1  |
+| R11-05 | Rejected and Withdrawn become an outcome with a mandatory reason; the stage reached is kept                                                   | #7  |
+| R11-06 | Bulk move, reject (with reason) and assign, with a result summary                                                                             | #7  |
+| R11-07 | Days-in-stage badges and stage SLA thresholds                                                                                                 | #7  |
+| R11-08 | Compare-and-merge duplicates with explicit rules and audit; "not a duplicate"                                                                 | #8  |
+| R11-09 | Fix metric definitions flagged in the analysis (open vacancies, department chart)                                                             | #10 |
+
+## R1.2 — Hiring managers and approvals
+
+Closes top gaps 2 and 3 and the "requesting department" perspective.
+
+| ID     | Item                                                                                                     | Gap |
+| ------ | -------------------------------------------------------------------------------------------------------- | --- |
+| R12-01 | Hiring manager role and home screen: candidates to review, my interviews, my feedback, approvals waiting | #2  |
+| R12-02 | Requisition intake form and approval chain (department head, finance, HR)                                | #3  |
+| R12-03 | Offer approval chain with amount visible only to approvers                                               | #3  |
+| R12-04 | Interview kits: questions per competency, guidance, and the candidate packet                             | #1  |
+| R12-05 | Debrief view after all scorecards are in; decision recorded by a person                                  | #1  |
+| R12-06 | Notification centre and email notifications for approvals, reminders and mentions                        | #5  |
+| R12-07 | Candidate email templates and logged outbound email (sent through the R1.3 email integrations or Resend) | #5  |
+
+**Built on the workflow engine.** R12-02 and R12-03 are implemented as the first two workflows of the R1.6 engine (approval steps and approval groups only), so approvals are not built twice. The visual designer, custom screens, fields and conditions follow in R1.6.
+
+## R1.3 — Integrations marketplace v1
+
+Closes top gaps 5 and 6. Every integration is installed per team from a **marketplace** page, so admins can see what is connected and what data it gets.
+
+**Marketplace framework (built first):**
+
+| ID     | Item                                                                                                                                                                 |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R13-01 | Marketplace catalogue: install, configure, pause, disconnect per team; owner/admin only                                                                              |
+| R13-02 | Connection security: OAuth per provider, tokens encrypted and server-only, least-privilege scopes, data shared shown before install, every sync and delivery audited |
+| R13-03 | Event bus and delivery queue with retries, dead-letter list and per-integration health status                                                                        |
+| R13-04 | Outbound webhooks (signed) for custom integrations                                                                                                                   |
+
+**Integrations:**
+
+| ID     | Integration                                | What it does                                                                                                   |
+| ------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| R13-10 | **Microsoft Outlook / Microsoft 365 mail** | Send candidate emails from the recruiter's mailbox, log replies to the candidate timeline                      |
+| R13-11 | **Gmail / Google Workspace mail**          | Same as Outlook                                                                                                |
+| R13-12 | **Microsoft Outlook calendar**             | Two-way interview sync, free/busy lookup, Teams meeting links                                                  |
+| R13-13 | **Google Calendar**                        | Two-way interview sync, free/busy lookup, Google Meet links                                                    |
+| R13-14 | **Candidate self-scheduling**              | Booking links from real availability (uses R13-12/13)                                                          |
+| R13-15 | **Microsoft Teams**                        | Channel and personal notifications (new applicant, feedback due, approval needed) with approve/decline buttons |
+| R13-16 | **Slack**                                  | Same as Teams                                                                                                  |
+| R13-17 | **Discord**                                | Channel notifications through a bot or webhook (no candidate personal data beyond name and link by default)    |
+| R13-18 | **Claude and ChatGPT (MCP)**               | Listed in the marketplace with their consent status (built in Phase 1)                                         |
+
+Notifications never include private notes, sensitive attributes or CV contents; links open RecruitmentOS where permissions are checked again. Each provider needs an app registration in Omar's accounts (Microsoft Entra, Google Cloud, Slack, Discord), approved separately.
+
+## R1.4 — Insights
+
+Closes top gap 10.
+
+| ID     | Item                                                                                                                                                                                                                               |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R14-01 | Customisable home dashboard: add, remove, resize and reorder widgets                                                                                                                                                               |
+| R14-02 | Widget library: KPI card, trend, bar/stacked, funnel, time-in-stage, pipeline by stage, source effectiveness, recruiter workload, interviewer feedback SLA, upcoming interviews, overdue tasks, offers pending, requisition ageing |
+| R14-03 | Widget builder: pick metric, calculation (count, sum, average, median, percentage, rate, time between events, conversion), chart, filters, date range and comparison with the previous period                                      |
+| R14-04 | Targets and colour thresholds; personal and shared dashboards; role templates (recruiter, hiring manager, admin)                                                                                                                   |
+| R14-05 | Scheduled report emails and CSV export with formula-injection protection                                                                                                                                                           |
+
+Metric definitions follow the analysis: imported history never creates fake events, and small samples show their count.
+
+## R1.5 — Compliance and data lifecycle
+
+Closes top gap 9. Requires the owner's privacy and retention policy decisions first.
+
+| ID     | Item                                                                                                                                                                                                                   |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R15-01 | Retention schedules per record type, anonymisation and permanent deletion workflow across rows, CVs, exports and backups (including the bulk-import tombstone rows kept by job 023, which reference the user and team) |
+| R15-02 | Candidate consent records and privacy notice versions                                                                                                                                                                  |
+| R15-03 | Data subject requests: access, correction, erasure, with an audit trail                                                                                                                                                |
+| R15-04 | Audit export for administrators                                                                                                                                                                                        |
+| R15-05 | Emiratisation tracker and work permit checklist (if approved; counts only, no automated decisions)                                                                                                                     |
+| R15-06 | Malware scanning and quarantine for uploaded CVs before real untrusted intake at scale                                                                                                                                 |
+
+## R1.6 — Workflow designer
+
+_Owner request, 6 November 2026. Reference: the end-to-end hiring flow in the Sanad recruitment management system (requisition → approval → job posting → applications → shortlisting → interview scheduling → offer letter → onboarding, with hiring manager and recruiter hand-offs)._
+
+**Goal:** each team designs its own hiring pipeline instead of the fixed seven stages: which stages exist, what each stage asks for, who must approve, and which path a record takes depending on its data.
+
+| ID     | Item                                                                                                                                                                                                                                                                                                                                     |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R16-01 | **Workflow engine and versioning.** Workflows are defined per team for requisitions, applications, offers and onboarding. Definitions are versioned: records in flight keep the version they started with; changes apply to new records.                                                                                                 |
+| R16-02 | **Custom stages.** Add, rename, reorder and archive stages; stage types (work, approval, interview, offer, onboarding, closed); each stage maps to a reporting category so analytics stay comparable.                                                                                                                                    |
+| R16-03 | **Custom fields and screens.** A field library (text, number, money, date, dropdown, multi-select, checkbox, person, file, rich text) and a screen designer per stage: which fields show, which are mandatory, optional or read-only, and in which order.                                                                                |
+| R16-04 | **Conditions (if / then / else).** Rules on field values and record data, for example "if salary band above X, then add the finance approval group, else skip"; "if department is Engineering, then require the technical interview stage". Rules can show or hide fields, make them mandatory, add or skip stages, and route approvals. |
+| R16-05 | **Approval groups.** Named groups of users or roles (department heads, finance, HR, executive); approval steps with any-one, all, majority or sequential rules; delegates and out-of-office cover; SLA reminders and escalation.                                                                                                         |
+| R16-06 | **Visual designer.** Drag-and-drop canvas like the reference flow, with lanes or badges for who acts at each step (requester, hiring manager, recruiter, approvers), plus a step list view for keyboard and screen-reader users.                                                                                                         |
+| R16-07 | **Validation and test mode.** The designer blocks unreachable stages, loops, missing approvers and conditions that reference deleted fields; a "test with sample data" preview shows which path a record would take before publishing.                                                                                                   |
+| R16-08 | **Templates.** Ready-made workflows (standard hire, Emiratisation role, executive hire, internal transfer, contractor) that teams copy and adapt.                                                                                                                                                                                        |
+| R16-09 | **Audit and permissions.** Only owners and admins edit workflows; every publish is versioned and audited; every approval, rejection, skipped step and rule decision is recorded with the actor and the rule that applied.                                                                                                                |
+| R16-10 | **Integrations hooks.** Workflow events (stage entered, approval needed, approved, rejected) feed the R1.3 marketplace: Teams/Slack approve buttons, calendar steps, email templates.                                                                                                                                                    |
+
+**Guardrails:** conditions may route work, require approvals or require fields, but never make a hiring decision on their own: moving a candidate to Hired or Rejected is always a person's action, and rules may not use sensitive attributes (gender, nationality, age, national-service status) as conditions. Migrating existing teams maps today's seven stages onto the default template with no data loss.
+
+**Depends on:** R1.1 (users as owners and interviewers), R1.2 (approvals built on this engine), R1.3 (notification and calendar hooks).
+
+## R2.0 — Reach and region
+
+| ID     | Item                                                                                            |
+| ------ | ----------------------------------------------------------------------------------------------- |
+| R20-01 | Careers page and job posting; job boards (Bayt, GulfTalent, LinkedIn) through the marketplace   |
+| R20-02 | WhatsApp and SMS with explicit consent, through the marketplace                                 |
+| R20-03 | Arabic interface and right-to-left layout                                                       |
+| R20-04 | Installable mobile app (PWA) for hiring managers: approvals, scorecards, interviews             |
+| R20-05 | Live AI extraction with an approved provider, region and retention terms; human review required |
+
+## Deliberately not doing
+
+- Automated candidate ranking, suitability scores or automatic rejection.
+- Inferring gender, nationality, age or other sensitive traits from names, photos or folders.
+- Sending CVs to an AI provider without the owner's specific approval of provider, region and retention.
+- Two-way sync with the old Excel files.
+
+## Top 10 gaps covered
+
+| #   | Gap from the analysis                               | Release                                 |
+| --- | --------------------------------------------------- | --------------------------------------- |
+| 1   | Structured interview feedback (scorecards, kits)    | R1.1, R1.2                              |
+| 2   | Hiring managers and interviewers as real users      | R1.1, R1.2                              |
+| 3   | Requisition and offer approvals                     | R1.2                                    |
+| 4   | CV storage, bulk import, AI extraction switched off | Phase 1 (storage, bulk), R2.0 (live AI) |
+| 5   | Candidate communication                             | R1.2, R1.3, R2.0                        |
+| 6   | Calendar sync and self-scheduling                   | R1.3                                    |
+| 7   | Bulk actions, rejection reasons, stage ageing       | R1.1                                    |
+| 8   | Duplicate merge                                     | Phase 1 (warning), R1.1 (merge)         |
+| 9   | Retention, erasure, consent, data requests          | R1.5                                    |
+| 10  | Fixed dashboards, miscounted metrics                | Phase 1 (fixes), R1.1, R1.4             |

@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+} from "../src/domain/records";
+import {
   canStartImport,
+  capSelection,
   fileProblem,
+  importSummary,
+  pageItems,
+  pausesRun,
+  sameQueue,
+  stopsRun,
+  uncertainRetryTooOld,
 } from "../src/components/workspace/bulk-cv-queue";
+
+const draft = (id: string, email = "", phone = "") => ({
+  id,
+  fields: { email, phone },
+});
 
 describe("bulk CV review safeguards", () => {
   it("does not create a candidate while upload capability is unavailable", () => {
@@ -19,5 +35,144 @@ describe("bulk CV review safeguards", () => {
     expect(fileProblem("cv.exe", 100)).toMatch(/type/i);
     expect(fileProblem("cv.pdf", 10 * 1024 * 1024 + 1)).toMatch(/10 MiB/);
     expect(fileProblem("cv.pdf", 100)).toBe("");
+  });
+});
+
+describe("bulk CV queue helpers", () => {
+  it("keeps at most the batch limit of entries and reports how many were not added", () => {
+    const files = Array.from({ length: 30 }, (_, index) => `cv-${index}.pdf`);
+    expect(capSelection(0, files)).toEqual({ added: files, skipped: 0 });
+    const capped = capSelection(BULK_INTAKE_MAX_FILES - 10, files);
+    expect(capped.added).toEqual(files.slice(0, 10));
+    expect(capped.skipped).toBe(20);
+    expect(capSelection(BULK_INTAKE_MAX_FILES, files)).toEqual({
+      added: [],
+      skipped: 30,
+    });
+    expect(BULK_INTAKE_MAX_FILES).toBe(200);
+    const many = Array.from({ length: 250 }, (_, index) => `cv-${index}.pdf`);
+    const large = capSelection(0, many);
+    expect(large.added).toEqual(many.slice(0, 200));
+    expect(large.skipped).toBe(50);
+  });
+
+  it("pages 200 entries as 8 pages of 25 and clamps out-of-range pages", () => {
+    const items = Array.from({ length: 200 }, (_, index) => index);
+    expect(pageItems(items, 1)).toEqual({
+      items: items.slice(0, 25),
+      page: 1,
+      totalPages: 8,
+    });
+    expect(pageItems(items, 8).items).toEqual(items.slice(175));
+    for (const [page, clamped] of [
+      [0, 1],
+      [-3, 1],
+      [9, 8],
+      [Number.NaN, 1],
+    ])
+      expect(pageItems(items, page).page, String(page)).toBe(clamped);
+    expect(pageItems([], 3)).toEqual({ items: [], page: 1, totalPages: 1 });
+    expect(pageItems(items, 2, 100)).toMatchObject({ page: 2, totalPages: 2 });
+  });
+
+  it("pauses a run only for the team's CV upload rate limit", () => {
+    expect(pausesRun({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" })).toBe(
+      true,
+    );
+    for (const error of [
+      { status: 429, code: "rate_limited" },
+      { status: 429, code: "ai_rate_limited" },
+      { status: 409, code: "CV_UPLOAD_RATE_LIMITED" },
+      { status: 503, code: "STORAGE_SETUP_REQUIRED" },
+    ])
+      expect(pausesRun(error), error.code).toBe(false);
+    expect(stopsRun({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" })).toBe(
+      false,
+    );
+  });
+
+  it("flags other drafts with the same email in any case or the same phone", () => {
+    const entry = draft(
+      "a",
+      " Amira.Fictional@Example.test ",
+      "+971 50 000 0000",
+    );
+    const queue = [
+      entry,
+      draft("b", "amira.fictional@example.test"),
+      draft("c", "", "+971 50 000 0000"),
+      draft("d", "other.fictional@example.test", "+971 50 111 1111"),
+    ];
+    expect(sameQueue(entry, queue).map((item) => item.id)).toEqual(["b", "c"]);
+    expect(sameQueue(draft("e"), queue)).toEqual([]);
+  });
+
+  it("groups a mixed run into the five summary groups", () => {
+    const summary = importSummary([
+      { name: "imported-1.pdf", done: true, candidateId: "c1" },
+      { name: "imported-2.pdf", done: true, candidateId: "c2" },
+      { name: "pending.pdf", done: false, candidateId: "c3" },
+      {
+        name: "pending-after-abort.pdf",
+        done: false,
+        candidateId: "c4",
+        result: "unknown",
+      },
+      { name: "not-reviewed.pdf", done: false },
+      { name: "not-started.pdf", done: false },
+      { name: "refused.pdf", done: false, result: "failed" },
+      { name: "lost.pdf", done: false, result: "unknown" },
+    ]);
+    expect(
+      summary.map(({ group, label, names }) => [group, label, names]),
+    ).toEqual([
+      ["imported", "Imported", ["imported-1.pdf", "imported-2.pdf"]],
+      [
+        "cv-pending",
+        "Candidate created, CV pending",
+        ["pending.pdf", "pending-after-abort.pdf"],
+      ],
+      ["not-imported", "Not imported", ["not-reviewed.pdf", "not-started.pdf"]],
+      ["failed", "Failed", ["refused.pdf"]],
+      ["unknown", "Outcome unknown", ["lost.pdf"]],
+    ]);
+    expect(importSummary([]).map((group) => group.names.length)).toEqual([
+      0, 0, 0, 0, 0,
+    ]);
+  });
+
+  it("stops a run on lost session, permission or storage setup only", () => {
+    expect(stopsRun({ status: 401, code: "unauthorized" })).toBe(true);
+    expect(stopsRun({ status: 403, code: "scope_required" })).toBe(true);
+    expect(stopsRun({ status: 503, code: "STORAGE_SETUP_REQUIRED" })).toBe(
+      true,
+    );
+    expect(stopsRun({ status: 503, code: "STORAGE_UNAVAILABLE" })).toBe(false);
+    expect(stopsRun({ status: 400, code: "bulk_review_required" })).toBe(false);
+    expect(stopsRun({ status: 409, code: "bulk_duplicates_changed" })).toBe(
+      false,
+    );
+  });
+
+  it("refuses an uncertain retry once the window has passed since the batch start", () => {
+    const window = BULK_INTAKE_RECOVERY_HOURS * 3_600_000;
+    const batchStartedAt = Date.UTC(2030, 0, 1);
+    // The entry itself started an hour after the batch; the batch start still decides.
+    const uncertain = {
+      submitted: '{"name":"Fictional Late"}',
+      startedAt: batchStartedAt + 3_600_000,
+    };
+    const now = batchStartedAt + window;
+    expect(uncertainRetryTooOld(uncertain, batchStartedAt, now)).toBe(true);
+    expect(uncertainRetryTooOld(uncertain, batchStartedAt, now - 1)).toBe(
+      false,
+    );
+    expect(
+      uncertainRetryTooOld(
+        { ...uncertain, candidateId: "fictional-candidate" },
+        batchStartedAt,
+        now + window,
+      ),
+    ).toBe(false);
   });
 });

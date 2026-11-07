@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Archive,
@@ -14,8 +21,6 @@ import {
   FileText,
   Filter,
   FolderOpen,
-  LayoutGrid,
-  List,
   LoaderCircle,
   Mail,
   MessageSquare,
@@ -32,42 +37,59 @@ import {
   kindToResource,
   APPLICATION_STAGES,
   CANDIDATE_STATUSES,
+  REVIEW_STATUSES,
+  safeExternalUrl,
   type RecordDto,
   type ResourceName,
   type ReferenceField,
 } from "@/domain/records";
 import { CvUpload } from "@/components/cv-upload";
+import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
+import { DisplayModeToggle, type DisplayMode } from "./display-mode-toggle";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
 import { personalStateMutation } from "./mutation";
 import {
+  activeFilterCount,
+  checklistProgress,
   dataOf,
   display,
+  exportSummary,
+  isFiltered,
+  loadAllPages,
   recordLabel,
+  referenceText,
+  roleDifferences,
+  roleSnapshot,
   initials,
   formatDate,
+  formatField,
+  formatNumber,
+  commentAuthor,
   badgeTone,
-  saveCsv,
+  saveBlob,
+  type ListResponse,
 } from "./helpers";
 import {
+  ClientError,
+  isAbortError,
   useApi,
   useDebounced,
+  useUnsavedWork,
   useWorkspace,
+  requestExport,
   requestJson,
   humanError,
 } from "./client";
+import {
+  failedResourceState,
+  resourceSnapshot,
+  type ResourceState,
+} from "./resource-state";
 
-export interface ListResponse {
-  data: RecordDto[];
-  pagination: {
-    page: number;
-    pageSize: number;
-    total: number;
-    totalPages: number;
-  };
-}
+export type { ListResponse } from "./helpers";
 function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   const buttons = [
@@ -129,8 +151,8 @@ export const screenDefinitions: Record<
     resource: "candidates",
   },
   vacancies: {
-    title: "Open vacancies",
-    description: "A clear view of the roles your team is working to fill.",
+    title: "Vacancies",
+    description: "Every vacancy your team manages, from draft to closed.",
     resource: "vacancies",
   },
   roles: {
@@ -173,6 +195,66 @@ export const screenDefinitions: Record<
   },
 };
 
+/** Most applications the whole-vacancy board loads; above it the board is replaced by a message. */
+const BOARD_LIMIT = 1000;
+/** Every application matching `query` (no page), reloaded on refresh and on application changes. */
+function useWholePipeline(query: string | null) {
+  const { team } = useWorkspace();
+  const [state, setState] = useState<ResourceState<
+    Awaited<ReturnType<typeof loadAllPages>>
+  > | null>(null);
+  const [revision, setRevision] = useState(0);
+  const key = JSON.stringify([team?.id || "", query || ""]);
+  const refresh = useCallback(() => setRevision((n) => n + 1), []);
+  useEffect(() => {
+    if (!team || !query) return;
+    const onChange = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ teamId: string | null; path: string }>
+      ).detail;
+      if (
+        detail.teamId === team.id &&
+        detail.path.split("/")[3] === "applications"
+      )
+        refresh();
+    };
+    window.addEventListener("recruitmentos:data-changed", onChange);
+    return () =>
+      window.removeEventListener("recruitmentos:data-changed", onChange);
+  }, [team, query, refresh]);
+  useEffect(() => {
+    if (!team || !query) return;
+    let active = true;
+    const controller = new AbortController();
+    const fetchPage = (page: number) =>
+      requestJson<ListResponse>(
+        team.id,
+        `/api/v1/applications?${query}&page=${page}&pageSize=100`,
+        { signal: controller.signal },
+      );
+    (async () => {
+      let loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      // The pipeline changed between pages; one more pass usually settles it.
+      if (!loaded.tooMany && !loaded.complete)
+        loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      if (active) setState({ key, revision, data: loaded, error: "" });
+    })().catch((error: unknown) => {
+      if (active && !isAbortError(error))
+        setState((previous) =>
+          failedResourceState(previous, key, revision, error),
+        );
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [team, query, key, revision]);
+  return {
+    ...resourceSnapshot(state, key, revision, !!query && !!team),
+    refresh,
+  };
+}
+
 export function RecordsScreen({ section }: { section: string }) {
   const searchParams = useSearchParams();
   const linkedRecord = searchParams.get("record");
@@ -186,10 +268,14 @@ export function RecordsScreen({ section }: { section: string }) {
   const [category, setCategory] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
+  const [certifications, setCertifications] = useState<string[]>([]);
   const [shortlisted, setShortlisted] = useState(section === "shortlist");
   const [reviewStatus, setReviewStatus] = useState("");
   const [emirate, setEmirate] = useState("");
   const [degree, setDegree] = useState("");
+  const [education, setEducation] = useState("");
+  const [minYears, setMinYears] = useState("");
+  const [maxYears, setMaxYears] = useState("");
   const [vacancy, setVacancy] = useState("");
   const [archived, setArchived] = useState(false);
   const [sort, setSort] = useState(
@@ -198,7 +284,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const [direction, setDirection] = useState("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [mode, setMode] = useState<"table" | "cards" | "board">(
+  const [mode, setMode] = useState<DisplayMode>(
     resource === "tasks" || resource === "applications"
       ? "board"
       : resource === "vacancies" || resource === "job-roles"
@@ -206,6 +292,9 @@ export function RecordsScreen({ section }: { section: string }) {
         : "table",
   );
   const [selected, setSelected] = useState<string[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
+  const experienceHelpId = useId();
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;
@@ -219,6 +308,10 @@ export function RecordsScreen({ section }: { section: string }) {
   const [saveView, setSaveView] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [conflict, setConflict] = useState<{
+    record: RecordDto;
+    target: string;
+  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const debounced = useDebounced(search);
   const params = useMemo(() => {
@@ -239,6 +332,11 @@ export function RecordsScreen({ section }: { section: string }) {
     if (shortlisted) p.set("shortlisted", "true");
     if (categories.length) p.set("categories", JSON.stringify(categories));
     if (skills.length) p.set("skills", JSON.stringify(skills));
+    if (certifications.length)
+      p.set("certifications", JSON.stringify(certifications));
+    if (education.trim()) p.set("education", education.trim());
+    if (minYears) p.set("minYearsExperience", minYears);
+    if (maxYears) p.set("maxYearsExperience", maxYears);
     if (section === "source-review") p.set("needsReview", "true");
     return p;
   }, [
@@ -257,10 +355,26 @@ export function RecordsScreen({ section }: { section: string }) {
     section,
     categories,
     skills,
+    certifications,
+    education,
+    minYears,
+    maxYears,
     shortlisted,
     reviewStatus,
   ]);
   const result = useApi<ListResponse>(`/api/v1/${resource}?${params}`);
+  // With a vacancy selected, the application board covers the whole pipeline in a stable order.
+  const boardQuery = useMemo(() => {
+    if (resource !== "applications" || mode !== "board" || !vacancy)
+      return null;
+    const query = new URLSearchParams(params);
+    query.delete("page");
+    query.delete("pageSize");
+    query.set("sort", "createdAt");
+    query.set("direction", "asc");
+    return query.toString();
+  }, [resource, mode, vacancy, params]);
+  const board = useWholePipeline(boardQuery);
   const buckets = useApi<ListResponse>(
     resource === "tasks"
       ? "/api/v1/buckets?pageSize=100&sort=position&direction=asc"
@@ -289,6 +403,10 @@ export function RecordsScreen({ section }: { section: string }) {
     pageSize,
     categories,
     skills,
+    certifications,
+    education,
+    minYears,
+    maxYears,
     shortlisted,
     reviewStatus,
   ]);
@@ -311,6 +429,7 @@ export function RecordsScreen({ section }: { section: string }) {
   }, [team, resource, linkedRecord]);
   const refresh = () => {
     result.refresh();
+    board.refresh();
     buckets.refresh();
     views.refresh();
     setSelected([]);
@@ -326,6 +445,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const move = async (record: RecordDto, value: string) => {
     if (!team) return;
     setError("");
+    setConflict(null);
     try {
       await requestJson(team.id, `/api/v1/${resource}/${record.id}`, {
         method: "PATCH",
@@ -341,8 +461,33 @@ export function RecordsScreen({ section }: { section: string }) {
         resource === "tasks" ? "Task moved." : "Application stage updated.",
       );
     } catch (e) {
+      // A board has no draft to keep: reread it and offer the move again.
+      if (e instanceof ClientError && e.status === 409) {
+        setConflict({ record, target: value });
+        refresh();
+      } else setError(humanError(e));
+    }
+  };
+  const moveAgain = async () => {
+    if (!team || !conflict) return;
+    const { record, target } = conflict;
+    setConflict(null);
+    setError("");
+    try {
+      // Never reuse the stale version; fetch the current one first.
+      const latest = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/${resource}/${record.id}`,
+      );
+      await move(latest.data, target);
+    } catch (e) {
       setError(humanError(e));
     }
+  };
+  const moveTargetName = (target: string) => {
+    if (resource !== "tasks") return target;
+    const bucket = buckets.data?.data.find((item) => item.id === target);
+    return bucket ? recordLabel(bucket) : "the chosen bucket";
   };
   const applyView = (view: RecordDto) => {
     const q = dataOf(view).query as Record<string, unknown>;
@@ -353,8 +498,12 @@ export function RecordsScreen({ section }: { section: string }) {
         q.degreeLevel ||
         q.reviewStatus ||
         q.shortlisted ||
+        q.education ||
+        q.minYearsExperience !== undefined ||
+        q.maxYearsExperience !== undefined ||
         (Array.isArray(q.categories) && q.categories.length) ||
-        (Array.isArray(q.skills) && q.skills.length))
+        (Array.isArray(q.skills) && q.skills.length) ||
+        (Array.isArray(q.certifications) && q.certifications.length))
     ) {
       setError(
         "This saved application view contains candidate-only filters. Edit the view to remove those filters before applying it.",
@@ -365,10 +514,27 @@ export function RecordsScreen({ section }: { section: string }) {
     setCategory(String(q.category || ""));
     setCategories(Array.isArray(q.categories) ? q.categories.map(String) : []);
     setSkills(Array.isArray(q.skills) ? q.skills.map(String) : []);
+    setCertifications(
+      Array.isArray(q.certifications) ? q.certifications.map(String) : [],
+    );
     setShortlisted(q.shortlisted === true || section === "shortlist");
-    setReviewStatus(String(q.reviewStatus || ""));
+    // Source review already shows only records that need review.
+    setReviewStatus(
+      section === "source-review" ? "" : String(q.reviewStatus || ""),
+    );
     setEmirate(String(q.emirate || ""));
     setDegree(String(q.degreeLevel || ""));
+    setEducation(String(q.education || ""));
+    setMinYears(
+      typeof q.minYearsExperience === "number"
+        ? String(q.minYearsExperience)
+        : "",
+    );
+    setMaxYears(
+      typeof q.maxYearsExperience === "number"
+        ? String(q.maxYearsExperience)
+        : "",
+    );
     setStatus(String(q.stage || q.status || ""));
     setVacancy(String(q.vacancyId || ""));
     setArchived(!!q.includeArchived);
@@ -376,47 +542,54 @@ export function RecordsScreen({ section }: { section: string }) {
     setDirection(String(q.direction || "asc"));
     setPageSize(Number(q.pageSize) || 25);
   };
+  const filters = {
+    status,
+    category,
+    categories,
+    skills,
+    certifications,
+    shortlisted,
+    reviewStatus,
+    emirate,
+    degree,
+    education,
+    minYears,
+    maxYears,
+    vacancy,
+    archived,
+  };
+  const clearFilters = () => {
+    setSearch("");
+    setStatus("");
+    setCategory("");
+    setCategories([]);
+    setSkills([]);
+    setCertifications([]);
+    setReviewStatus("");
+    setShortlisted(section === "shortlist");
+    setEmirate("");
+    setDegree("");
+    setEducation("");
+    setMinYears("");
+    setMaxYears("");
+    setVacancy("");
+    setArchived(false);
+  };
   const exportAll = async () => {
     if (!team) return;
     setExporting(true);
     setError("");
+    setNotice("");
     try {
-      const rows: RecordDto[] = [];
-      let current = 1;
-      let total = 1;
-      do {
-        const query = new URLSearchParams(params);
-        query.set("page", String(current));
-        query.set("pageSize", "100");
-        const response = await requestJson<ListResponse>(
-          team.id,
-          `/api/v1/${resource}?${query}`,
-        );
-        rows.push(...response.data);
-        total = response.pagination.totalPages;
-        current++;
-        if (rows.length > 100000)
-          throw new Error("This export is too large. Narrow your filters.");
-      } while (current <= total);
-      const fields = RESOURCE_CONFIG[resource].fields;
-      saveCsv(
-        `RecruitmentOS-${resource}.csv`,
-        [
-          "Record ID",
-          ...fields.map((f) => f.label),
-          "Created at",
-          "Updated at",
-        ],
-        rows.map((r) => [
-          r.id,
-          ...fields.map((f) => dataOf(r)[f.key]),
-          r.createdAt,
-          r.updatedAt,
-        ]),
+      const query = new URLSearchParams(params);
+      query.delete("page");
+      query.delete("pageSize");
+      const file = await requestExport(
+        team.id,
+        `/api/v1/${resource}/export?${query}`,
       );
-      setNotice(
-        `Exported ${rows.length} records matching the current filters.`,
-      );
+      saveBlob(file.filename, file.blob);
+      setNotice(exportSummary(file.rows, file.rows).notice);
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -426,6 +599,13 @@ export function RecordsScreen({ section }: { section: string }) {
   const columns =
     tableColumns[resource] ||
     RESOURCE_CONFIG[resource].fields.slice(0, 5).map((field) => field.key);
+  const columnField = (key: string) =>
+    RESOURCE_CONFIG[resource].fields.find((f) => f.key === key);
+  const columnLabel = (key: string) => columnField(key)?.label || key;
+  const cellText = (key: string, record: RecordDto) =>
+    formatField(columnField(key) || { key, type: "text" }, dataOf(record));
+  const filterCount = activeFilterCount(filters, section === "shortlist");
+  const filtered = isFiltered(search, filters, section === "shortlist");
   const stateOptions =
     resource === "applications"
       ? APPLICATION_STAGES
@@ -445,7 +625,7 @@ export function RecordsScreen({ section }: { section: string }) {
             {config.title}
             {result.data && (
               <span className="heading-count">
-                {result.data.pagination.total.toLocaleString()}
+                {formatNumber(result.data.pagination.total)}
               </span>
             )}
           </h1>
@@ -496,6 +676,28 @@ export function RecordsScreen({ section }: { section: string }) {
       {error && (
         <div className="notice error" role="alert">
           {error}
+        </div>
+      )}
+      {conflict && (
+        <div className="notice error" role="alert">
+          {recordLabel(conflict.record)} was changed by someone else, so your
+          move to {moveTargetName(conflict.target)} was not applied. The board
+          now shows the latest version.
+          <div className="row">
+            <button
+              className="button small"
+              disabled={!canWrite}
+              onClick={moveAgain}
+            >
+              Move to {moveTargetName(conflict.target)} again
+            </button>
+            <button
+              className="button secondary small"
+              onClick={() => setConflict(null)}
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
       {resource === "candidates" && (
@@ -568,31 +770,11 @@ export function RecordsScreen({ section }: { section: string }) {
               )}
               Export
             </button>
-            <div className="view-toggle" aria-label="Display mode">
-              {(resource === "applications" || resource === "tasks") && (
-                <button
-                  aria-label="Board view"
-                  aria-pressed={mode === "board"}
-                  onClick={() => setMode("board")}
-                >
-                  <LayoutGrid size={17} />
-                </button>
-              )}
-              <button
-                aria-label="Table view"
-                aria-pressed={mode === "table"}
-                onClick={() => setMode("table")}
-              >
-                <List size={18} />
-              </button>
-              <button
-                aria-label="Card view"
-                aria-pressed={mode === "cards"}
-                onClick={() => setMode("cards")}
-              >
-                <LayoutGrid size={17} />
-              </button>
-            </div>
+            <DisplayModeToggle
+              board={resource === "applications" || resource === "tasks"}
+              mode={mode}
+              onChange={setMode}
+            />
             <button
               className="icon-button"
               aria-label="Refresh records"
@@ -600,9 +782,21 @@ export function RecordsScreen({ section }: { section: string }) {
             >
               <RefreshCw size={17} />
             </button>
+            <button
+              className="button secondary filters-toggle"
+              aria-expanded={filtersOpen}
+              aria-controls={filtersId}
+              onClick={() => setFiltersOpen((open) => !open)}
+            >
+              <Filter size={16} aria-hidden="true" />
+              {filterCount > 0 ? `Filters (${filterCount})` : "Filters"}
+            </button>
           </div>
         </div>
-        <div className="filter-bar">
+        <div
+          className={`filter-bar${filtersOpen ? " is-open" : ""}`}
+          id={filtersId}
+        >
           {stateOptions.length > 0 && (
             <label>
               Status
@@ -679,6 +873,51 @@ export function RecordsScreen({ section }: { section: string }) {
                 values={skills}
                 onChange={setSkills}
               />
+              <FilterTags
+                label="All of these certifications"
+                values={certifications}
+                onChange={setCertifications}
+              />
+              <label>
+                Education contains
+                <input
+                  value={education}
+                  maxLength={300}
+                  placeholder="Degree, major or university"
+                  onChange={(e) => setEducation(e.target.value)}
+                />
+              </label>
+              <label>
+                Minimum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMinYears(e.target.value)}
+                />
+              </label>
+              <label>
+                Maximum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={maxYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMaxYears(e.target.value)}
+                />
+              </label>
+              {(minYears || maxYears) && (
+                <p className="muted small-text" id={experienceHelpId}>
+                  Candidates without stated experience are not included.
+                </p>
+              )}
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -688,14 +927,18 @@ export function RecordsScreen({ section }: { section: string }) {
                 />
                 My shortlist only
               </label>
-              {section === "source-review" && (
+              {section !== "source-review" && (
                 <label>
                   Review status
-                  <input
+                  <select
                     value={reviewStatus}
-                    placeholder="Any review status"
                     onChange={(e) => setReviewStatus(e.target.value)}
-                  />
+                  >
+                    <option value="">Any review status</option>
+                    {REVIEW_STATUSES.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
                 </label>
               )}
             </>
@@ -741,33 +984,8 @@ export function RecordsScreen({ section }: { section: string }) {
             />
             Include archived
           </label>
-          {(search ||
-            status ||
-            category ||
-            emirate ||
-            degree ||
-            vacancy ||
-            archived ||
-            categories.length > 0 ||
-            skills.length > 0 ||
-            shortlisted ||
-            reviewStatus) && (
-            <button
-              className="text-link"
-              onClick={() => {
-                setSearch("");
-                setStatus("");
-                setCategory("");
-                setCategories([]);
-                setSkills([]);
-                setReviewStatus("");
-                setShortlisted(section === "shortlist");
-                setEmirate("");
-                setDegree("");
-                setVacancy("");
-                setArchived(false);
-              }}
-            >
+          {filtered && (
+            <button className="text-link" onClick={clearFilters}>
               Clear filters
             </button>
           )}
@@ -796,24 +1014,36 @@ export function RecordsScreen({ section }: { section: string }) {
           <LoadError message={result.error} retry={result.refresh} />
         ) : result.loading ? (
           <Loading />
-        ) : !result.data?.data.length ? (
+        ) : !result.data ||
+          !(boardQuery
+            ? result.data.pagination.total
+            : result.data.data.length) ? (
           <EmptyState
             title={
-              search || status || category || emirate
+              filtered
                 ? "No records match these filters"
                 : section === "shortlist"
                   ? "Your shortlist is ready for a first candidate"
-                  : `Your ${config.title.toLowerCase()} start here`
+                  : section === "source-review"
+                    ? "Nothing needs source review"
+                    : `Your ${config.title.toLowerCase()} start here`
             }
             description={
-              search || status || category || emirate
+              filtered
                 ? "Try a broader search or clear your filters."
                 : section === "shortlist"
                   ? "Open a candidate profile and select “Add to my shortlist”."
-                  : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
+                  : section === "source-review"
+                    ? "Every candidate's source information has been reviewed."
+                    : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
             }
             action={
-              section === "shortlist" ? (
+              filtered ? (
+                <button className="button secondary" onClick={clearFilters}>
+                  Clear filters
+                </button>
+              ) : section === "source-review" ? undefined : section ===
+                "shortlist" ? (
                 <Link href="/app/candidates" className="button">
                   Browse candidates
                   <ArrowRight size={16} aria-hidden="true" />
@@ -830,6 +1060,44 @@ export function RecordsScreen({ section }: { section: string }) {
               )
             }
           />
+        ) : boardQuery ? (
+          board.error ? (
+            <LoadError message={board.error} retry={board.refresh} />
+          ) : !board.data ? (
+            <Loading />
+          ) : board.data.tooMany ? (
+            <div className="notice" role="status">
+              <p>
+                This vacancy has {formatNumber(board.data.total)} matching
+                applications, more than the board shows at once (1,000). Use the
+                table or narrow the filters.
+              </p>
+              <button
+                className="button secondary small"
+                onClick={() => setMode("table")}
+              >
+                Show as table
+              </button>
+            </div>
+          ) : (
+            <>
+              {!board.data.complete && (
+                <p className="notice" role="status">
+                  The pipeline changed while it loaded. Refresh to see every
+                  application.
+                </p>
+              )}
+              <Kanban
+                resource={resource}
+                records={board.data.rows}
+                buckets={[]}
+                onOpen={setDetail}
+                onMove={move}
+                canWrite={canWrite}
+                emptyText="No matching applications"
+              />
+            </>
+          )
         ) : mode === "board" ? (
           <Kanban
             resource={resource}
@@ -883,11 +1151,7 @@ export function RecordsScreen({ section }: { section: string }) {
                   ) && <th>Application</th>}
                   {resource === "onboarding" && <th>Checklist progress</th>}
                   {columns.map((key) => (
-                    <th key={key}>
-                      {RESOURCE_CONFIG[resource].fields.find(
-                        (f) => f.key === key,
-                      )?.label || key}
-                    </th>
+                    <th key={key}>{columnLabel(key)}</th>
                   ))}
                   <th>
                     <span className="sr-only">Actions</span>
@@ -901,7 +1165,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     className={record.archivedAt ? "is-archived" : ""}
                   >
                     {resource === "candidates" && (
-                      <td>
+                      <td data-label="Select">
                         <input
                           type="checkbox"
                           aria-label={`Select ${recordLabel(record)}`}
@@ -918,13 +1182,13 @@ export function RecordsScreen({ section }: { section: string }) {
                     )}
                     {resource === "applications" && (
                       <>
-                        <td>
+                        <td data-label="Candidate">
                           <ReferenceLabel
                             resource="candidates"
                             id={record.candidateId}
                           />
                         </td>
-                        <td>
+                        <td data-label="Vacancy">
                           <ReferenceLabel
                             resource="vacancies"
                             id={record.vacancyId}
@@ -935,7 +1199,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     {["interviews", "offers", "onboarding"].includes(
                       resource,
                     ) && (
-                      <td>
+                      <td data-label="Application">
                         <ReferenceLabel
                           resource="applications"
                           id={record.applicationId}
@@ -943,12 +1207,12 @@ export function RecordsScreen({ section }: { section: string }) {
                       </td>
                     )}
                     {resource === "onboarding" && (
-                      <td>
+                      <td data-label="Checklist progress">
                         <OnboardingProgress id={record.id} />
                       </td>
                     )}
                     {columns.map((key, index) => (
-                      <td key={key}>
+                      <td key={key} data-label={columnLabel(key)}>
                         {index === 0 ? (
                           <button
                             className="table-record-button"
@@ -960,7 +1224,7 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                             <span>
-                              <strong>{display(dataOf(record)[key])}</strong>
+                              <strong>{cellText(key, record)}</strong>
                               {resource === "candidates" && (
                                 <small>
                                   {String(
@@ -992,10 +1256,8 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                           </div>
-                        ) : key.endsWith("Date") || key === "startAt" ? (
-                          formatDate(dataOf(record)[key], key === "startAt")
                         ) : (
-                          display(dataOf(record)[key])
+                          cellText(key, record)
                         )}
                       </td>
                     ))}
@@ -1014,7 +1276,15 @@ export function RecordsScreen({ section }: { section: string }) {
             </table>
           </div>
         )}
-        {result.data && (
+        {result.data && boardQuery ? (
+          <div className="pagination">
+            <span className="muted">
+              {board.data && !board.data.tooMany
+                ? `${formatNumber(board.data.rows.length)} matching applications${board.data.complete ? " · board shows all of them" : ""}`
+                : `${formatNumber(board.data?.total ?? result.data.pagination.total)} matching applications`}
+            </span>
+          </div>
+        ) : result.data ? (
           <div className="pagination">
             <div className="row">
               <label>
@@ -1029,8 +1299,12 @@ export function RecordsScreen({ section }: { section: string }) {
                 </select>
               </label>
               <span className="muted">
-                {result.data.pagination.total.toLocaleString()} matching records
-                {mode === "board" ? " · board shows this page" : ""}
+                {formatNumber(result.data.pagination.total)} matching records
+                {mode === "board"
+                  ? resource === "applications"
+                    ? " · board shows this page; choose a vacancy to see its whole pipeline"
+                    : " · board shows this page"
+                  : ""}
               </span>
             </div>
             <div className="row">
@@ -1057,7 +1331,7 @@ export function RecordsScreen({ section }: { section: string }) {
               </button>
             </div>
           </div>
-        )}
+        ) : null}
       </section>
       {detail && (
         <RecordDetail
@@ -1107,11 +1381,11 @@ export function RecordsScreen({ section }: { section: string }) {
         <BulkAssign
           candidateIds={selected}
           onClose={() => setBulk(false)}
-          onSaved={() => {
+          onSaved={({ created, skipped }) => {
             setBulk(false);
             refresh();
             setNotice(
-              "Candidate assignments saved. Existing active assignments were retained.",
+              `Assignments saved: ${created} created, ${skipped} already had an active application for this vacancy.`,
             );
           }}
         />
@@ -1132,9 +1406,13 @@ export function RecordsScreen({ section }: { section: string }) {
             category,
             categories,
             skills,
+            certifications,
             shortlisted,
             emirate,
             degreeLevel: degree,
+            education,
+            minYearsExperience: minYears === "" ? undefined : Number(minYears),
+            maxYearsExperience: maxYears === "" ? undefined : Number(maxYears),
             ...(resource === "applications"
               ? { stage: status || undefined, vacancyId: vacancy || undefined }
               : { status, reviewStatus }),
@@ -1283,7 +1561,7 @@ export function NoTeam() {
     </section>
   );
 }
-function RecordCard({
+export function RecordCard({
   record,
   onOpen,
 }: {
@@ -1364,6 +1642,7 @@ function Kanban({
   onOpen,
   onMove,
   canWrite,
+  emptyText = "No records on this page",
 }: {
   resource: ResourceName;
   records: RecordDto[];
@@ -1371,6 +1650,7 @@ function Kanban({
   onOpen: (r: RecordDto) => void;
   onMove: (r: RecordDto, value: string) => void;
   canWrite: boolean;
+  emptyText?: string;
 }) {
   const columns =
     resource === "tasks"
@@ -1512,9 +1792,7 @@ function Kanban({
                   </footer>
                 </article>
               ))}
-              {!cards.length && (
-                <p className="board-empty">No records on this page</p>
-              )}
+              {!cards.length && <p className="board-empty">{emptyText}</p>}
             </div>
           </section>
         );
@@ -1535,13 +1813,13 @@ export function ReferenceLabel({
     id ? `/api/v1/${resource}/${id}` : null,
   );
   if (!id) return <span className="muted">Not linked</span>;
-  const label = result.data
-    ? recordLabel(result.data.data)
-    : result.loading
-      ? "Loading…"
-      : `Record ${id.slice(0, 8)}`;
-  if (plain || resource !== "candidates")
-    return <span title={id}>{label}</span>;
+  const label = referenceText({
+    data: result.data?.data ?? null,
+    loading: result.loading,
+    status: result.status,
+  });
+  if (plain || resource !== "candidates" || !result.data)
+    return <span>{label}</span>;
   return <Link href={`/app/candidates/${id}`}>{label}</Link>;
 }
 function OnboardingProgress({ id }: { id: string }) {
@@ -1552,31 +1830,27 @@ function OnboardingProgress({ id }: { id: string }) {
     return <small className="muted">Loading checklist…</small>;
   if (result.error)
     return <small className="field-error">Checklist unavailable</small>;
-  const items = result.data?.data || [];
-  if (!items.length)
-    return <small className="muted">Checklist not configured</small>;
+  const { done, total } = checklistProgress(result.data?.data || []);
+  if (!total) return <small className="muted">Checklist not configured</small>;
   if ((result.data?.pagination.total || 0) > 100)
     return (
       <small className="muted">
         {result.data!.pagination.total} items · open checklist for details
       </small>
     );
-  const complete = items.filter((item) =>
-    ["Complete", "Waived"].includes(String(dataOf(item).status)),
-  ).length;
   return (
     <div className="onboarding-progress">
       <span>
-        {complete} / {items.length} complete or waived
+        {done} / {total} complete or waived
       </span>
-      <progress
-        aria-label="Checklist progress"
-        value={complete}
-        max={items.length}
-      />
+      <progress aria-label="Checklist progress" value={done} max={total} />
     </div>
   );
 }
+const customFieldTypes: Record<string, string> = {
+  Date: "date",
+  Number: "number",
+};
 function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
   const fields = useApi<ListResponse>(
     "/api/v1/task-fields?pageSize=100&includeArchived=true&sort=position",
@@ -1605,7 +1879,16 @@ function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
                   ? value
                     ? "Yes"
                     : "No"
-                  : display(value)}
+                  : formatField(
+                      {
+                        key,
+                        type:
+                          (field &&
+                            customFieldTypes[String(dataOf(field).type)]) ||
+                          "text",
+                      },
+                      values,
+                    )}
               </dd>
             </div>
           );
@@ -1648,9 +1931,12 @@ export function RecordDetail({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [archiveDestination, setArchiveDestination] = useState("");
+  const [roleReview, setRoleReview] = useState(false);
   const canWrite = role !== "viewer";
   const resource = kindToResource[record.kind];
   const data = dataOf(record);
+  // The write schema allows only http(s), but a stored value is rechecked before it becomes a link.
+  const meetingUrl = safeExternalUrl(data.meetingUrl);
   const archive = async () => {
     if (!team) return;
     setBusy(true);
@@ -1729,7 +2015,15 @@ export function RecordDetail({
         {[
           "details",
           ...(record.kind === "candidate"
-            ? ["resumes", "follow-up", "applications"]
+            ? [
+                "resumes",
+                "follow-up",
+                "applications",
+                "tasks",
+                "interviews",
+                "offers",
+                "onboarding",
+              ]
             : record.kind === "vacancy"
               ? ["applications"]
               : []),
@@ -1771,10 +2065,10 @@ export function RecordDetail({
         {tab === "details" && (
           <div className="stack">
             <div className="row detail-actions">
-              {record.kind === "interview" && data.meetingUrl ? (
+              {record.kind === "interview" && meetingUrl ? (
                 <a
                   className="button"
-                  href={String(data.meetingUrl)}
+                  href={meetingUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -1843,6 +2137,16 @@ export function RecordDetail({
                   Add candidate
                 </button>
               )}
+              {record.kind === "vacancy" && record.jobRoleId && (
+                <button
+                  className="button secondary"
+                  disabled={!canWrite || !!record.archivedAt}
+                  onClick={() => setRoleReview(true)}
+                >
+                  <RefreshCw size={16} aria-hidden="true" />
+                  Review changes from role
+                </button>
+              )}
               {record.kind === "job-role" && (
                 <button
                   className="button"
@@ -1852,7 +2156,7 @@ export function RecordDetail({
                       "vacancies",
                       { jobRoleId: record.id },
                       {
-                        ...data,
+                        ...roleSnapshot(data),
                         status: "Draft",
                         openings: 1,
                         requisitionId: "",
@@ -1980,7 +2284,7 @@ export function RecordDetail({
                             "Not recorded"}
                         </div>
                       ) : (
-                        display(data[field.key])
+                        formatField(field, data)
                       )}
                     </dd>
                   </div>
@@ -2058,6 +2362,7 @@ export function RecordDetail({
           "offers",
           "onboarding",
           "checklist",
+          "tasks",
         ].includes(tab) && (
           <RelatedRecords
             resource={tab as ResourceName}
@@ -2073,9 +2378,27 @@ export function RecordDetail({
             }
             focusId={tab === "checklist" ? focusChecklistId : undefined}
             onCreate={onCreate}
+            {...(record.kind === "candidate" &&
+            ["interviews", "offers", "onboarding"].includes(tab)
+              ? {
+                  queryKey: "applicationCandidateId",
+                  addNote:
+                    "Add these from one of the candidate's applications.",
+                }
+              : {})}
           />
         )}
       </div>
+      {roleReview && (
+        <RoleRefresh
+          vacancy={record}
+          onClose={() => setRoleReview(false)}
+          onUpdated={(value) => {
+            setRoleReview(false);
+            onUpdated(value);
+          }}
+        />
+      )}
     </>
   );
   return inline ? (
@@ -2087,6 +2410,143 @@ export function RecordDetail({
         <button className="button secondary" onClick={onClose}>
           Close
         </button>
+      </footer>
+    </Dialog>
+  );
+}
+/** Lists the role facts that now differ from the vacancy; only ticked fields are copied. */
+function RoleRefresh({
+  vacancy,
+  onClose,
+  onUpdated,
+}: {
+  vacancy: RecordDto;
+  onClose: () => void;
+  onUpdated: (record: RecordDto) => void;
+}) {
+  const { team } = useWorkspace();
+  const [current, setCurrent] = useState(vacancy);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const role = useApi<{ data: RecordDto }>(
+    `/api/v1/job-roles/${vacancy.jobRoleId}`,
+  );
+  const differences = role.data
+    ? roleDifferences(dataOf(current), dataOf(role.data.data))
+    : [];
+  const apply = async () => {
+    if (!team || !role.data || saving) return;
+    setSaving(true);
+    setError("");
+    const snapshot = roleSnapshot(dataOf(role.data.data));
+    try {
+      const response = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/vacancies/${current.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            version: current.version,
+            data: Object.fromEntries(
+              selected.map((key) => [
+                key,
+                snapshot[key as keyof typeof snapshot],
+              ]),
+            ),
+          }),
+        },
+      );
+      onUpdated(response.data);
+    } catch (e) {
+      setError(humanError(e));
+      if (e instanceof ClientError && e.status === 409) {
+        // Compare again against the latest vacancy and role.
+        setSelected([]);
+        role.refresh();
+        try {
+          const latest = await requestJson<{ data: RecordDto }>(
+            team.id,
+            `/api/v1/vacancies/${current.id}`,
+          );
+          setCurrent(latest.data);
+        } catch (reload) {
+          setError(humanError(reload));
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      title="Review changes from role"
+      wide
+      onClose={onClose}
+      busy={saving}
+    >
+      <div className="dialog-body stack">
+        {error && (
+          <p className="notice error" role="alert">
+            {error}
+          </p>
+        )}
+        {role.error ? (
+          <LoadError message={role.error} retry={role.refresh} />
+        ) : !role.data ? (
+          <Loading />
+        ) : role.data.data.archivedAt ? (
+          <p className="notice">
+            The source role is archived. Its details can no longer be copied.
+          </p>
+        ) : !differences.length ? (
+          <p className="notice">This vacancy already matches its role.</p>
+        ) : (
+          <fieldset className="editor-fieldset stack" disabled={saving}>
+            <legend>
+              These role details differ from {recordLabel(current)}. Tick the
+              ones to copy into the vacancy; nothing else changes.
+            </legend>
+            {differences.map((item) => (
+              <label className="checkbox-label role-difference" key={item.key}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(item.key)}
+                  onChange={(e) =>
+                    setSelected((old) =>
+                      e.target.checked
+                        ? [...old, item.key]
+                        : old.filter((key) => key !== item.key),
+                    )
+                  }
+                />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>Vacancy now: {display(item.vacancy)}</small>
+                  <small>Role now: {display(item.role)}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+      </div>
+      <footer className="dialog-footer">
+        <button
+          className="button secondary"
+          disabled={saving}
+          onClick={onClose}
+        >
+          Cancel
+        </button>
+        {role.data && !role.data.data.archivedAt && differences.length > 0 && (
+          <button
+            className="button"
+            disabled={saving || !selected.length}
+            onClick={apply}
+          >
+            {saving ? "Applying…" : "Apply selected changes"}
+          </button>
+        )}
       </footer>
     </Dialog>
   );
@@ -2105,6 +2565,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       status: string;
       sourcePath?: string;
       createdAt: string;
+      downloadProtocol: string | null;
     }[];
     pagination: {
       page: number;
@@ -2113,23 +2574,40 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       totalPages: number;
     };
   }>(`/api/v1/candidates/${candidateId}/cvs?page=${page}&pageSize=${pageSize}`);
+  const canUpload = Boolean(team) && role !== "viewer";
+  // Environment-only readiness; a failed check keeps the controls and the server still refuses.
+  const capability = useApi<{ data: { storageConfigured: boolean } }>(
+    canUpload ? "/api/v1/cvs/bulk-capabilities" : null,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const setPage = (next: number) => setPagination({ candidateId, page: next });
-  const download = async (id: string) => {
+  const download = async (cv: {
+    id: string;
+    downloadProtocol: string | null;
+  }) => {
     if (!team) return;
-    setBusy(id);
+    setBusy(cv.id);
     setError("");
     try {
-      const response = await requestJson<{ url: string }>(
-        team.id,
-        `/api/v1/cvs/${id}/download`,
-      );
-      const anchor = document.createElement("a");
-      anchor.href = response.url;
-      anchor.rel = "noopener noreferrer";
-      anchor.target = "_blank";
-      anchor.click();
+      if (cv.downloadProtocol === "s3-url-v1") {
+        const response = await requestJson<{ url: string }>(
+          team.id,
+          `/api/v1/cvs/${cv.id}/download`,
+        );
+        const anchor = document.createElement("a");
+        anchor.href = response.url;
+        anchor.rel = "noopener noreferrer";
+        anchor.target = "_blank";
+        anchor.click();
+      } else if (cv.downloadProtocol === "blob-chunks-v1") {
+        // Bytes and the object URL stay local to this call and never enter React state.
+        const file = await downloadVerifiedCv(team.id, cv.id);
+        saveCvBytes(file.bytes, file.originalName);
+      } else
+        throw new Error(
+          "This CV uses a download method this page does not support. Refresh the page and try again.",
+        );
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -2143,7 +2621,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           CV files & versions
           {result.data && (
             <span className="heading-count">
-              {result.data.pagination.total.toLocaleString()} file records
+              {formatNumber(result.data.pagination.total)} file records
             </span>
           )}
         </h3>
@@ -2188,7 +2666,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
               <button
                 className="button secondary"
                 disabled={cv.status !== "ready" || busy === cv.id}
-                onClick={() => download(cv.id)}
+                onClick={() => download(cv)}
               >
                 <Download size={16} aria-hidden="true" />
                 {busy === cv.id ? "Preparing…" : "Open CV"}
@@ -2217,8 +2695,8 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
         <nav className="pagination" aria-label="CV file pages">
           <span>
             {result.data.data.length > 0
-              ? `Showing ${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, result.data.pagination.total).toLocaleString()} of ${result.data.pagination.total.toLocaleString()} file records`
-              : `0 records on this page · ${result.data.pagination.total.toLocaleString()} total file records`}
+              ? `Showing ${formatNumber((page - 1) * pageSize + 1)}–${formatNumber(Math.min(page * pageSize, result.data.pagination.total))} of ${formatNumber(result.data.pagination.total)} file records`
+              : `0 records on this page · ${formatNumber(result.data.pagination.total)} total file records`}
           </span>
           <div className="row">
             <button
@@ -2243,10 +2721,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           </div>
         </nav>
       )}
-      {team && role !== "viewer" && (
+      {team && canUpload && !capability.loading && (
         <CvUpload
           teamId={team.id}
           candidateId={candidateId}
+          storageConfigured={capability.data?.data.storageConfigured !== false}
           onComplete={() => {
             setPage(1);
             result.refresh();
@@ -2272,6 +2751,7 @@ function CandidateFollowup({ candidateId }: { candidateId: string }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  useUnsavedWork(dirty);
   const current = draft ?? result.data?.data ?? null;
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2387,12 +2867,18 @@ function RelatedRecords({
   resource,
   parentId,
   parentKey,
+  queryKey = parentKey,
+  addNote,
   onCreate,
   focusId,
 }: {
   resource: ResourceName;
   parentId: string;
   parentKey: ReferenceField;
+  /** The list filter naming the parent; defaults to parentKey. */
+  queryKey?: string;
+  /** Shown instead of the Add button, for records that cannot be added from this parent. */
+  addNote?: string;
   focusId?: string;
   onCreate: (
     resource: ResourceName,
@@ -2402,7 +2888,7 @@ function RelatedRecords({
   const { team, role } = useWorkspace();
   const [page, setPage] = useState(1);
   const result = useApi<ListResponse>(
-    `/api/v1/${resource}?${parentKey}=${parentId}&pageSize=100&page=${page}`,
+    `/api/v1/${resource}?${queryKey}=${parentId}&pageSize=100&page=${page}`,
   );
   const [edit, setEdit] = useState<RecordDto | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<RecordDto | null>(null);
@@ -2431,10 +2917,7 @@ function RelatedRecords({
       active = false;
     };
   }, [team, resource, focusId, parentKey, parentId]);
-  const completed =
-    result.data?.data.filter((r) =>
-      ["Complete", "Waived"].includes(String(dataOf(r).status)),
-    ).length || 0;
+  const progress = checklistProgress(result.data?.data || []);
   return (
     <div className="stack">
       {linkedError && (
@@ -2444,31 +2927,39 @@ function RelatedRecords({
       )}
       <div className="row space-between">
         <h3>{RESOURCE_CONFIG[resource].label}</h3>
-        <button
-          className="button secondary"
-          disabled={role === "viewer"}
-          onClick={() => onCreate(resource, { [parentKey]: parentId })}
-        >
-          <Plus size={16} aria-hidden="true" />
-          Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
-        </button>
+        {addNote ? (
+          <p className="muted">{addNote}</p>
+        ) : (
+          <button
+            className="button secondary"
+            disabled={role === "viewer"}
+            onClick={() => onCreate(resource, { [parentKey]: parentId })}
+          >
+            <Plus size={16} aria-hidden="true" />
+            Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
+          </button>
+        )}
       </div>
       {resource === "checklist" &&
-      result.data?.data.length &&
+      result.data &&
       result.data.pagination.total <= 100 ? (
-        <div>
-          <div className="row space-between">
-            <strong>Checklist progress</strong>
-            <span>
-              {completed} / {result.data.data.length}
-            </span>
+        progress.total ? (
+          <div>
+            <div className="row space-between">
+              <strong>Checklist progress</strong>
+              <span>
+                {progress.done} / {progress.total}
+              </span>
+            </div>
+            <progress
+              aria-label="Checklist progress"
+              value={progress.done}
+              max={progress.total}
+            />
           </div>
-          <progress
-            aria-label="Checklist progress"
-            value={completed}
-            max={result.data.data.length}
-          />
-        </div>
+        ) : (
+          <p className="muted">Checklist not configured</p>
+        )
       ) : null}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />
@@ -2484,15 +2975,37 @@ function RelatedRecords({
             >
               <span>
                 <strong>{recordLabel(record)}</strong>
-                <small>
-                  {String(dataOf(record).stage || dataOf(record).status || "")}{" "}
-                  ·{" "}
-                  {formatDate(
-                    dataOf(record).dueDate ||
-                      dataOf(record).startAt ||
-                      record.createdAt,
+                {queryKey === "applicationCandidateId" &&
+                  (resource === "interviews" || resource === "offers") && (
+                    <small>
+                      For{" "}
+                      <ReferenceLabel
+                        resource="applications"
+                        id={record.applicationId}
+                        plain
+                      />
+                    </small>
                   )}
-                </small>
+                {resource === "tasks" ? (
+                  <small>
+                    {String(dataOf(record).priority)} ·{" "}
+                    {dataOf(record).dueDate
+                      ? `Due ${formatDate(dataOf(record).dueDate)}`
+                      : "No due date"}
+                  </small>
+                ) : (
+                  <small>
+                    {String(
+                      dataOf(record).stage || dataOf(record).status || "",
+                    )}{" "}
+                    ·{" "}
+                    {formatDate(
+                      dataOf(record).dueDate ||
+                        dataOf(record).startAt ||
+                        record.createdAt,
+                    )}
+                  </small>
+                )}
               </span>
               <ArrowUpRight size={17} aria-hidden="true" />
             </button>
@@ -2563,6 +3076,7 @@ function Discussion({ recordId }: { recordId: string }) {
   const [body, setBody] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(body !== "");
   const key = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2604,10 +3118,7 @@ function Discussion({ recordId }: { recordId: string }) {
       {result.data?.data.map((comment) => (
         <article className="comment" key={comment.id}>
           <header>
-            <strong>
-              {String(dataOf(comment).legacyAuthorLabel || comment.createdBy)}
-              {dataOf(comment).legacyAuthorLabel ? " · imported label" : ""}
-            </strong>
+            <strong>{commentAuthor(comment)}</strong>
             <time>{formatDate(comment.createdAt, true)}</time>
           </header>
           <p className="pre-wrap">{String(dataOf(comment).body)}</p>
@@ -2657,7 +3168,7 @@ function BulkAssign({
 }: {
   candidateIds: string[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (counts: { created: number; skipped: number }) => void;
 }) {
   const { team } = useWorkspace();
   const [vacancy, setVacancy] = useState("");
@@ -2665,22 +3176,34 @@ function BulkAssign({
   const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const idempotency = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!team || saving) return;
     setSaving(true);
     setError("");
     try {
-      await requestJson(team.id, "/api/v1/applications/bulk", {
-        method: "POST",
-        body: JSON.stringify({
-          candidateIds,
-          vacancyId: vacancy,
-          stage,
-          owner,
-        }),
+      const serialized = JSON.stringify({
+        candidateIds,
+        vacancyId: vacancy,
+        stage,
+        owner,
       });
-      onSaved();
+      let key = idempotency.current.get(serialized);
+      if (!key) {
+        key = crypto.randomUUID();
+        idempotency.current.set(serialized, key);
+      }
+      const response = await requestJson<{ created: number; skipped: number }>(
+        team.id,
+        "/api/v1/applications/bulk",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: serialized,
+        },
+      );
+      onSaved({ created: response.created, skipped: response.skipped });
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -2801,7 +3324,7 @@ function WorkflowSettings({ onClose }: { onClose: () => void }) {
                     ? "Archived"
                     : tab === "task-fields"
                       ? `${dataOf(record).type}${dataOf(record).required ? " · Required" : ""}`
-                      : `Position ${dataOf(record).position}`}
+                      : `Position ${dataOf(record).position}${dataOf(record).completed ? " · Counts as completed" : ""}`}
                 </small>
               </span>
               <div className="row">

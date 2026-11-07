@@ -9,7 +9,7 @@ const MAX_SLICE_BYTES = 4 * 1024 * 1024;
 export async function assembleVerifiedBlobChunks(
   reference: BlobReference,
   chunks: AsyncIterable<BlobChunk>,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   // Snapshot the trusted reference before an asynchronous producer can mutate it.
   const uploadId = reference?.uploadId;
   const sha256 = reference?.sha256;

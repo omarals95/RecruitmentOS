@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useState, type FormEvent } from "react";
 import { Laptop, LockKeyhole, RefreshCw, UserRound } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { humanError, useWorkspace } from "@/components/workspace/client";
+import { formatDate } from "@/components/workspace/helpers";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { SettingsNavigation } from "./settings-navigation";
 
 interface SessionItem {
@@ -21,11 +23,14 @@ function ensure(result: { error?: { message?: string } | null }) {
       result.error.message || "The action could not be completed.",
     );
 }
-const date = (value: string | Date) =>
-  new Date(value).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+/** Listing devices needs a recent sign-in; that refusal is explained inline, not as a failure. */
+export function deviceListMessage(
+  error?: { code?: string; status?: number } | null,
+) {
+  return error?.code === "SESSION_NOT_FRESH"
+    ? "For your security, the device list needs a recent sign-in. Sign out and sign in again to view your devices."
+    : null;
+}
 
 export function ProfileSettings({
   providers,
@@ -39,16 +44,28 @@ export function ProfileSettings({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [currentSession, setCurrentSession] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [devices, setDevices] = useState<"hidden" | "loading" | "shown">(
+    "hidden",
+  );
+  const [devicesMessage, setDevicesMessage] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const { confirm, dialog } = useConfirm();
   const load = useCallback(async () => {
+    setDevices("loading");
+    setDevicesMessage("");
     try {
       const results = await Promise.all([
         authClient.listSessions(),
         authClient.getSession(),
       ]);
+      const message = deviceListMessage(results[0].error);
+      if (message) {
+        setSessions([]);
+        setDevicesMessage(message);
+        return;
+      }
       ensure(results[0]);
       ensure(results[1]);
       setSessions((results[0].data as SessionItem[]) ?? []);
@@ -56,29 +73,8 @@ export function ProfileSettings({
     } catch (e) {
       setError(humanError(e));
     } finally {
-      setLoading(false);
+      setDevices("shown");
     }
-  }, []);
-  useEffect(() => {
-    let active = true;
-    Promise.all([authClient.listSessions(), authClient.getSession()])
-      .then((results) => {
-        ensure(results[0]);
-        ensure(results[1]);
-        if (active) {
-          setSessions((results[0].data as SessionItem[]) ?? []);
-          setCurrentSession(results[1].data?.session.id ?? "");
-        }
-      })
-      .catch((e) => {
-        if (active) setError(humanError(e));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
   }, []);
   async function action(
     key: string,
@@ -128,7 +124,7 @@ export function ProfileSettings({
         setCurrentPassword("");
         setNewPassword("");
         setConfirmPassword("");
-        await load();
+        if (devices === "shown") await load();
       },
       "Password changed. Other sessions have been signed out.",
     );
@@ -136,7 +132,12 @@ export function ProfileSettings({
   async function revokeSession(session: SessionItem) {
     if (
       session.id === currentSession ||
-      !window.confirm("Sign out this device?")
+      !(await confirm({
+        title: "Sign out device?",
+        message: "Sign out this device?",
+        confirmLabel: "Sign out device",
+        destructive: true,
+      }))
     )
       return;
     await action(
@@ -301,21 +302,33 @@ export function ProfileSettings({
             </h2>
             <p className="muted">Only sessions for your account appear here.</p>
           </div>
+          {devices !== "hidden" && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!!busy || devices === "loading"}
+              onClick={() => void load()}
+            >
+              <RefreshCw size={16} aria-hidden="true" />
+              Refresh
+            </button>
+          )}
+        </div>
+        {devices === "hidden" ? (
           <button
             className="button secondary"
             type="button"
-            disabled={!!busy || loading}
-            onClick={() => {
-              setLoading(true);
-              void load();
-            }}
+            disabled={!!busy}
+            onClick={() => void load()}
           >
-            <RefreshCw size={16} aria-hidden="true" />
-            Refresh
+            Show signed-in devices
           </button>
-        </div>
-        {loading ? (
+        ) : devices === "loading" ? (
           <p role="status">Loading devices…</p>
+        ) : devicesMessage ? (
+          <p className="muted" role="status">
+            {devicesMessage}
+          </p>
         ) : sessions.length === 0 ? (
           <p className="muted">No active device sessions were returned.</p>
         ) : (
@@ -358,8 +371,8 @@ export function ProfileSettings({
                         </>
                       )}
                     </td>
-                    <td>{date(session.createdAt)}</td>
-                    <td>{date(session.expiresAt)}</td>
+                    <td>{formatDate(session.createdAt, true)}</td>
+                    <td>{formatDate(session.expiresAt, true)}</td>
                     <td>
                       {session.id !== currentSession && (
                         <button
@@ -389,7 +402,7 @@ export function ProfileSettings({
                 async () => {
                   const result = await authClient.revokeOtherSessions();
                   ensure(result);
-                  await load();
+                  if (devices === "shown") await load();
                 },
                 "All other devices signed out.",
               )
@@ -417,6 +430,7 @@ export function ProfileSettings({
           </button>
         </div>
       </section>
+      {dialog}
     </div>
   );
 }

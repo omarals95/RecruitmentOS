@@ -17,6 +17,7 @@
     "db:seed": "tsx scripts/seed-local.ts",
     "import:legacy": "tsx scripts/import-legacy.ts",
     "test:local": "tsx scripts/smoke-local.ts",
+    "test:live-roles": "tsx scripts/live-role-tests.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
@@ -28,6 +29,8 @@
     "@better-auth/core": "1.7.15",
     "@better-auth/drizzle-adapter": "1.7.15",
     "@electric-sql/pglite": "0.5.14",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@vercel/blob": "2.8.2",
     "@vercel/functions": "3.10.5",
     "@vercel/oidc": "4.0.5",
     "better-auth": "1.7.15",

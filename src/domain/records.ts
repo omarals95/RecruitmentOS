@@ -25,6 +25,16 @@ export const TASK_FIELD_TYPES = [
   "Checkbox",
 ] as const;
 export type ApplicationStage = (typeof APPLICATION_STAGES)[number];
+/** Source review states; "Needs review" until someone checks the source facts. */
+export const REVIEW_STATUSES = ["Needs review", "Reviewed"] as const;
+/** Legacy free text: the reviewed words map to "Reviewed", anything else needs review. */
+export function reviewStatusValue(
+  value: string,
+): (typeof REVIEW_STATUSES)[number] {
+  return /^(verified|reviewed|complete|completed)$/i.test(value.trim())
+    ? "Reviewed"
+    : "Needs review";
+}
 export const uuidSchema = z.uuid();
 const text = (max = 200) => z.string().trim().max(max).default("");
 const requiredText = (max = 200) => z.string().trim().min(1).max(max);
@@ -90,12 +100,16 @@ const savedQuery = z
     category: text(),
     categories: z.array(requiredText()).max(100).optional(),
     skills: z.array(requiredText()).max(100).optional(),
+    certifications: z.array(requiredText()).max(100).optional(),
     emirate: text(),
     degreeLevel: text(),
+    education: text(300),
+    minYearsExperience: z.number().min(0).max(100).optional(),
+    maxYearsExperience: z.number().min(0).max(100).optional(),
     status: text(),
     stage: z.enum(APPLICATION_STAGES).optional(),
     vacancyId: uuidSchema.optional(),
-    reviewStatus: text(),
+    reviewStatus: z.union([z.enum(REVIEW_STATUSES), z.literal("")]).default(""),
     shortlisted: z.boolean().optional(),
     needsReview: z.boolean().optional(),
     includeArchived: z.boolean().optional(),
@@ -106,6 +120,19 @@ const savedQuery = z
     pageSize: z.number().int().min(1).max(100).optional(),
   })
   .strict();
+
+/** Optional candidate fields about sensitive traits; MCP tools never return or search them. */
+export const SENSITIVE_CANDIDATE_FIELDS = [
+  "explicitGender",
+  "nationalServiceStatus",
+] as const;
+
+/** Most possible-duplicate matches one contact lookup returns. */
+export const CANDIDATE_DUPLICATE_LIMIT = 20;
+/** Most CV files one bulk import batch can hold. */
+export const BULK_INTAKE_MAX_FILES = 200;
+/** Hours a bulk import batch's recovery rows stay readable, counted from its creation. */
+export const BULK_INTAKE_RECOVERY_HOURS = 24;
 
 export const recordDataSchemas = {
   candidate: z
@@ -140,7 +167,7 @@ export const recordDataSchemas = {
       roleStatus: text(300),
       experienceBasis: text(1000),
       experienceWording: text(2000),
-      reviewStatus: text(300),
+      reviewStatus: z.enum(REVIEW_STATUSES).default("Needs review"),
       sourceNotes: notes(),
       rawSource: jsonObject.default({}),
       evidence: z.array(jsonObject).max(1000).default([]),
@@ -196,6 +223,7 @@ export const recordDataSchemas = {
         .regex(/^#[0-9a-fA-F]{6}$/)
         .default("#4338CA"),
       position: z.number().int().min(0).max(10000).default(0),
+      completed: z.boolean().default(false),
     })
     .strict(),
   "task-field": z
@@ -358,6 +386,7 @@ export interface RecordDto<
   privateOwnerId: string | null;
   importMeta?: Record<string, unknown>;
   label?: string;
+  authorName?: string | null;
 }
 export const referencesByKind: Record<
   RecordKind,
@@ -500,6 +529,18 @@ export function factualText(value: unknown): string {
     return Object.values(value).map(factualText).join(" ");
   return String(value).toLocaleLowerCase();
 }
+/** An absolute http(s) URL to link to, or null; stored values stay untrusted when rendered. */
+export function safeExternalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 export function matchesSearch(value: unknown, query: string): boolean {
   const haystack = factualText(value);
   return searchTerms(query).every((term) =>
@@ -550,6 +591,7 @@ const labels: Record<RecordKind, [string, string]> = {
 };
 const enumOptions: Record<string, readonly string[]> = {
   "application.stage": APPLICATION_STAGES,
+  "candidate.reviewStatus": REVIEW_STATUSES,
   "vacancy.status": ["Draft", "Open", "On hold", "Filled", "Closed"],
   "task-field.type": TASK_FIELD_TYPES,
   "task.priority": ["Low", "Normal", "High", "Urgent"],
@@ -582,6 +624,7 @@ const fieldLabels: Record<string, string> = {
   customValues: "Custom task values",
   meetingUrl: "Meeting URL",
   privateOwnerId: "Owner",
+  completed: "Counts as completed",
 };
 export const RESOURCE_CONFIG = Object.fromEntries(
   Object.entries(resourceToKind).map(([resource, kind]) => [
@@ -610,7 +653,7 @@ export const RESOURCE_CONFIG = Object.fromEntries(
                   "customValues",
                 ].includes(key)
               ? "json"
-              : ["required"].includes(key)
+              : ["required", "completed"].includes(key)
                 ? "checkbox"
                 : [
                       "yearsExperience",

@@ -1,5 +1,47 @@
 # Validation before deployment
 
+## Update: private Vercel Blob CV storage enablement (P1-15a)
+
+**Owner's live run.** On 7 November 2026 the owner ran `scripts/blob-live-verify.ts` against the Preview Blob store; agents did not run it. Results:
+
+- PASS headers.
+- PASS no-overwrite.
+- PASS replay.
+- PASS oversized single PUT refused.
+- PASS PUT started after expiry refused.
+- PASS deleted object reads missing.
+- PASS cleanup.
+- OBSERVED a PUT started before expiry and finished after it was refused (no object).
+- FAIL a wrong content type was accepted by the provider.
+- FAIL multipart with the PUT ticket bypassed the size limit (oversized parts and completion accepted; uncompleted parts cannot be listed).
+- OBSERVED retrying a still-valid ticket after deletion recreated the object.
+
+Mitigations ([blob-security-design.md](blob-security-design.md#live-provider-verification)): completion checks size and type with `head` and never trusts the provider, Blob reservations last 15 minutes with tickets still capped at 300 s, and rejected or abandoned objects are deleted only 10 minutes after their reservation expired, with the retained charge freed only once `head` confirms the object missing. Residual risk: multipart with a valid PUT ticket can bypass the size limit, and uncompleted parts cannot be listed or deleted by the application, so store usage can exceed the ledger until the provider discards them; limits and budgets are application limits, not hard provider or billing caps.
+
+**Supersedes older entries.** From this update, Blob is the hosted CV storage provider in code; the statements in the older entries below that Blob CV storage is disabled or remains disabled are history and no longer describe the code.
+
+**Local validation.** On 7 November 2026, with Node v24.20.0, the local revision passed `npm run typecheck`, `npm run lint`, `npm test` (886 Vitest tests in 71 files), `npm run test:storage` (57 native storage tests), `npm run build`, Prettier repo-wide (`npx prettier --check . --end-of-line auto`) and `npm audit --audit-level=moderate` (0 vulnerabilities); `tests/runtime-role-grants.test.ts` passed 64 tests on its own. No dependency was added. Migration `0018_blob_storage_enablement.sql` applied to the worktree's PGlite: `db_boundary.storage_schema` reads 3 and `storage_ledger.budgets` still holds 600,000,000 / 2,000 (Production) and 200,000,000 / 500 (Preview and development). On the dev server, signed in with the fictional seed owner, the Team & access **CV storage** panel showed usage, both toggles and Save; 0.5 GB and 100 files saved with "CV storage settings saved.", showed again after a reload, and Activity on Overview listed "Updated CV storage settings".
+
+New and changed tests: `tests/storage.test.ts` (provider selection, OIDC refusals), `tests/blob-client-contract.test.ts` (OIDC mode; head, delete and list for the fake and the real client), `tests/csp.test.ts`, `tests/cv-blob-transfer.test.ts` (oversized and wrong-type rejection without a read, 15-minute reservations), `tests/blob-reconciliation.test.ts` (post-expiry ordering, list pass, caps, counts only, server trigger, endpoint), `tests/team-storage-settings.test.ts` (settings, validation, audit, 429, helper boundary), `tests/tenant-context.test.ts` (helpers under the split data role), `tests/settings-ui.test.tsx`, and the 200-file batch cases in `tests/bulk-intake.test.ts`, `tests/bulk-cv-queue.test.ts` and `tests/workspace-render.test.tsx`.
+
+No remote service was contacted: tests use the fake Blob client, a stub provider and PGlite with fictional data only, and no agent ran the live script. Hosted Preview switch-on waits for the owner: the environment settings in [deployment §5](deployment.md#5-cv-storage), migration `0018` and the role template rerun.
+
+## Update: documentation and configuration reconciliation (WP-15)
+
+On 7 November 2026, the local revision passed TypeScript, ESLint on the changed component, Prettier on the changed files and repo-wide (`npx prettier --check . --end-of-line auto`), a production build, 829 Vitest tests in 69 files and 55 native storage tests; `tests/runtime-role-grants.test.ts` passed 64 tests on its own. The change is documentation, one role-template comment, one sentence of API-token page copy and one CI step, which now runs `npm run format:check`. The runbooks, the Preview change plan and the identity plan now record the Preview evidence and the precise hosted startup checks, the BRD, SRS and brief carry dated status notes, and [neon-database-runbook.md](neon-database-runbook.md#run-the-migration-against-a-neon-database) documents how to migrate a hosted database without `npm run db:migrate`. That procedure was checked locally only: run from a temporary directory holding only `drizzle/`, against a fictional closed loopback port, `scripts/migrate.ts` skipped PGlite and printed its generic connection failure (exit 1), while `npm run db:migrate` from the checkout migrated local PGlite and printed `Local PostgreSQL migrations applied.` although `MIGRATION_DATABASE_URL` was set. No hosted database or other remote service was contacted.
+
+## Update: accessibility and responsive checks (WP-08)
+
+On 7 November 2026, the local revision passed TypeScript, ESLint, Prettier on the changed files, a production build, 829 Vitest tests in 69 files and 55 native storage tests. It names the calendar "+N more" button with its day and makes it 24 px tall, gives the phone search button a name at every width, takes the closed phone menu out of the tab order, removes the `opacity` that left outside-month days and cancelled interviews under 4.5:1, and stops visually hidden text in the board and tables from widening the page. `tests/workspace-ui.test.ts` and `tests/workspace-render.test.tsx` cover each fix, and each new test failed when its fix was reverted. A keyboard-only walkthrough in Chromium through `agent-browser` on the local development server, at 360×740, 640×800 (standing in for 200% zoom) and 1280×800 in light and dark, with the fictional seed account and fictional records in local PGlite, is recorded with its known gaps in [accessibility-checklist.md](accessibility-checklist.md). No screen reader, other browser or automated accessibility lint was run, D-13 is undecided, and no WCAG conformance is claimed.
+
+## Update: MCP endpoint for AI assistants (WP-16)
+
+On 5 November 2026, the local revision passed TypeScript, ESLint, Prettier on the changed files, a production build, 575 Vitest tests in 50 files, 55 native storage tests and `npm audit --audit-level=moderate` (0 vulnerabilities). It adds `POST /api/mcp` ([mcp.md](mcp.md)) with the pinned `@modelcontextprotocol/sdk` 1.32.2, a minimal OAuth 2.1 server and migration `0010_mcp_oauth.sql`. `tests/mcp-endpoint.test.ts` (19 tests) runs the real route against PGlite under a nonowner RLS role and the split data role: Bearer-only access, the guess budget and per-token limit, team binding, scope and current-role checks per tool, field filtering, caps, Asia/Dubai times, idempotent writes, prompt-injection text treated as data, and the `mcp-tool` audit rows that the data role cannot forge. `tests/mcp-oauth.test.ts` (10 tests) covers readiness, metadata, registration, consent, exact redirect matching, PKCE, code expiry and reuse, audience binding, lifetimes, refresh rotation and Settings revocation. A browser check on the local development server signed in with the fictional seed account, approved a fictional client on the consent page, redeemed the code, called the tools and revoked the connection in Settings. Live Claude.ai and Claude Code connections, and migration `0010` and the role template on Preview, are not verified.
+
+## Update: signed tenant context
+
+On 4 November 2026, the local revision passed TypeScript, ESLint, formatting of the changed files, a production build, 205 Vitest tests in 32 files and 52 native storage tests. Migration `0006_trusted_tenant_context.sql` replaces the GUC tenant policies with a signed per-transaction context, token create/revoke now audits in one identity-role transaction, and activity names come from a context-checked accessor. The five research tests and four SQL fixtures were removed, and their relevant cases were moved into `tests/tenant-context.test.ts`. That file and the rewritten role-boundary tests run the real migrations under synthetic split roles: a nonsuperuser, non-BYPASSRLS owner and separate data and identity roles that cannot assume each other. This is PGlite-only evidence on one connection. It does not establish live Neon privileges, concurrent revocation, pooler behaviour or lock contention, and the design has not been independently reviewed. The hosted `tenant_isolation_pending` guard remains closed.
+
 ## Update: staged connection and workflow review
 
 On 3 November 2026, the local staged revision passed TypeScript, ESLint, formatting, 196 Vitest tests and 46 native storage tests; one synthetic Windows junction test was skipped. The paired-pool connection checks now reject unsupported URI options and unexpected startup options, normalize ports, and check the inspected login and effective roles. They do not establish safe state on every future pool checkout, and the legacy single-pool development path does not have the same checks. Token/audit and activity-name integration remain unfinished. The activity accessor experiments use synthetic data and are not deployed. No live Neon connection, migration, production policy change or Blob-provider verification was performed.

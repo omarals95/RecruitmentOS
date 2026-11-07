@@ -957,6 +957,9 @@ input[type="color"] {
 .filter-reference select {
   min-height: 38px;
 }
+.filters-toggle {
+  display: none;
+}
 .directory-note {
   display: flex;
   align-items: center;
@@ -975,6 +978,7 @@ input[type="color"] {
   margin-left: 6px;
 }
 .table-wrap {
+  position: relative;
   overflow: auto;
   width: 100%;
   overscroll-behavior-x: contain;
@@ -1418,6 +1422,18 @@ input[type="color"] {
 .related-item:hover {
   color: var(--primary-text);
 }
+.role-difference {
+  align-items: flex-start;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.role-difference small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .comment {
   padding: 16px;
   border: 1px solid var(--border);
@@ -1472,6 +1488,7 @@ input[type="color"] {
 }
 /* Boards */
 .kanban {
+  position: relative;
   display: flex;
   gap: 18px;
   padding: 24px;
@@ -2063,7 +2080,6 @@ progress::-moz-progress-bar {
 }
 .calendar-day.outside-month .calendar-day-number {
   color: var(--muted);
-  opacity: 0.6;
 }
 .calendar-event {
   display: flex;
@@ -2089,7 +2105,6 @@ progress::-moz-progress-bar {
   text-overflow: ellipsis;
 }
 .calendar-event.cancelled {
-  opacity: 0.55;
   text-decoration: line-through;
 }
 .calendar-more {
@@ -2098,6 +2113,7 @@ progress::-moz-progress-bar {
   background: transparent;
   text-align: left;
   padding: 4px;
+  min-height: 24px;
 }
 .week-view .calendar-day {
   min-height: 350px;
@@ -2188,17 +2204,6 @@ progress::-moz-progress-bar {
   height: 1px;
   background: var(--border);
   flex: 1;
-}
-.settings-nav {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.settings-nav a {
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
 }
 /* Public homepage */
 .landing {
@@ -3162,8 +3167,16 @@ progress::-moz-progress-bar {
     width: 245px;
     transition: transform 0.2s ease;
   }
+  /* Closed: out of the tab order and the accessibility tree once the slide ends. */
+  .workspace-sidebar:not(.is-open) {
+    visibility: hidden;
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+  }
   .workspace-sidebar.is-open {
     transform: translateX(0);
+    visibility: visible;
   }
   .workspace-body {
     margin-left: 0;
@@ -3286,6 +3299,60 @@ progress::-moz-progress-bar {
   }
   .filter-bar .text-link {
     font-size: 11px;
+  }
+  .filters-toggle {
+    display: inline-flex;
+  }
+  .filter-bar:not(.is-open) {
+    display: none;
+  }
+  /* Phone tables become one labelled card per record, without sideways scrolling. */
+  .records-panel .table-wrap {
+    overflow: visible;
+  }
+  .records-panel .data-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .records-panel .data-table,
+  .records-panel .data-table tr {
+    display: block;
+  }
+  .records-panel .data-table tbody {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+  }
+  .records-panel .data-table tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+  }
+  .records-panel .data-table td,
+  .records-panel .data-table td:first-child,
+  .records-panel .data-table td:last-child,
+  .records-panel .data-table tr > td:has(input[type="checkbox"]) {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    width: auto;
+    padding: 6px 0;
+    border-bottom: 0;
+  }
+  .records-panel .data-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .records-panel .table-record-button {
+    min-width: 0;
+    max-width: none;
   }
   .record-card-grid {
     padding: 16px;

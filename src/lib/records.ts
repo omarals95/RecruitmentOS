@@ -18,6 +18,8 @@ import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
 import {
+  CANDIDATE_DUPLICATE_LIMIT,
+  REVIEW_STATUSES,
   bulkApplicationsSchema,
   candidateStateSchema,
   createRecordSchemas,
@@ -35,6 +37,7 @@ import {
   type RecordReferences,
   type ResourceName,
 } from "@/domain/records";
+import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
 
 type DbRecord = typeof records.$inferSelect;
 type Data = Record<string, unknown>;
@@ -121,6 +124,34 @@ async function decorate(
   p: Principal,
   rows: RecordDto[],
 ): Promise<RecordDto[]> {
+  const commentIds = rows
+    .filter((row) => row.kind === "comment")
+    .map((row) => row.id);
+  if (commentIds.length) {
+    // The accessor names only readable events; imported comments have no 'created' event.
+    const authors = await tx
+      .select({
+        recordId: activity.recordId,
+        name: sql<
+          string | null
+        >`tenant_context.activity_actor_name(${activity.id})`,
+      })
+      .from(activity)
+      .where(
+        and(
+          eq(activity.teamId, p.teamId),
+          eq(activity.kind, "comment"),
+          eq(activity.action, "created"),
+          inArray(activity.recordId, commentIds),
+        ),
+      );
+    const names = new Map(authors.map((row) => [row.recordId, row.name]));
+    rows = rows.map((row) =>
+      row.kind === "comment"
+        ? { ...row, authorName: names.get(row.id) ?? null }
+        : row,
+    );
+  }
   if (
     !p.scopes.includes("recruitment:read") ||
     !rows.some((row) => ["application", "onboarding"].includes(row.kind))
@@ -243,7 +274,7 @@ async function find(
     throw new ApiError(404, "not_found", "Record not found in this team.");
   return rows[0];
 }
-async function lockTeam(tx: TeamTx, p: Principal) {
+export async function lockTeam(tx: TeamTx, p: Principal) {
   // A transaction-scoped lock also serializes empty-set and cross-record invariants.
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`recruitment-records:${p.teamId}`}, 0))`,
@@ -558,6 +589,11 @@ function canonical(value: unknown): string {
     .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
     .join(",")}}`;
 }
+/**
+ * Keys are never reused for different content, even after expiry. An expired
+ * same-payload retry runs `reconcile` (or `work` when it cannot duplicate) and
+ * renews the stored result in place.
+ */
 async function idempotent<T>(
   tx: TeamTx,
   p: Principal,
@@ -565,6 +601,7 @@ async function idempotent<T>(
   key: string | undefined,
   payload: unknown,
   work: () => Promise<T>,
+  reconcile?: (previous: unknown) => Promise<T>,
 ): Promise<T> {
   if (!key) return work();
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key))
@@ -584,16 +621,26 @@ async function idempotent<T>(
     eq(idempotency.key, key),
   );
   const [previous] = await tx.select().from(idempotency).where(where).limit(1);
-  if (previous && previous.expiresAt > new Date()) {
+  if (previous) {
     if (previous.payloadHash !== payloadHash)
       throw new ApiError(
         409,
         "idempotency_mismatch",
         "This Idempotency-Key was used with different content.",
       );
-    return previous.response as T;
+    if (previous.expiresAt > new Date()) return previous.response as T;
+    const result = reconcile
+      ? await reconcile(previous.response)
+      : await work();
+    await tx
+      .update(idempotency)
+      .set({
+        response: result,
+        expiresAt: new Date(Date.now() + 7 * 86400000),
+      })
+      .where(where);
+    return result;
   }
-  if (previous) await tx.delete(idempotency).where(where);
   const result = await work();
   await tx.insert(idempotency).values({
     teamId: p.teamId,
@@ -634,6 +681,28 @@ export async function getRecord(
   );
 }
 
+/** Kind and archive state of a record the caller can see in its team, for checks before a write. */
+export async function recordKindOf(
+  p: Principal,
+  recordId: string,
+): Promise<{ kind: RecordKind; archived: boolean }> {
+  id(recordId);
+  return withTeam(p, async (tx) => {
+    const [row] = await tx
+      .select({
+        kind: records.kind,
+        privateOwnerId: records.privateOwnerId,
+        archivedAt: records.archivedAt,
+      })
+      .from(records)
+      .where(and(eq(records.teamId, p.teamId), eq(records.id, recordId)))
+      .limit(1);
+    if (!row || (row.kind === "saved-view" && row.privateOwnerId !== p.userId))
+      throw new ApiError(404, "not_found", "Record not found in this team.");
+    return { kind: row.kind as RecordKind, archived: !!row.archivedAt };
+  });
+}
+
 export const candidateDuplicateQuerySchema = z
   .object({
     email: z.string().trim().max(320).optional(),
@@ -650,6 +719,18 @@ export const candidateDuplicateQuerySchema = z
 export async function findCandidateDuplicates(p: Principal, input: unknown) {
   permission(p, "candidates");
   const query = parse(candidateDuplicateQuerySchema, input);
+  return withTeam(p, (tx) => matchCandidateContacts(tx, p, query));
+}
+
+/**
+ * The contact match behind findCandidateDuplicates, inside the caller's transaction: lower-cased
+ * email or digits-only phone of at least seven digits. Without either it matches nothing.
+ */
+export async function matchCandidateContacts(
+  tx: TeamTx,
+  p: Principal,
+  query: { email?: string; phone?: string },
+) {
   const email = query.email?.toLowerCase() || "";
   const phone = (query.phone || "").replace(/\D/g, "");
   const predicates: SQL[] = [];
@@ -659,89 +740,104 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
     predicates.push(
       sql`regexp_replace(coalesce(${records.data}->>'phone', ''), '[^0-9]', '', 'g') = ${phone}`,
     );
-  return withTeam(p, async (tx) => {
-    const rows = await tx
-      .select({ id: records.id, data: records.data })
-      .from(records)
-      .where(and(...owned(p, "candidate"), or(...predicates)))
-      .orderBy(asc(records.id))
-      .limit(20);
-    return rows.map((row) => {
-      const storedEmail =
-        typeof row.data.email === "string" ? row.data.email : "";
-      const storedPhone =
-        typeof row.data.phone === "string" ? row.data.phone : "";
-      return {
-        id: row.id,
-        name: typeof row.data.name === "string" ? row.data.name : "",
-        email: storedEmail,
-        phone: storedPhone,
-        matches: [
-          ...(email && storedEmail.trim().toLowerCase() === email
-            ? ["email"]
-            : []),
-          ...(phone.length >= 7 && storedPhone.replace(/\D/g, "") === phone
-            ? ["phone"]
-            : []),
-        ],
-      };
-    });
+  if (!predicates.length) return { data: [], limited: false };
+  const rows = await tx
+    .select({ id: records.id, data: records.data })
+    .from(records)
+    .where(and(...owned(p, "candidate"), or(...predicates)))
+    .orderBy(asc(records.id))
+    .limit(CANDIDATE_DUPLICATE_LIMIT + 1);
+  const data = rows.slice(0, CANDIDATE_DUPLICATE_LIMIT).map((row) => {
+    const storedEmail =
+      typeof row.data.email === "string" ? row.data.email : "";
+    const storedPhone =
+      typeof row.data.phone === "string" ? row.data.phone : "";
+    return {
+      id: row.id,
+      name: typeof row.data.name === "string" ? row.data.name : "",
+      email: storedEmail,
+      phone: storedPhone,
+      matches: [
+        ...(email && storedEmail.trim().toLowerCase() === email
+          ? ["email"]
+          : []),
+        ...(phone.length >= 7 && storedPhone.replace(/\D/g, "") === phone
+          ? ["phone"]
+          : []),
+      ],
+    };
   });
+  return { data, limited: rows.length > CANDIDATE_DUPLICATE_LIMIT };
 }
 
-export async function listRecords(
+/** Every list query key; an export takes the filter keys plus sort and direction. */
+const LIST_QUERY_KEYS = [
+  "page",
+  "pageSize",
+  "search",
+  "includeArchived",
+  "archived",
+  "legacyId",
+  "sort",
+  "direction",
+  "shortlisted",
+  "needsReview",
+  "categories",
+  "skills",
+  "certifications",
+  "education",
+  "minYearsExperience",
+  "maxYearsExperience",
+  "startFrom",
+  "startTo",
+  ...referenceFields,
+  "applicationCandidateId",
+  "status",
+  "stage",
+  "department",
+  "residenceEmirate",
+  "folderCategory",
+  "owner",
+  "priority",
+  "type",
+  "category",
+  "reviewStatus",
+  "degreeLevel",
+  "employmentType",
+  "workMode",
+  "area",
+] as const;
+/** Keep in step with the key list in tenant_context.audit_export (drizzle/0013_export_audit.sql). */
+export const EXPORT_FILTER_KEYS: readonly string[] = LIST_QUERY_KEYS.filter(
+  (key) => !["page", "pageSize", "sort", "direction"].includes(key),
+);
+/**
+ * Filters on the exporter's own private state, left out of the team-visible export audit so it
+ * never shows that someone filtered by them: `shortlisted` is always the caller's personal
+ * shortlist, and on candidates `status` is the caller's personal follow-up status. They still
+ * filter the rows; on every other resource `status` is a shared field and stays audited.
+ */
+export const PRIVATE_EXPORT_FILTER_KEYS: Readonly<
+  Record<"all" | "candidates", readonly string[]>
+> = { all: ["shortlisted"], candidates: ["shortlisted", "status"] };
+/** Most rows one export may hold; a larger match is refused, never cut short. */
+export const EXPORT_LIMIT = 100000;
+
+/** Validates a list or export query and builds its filter and order, so both share one filter SQL. */
+function recordQuery(
   p: Principal,
-  resource: ResourceName,
+  kind: RecordKind,
   query: URLSearchParams,
+  allowed: readonly string[],
+  options: { omitFromSearch?: readonly string[] } = {},
 ) {
-  const kind = kindOf(resource);
-  permission(p, resource);
-  const validKeys = new Set([
-    "page",
-    "pageSize",
-    "search",
-    "includeArchived",
-    "archived",
-    "legacyId",
-    "sort",
-    "direction",
-    "shortlisted",
-    "needsReview",
-    "categories",
-    "skills",
-    "startFrom",
-    "startTo",
-    ...referenceFields,
-    "status",
-    "stage",
-    "department",
-    "residenceEmirate",
-    "folderCategory",
-    "owner",
-    "priority",
-    "type",
-    "category",
-    "reviewStatus",
-    "degreeLevel",
-    "employmentType",
-    "workMode",
-    "area",
-  ]);
   for (const key of query.keys())
-    if (!validKeys.has(key) || query.getAll(key).length > 1)
+    if (!allowed.includes(key) || query.getAll(key).length > 1)
       throw new ApiError(
         400,
         "invalid_query",
         `Unsupported or repeated filter: ${key}.`,
       );
-  const page = parse(
-    z.coerce.number().int().min(1).max(1000000),
-    query.get("page") || 1,
-  );
-  const pageSize = parse(
-    z.coerce.number().int().min(1).max(100),
-    query.get("pageSize") || 30,
-  );
   const search = parse(z.string().trim().max(500), query.get("search") ?? "");
   const order = parse(z.enum(["asc", "desc"]), query.get("direction") || "asc");
   const sort = parse(
@@ -760,166 +856,276 @@ export async function listRecords(
           ? "position"
           : "createdAt"),
   );
-  return withTeam(p, async (tx) => {
-    const where: SQL[] = owned(p, kind);
-    if (query.has("includeArchived"))
-      parse(z.enum(["true", "false"]), query.get("includeArchived"));
-    if (query.has("archived")) {
-      const archived = parse(z.enum(["true", "false"]), query.get("archived"));
-      where.push(
-        archived === "true"
-          ? sql`${records.archivedAt} is not null`
-          : isNull(records.archivedAt),
+  const where: SQL[] = owned(p, kind);
+  if (query.has("includeArchived"))
+    parse(z.enum(["true", "false"]), query.get("includeArchived"));
+  if (query.has("archived")) {
+    const archived = parse(z.enum(["true", "false"]), query.get("archived"));
+    where.push(
+      archived === "true"
+        ? sql`${records.archivedAt} is not null`
+        : isNull(records.archivedAt),
+    );
+  } else if (query.get("includeArchived") !== "true")
+    where.push(isNull(records.archivedAt));
+  for (const key of referenceFields)
+    if (query.get(key)) where.push(eq(records[key], id(query.get(key))));
+  if (query.has("applicationCandidateId")) {
+    if (!["interview", "offer", "onboarding"].includes(kind))
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "applicationCandidateId applies only to interviews, offers and onboarding.",
       );
-    } else if (query.get("includeArchived") !== "true")
-      where.push(isNull(records.archivedAt));
-    for (const key of referenceFields)
-      if (query.get(key)) where.push(eq(records[key], id(query.get(key))));
-    if (query.get("legacyId"))
-      where.push(
-        eq(records.legacyId, parse(z.string().max(200), query.get("legacyId"))),
+    const candidateId = query.get("applicationCandidateId");
+    if (!uuidSchema.safeParse(candidateId).success)
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "applicationCandidateId must be a record ID.",
       );
-    if (query.has("startFrom") || query.has("startTo")) {
-      if (kind !== "interview")
-        throw new ApiError(
-          400,
-          "invalid_query",
-          "Start-time ranges apply only to interviews.",
-        );
-      const from = query.has("startFrom")
-        ? parse(z.iso.datetime({ offset: true }), query.get("startFrom"))
-        : null;
-      const to = query.has("startTo")
-        ? parse(z.iso.datetime({ offset: true }), query.get("startTo"))
-        : null;
-      if (from && to && new Date(from) > new Date(to))
-        throw new ApiError(
-          400,
-          "invalid_query",
-          "Range start must precede its end.",
-        );
-      if (from)
+    where.push(
+      sql`exists (select 1 from ${records} a where a.team_id = ${p.teamId} and a.kind = 'application' and a.id = ${records.applicationId} and a.candidate_id = ${candidateId})`,
+    );
+  }
+  if (query.get("legacyId"))
+    where.push(
+      eq(records.legacyId, parse(z.string().max(200), query.get("legacyId"))),
+    );
+  if (query.has("startFrom") || query.has("startTo")) {
+    if (kind !== "interview")
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Start-time ranges apply only to interviews.",
+      );
+    const from = query.has("startFrom")
+      ? parse(z.iso.datetime({ offset: true }), query.get("startFrom"))
+      : null;
+    const to = query.has("startTo")
+      ? parse(z.iso.datetime({ offset: true }), query.get("startTo"))
+      : null;
+    if (from && to && new Date(from) > new Date(to))
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Range start must precede its end.",
+      );
+    if (from)
+      where.push(
+        sql`(${records.data}->>'startAt')::timestamptz >= ${from}::timestamptz`,
+      );
+    if (to)
+      where.push(
+        sql`(${records.data}->>'startAt')::timestamptz < ${to}::timestamptz`,
+      );
+  }
+  if (query.has("shortlisted")) {
+    if (kind !== "candidate")
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Shortlist is a personal candidate filter.",
+      );
+    const selected =
+      parse(z.enum(["true", "false"]), query.get("shortlisted")) === "true";
+    const matching = sql`exists (select 1 from ${candidateStates} where ${candidateStates.teamId} = ${p.teamId} and ${candidateStates.userId} = ${p.userId} and ${candidateStates.candidateId} = ${records.id} and ${candidateStates.shortlisted} = true)`;
+    where.push(selected ? matching : sql`not (${matching})`);
+  }
+  if (query.has("needsReview")) {
+    if (kind !== "candidate")
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Review filters apply only to candidates.",
+      );
+    const needsReview =
+      parse(z.enum(["true", "false"]), query.get("needsReview")) === "true";
+    const reviewed = sql`coalesce(${records.data}->>'reviewStatus','') ~* '^(verified|reviewed|complete|completed)$'`;
+    where.push(needsReview ? sql`not (${reviewed})` : reviewed);
+  }
+  if (
+    query.get("reviewStatus") &&
+    !z.enum(REVIEW_STATUSES).safeParse(query.get("reviewStatus")).success
+  )
+    throw new ApiError(
+      400,
+      "invalid_query",
+      `reviewStatus must be ${REVIEW_STATUSES.map((value) => `"${value}"`).join(" or ")}.`,
+    );
+  for (const key of [
+    "status",
+    "stage",
+    "department",
+    "residenceEmirate",
+    "owner",
+    "priority",
+    "type",
+    "category",
+    "reviewStatus",
+    "degreeLevel",
+    "employmentType",
+    "workMode",
+    "area",
+  ]) {
+    if (query.get(key)) {
+      const value = parse(z.string().trim().max(300), query.get(key));
+      if (kind === "candidate" && key === "status") {
         where.push(
-          sql`(${records.data}->>'startAt')::timestamptz >= ${from}::timestamptz`,
+          sql`coalesce((select ${candidateStates.status} from ${candidateStates} where ${candidateStates.teamId} = ${p.teamId} and ${candidateStates.userId} = ${p.userId} and ${candidateStates.candidateId} = ${records.id}), 'New') = ${value}`,
         );
-      if (to)
-        where.push(
-          sql`(${records.data}->>'startAt')::timestamptz < ${to}::timestamptz`,
-        );
+      } else where.push(sql`${records.data}->>${key} = ${value}`);
     }
-    if (query.has("shortlisted")) {
+  }
+  if (query.get("folderCategory"))
+    where.push(
+      sql`(${records.data}->'folderCategories') @> ${JSON.stringify([parse(z.string().max(200), query.get("folderCategory"))])}::jsonb`,
+    );
+  for (const key of [
+    "education",
+    "minYearsExperience",
+    "maxYearsExperience",
+  ] as const)
+    if (query.has(key) && kind !== "candidate")
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Education and experience filters apply only to candidates.",
+      );
+  if (query.has("education")) {
+    const value = parse(z.string().trim().max(300), query.get("education"));
+    if (value)
+      where.push(
+        or(
+          ...["degreeName", "major", "university"].map(
+            (field) =>
+              sql`strpos(lower(coalesce(${records.data}->>${field}, '')), lower(${value})) > 0`,
+          ),
+        )!,
+      );
+  }
+  // Only a stated JSON number is in range; missing experience never matches.
+  const years = (key: string) => {
+    const raw = query.get(key);
+    if (raw === null) return null;
+    const value = Number(raw);
+    if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 100)
+      throw new ApiError(
+        400,
+        "invalid_query",
+        `${key} must be a number from 0 to 100.`,
+      );
+    return value;
+  };
+  const minYears = years("minYearsExperience");
+  const maxYears = years("maxYearsExperience");
+  if (minYears !== null && maxYears !== null && minYears > maxYears)
+    throw new ApiError(
+      400,
+      "invalid_query",
+      "minYearsExperience must not exceed maxYearsExperience.",
+    );
+  const stated = sql`(case when jsonb_typeof(${records.data}->'yearsExperience') = 'number' then (${records.data}->>'yearsExperience')::numeric end)`;
+  if (minYears !== null) where.push(sql`${stated} >= ${minYears}::numeric`);
+  if (maxYears !== null) where.push(sql`${stated} <= ${maxYears}::numeric`);
+  for (const key of ["categories", "skills", "certifications"] as const)
+    if (query.has(key)) {
       if (kind !== "candidate")
         throw new ApiError(
           400,
           "invalid_query",
-          "Shortlist is a personal candidate filter.",
+          "Skill, certification and folder category filters apply only to candidates.",
         );
-      const selected =
-        parse(z.enum(["true", "false"]), query.get("shortlisted")) === "true";
-      const matching = sql`exists (select 1 from ${candidateStates} where ${candidateStates.teamId} = ${p.teamId} and ${candidateStates.userId} = ${p.userId} and ${candidateStates.candidateId} = ${records.id} and ${candidateStates.shortlisted} = true)`;
-      where.push(selected ? matching : sql`not (${matching})`);
-    }
-    if (query.has("needsReview")) {
-      if (kind !== "candidate")
+      let value: unknown;
+      try {
+        value = JSON.parse(query.get(key)!);
+      } catch {
         throw new ApiError(
           400,
           "invalid_query",
-          "Review filters apply only to candidates.",
+          `${key} must be a JSON array.`,
         );
-      const needsReview =
-        parse(z.enum(["true", "false"]), query.get("needsReview")) === "true";
-      const reviewed = sql`coalesce(${records.data}->>'reviewStatus','') ~* '^(verified|reviewed|complete|completed)$'`;
-      where.push(needsReview ? sql`not (${reviewed})` : reviewed);
-    }
-    for (const key of [
-      "status",
-      "stage",
-      "department",
-      "residenceEmirate",
-      "owner",
-      "priority",
-      "type",
-      "category",
-      "reviewStatus",
-      "degreeLevel",
-      "employmentType",
-      "workMode",
-      "area",
-    ]) {
-      if (query.get(key)) {
-        const value = parse(z.string().trim().max(300), query.get(key));
-        if (kind === "candidate" && key === "status") {
-          where.push(
-            sql`coalesce((select ${candidateStates.status} from ${candidateStates} where ${candidateStates.teamId} = ${p.teamId} and ${candidateStates.userId} = ${p.userId} and ${candidateStates.candidateId} = ${records.id}), 'New') = ${value}`,
-          );
-        } else where.push(sql`${records.data}->>${key} = ${value}`);
       }
-    }
-    if (query.get("folderCategory"))
-      where.push(
-        sql`(${records.data}->'folderCategories') @> ${JSON.stringify([parse(z.string().max(200), query.get("folderCategory"))])}::jsonb`,
+      const values = parse(
+        z.array(z.string().trim().min(1).max(200)).max(100),
+        value,
       );
-    for (const key of ["categories", "skills"] as const)
-      if (query.has(key)) {
-        if (kind !== "candidate")
-          throw new ApiError(
-            400,
-            "invalid_query",
-            "Skill and folder category filters apply only to candidates.",
-          );
-        let value: unknown;
-        try {
-          value = JSON.parse(query.get(key)!);
-        } catch {
-          throw new ApiError(
-            400,
-            "invalid_query",
-            `${key} must be a JSON array.`,
-          );
-        }
-        const values = parse(
-          z.array(z.string().trim().min(1).max(200)).max(100),
-          value,
+      if (values.length && (key === "skills" || key === "certifications"))
+        where.push(
+          sql`(${records.data}->${key}) @> ${JSON.stringify(values)}::jsonb`,
         );
-        if (values.length && key === "skills")
-          where.push(
-            sql`(${records.data}->'skills') @> ${JSON.stringify(values)}::jsonb`,
-          );
-        if (values.length && key === "categories")
-          where.push(
-            sql`exists(select 1 from jsonb_array_elements_text(${records.data}->'folderCategories') category(value) where ${inArray(sql`category.value`, values)})`,
-          );
-      }
-    // jsonpath extracts scalar values only. JSON property names are never searchable candidate facts.
-    const ownFacts = sql`jsonb_path_query_array(${records.data}, '$.** ? (@.type() == "string" || @.type() == "number" || @.type() == "boolean")')::text`;
-    const factual =
-      kind === "application"
-        ? sql`concat_ws(' ',${ownFacts},
+      if (values.length && key === "categories")
+        where.push(
+          sql`exists(select 1 from jsonb_array_elements_text(${records.data}->'folderCategories') category(value) where ${inArray(sql`category.value`, values)})`,
+        );
+    }
+  // jsonpath extracts scalar values only. JSON property names are never searchable candidate facts.
+  // Top-level keys in omitFromSearch are removed first, so words neither match nor exclude on them.
+  const omitted = options.omitFromSearch ?? [];
+  const searched = omitted.length
+    ? sql`(${records.data} - array[${sql.join(
+        omitted.map((key) => sql`${key}`),
+        sql`, `,
+      )}]::text[])`
+    : records.data;
+  const ownFacts = sql`jsonb_path_query_array(${searched}, '$.** ? (@.type() == "string" || @.type() == "number" || @.type() == "boolean")')::text`;
+  const factual =
+    kind === "application"
+      ? sql`concat_ws(' ',${ownFacts},
       (select concat_ws(' ',v.data->>'title',v.data->>'department') from ${records} v where v.team_id=${p.teamId} and v.kind='vacancy' and v.id=${records.vacancyId}),
       ${p.scopes.includes("candidates:read") ? sql`(select concat_ws(' ',c.data->>'name',c.data->>'email',c.data->>'jobTitle') from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
-        : ownFacts;
-    for (const term of searchTerms(search)) {
-      const position = sql`strpos(lower(${factual}),lower(${term.value}))`;
-      where.push(term.excluded ? sql`${position}=0` : sql`${position}>0`);
-    }
-    const condition = and(...where);
+      : ownFacts;
+  for (const term of searchTerms(search)) {
+    const position = sql`strpos(lower(${factual}),lower(${term.value}))`;
+    where.push(term.excluded ? sql`${position}=0` : sql`${position}>0`);
+  }
+  const expression = ["createdAt", "updatedAt"].includes(sort)
+    ? records[sort as "createdAt" | "updatedAt"]
+    : ["yearsExperience", "position"].includes(sort)
+      ? sql`nullif(${records.data}->>${sort}, '')::numeric`
+      : sql`lower(${records.data}->>${sort})`;
+  return {
+    condition: and(...where),
+    orderBy: [
+      order === "asc" ? asc(expression) : desc(expression),
+      asc(records.id),
+    ],
+  };
+}
+
+export async function listRecords(
+  p: Principal,
+  resource: ResourceName,
+  query: URLSearchParams,
+  options: { omitFromSearch?: readonly string[] } = {},
+) {
+  const kind = kindOf(resource);
+  permission(p, resource);
+  const { condition, orderBy } = recordQuery(
+    p,
+    kind,
+    query,
+    LIST_QUERY_KEYS,
+    options,
+  );
+  const page = parse(
+    z.coerce.number().int().min(1).max(1000000),
+    query.get("page") || 1,
+  );
+  const pageSize = parse(
+    z.coerce.number().int().min(1).max(100),
+    query.get("pageSize") || 30,
+  );
+  return withTeam(p, async (tx) => {
     const [{ total }] = await tx
       .select({ total: count() })
       .from(records)
       .where(condition);
-    const expression = ["createdAt", "updatedAt"].includes(sort)
-      ? records[sort as "createdAt" | "updatedAt"]
-      : ["yearsExperience", "position"].includes(sort)
-        ? sql`nullif(${records.data}->>${sort}, '')::numeric`
-        : sql`lower(${records.data}->>${sort})`;
     const rows = await tx
       .select()
       .from(records)
       .where(condition)
-      .orderBy(
-        order === "asc" ? asc(expression) : desc(expression),
-        asc(records.id),
-      )
+      .orderBy(...orderBy)
       .limit(pageSize)
       .offset((page - 1) * pageSize);
     return {
@@ -934,12 +1140,89 @@ export async function listRecords(
   });
 }
 
-async function createInside(
+/**
+ * Every matching record and one audit row, in one transaction. A count bounded at EXPORT_LIMIT + 1
+ * refuses an oversized match before any row is loaded. Rows and total then come from one statement,
+ * so the file and its Rows count agree; its recheck catches rows added between the two statements.
+ * The audit names applied filter keys, never values, and leaves out PRIVATE_EXPORT_FILTER_KEYS.
+ */
+export async function exportRecords(
+  p: Principal,
+  resource: string,
+  query: URLSearchParams,
+): Promise<{ resource: ExportResource; rows: RecordDto[]; total: number }> {
+  if (!(EXPORT_RESOURCES as readonly string[]).includes(resource))
+    throw new ApiError(404, "not_found", "Unknown resource.");
+  const name = resource as ExportResource;
+  const kind = kindOf(name);
+  permission(p, name);
+  if (query.has("page") || query.has("pageSize"))
+    throw new ApiError(
+      400,
+      "invalid_query",
+      "An export covers every matching record; remove page and pageSize.",
+    );
+  const { condition, orderBy } = recordQuery(p, kind, query, [
+    ...EXPORT_FILTER_KEYS,
+    "sort",
+    "direction",
+  ]);
+  const privateKeys =
+    PRIVATE_EXPORT_FILTER_KEYS[name === "candidates" ? "candidates" : "all"];
+  const filters = [...query.entries()]
+    .filter(
+      ([key, value]) =>
+        EXPORT_FILTER_KEYS.includes(key) &&
+        !privateKeys.includes(key) &&
+        !["", "[]"].includes(value.trim()),
+    )
+    .map(([key]) => key)
+    .sort();
+  const tooLarge = () =>
+    new ApiError(
+      400,
+      "export_too_large",
+      "This export is too large. Narrow your filters.",
+    );
+  return withTeam(p, async (tx) => {
+    const [matching] = await tx.select({ total: count() }).from(
+      tx
+        .select({ id: records.id })
+        .from(records)
+        .where(condition)
+        .limit(EXPORT_LIMIT + 1)
+        .as("matching"),
+    );
+    if ((matching?.total ?? 0) > EXPORT_LIMIT) throw tooLarge();
+    const rows = await tx
+      .select({
+        record: records,
+        total: sql<number>`count(*) over ()`.mapWith(Number),
+      })
+      .from(records)
+      .where(condition)
+      .orderBy(...orderBy)
+      .limit(EXPORT_LIMIT);
+    const total = rows[0]?.total ?? 0;
+    if (total > EXPORT_LIMIT) throw tooLarge();
+    await tx.execute(
+      sql`select tenant_context.audit_export(${name}::text, ${total}::integer, array[${sql.join(
+        filters.map((key) => sql`${key}`),
+        sql`, `,
+      )}]::text[])`,
+    );
+    return { resource: name, rows: rows.map((row) => dto(row.record)), total };
+  });
+}
+
+/** `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review. */
+export async function createInside(
   tx: TeamTx,
   p: Principal,
   kind: RecordKind,
   input: WriteInput,
   imported: boolean,
+  auditMetadata: Data = {},
 ): Promise<RecordDto> {
   validateRelations(kind, input.data);
   await checkReferences(
@@ -1017,9 +1300,14 @@ async function createInside(
     p,
     row,
     imported ? "imported" : "created",
-    kind === "application" && !imported
-      ? { fromStage: null, toStage: input.data.stage }
-      : {},
+    {
+      ...(kind === "application" && !imported
+        ? { fromStage: null, toStage: input.data.stage }
+        : kind === "offer" && !imported
+          ? { fromStatus: null, toStatus: input.data.status }
+          : {}),
+      ...auditMetadata,
+    },
     imported,
   );
   return dto(row);
@@ -1049,6 +1337,31 @@ export async function createRecord(
             await createInside(tx, p, kind, input, imported),
           ])
         )[0],
+      async (previous) => {
+        // Return the record's current state, including archived records; never create again.
+        const recordId = (previous as { id?: unknown } | null)?.id;
+        const [row] = uuidSchema.safeParse(recordId).success
+          ? await tx
+              .select()
+              .from(records)
+              .where(and(...owned(p, kind), eq(records.id, recordId as string)))
+              .limit(1)
+          : [];
+        if (!row)
+          throw new ApiError(
+            409,
+            "idempotency_expired",
+            "This Idempotency-Key has expired and its original record is no longer available. Search for the record before creating it again.",
+          );
+        // Without the read scope, return the original snapshot rather than later edits.
+        if (
+          !p.scopes.includes(
+            resource === "candidates" ? "candidates:read" : "recruitment:read",
+          )
+        )
+          return previous as RecordDto;
+        return (await decorate(tx, p, [dto(row)]))[0];
+      },
     );
   });
 }
@@ -1210,80 +1523,106 @@ export async function updateRecord(
     const metadata =
       kind === "application" && !imported && existing.data.stage !== data.stage
         ? { fromStage: existing.data.stage, toStage: data.stage }
-        : {};
+        : kind === "offer" && !imported && existing.data.status !== data.status
+          ? { fromStatus: existing.data.status, toStatus: data.status }
+          : {};
     await audit(tx, p, row, action, metadata, imported);
     return (await decorate(tx, p, [dto(row)]))[0];
   });
 }
 
-export async function bulkApplications(p: Principal, raw: unknown) {
+export async function bulkApplications(
+  p: Principal,
+  raw: unknown,
+  idempotencyKey?: string,
+) {
   permission(p, "applications", true);
   permission(p, "candidates");
   const input = parse(bulkApplicationsSchema, raw);
   const candidateIds = [...new Set(input.candidateIds)];
   return withTeam(p, async (tx) => {
     await lockTeam(tx, p);
-    const vacancy = await find(tx, p, "vacancy", input.vacancyId);
-    if (vacancy.archivedAt)
-      throw new ApiError(
-        400,
-        "archived_reference",
-        "Choose an active vacancy.",
-      );
-    const candidates = await tx
-      .select()
-      .from(records)
-      .where(
-        and(
-          ...owned(p, "candidate"),
-          inArray(records.id, candidateIds),
-          isNull(records.archivedAt),
-        ),
-      );
-    if (candidates.length !== candidateIds.length)
-      throw new ApiError(
-        400,
-        "invalid_reference",
-        "Every candidate must be active and in this team. No applications were created.",
-      );
-    const existing = await tx
-      .select({ candidateId: records.candidateId })
-      .from(records)
-      .where(
-        and(
-          ...owned(p, "application"),
-          eq(records.vacancyId, input.vacancyId),
-          inArray(records.candidateId, candidateIds),
-          isNull(records.archivedAt),
-        ),
-      );
-    const skip = new Set(existing.map((row) => row.candidateId));
-    const created: RecordDto[] = [];
-    for (const candidateId of candidateIds)
-      if (!skip.has(candidateId))
-        created.push(
-          await createInside(
-            tx,
-            p,
-            "application",
-            {
-              candidateId,
-              vacancyId: input.vacancyId,
-              data: parse(recordDataSchemas.application, {
-                stage: input.stage,
-                owner: input.owner,
-                source: input.source,
-                appliedDate: input.appliedDate,
-              }) as Data,
-            },
-            false,
-          ),
-        );
-    return {
-      data: await decorate(tx, p, created),
-      created: created.length,
-      skipped: skip.size,
-    };
+    // Expired keys re-run: existing active pairs are reported, never duplicated.
+    return idempotent(
+      tx,
+      p,
+      "bulk:applications",
+      idempotencyKey,
+      input,
+      async () => {
+        const vacancy = await find(tx, p, "vacancy", input.vacancyId);
+        if (vacancy.archivedAt)
+          throw new ApiError(
+            400,
+            "archived_reference",
+            "Choose an active vacancy.",
+          );
+        const candidates = await tx
+          .select()
+          .from(records)
+          .where(
+            and(
+              ...owned(p, "candidate"),
+              inArray(records.id, candidateIds),
+              isNull(records.archivedAt),
+            ),
+          );
+        if (candidates.length !== candidateIds.length)
+          throw new ApiError(
+            400,
+            "invalid_reference",
+            "Every candidate must be active and in this team. No applications were created.",
+          );
+        const existing = await tx
+          .select()
+          .from(records)
+          .where(
+            and(
+              ...owned(p, "application"),
+              eq(records.vacancyId, input.vacancyId),
+              inArray(records.candidateId, candidateIds),
+              isNull(records.archivedAt),
+            ),
+          )
+          .orderBy(asc(records.createdAt), asc(records.id));
+        const skip = new Set(existing.map((row) => row.candidateId));
+        const created: RecordDto[] = [];
+        for (const candidateId of candidateIds)
+          if (!skip.has(candidateId))
+            created.push(
+              await createInside(
+                tx,
+                p,
+                "application",
+                {
+                  candidateId,
+                  vacancyId: input.vacancyId,
+                  data: parse(recordDataSchemas.application, {
+                    stage: input.stage,
+                    owner: input.owner,
+                    source: input.source,
+                    appliedDate: input.appliedDate,
+                  }) as Data,
+                },
+                false,
+              ),
+            );
+        return {
+          data: await decorate(tx, p, created),
+          // Other users' application contents require recruitment:read; otherwise report references only.
+          existing: p.scopes.includes("recruitment:read")
+            ? await decorate(tx, p, existing.map(dto))
+            : existing.map((row) => ({
+                id: row.id,
+                kind: row.kind as RecordKind,
+                candidateId: row.candidateId,
+                vacancyId: row.vacancyId,
+              })),
+          created: created.length,
+          skipped: existing.length,
+        };
+      },
+    );
   });
 }
 
@@ -1319,6 +1658,7 @@ export async function bootstrapTeam(p: Principal) {
               name,
               position,
               color: ["#64748B", "#4338CA", "#D97706", "#059669"][position],
+              completed: name === "Done",
             }),
           },
           false,

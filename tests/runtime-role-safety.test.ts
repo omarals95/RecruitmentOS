@@ -3,12 +3,19 @@ import { describe, expect, it } from "vitest";
 import { applyMigrations } from "../src/db";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role";
 
+// The runtime role template closes the database and the public schema to PUBLIC.
+const closedToPublic = `
+  REVOKE ALL ON SCHEMA public FROM PUBLIC;
+  DO $$ BEGIN EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()); END $$;
+`;
+
 describe("database runtime role safety", () => {
   it("rejects direct, inherited and PUBLIC execution of server-file helpers", async () => {
     const pg = new PGlite();
     try {
       await applyMigrations(pg);
       await pg.exec(`
+        ${closedToPublic}
         CREATE ROLE file_safe NOLOGIN;
         CREATE ROLE file_direct NOLOGIN;
         CREATE ROLE file_parent NOLOGIN;
@@ -44,6 +51,7 @@ describe("database runtime role safety", () => {
     try {
       await applyMigrations(pg);
       await pg.exec(`
+        ${closedToPublic}
         CREATE ROLE guarded_safe NOLOGIN;
         CREATE ROLE guarded_creator NOLOGIN CREATEROLE;
         CREATE ROLE guarded_createdb NOLOGIN CREATEDB;
@@ -110,6 +118,7 @@ describe("database runtime role safety", () => {
     try {
       await applyMigrations(pg);
       await pg.exec(`
+        ${closedToPublic}
         CREATE ROLE guard_direct NOLOGIN;
         GRANT DELETE ON auth.initial_admin_claim TO guard_direct;
         CREATE ROLE guard_update NOLOGIN;
@@ -175,6 +184,250 @@ describe("database runtime role safety", () => {
         runtimeRoleSafetyQuery,
       );
       expect(result.rows[0]?.unsafe).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("rejects owners, CREATE holders and object owners in the tenant_context, db_boundary and storage_ledger schemas", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      await pg.exec(`${closedToPublic} CREATE ROLE schema_guard_safe NOLOGIN`);
+      const unsafeRoles: string[] = [];
+      for (const schema of [
+        "tenant_context",
+        "db_boundary",
+        "storage_ledger",
+      ]) {
+        const role = (kind: string) => `${schema}_${kind}`;
+        await pg.exec(`
+          CREATE ROLE ${role("owner")} NOLOGIN;
+          CREATE ROLE ${role("create")} NOLOGIN;
+          GRANT CREATE ON SCHEMA ${schema} TO ${role("create")};
+          CREATE ROLE ${role("parent")} NOLOGIN;
+          GRANT CREATE ON SCHEMA ${schema} TO ${role("parent")};
+          CREATE ROLE ${role("child")} NOLOGIN NOINHERIT;
+          GRANT ${role("parent")} TO ${role("child")};
+          CREATE ROLE ${role("relation")} NOLOGIN;
+          CREATE TABLE ${schema}.runtime_guard_probe (id integer);
+          ALTER TABLE ${schema}.runtime_guard_probe OWNER TO ${role("relation")};
+          CREATE ROLE ${role("function")} NOLOGIN;
+          CREATE FUNCTION ${schema}.runtime_guard_probe() RETURNS integer LANGUAGE SQL AS 'SELECT 1';
+          ALTER FUNCTION ${schema}.runtime_guard_probe() OWNER TO ${role("function")};
+          ALTER SCHEMA ${schema} OWNER TO ${role("owner")};
+        `);
+        unsafeRoles.push(
+          ...["owner", "create", "child", "relation", "function"].map(role),
+        );
+      }
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("schema_guard_safe")).toBe(false);
+      for (const role of unsafeRoles)
+        expect(await unsafe(role), role).toBe(true);
+      await pg.exec("GRANT CREATE ON SCHEMA db_boundary TO PUBLIC");
+      expect(await unsafe("schema_guard_safe")).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("fails closed when any one of the tenant_context, db_boundary or storage_ledger schemas is missing", async () => {
+    const schemas = ["app", "tenant_context", "db_boundary", "storage_ledger"];
+    for (const missing of [null, ...schemas.slice(1)]) {
+      const pg = new PGlite();
+      try {
+        await pg.exec(`
+          CREATE SCHEMA auth;
+          CREATE TABLE auth.initial_admin_claim (id boolean PRIMARY KEY);
+          ${schemas
+            .filter((schema) => schema !== missing)
+            .map((schema) => `CREATE SCHEMA ${schema};`)
+            .join(" ")}
+          ${closedToPublic}
+          CREATE ROLE guard_missing_schema NOLOGIN;
+          SET ROLE guard_missing_schema;
+        `);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        expect(result.rows[0]?.unsafe, String(missing)).toBe(missing !== null);
+      } finally {
+        await pg.close();
+      }
+    }
+  });
+
+  it("rejects PUBLIC CONNECT, and database TEMPORARY or public schema access held directly, through a member role or by PUBLIC", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      const name = await pg.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      );
+      const database = '"' + name.rows[0].name.replaceAll('"', '""') + '"';
+      await pg.exec(`
+        ${closedToPublic}
+        CREATE ROLE public_guard_safe NOLOGIN;
+        CREATE ROLE public_guard_temporary NOLOGIN;
+        GRANT TEMPORARY ON DATABASE ${database} TO public_guard_temporary;
+        CREATE ROLE public_guard_temporary_parent NOLOGIN;
+        GRANT TEMPORARY ON DATABASE ${database} TO public_guard_temporary_parent;
+        CREATE ROLE public_guard_temporary_child NOLOGIN NOINHERIT;
+        GRANT public_guard_temporary_parent TO public_guard_temporary_child;
+        CREATE ROLE public_guard_usage NOLOGIN;
+        GRANT USAGE ON SCHEMA public TO public_guard_usage;
+        CREATE ROLE public_guard_create NOLOGIN;
+        GRANT CREATE ON SCHEMA public TO public_guard_create;
+        CREATE ROLE public_guard_schema_parent NOLOGIN;
+        GRANT USAGE ON SCHEMA public TO public_guard_schema_parent;
+        CREATE ROLE public_guard_schema_child NOLOGIN NOINHERIT;
+        GRANT public_guard_schema_parent TO public_guard_schema_child;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("public_guard_safe")).toBe(false);
+      for (const role of [
+        "public_guard_temporary",
+        "public_guard_temporary_child",
+        "public_guard_usage",
+        "public_guard_create",
+        "public_guard_schema_child",
+      ])
+        expect(await unsafe(role), role).toBe(true);
+      for (const [grant, revoke] of [
+        [
+          `GRANT CONNECT ON DATABASE ${database} TO PUBLIC`,
+          `REVOKE CONNECT ON DATABASE ${database} FROM PUBLIC`,
+        ],
+        [
+          `GRANT TEMPORARY ON DATABASE ${database} TO PUBLIC`,
+          `REVOKE TEMPORARY ON DATABASE ${database} FROM PUBLIC`,
+        ],
+        [
+          "GRANT USAGE ON SCHEMA public TO PUBLIC",
+          "REVOKE USAGE ON SCHEMA public FROM PUBLIC",
+        ],
+      ]) {
+        await pg.exec(grant);
+        expect(await unsafe("public_guard_safe"), grant).toBe(true);
+        await pg.exec(revoke);
+        expect(await unsafe("public_guard_safe"), revoke).toBe(false);
+      }
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("rejects the owner of the current database and a NOINHERIT member of it, even with its database privileges revoked", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      const name = await pg.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      );
+      const database = '"' + name.rows[0].name.replaceAll('"', '""') + '"';
+      await pg.exec(`
+        ${closedToPublic}
+        CREATE ROLE database_owner_probe NOLOGIN;
+        CREATE ROLE database_owner_member NOLOGIN NOINHERIT;
+        GRANT database_owner_probe TO database_owner_member;
+        CREATE ROLE database_owner_unrelated NOLOGIN;
+        ALTER DATABASE ${database} OWNER TO database_owner_probe;
+        -- Without pg_database_owner on the public schema, only the owner clause catches this role.
+        ALTER SCHEMA public OWNER TO CURRENT_USER;
+        SET ROLE database_owner_probe;
+        REVOKE ALL ON DATABASE ${database} FROM database_owner_probe;
+        RESET ROLE;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      const privileges = await pg.query<{ create: boolean; temp: boolean }>(
+        `SELECT has_database_privilege('database_owner_probe', current_database(), 'CREATE') AS create,
+          has_database_privilege('database_owner_probe', current_database(), 'TEMPORARY') AS temp`,
+      );
+      expect(privileges.rows).toEqual([{ create: false, temp: false }]);
+      expect(await unsafe("database_owner_unrelated")).toBe(false);
+      for (const role of ["database_owner_probe", "database_owner_member"])
+        expect(await unsafe(role), role).toBe(true);
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("rejects any table, column, sequence, function, schema or database privilege held WITH GRANT OPTION, directly or through a member role", async () => {
+    const pg = new PGlite();
+    try {
+      await applyMigrations(pg);
+      const name = await pg.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      );
+      const database = '"' + name.rows[0].name.replaceAll('"', '""') + '"';
+      await pg.exec(`
+        ${closedToPublic}
+        CREATE SEQUENCE app.grant_option_probe;
+        CREATE ROLE grant_option_plain NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_plain;
+        GRANT SELECT (id) ON app.activity TO grant_option_plain;
+        GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_plain;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_plain;
+        GRANT USAGE ON SCHEMA app TO grant_option_plain;
+        GRANT CONNECT ON DATABASE ${database} TO grant_option_plain;
+        CREATE ROLE grant_option_table NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_table WITH GRANT OPTION;
+        CREATE ROLE grant_option_column NOLOGIN;
+        GRANT SELECT (id) ON app.activity TO grant_option_column WITH GRANT OPTION;
+        CREATE ROLE grant_option_sequence NOLOGIN;
+        GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_sequence WITH GRANT OPTION;
+        CREATE ROLE grant_option_function NOLOGIN;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_function WITH GRANT OPTION;
+        CREATE ROLE grant_option_schema NOLOGIN;
+        GRANT USAGE ON SCHEMA app TO grant_option_schema WITH GRANT OPTION;
+        CREATE ROLE grant_option_database NOLOGIN;
+        GRANT CONNECT ON DATABASE ${database} TO grant_option_database WITH GRANT OPTION;
+        CREATE ROLE grant_option_parent NOLOGIN;
+        GRANT SELECT ON app.records TO grant_option_parent WITH GRANT OPTION;
+        CREATE ROLE grant_option_child NOLOGIN NOINHERIT;
+        GRANT grant_option_parent TO grant_option_child;
+      `);
+      async function unsafe(role: string): Promise<boolean> {
+        await pg.exec(`SET ROLE ${role}`);
+        const result = await pg.query<{ unsafe: boolean }>(
+          runtimeRoleSafetyQuery,
+        );
+        await pg.exec("RESET ROLE");
+        return result.rows[0]?.unsafe ?? true;
+      }
+      expect(await unsafe("grant_option_plain")).toBe(false);
+      for (const role of [
+        "grant_option_table",
+        "grant_option_column",
+        "grant_option_sequence",
+        "grant_option_function",
+        "grant_option_schema",
+        "grant_option_database",
+        "grant_option_child",
+      ])
+        expect(await unsafe(role), role).toBe(true);
     } finally {
       await pg.close();
     }

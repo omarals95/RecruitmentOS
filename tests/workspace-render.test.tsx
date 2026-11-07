@@ -1,0 +1,544 @@
+import {
+  isValidElement,
+  type ButtonHTMLAttributes,
+  type MouseEvent,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/app/pipeline",
+  useRouter: () => ({ push: () => {}, refresh: () => {} }),
+}));
+
+import { WorkspaceProvider } from "../src/components/workspace/client";
+import { WorkspaceShell } from "../src/components/workspace/shell";
+import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
+import {
+  BulkCvImport,
+  BulkCvImportDialog,
+  RecentImports,
+  SelectedCvList,
+  type CvImportState,
+  type RecentImportsPage,
+} from "../src/components/workspace/bulk-cv-import";
+import {
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+} from "../src/domain/records";
+import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
+import {
+  AI_EXTRACTION_DATA_SENT,
+  AI_EXTRACTION_LIMITS_TEXT,
+  AI_EXTRACTION_PURPOSE,
+} from "../src/domain/cv-extraction";
+import { rules } from "./helpers/css";
+
+const workspace = {
+  user: {
+    id: "fictional-user",
+    name: "Fictional Recruiter",
+    email: "recruiter@example.test",
+  },
+  team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
+  role: "recruiter",
+  environment: "Local development",
+};
+const buttonSvg = (markup: string, label: string) =>
+  new RegExp(`aria-label="${label}"[^>]*>(<svg[\\s\\S]*?</svg>)`).exec(
+    markup,
+  )?.[1];
+
+describe("workspace shell", () => {
+  it("names the search button at every width, not only through its hidden text", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <WorkspaceShell identity={workspace}>
+          <p>Fictional page</p>
+        </WorkspaceShell>
+      </WorkspaceProvider>,
+    );
+    const button = /<button[^>]*class="search-launcher"[^>]*>/.exec(
+      markup,
+    )?.[0];
+    expect(button).toBeDefined();
+    expect(button).toContain('aria-label="Search your workspace"');
+  });
+});
+
+describe("workspace accessibility styles", () => {
+  const css = rules("src/app/globals.css");
+  const rule = (selector: string, media = "") =>
+    css.find((item) => item.selector === selector && item.media === media);
+  it("keeps visually hidden text inside the board and table scrollers", () => {
+    for (const selector of [".kanban", ".table-wrap"])
+      expect(rule(selector)?.body, selector).toMatch(
+        /(^|;)\s*position:\s*relative\s*;/,
+      );
+  });
+  it("draws outside-month days and cancelled interviews without opacity", () => {
+    for (const selector of [
+      ".calendar-day.outside-month .calendar-day-number",
+      ".calendar-event.cancelled",
+    ]) {
+      expect(rule(selector), selector).toBeDefined();
+      expect(rule(selector)!.body, selector).not.toMatch(/opacity/);
+    }
+    expect(rule(".calendar-event.cancelled")!.body).toMatch(
+      /text-decoration:\s*line-through/,
+    );
+  });
+  it("gives +N more a 24 px target", () => {
+    const height = /min-height:\s*(\d+)px/.exec(
+      rule(".calendar-more")?.body ?? "",
+    );
+    expect(Number(height?.[1])).toBeGreaterThanOrEqual(24);
+  });
+  it("takes the closed phone menu out of the tab order", () => {
+    const phone = "@media (max-width: 720px)";
+    expect(rule(".workspace-sidebar:not(.is-open)", phone)?.body).toMatch(
+      /visibility:\s*hidden/,
+    );
+    expect(rule(".workspace-sidebar.is-open", phone)?.body).toMatch(
+      /visibility:\s*visible/,
+    );
+    expect(
+      css.some(
+        (item) =>
+          item.media === "" &&
+          item.selector.includes(".workspace-sidebar") &&
+          /visibility/.test(item.body),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("display mode toggle", () => {
+  it("uses a distinct board icon and hides every icon from assistive technology", () => {
+    const markup = renderToStaticMarkup(
+      <DisplayModeToggle board mode="board" onChange={() => {}} />,
+    );
+    const board = buttonSvg(markup, "Board view");
+    const cards = buttonSvg(markup, "Card view");
+    expect(board).toBeDefined();
+    expect(cards).toBeDefined();
+    expect(board).not.toBe(cards);
+    const svgs = markup.match(/<svg[^>]*>/g) ?? [];
+    expect(svgs).toHaveLength(3);
+    for (const svg of svgs) expect(svg).toContain('aria-hidden="true"');
+  });
+});
+
+describe("confirm dialog", () => {
+  it("is a labelled, described alertdialog that starts on Cancel", () => {
+    const markup = renderToStaticMarkup(
+      <ConfirmDialog
+        title="Revoke token?"
+        message="Revoke “Fictional token”? Integrations using this token will lose access."
+        confirmLabel="Revoke token"
+        destructive
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    const dialog = /<dialog[^>]*>/.exec(markup)![0];
+    expect(dialog).toContain('role="alertdialog"');
+    const labelledBy = /aria-labelledby="([^"]+)"/.exec(dialog)![1];
+    const describedBy = /aria-describedby="([^"]+)"/.exec(dialog)![1];
+    expect(markup).toContain(`<h2 id="${labelledBy}">Revoke token?</h2>`);
+    expect(markup).toContain(
+      `<p id="${describedBy}">Revoke “Fictional token”? Integrations using this token will lose access.</p>`,
+    );
+    const buttons = [...markup.matchAll(/<button[^>]*>([^<]*)<\/button>/g)];
+    const cancel = buttons.findIndex((match) => match[1] === "Cancel");
+    const confirm = buttons.findIndex((match) => match[1] === "Revoke token");
+    expect(cancel).toBeGreaterThanOrEqual(0);
+    expect(cancel).toBeLessThan(confirm);
+    expect(buttons[cancel][0]).toContain("autofocus");
+    expect(buttons[confirm][0]).toContain('class="button danger"');
+    expect(
+      renderToStaticMarkup(
+        <ConfirmDialog
+          title="Switch team?"
+          message="Fictional message"
+          confirmLabel="Switch team"
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />,
+      ),
+    ).not.toContain("button danger");
+  });
+});
+
+describe("Import CVs", () => {
+  it("shows only the capability check before the availability answer arrives", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <BulkCvImport onClose={() => {}} onChanged={() => {}} />
+      </WorkspaceProvider>,
+    );
+    expect(markup).toContain("Checking CV import availability");
+    expect(markup).not.toContain('type="file"');
+    expect(markup).not.toContain("unavailable");
+    expect(markup).not.toContain("not set up");
+  });
+
+  const dialog = (importState: CvImportState) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <BulkCvImportDialog
+          importState={importState}
+          capabilityError={importState === "error" ? "Network unavailable" : ""}
+          onCapabilityLost={() => {}}
+          onClose={() => {}}
+          onChanged={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  it.each(["checking", "not-set-up", "unavailable", "error"] as const)(
+    "shows only the explanation and Close while %s",
+    (importState) => {
+      const markup = dialog(importState);
+      expect(markup).not.toContain('type="file"');
+      expect(markup).not.toContain("Import reviewed");
+      expect(markup).not.toContain("prepare a review draft");
+      expect(markup).not.toContain("Recent imports");
+      expect(markup).toContain(">Close</button>");
+    },
+  );
+  it("explains each unavailable state in plain words", () => {
+    expect(dialog("not-set-up")).toContain("CV uploads are not set up yet.");
+    expect(dialog("unavailable")).toContain(
+      "CV import is not available right now. You can still add and edit candidate details in the candidate directory.",
+    );
+    expect(dialog("error")).toContain(
+      "Could not check import availability. Network unavailable",
+    );
+  });
+  it("shows the limits before any work once uploads are ready", () => {
+    const markup = dialog("ready");
+    expect(BULK_INTAKE_MAX_FILES).toBe(200);
+    const limits = `Up to ${BULK_INTAKE_MAX_FILES} files per import, 10 MiB each. One CV uploads at a time in this browser. Import progress is kept on the server for ${BULK_INTAKE_RECOVERY_HOURS} hours; selected files and drafts stay only in this browser.`;
+    expect(markup).toContain(`<p>${limits}</p>`);
+    expect(markup.indexOf(limits)).toBeLessThan(markup.indexOf('type="file"'));
+    expect(markup).toContain(
+      `Recent imports (kept for ${BULK_INTAKE_RECOVERY_HOURS} hours)`,
+    );
+    expect(markup).toContain("Import reviewed (0)");
+    expect(markup).not.toContain("Cancel import");
+  });
+  // A fictional disclosure; no provider is configured in this build.
+  const disclosure = {
+    version: "c".repeat(64),
+    provider: "Fictional Extraction Service",
+    model: "fictional-model-1",
+    region: "Fictional region (test only)",
+    retention: "Fictional: deleted after 30 days",
+    trainingUse: "Fictional: not used for training",
+    costNote: "Fictional: no charge in tests",
+    purpose: AI_EXTRACTION_PURPOSE,
+    dataSent: AI_EXTRACTION_DATA_SENT,
+    limits: AI_EXTRACTION_LIMITS_TEXT,
+  };
+  const aiDialog = (
+    importState: CvImportState,
+    consent: "none" | "granted" | "withdrawn" | "outdated",
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <BulkCvImportDialog
+          importState={importState}
+          capabilityError=""
+          onCapabilityLost={() => {}}
+          onClose={() => {}}
+          onChanged={() => {}}
+          ai={{ disclosure, consent }}
+          onAiChanged={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  const changedTerms = "The AI service or its terms changed since you agreed.";
+  it("keeps the not-configured text and no AI controls without an AI provider", () => {
+    for (const markup of [
+      dialog("ready"),
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <BulkCvImportDialog
+            importState="ready"
+            capabilityError=""
+            onCapabilityLost={() => {}}
+            onClose={() => {}}
+            onChanged={() => {}}
+            ai={null}
+          />
+        </WorkspaceProvider>,
+      ),
+    ]) {
+      expect(markup).toContain(
+        "AI extraction is not configured. Enter details from each CV and verify them yourself. No CV content is sent to an AI service.",
+      );
+      expect(markup).not.toContain("Allow AI suggestions");
+      expect(markup).not.toContain("Withdraw AI consent");
+      expect(markup).not.toContain("AI suggestions</h3>");
+    }
+  });
+  it("shows the full disclosure and Allow AI suggestions before the file input", () => {
+    const markup = aiDialog("ready", "none");
+    const file = markup.indexOf('type="file"');
+    expect(file).toBeGreaterThan(0);
+    for (const value of [
+      disclosure.provider,
+      disclosure.model,
+      disclosure.region,
+      disclosure.retention,
+      disclosure.trainingUse,
+      disclosure.costNote,
+      disclosure.purpose,
+      disclosure.dataSent,
+      disclosure.limits,
+      "Selecting files sends nothing to the AI service",
+      "continue manually",
+      ">Allow AI suggestions</button>",
+    ]) {
+      expect(markup, value).toContain(value);
+      expect(markup.indexOf(value), value).toBeLessThan(file);
+    }
+    expect(markup).not.toContain("AI extraction is not configured");
+    expect(markup).not.toContain("Withdraw AI consent");
+    expect(markup).not.toContain(changedTerms);
+    expect(aiDialog("ready", "withdrawn")).toContain("Allow AI suggestions");
+  });
+  it("explains changed terms for an outdated consent", () => {
+    const markup = aiDialog("ready", "outdated");
+    expect(markup).toContain(changedTerms);
+    expect(markup).toContain("Allow AI suggestions");
+  });
+  it("offers withdrawal once consent is granted", () => {
+    const markup = aiDialog("ready", "granted");
+    expect(markup).toContain(">Withdraw AI consent</button>");
+    expect(markup).not.toContain("Allow AI suggestions");
+    expect(markup).toContain(disclosure.retention);
+  });
+  it.each(["checking", "not-set-up", "unavailable", "error"] as const)(
+    "renders no AI text or control while %s",
+    (importState) => {
+      for (const consent of ["none", "granted", "outdated"] as const) {
+        const markup = aiDialog(importState, consent);
+        for (const text of [
+          "AI suggestions",
+          "AI extraction",
+          "AI consent",
+          disclosure.provider,
+          disclosure.purpose,
+          "Unverified suggestion",
+        ])
+          expect(markup).not.toContain(text);
+      }
+    },
+  );
+  const recentPage = (totalPages: number): RecentImportsPage => ({
+    data: [
+      {
+        id: "00000000-0000-4000-8000-0000000000b1",
+        createdAt: "2030-01-01T09:00:00.000Z",
+        expiresAt: "2030-01-02T09:00:00.000Z",
+        items: [
+          {
+            id: "00000000-0000-4000-8000-0000000000c1",
+            originalName: "fictional-cv.pdf",
+            sizeBytes: 200,
+            candidateId: "00000000-0000-4000-8000-0000000000d1",
+            outcome: "cv-rejected",
+          },
+        ],
+      },
+    ],
+    pagination: { page: 1, pageSize: 10, total: totalPages * 10, totalPages },
+  });
+  const recent = (page: RecentImportsPage) =>
+    renderToStaticMarkup(
+      <RecentImports
+        page={page}
+        error=""
+        loading={false}
+        currentBatchId="00000000-0000-4000-8000-0000000000b2"
+        onPage={() => {}}
+      />,
+    );
+  it("pages Recent imports only when there is more than one page", () => {
+    const markup = recent(recentPage(2));
+    const nav =
+      /<nav class="pagination" aria-label="Recent import pages">[\s\S]*?<\/nav>/.exec(
+        markup,
+      )?.[0];
+    expect(nav).toBeDefined();
+    expect(nav).toContain("Page 1 of 2");
+    expect(nav).toContain(">Next</button>");
+    expect(nav).toMatch(/<button[^>]*disabled=""[^>]*>Previous<\/button>/);
+    expect(markup).toContain("Candidate created, CV rejected");
+    expect(markup).toContain("Open the candidate to attach the CV");
+    const single = recent(recentPage(1));
+    expect(single).toContain("fictional-cv.pdf");
+    expect(single).not.toContain("<nav");
+    expect(single).not.toContain("Recent import pages");
+  });
+  const emptyPage = (page: number): RecentImportsPage => ({
+    data: [],
+    pagination: { page, pageSize: 10, total: 3, totalPages: 1 },
+  });
+  /** The button with this label in an element tree; the component has no hooks, so it runs directly. */
+  const buttonIn = (
+    node: ReactNode,
+    label: string,
+  ): ReactElement<ButtonHTMLAttributes<HTMLButtonElement>> | undefined => {
+    if (Array.isArray(node))
+      return node.map((child) => buttonIn(child, label)).find(Boolean);
+    if (!isValidElement<{ children?: ReactNode }>(node)) return undefined;
+    if (node.type === "button" && node.props.children === label)
+      return node as ReactElement<ButtonHTMLAttributes<HTMLButtonElement>>;
+    return buttonIn(node.props.children, label);
+  };
+  it("offers Go to first page when a later Recent imports page is empty", () => {
+    const markup = recent(emptyPage(2));
+    expect(markup).toContain("No recent imports on this page.");
+    expect(markup).not.toContain("No other recent imports.");
+    const button = /<button[^>]*>Go to first page<\/button>/.exec(markup)?.[0];
+    expect(button).toBeDefined();
+    expect(button).toContain('class="button secondary small"');
+    expect(button).not.toContain("disabled");
+    expect(markup).not.toContain("<nav");
+    // A later page holding only the batch this dialog is running counts as empty as well.
+    const onlyCurrent = recent({
+      ...emptyPage(2),
+      data: [
+        {
+          ...recentPage(1).data[0],
+          id: "00000000-0000-4000-8000-0000000000b2",
+        },
+      ],
+    });
+    expect(onlyCurrent).toContain("No recent imports on this page.");
+    expect(onlyCurrent).toContain("Go to first page");
+    expect(onlyCurrent).not.toContain("fictional-cv.pdf");
+
+    const onPage = vi.fn();
+    const tree = RecentImports({
+      page: emptyPage(2),
+      error: "",
+      loading: false,
+      currentBatchId: "00000000-0000-4000-8000-0000000000b2",
+      onPage,
+    });
+    const first = buttonIn(tree, "Go to first page");
+    expect(first).toBeDefined();
+    first!.props.onClick!({} as MouseEvent<HTMLButtonElement>);
+    expect(onPage).toHaveBeenCalledTimes(1);
+    expect(onPage).toHaveBeenCalledWith(1);
+
+    const loading = renderToStaticMarkup(
+      <RecentImports
+        page={emptyPage(2)}
+        error=""
+        loading
+        currentBatchId="00000000-0000-4000-8000-0000000000b2"
+        onPage={() => {}}
+      />,
+    );
+    expect(loading).toMatch(
+      /<button[^>]*disabled=""[^>]*>Go to first page<\/button>/,
+    );
+  });
+  it("keeps the plain empty text on the first Recent imports page", () => {
+    const markup = recent(emptyPage(1));
+    expect(markup).toContain("No other recent imports.");
+    expect(markup).not.toContain("No recent imports on this page.");
+    expect(markup).not.toContain("Go to first page");
+  });
+  describe("200-file batches", () => {
+    const entries = Array.from({ length: 200 }, (_, index) => ({
+      id: `entry-${index}`,
+      file: { name: `fictional-cv-${String(index).padStart(3, "0")}.pdf` },
+    }));
+    const selected = (focusId: string) =>
+      renderToStaticMarkup(
+        <SelectedCvList
+          entries={entries}
+          focusId={focusId}
+          selected={focusId}
+          busy={false}
+          status={() => "Awaiting review"}
+          onSelect={() => {}}
+        />,
+      );
+    const rows = (markup: string) =>
+      [...markup.matchAll(/fictional-cv-(\d{3})\.pdf/g)].map((match) =>
+        Number(match[1]),
+      );
+    it("shows 25 selected CVs per page with a page control", () => {
+      const markup = selected("");
+      expect(rows(markup)).toEqual(Array.from({ length: 25 }, (_, n) => n));
+      expect(markup).toContain(
+        '<nav class="pagination" aria-label="Selected CV pages">',
+      );
+      expect(markup).toContain("Page 1 of 8");
+      expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Previous<\/button>/);
+      // The page follows the entry under review or being imported.
+      const later = selected("entry-130");
+      expect(rows(later)).toEqual(
+        Array.from({ length: 25 }, (_, n) => 125 + n),
+      );
+      expect(later).toContain("Page 6 of 8");
+      const few = renderToStaticMarkup(
+        <SelectedCvList
+          entries={entries.slice(0, 25)}
+          focusId=""
+          selected=""
+          busy={false}
+          status={() => "Awaiting review"}
+          onSelect={() => {}}
+        />,
+      );
+      expect(rows(few)).toHaveLength(25);
+      expect(few).not.toContain("<nav");
+    });
+    const batch = (count: number, id: string) => ({
+      id,
+      createdAt: "2030-01-01T09:00:00.000Z",
+      expiresAt: "2030-01-02T09:00:00.000Z",
+      items: Array.from({ length: count }, (_, index) => ({
+        id: `${id}-item-${index}`,
+        originalName: `fictional-cv-${String(index).padStart(3, "0")}.pdf`,
+        sizeBytes: 200,
+        candidateId: null,
+        outcome: "not-imported" as const,
+      })),
+    });
+    it("pages a 200-item recent import by 25 and shows no control for 10 items", () => {
+      const render = (count: number) =>
+        renderToStaticMarkup(
+          <RecentImports
+            page={{
+              data: [batch(count, "00000000-0000-4000-8000-0000000000e1")],
+              pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 },
+            }}
+            error=""
+            loading={false}
+            currentBatchId="00000000-0000-4000-8000-0000000000e2"
+            onPage={() => {}}
+          />,
+        );
+      const large = render(200);
+      expect(rows(large)).toEqual(Array.from({ length: 25 }, (_, n) => n));
+      expect(large).toContain(
+        '<nav class="pagination" aria-label="Import file pages">',
+      );
+      expect(large).toContain("Page 1 of 8");
+      expect(large).not.toContain("Recent import pages");
+      const small = render(10);
+      expect(rows(small)).toHaveLength(10);
+      expect(small).not.toContain("<nav");
+    });
+  });
+});

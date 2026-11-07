@@ -2,12 +2,18 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
 import * as recordService from "@/lib/records";
+import { CANDIDATE_DUPLICATE_LIMIT } from "@/domain/records";
 import { getVerifiedSession } from "@/lib/auth-session";
 import { authenticateApiToken } from "@/lib/api-tokens";
 import { ApiError } from "@/lib/errors";
 import { POST } from "@/app/api/v1/candidates/duplicates/route";
 import type { Principal } from "@/lib/principal";
-import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
+import {
+  createTestDb,
+  enforceTestRls,
+  seedApiToken,
+  seedIdentity,
+} from "./helpers/db";
 
 describe("possible candidate duplicates", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -40,15 +46,48 @@ describe("possible candidate duplicates", () => {
       email: " PERSON@EXAMPLE.TEST ",
       phone: "+971-50-123-4567",
     });
-    expect(matches).toEqual([
-      {
-        id: local.id,
-        name: "Synthetic Local",
-        email: "person@example.test",
-        phone: "+971 50 123 4567",
-        matches: ["email", "phone"],
-      },
-    ]);
+    expect(matches).toEqual({
+      data: [
+        {
+          id: local.id,
+          name: "Synthetic Local",
+          email: "person@example.test",
+          phone: "+971 50 123 4567",
+          matches: ["email", "phone"],
+        },
+      ],
+      limited: false,
+    });
+  });
+
+  it("returns at most the cap and flags only when more matches exist", async () => {
+    expect(CANDIDATE_DUPLICATE_LIMIT).toBe(20);
+    const seed = async (email: string, count: number) => {
+      const ids: string[] = [];
+      for (let index = 0; index < count; index++)
+        ids.push(
+          (
+            await recordService.createRecord(owner, "candidates", {
+              data: { name: `Synthetic Shared ${index + 1}`, email },
+            })
+          ).id,
+        );
+      return ids.sort();
+    };
+    const exact = await seed("shared-twenty@example.test", 20);
+    const atCap = await recordService.findCandidateDuplicates(owner, {
+      email: "shared-twenty@example.test",
+    });
+    expect(atCap.limited).toBe(false);
+    expect(atCap.data.map((row) => row.id)).toEqual(exact);
+
+    const over = await seed("shared-twenty-one@example.test", 21);
+    const beyondCap = await recordService.findCandidateDuplicates(owner, {
+      email: "shared-twenty-one@example.test",
+    });
+    expect(beyondCap.limited).toBe(true);
+    expect(beyondCap.data).toHaveLength(20);
+    expect(beyondCap.data.map((row) => row.id)).toEqual(over.slice(0, 20));
   });
 
   it("rejects empty queries and requires candidate-read scope", async () => {
@@ -79,18 +118,15 @@ describe("possible candidate duplicates", () => {
     expect(
       (await POST(request({ origin: "https://other.example.test" }))).status,
     ).toBe(403);
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-      scopes: [],
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner, []),
+    );
     expect(
       (await POST(request({ authorization: "Bearer synthetic" }))).status,
     ).toBe(403);
-    vi.mocked(authenticateApiToken).mockResolvedValue({
-      ...owner,
-      authType: "token",
-    });
+    vi.mocked(authenticateApiToken).mockResolvedValue(
+      await seedApiToken(fixture.db, owner),
+    );
     expect(
       (
         await POST(
@@ -103,8 +139,10 @@ describe("possible candidate duplicates", () => {
     ).toBe(403);
     const result = await POST(request({ authorization: "Bearer synthetic" }));
     expect(result.status).toBe(200);
-    expect(
-      (await result.json()).data.map((row: { name: string }) => row.name),
-    ).toEqual(["Synthetic Local"]);
+    const body = await result.json();
+    expect(body.data.map((row: { name: string }) => row.name)).toEqual([
+      "Synthetic Local",
+    ]);
+    expect(body.limited).toBe(false);
   });
 });

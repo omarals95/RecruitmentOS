@@ -66,6 +66,31 @@ function eventDay(record: RecordDto) {
     day: "2-digit",
   }).format(new Date(String(dataOf(record).startAt)));
 }
+/** One Dubai day's interviews by start time; equal starts are ordered by ID. */
+export function interviewsOnDay(events: RecordDto[], day: string) {
+  const start = (record: RecordDto) =>
+    Date.parse(String(dataOf(record).startAt));
+  return events
+    .filter((record) => eventDay(record) === day)
+    .sort((a, b) => start(a) - start(b) || a.id.localeCompare(b.id));
+}
+/** Each day's first 3 (month), 20 (week) or all (day) interviews and the count left for "+N more". */
+export function calendarCells(
+  events: RecordDto[],
+  days: string[],
+  view: "month" | "week" | "day",
+) {
+  const limit = view === "month" ? 3 : view === "week" ? 20 : Infinity;
+  return days.map((day) => {
+    const all = interviewsOnDay(events, day);
+    const shown = all.slice(0, limit);
+    return { day, shown, hidden: all.length - shown.length };
+  });
+}
+/** The "+N more" button's name: the visible text first, then the day it opens. */
+export function calendarMoreLabel(hidden: number, day: string): string {
+  return `+${hidden} more interviews on ${formatDate(day)}`;
+}
 export function CalendarScreen() {
   const { team, role } = useWorkspace();
   const linkedRecord = useSearchParams().get("record");
@@ -264,34 +289,28 @@ export function CalendarScreen() {
             ) : view === "day" ? (
               <div className="daily-agenda">
                 {events.length ? (
-                  events
-                    .sort((a, b) =>
-                      String(dataOf(a).startAt).localeCompare(
-                        String(dataOf(b).startAt),
-                      ),
-                    )
-                    .map((record) => (
-                      <button
-                        className="agenda-item"
-                        onClick={() => setDetail(record)}
-                        key={record.id}
-                      >
-                        <strong>
-                          {formatDate(dataOf(record).startAt, true)}
-                        </strong>
-                        <span>
-                          <strong>{recordLabel(record)}</strong>
-                          <small>
-                            {String(
-                              dataOf(record).interviewer ||
-                                "Interviewer not recorded",
-                            )}{" "}
-                            · {String(dataOf(record).minutes)} minutes
-                          </small>
-                        </span>
-                        <Badge value={dataOf(record).status} />
-                      </button>
-                    ))
+                  interviewsOnDay(events, days[0]).map((record) => (
+                    <button
+                      className="agenda-item"
+                      onClick={() => setDetail(record)}
+                      key={record.id}
+                    >
+                      <strong>
+                        {formatDate(dataOf(record).startAt, true)}
+                      </strong>
+                      <span>
+                        <strong>{recordLabel(record)}</strong>
+                        <small>
+                          {String(
+                            dataOf(record).interviewer ||
+                              "Interviewer not recorded",
+                          )}{" "}
+                          · {String(dataOf(record).minutes)} minutes
+                        </small>
+                      </span>
+                      <Badge value={dataOf(record).status} />
+                    </button>
+                  ))
                 ) : (
                   <EmptyState
                     title="A clear day in the calendar"
@@ -311,9 +330,8 @@ export function CalendarScreen() {
                   )}
                 </div>
                 <div className="calendar-grid">
-                  {days.map((day) => {
-                    const records = events.filter((r) => eventDay(r) === day);
-                    return (
+                  {calendarCells(events, days, view).map(
+                    ({ day, shown, hidden }) => (
                       <div
                         className={`calendar-day ${day === dubaiToday() ? "today" : ""} ${day.slice(0, 7) !== anchor.slice(0, 7) ? "outside-month" : ""}`}
                         key={day}
@@ -328,40 +346,39 @@ export function CalendarScreen() {
                         >
                           {Number(day.slice(-2))}
                         </button>
-                        {records
-                          .slice(0, view === "week" ? 20 : 3)
-                          .map((record) => (
-                            <button
-                              className={`calendar-event ${dataOf(record).status === "Cancelled" ? "cancelled" : ""}`}
-                              key={record.id}
-                              onClick={() => setDetail(record)}
-                            >
-                              <strong>
-                                {new Intl.DateTimeFormat("en-GB", {
-                                  timeZone: "Asia/Dubai",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                }).format(
-                                  new Date(String(dataOf(record).startAt)),
-                                )}
-                              </strong>
-                              <span>{recordLabel(record)}</span>
-                            </button>
-                          ))}
-                        {records.length > 3 && view === "month" && (
+                        {shown.map((record) => (
+                          <button
+                            className={`calendar-event ${dataOf(record).status === "Cancelled" ? "cancelled" : ""}`}
+                            key={record.id}
+                            onClick={() => setDetail(record)}
+                          >
+                            <strong>
+                              {new Intl.DateTimeFormat("en-GB", {
+                                timeZone: "Asia/Dubai",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }).format(
+                                new Date(String(dataOf(record).startAt)),
+                              )}
+                            </strong>
+                            <span>{recordLabel(record)}</span>
+                          </button>
+                        ))}
+                        {hidden > 0 && (
                           <button
                             className="calendar-more"
+                            aria-label={calendarMoreLabel(hidden, day)}
                             onClick={() => {
                               setAnchor(day);
                               setView("day");
                             }}
                           >
-                            +{records.length - 3} more
+                            +{hidden} more
                           </button>
                         )}
                       </div>
-                    );
-                  })}
+                    ),
+                  )}
                 </div>
               </div>
             )}

@@ -1,9 +1,35 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
-import { checkOrigin, readBody, errorResponse } from "@/lib/api";
+import { checkOrigin, readBody, errorResponse, json, runApi } from "@/lib/api";
+import { authenticateApiToken } from "@/lib/api-tokens";
 import { ApiError } from "@/lib/errors";
+import { StorageConfigurationError } from "@/lib/storage";
+
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** A Bearer request, which skips the origin check, to a fictional create endpoint. */
+function bearerRequest(init: RequestInit = {}) {
+  return new Request("http://localhost/api/v1/candidates", {
+    method: "POST",
+    ...init,
+    headers: {
+      authorization: "Bearer ros_live_fictional",
+      "content-type": "application/json",
+    },
+  });
+}
+async function errorOf(response: Response) {
+  const body = (await response.json()) as {
+    error: { code: string; message: string; correlationId: string };
+  };
+  expect(body.error.correlationId).toMatch(UUID);
+  expect(body.error.correlationId).toBe(
+    response.headers.get("x-correlation-id"),
+  );
+  return body.error;
+}
 describe("request boundaries", () => {
   it("rejects cookie writes without the exact configured origin", () => {
     vi.stubEnv("BETTER_AUTH_URL", "https://recruitment.example.test");
@@ -74,5 +100,139 @@ describe("request boundaries", () => {
     expect(response.status).toBe(500);
     expect(await response.text()).not.toContain("secret-password");
     expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+  it("adds a fresh correlation ID to every error and logs only a safe 500 category", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ids: string[] = [];
+    try {
+      for (const [error, status] of [
+        [new ApiError(404, "not_found", "Record not found in this team."), 404],
+        [
+          Object.assign(new Error("fictional unique detail"), {
+            code: "23505",
+          }),
+          409,
+        ],
+        [new Error("secret-password database-connection-string"), 500],
+      ] as const) {
+        const response = errorResponse(error);
+        expect(response.status).toBe(status);
+        const header = response.headers.get("x-correlation-id");
+        expect(header).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        const body = await response.json();
+        expect(Object.keys(body.error).sort()).toEqual([
+          "code",
+          "correlationId",
+          "message",
+        ]);
+        expect(body.error.correlationId).toBe(header);
+        ids.push(header!);
+      }
+      expect(new Set(ids).size).toBe(3);
+      expect(logged).toHaveBeenCalledTimes(1);
+      const line = logged.mock.calls[0].join(" ");
+      expect(line).toContain(ids[2]);
+      expect(line).toContain("Error");
+      expect(line).not.toContain("secret-password");
+      expect(line).not.toContain("connection-string");
+      expect(line).not.toContain("fictional unique detail");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+  describe("through runApi", () => {
+    let logged: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      vi.mocked(authenticateApiToken).mockResolvedValue({
+        userId: "fictional-user",
+        teamId: "fictional-team",
+        role: "recruiter",
+        scopes: ["candidates:write"],
+        authType: "token",
+        tokenId: "fictional-token",
+      });
+      logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    it("answers a body that fails mid-read with a quiet 499 request_cancelled", async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"name":"Fictional'));
+        },
+        pull(controller) {
+          controller.error(
+            Object.assign(new Error("fictional socket hang up"), {
+              code: "ECONNRESET",
+            }),
+          );
+        },
+      });
+      const request = bearerRequest({ body, duplex: "half" } as RequestInit);
+      const response = await runApi(request, undefined, async () =>
+        json({ data: await readBody(request, z.unknown()) }, 201),
+      );
+      expect(response.status).toBe(499);
+      expect((await errorOf(response)).code).toBe("request_cancelled");
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it("answers any unexpected error on an aborted request with a quiet 499, and logs it on a live one", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const fail = async (): Promise<Response> => {
+        throw new Error("fictional failure after the client left");
+      };
+      const cancelled = await runApi(
+        bearerRequest({ signal: controller.signal }),
+        undefined,
+        fail,
+      );
+      expect(cancelled.status).toBe(499);
+      expect((await errorOf(cancelled)).code).toBe("request_cancelled");
+      expect(logged).not.toHaveBeenCalled();
+      const live = await runApi(bearerRequest(), undefined, fail);
+      expect(live.status).toBe(500);
+      const { correlationId } = await errorOf(live);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0]).toEqual([
+        `internal_error correlationId=${correlationId} category=Error`,
+      ]);
+    });
+
+    it("keeps an ApiError's own status even when the request was aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const response = await runApi(
+        bearerRequest({ signal: controller.signal }),
+        undefined,
+        async () => {
+          throw new ApiError(
+            404,
+            "not_found",
+            "Record not found in this team.",
+          );
+        },
+      );
+      expect(response.status).toBe(404);
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it("answers a raw StorageConfigurationError with the generic 503 and one safe log line", async () => {
+      const secret = "fictional setting S3_BUCKET_NAME=fictional-bucket";
+      const response = await runApi(bearerRequest(), undefined, async () => {
+        throw new StorageConfigurationError(secret, "not_configured");
+      });
+      expect(response.status).toBe(503);
+      const error = await errorOf(response);
+      expect(error.code).toBe("STORAGE_SETUP_REQUIRED");
+      expect(error.message).not.toContain("S3_BUCKET_NAME");
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0]).toEqual([
+        `storage_configuration_error correlationId=${error.correlationId} code=STORAGE_SETUP_REQUIRED reason=not_configured`,
+      ]);
+    });
   });
 });

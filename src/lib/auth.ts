@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type AuthContext } from "better-auth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   APIError,
@@ -9,11 +9,14 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { organization as organizationPlugin } from "better-auth/plugins";
 import {
   getCurrentAdapter,
+  runWithTransaction,
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
-import { and, eq } from "drizzle-orm";
-import { getIdentityDb, type AppDb } from "@/db";
-import { authTables, member } from "@/db/auth-schema";
+import type { BetterAuthRateLimitStorage } from "@better-auth/core";
+import { and, eq, sql } from "drizzle-orm";
+import { getIdentityDb, prepareDbPairTargets, type AppDb } from "@/db";
+import { authTables, member, rateLimit, user } from "@/db/auth-schema";
+import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
 import {
@@ -21,6 +24,7 @@ import {
   isUsableAuthSecret,
   validateInvitationRole,
 } from "./auth-policy";
+import { clientIpHeader, keyedRateLimitHash } from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
 
 export type AuthOptions = {
@@ -46,18 +50,24 @@ export function getAuthOptions(): AuthOptions {
   } catch {
     /* Public pages remain available before setup. */
   }
-  const database =
-    Boolean(
-      process.env.DATABASE_URL &&
-      (!hosted || process.env.IDENTITY_DATABASE_URL),
-    ) ||
-    (!hosted &&
-      process.env.DATABASE_MODE === "pglite" &&
-      process.env.ALLOW_LOCAL_DB === "true");
+  let database = false;
+  if (hosted) {
+    try {
+      // The same refusals createDbPair applies before any pool; connection-time checks still run at first use.
+      prepareDbPairTargets();
+      // Hosted sign-in runs only in the Vercel production runtime.
+      database =
+        process.env.NODE_ENV === "production" && process.env.VERCEL === "1";
+    } catch {
+      /* Report setup required without revealing which setting was refused. */
+    }
+  } else
+    database =
+      Boolean(process.env.DATABASE_URL) ||
+      (process.env.DATABASE_MODE === "pglite" &&
+        process.env.ALLOW_LOCAL_DB === "true");
   return {
     configured: Boolean(
-      // Keep hosted sign-in unavailable while the database isolation gate is active.
-      !hosted &&
       validURL &&
       database &&
       isUsableAuthSecret(process.env.BETTER_AUTH_SECRET) &&
@@ -88,6 +98,49 @@ type FactoryConfig = {
   google?: { clientId: string; clientSecret: string };
   microsoft?: { clientId: string; clientSecret: string; tenantId?: string };
 };
+
+/**
+ * Better Auth's database limiter semantics in one atomic upsert on auth.rate_limit, but its
+ * `<ip>|<path>` key is stored only as a keyed hash. Allowed while count < max within the window
+ * since the last allowed request; a passed window restarts at 1. A refusal leaves the window as it
+ * is (the count is capped at max + 1 to mark it) and reports the seconds until the window frees.
+ */
+function hashedRateLimitStorage(
+  db: AppDb,
+  secret: string,
+): BetterAuthRateLimitStorage {
+  return {
+    async consume(key, rule) {
+      const now = Date.now();
+      const windowMs = rule.window * 1000;
+      const passed = sql`${now}::bigint - ${rateLimit.lastRequest} >= ${windowMs}::bigint`;
+      const [row] = await db
+        .insert(rateLimit)
+        .values({
+          key: `ba:${keyedRateLimitHash(key, secret)}`,
+          count: 1,
+          lastRequest: now,
+        })
+        .onConflictDoUpdate({
+          target: rateLimit.key,
+          set: {
+            count: sql`CASE WHEN ${passed} THEN 1 ELSE LEAST(${rateLimit.count} + 1, ${rule.max + 1}::int) END`,
+            lastRequest: sql`CASE WHEN ${passed} OR ${rateLimit.count} < ${rule.max}::int THEN ${now}::bigint ELSE ${rateLimit.lastRequest} END`,
+          },
+        })
+        .returning({
+          count: rateLimit.count,
+          lastRequest: rateLimit.lastRequest,
+        });
+      await purgeExpiredAuthRowsThrottled(db);
+      if (row.count <= rule.max) return { allowed: true, retryAfter: null };
+      return {
+        allowed: false,
+        retryAfter: Math.ceil((row.lastRequest + windowMs - now) / 1000),
+      };
+    },
+  };
+}
 
 export function createAuth(db: AppDb, config: FactoryConfig) {
   const mail = (to: string, subject: string, text: string) =>
@@ -152,6 +205,15 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       },
     },
   });
+  // The plugin writes the team, its owner and the active team separately; commit them together.
+  const createOrganization = plugin.endpoints.createOrganization;
+  plugin.endpoints.createOrganization = Object.assign(
+    (input: Parameters<typeof createOrganization>[0] & { context: object }) =>
+      runWithTransaction((input.context as AuthContext).adapter, () =>
+        createOrganization(input),
+      ),
+    { path: createOrganization.path, options: createOrganization.options },
+  ) as unknown as typeof createOrganization;
   return betterAuth({
     appName: "RecruitmentOS",
     baseURL: config.baseURL,
@@ -168,7 +230,13 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       schema: authTables,
       transaction: true,
     }),
-    advanced: { database: { generateId: "uuid" } },
+    advanced: {
+      database: { generateId: "uuid" },
+      // Better Auth skips callback and redirect origin checks when NODE_ENV=test or TEST is set; keep them on everywhere.
+      disableOriginCheck: false,
+      // Auth rate limits and session addresses use the same single client-IP header as the API.
+      ipAddress: { ipAddressHeaders: [clientIpHeader()] },
+    },
     user: {
       deleteUser: { enabled: false },
       changeEmail: { enabled: false },
@@ -195,7 +263,7 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
     },
     rateLimit: {
       enabled: true,
-      storage: "database",
+      customStorage: hashedRateLimitStorage(db, config.secret),
       window: 60,
       max: 100,
       customRules: {
@@ -337,16 +405,19 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
           [
             "/organization/invite-member",
             "/organization/update-member-role",
+            "/organization/remove-member",
           ].includes(ctx.path)
         ) {
           const body = ctx.body as {
             role?: unknown;
             organizationId?: string;
-            memberId?: string;
+            memberId?: unknown;
+            memberIdOrEmail?: unknown;
           };
-          const role = validateRole(
-            typeof body?.role === "string" ? body.role : "",
-          );
+          const role =
+            ctx.path === "/organization/remove-member"
+              ? undefined
+              : validateRole(typeof body?.role === "string" ? body.role : "");
           const organizationId =
             body?.organizationId ?? identity.session.activeOrganizationId;
           if (!organizationId)
@@ -363,20 +434,26 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               )
               .limit(1)
           )[0];
-          const target = body.memberId
-            ? (
-                await db
-                  .select()
-                  .from(member)
-                  .where(
-                    and(
-                      eq(member.id, body.memberId),
-                      eq(member.organizationId, organizationId),
-                    ),
-                  )
-                  .limit(1)
-              )[0]
-            : undefined;
+          // Removal names the member by id or email; resolve both so an owner cannot be removed by a non-owner.
+          const targetKey = body?.memberId ?? body?.memberIdOrEmail;
+          const target =
+            typeof targetKey === "string"
+              ? (
+                  await db
+                    .select({ role: member.role })
+                    .from(member)
+                    .innerJoin(user, eq(user.id, member.userId))
+                    .where(
+                      and(
+                        targetKey.includes("@")
+                          ? eq(user.email, targetKey.trim().toLowerCase())
+                          : eq(member.id, targetKey),
+                        eq(member.organizationId, organizationId),
+                      ),
+                    )
+                    .limit(1)
+                )[0]
+              : undefined;
           if (
             (role === "owner" || target?.role === "owner") &&
             actor?.role !== "owner"

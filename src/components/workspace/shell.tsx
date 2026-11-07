@@ -33,9 +33,15 @@ import {
 import { authClient } from "@/lib/auth-client";
 import { useTheme, type Theme } from "@/components/theme-provider";
 import { Dialog } from "@/components/ui/dialog";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
+  abortTeamRequests,
+  hasUnsavedWork,
+  hasWritesInFlight,
+  setSwitchNotice,
   useApi,
   useDebounced,
+  useSwitchNotice,
   useWorkspace,
   WorkspaceProvider,
   type WorkspaceIdentity,
@@ -175,6 +181,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const [search, setSearch] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
+  const switchNotice = useSwitchNotice();
   const { theme, setTheme } = useTheme();
   const notifications = useApi<{
     data?: { read: boolean }[];
@@ -285,7 +292,11 @@ function Shell({ children }: { children: React.ReactNode }) {
             <strong>{current?.label || "Settings"}</strong>
           </div>
           <div className="topbar-actions">
-            <button className="search-launcher" onClick={() => setSearch(true)}>
+            <button
+              className="search-launcher"
+              aria-label="Search your workspace"
+              onClick={() => setSearch(true)}
+            >
               <Search size={17} aria-hidden="true" />
               <span>Search your workspace</span>
               <kbd>⌘ K</kbd>
@@ -348,6 +359,33 @@ function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main id="main-content" className="workspace-main">
+          {team && switchNotice?.toTeamId === team.id && (
+            <div
+              className="notice"
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 16,
+              }}
+            >
+              <span>
+                Switched to {team.name}. Unsaved changes in{" "}
+                {switchNotice.fromTeam} were discarded. A save that was in
+                progress may or may not have completed; review{" "}
+                {switchNotice.fromTeam} before redoing it.
+              </span>
+              <button
+                className="icon-button"
+                aria-label="Dismiss notification"
+                onClick={() => setSwitchNotice(null)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
           {accountError && (
             <p className="notice error" role="alert">
               {accountError}
@@ -370,6 +408,7 @@ function TeamSwitcher() {
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const { confirm, dialog } = useConfirm();
   useEffect(() => {
     authClient.organization
       .list()
@@ -390,14 +429,40 @@ function TeamSwitcher() {
           value={team?.id || ""}
           disabled={busy || !teams.length}
           onChange={async (event) => {
+            const next = event.target.value;
+            const pending =
+              !!team && (hasUnsavedWork(team.id) || hasWritesInFlight(team.id));
+            if (
+              team &&
+              pending &&
+              !(await confirm({
+                title: "Switch team?",
+                message: `Unsaved changes in ${team.name} will be discarded. A save that is still in progress may or may not complete; check ${team.name} before redoing it.`,
+                confirmLabel: "Switch team",
+                cancelLabel: `Stay in ${team.name}`,
+                destructive: true,
+              }))
+            )
+              return;
             setBusy(true);
             setError("");
             try {
               const result = await authClient.organization.setActive({
-                organizationId: event.target.value,
+                organizationId: next,
               });
               if (result.error)
                 throw new Error(result.error.message || "Cannot switch team");
+              if (team) {
+                // Only after the server switched: drop the old team's work.
+                const discarded =
+                  pending ||
+                  hasUnsavedWork(team.id) ||
+                  hasWritesInFlight(team.id);
+                setSwitchNotice(
+                  discarded ? { fromTeam: team.name, toTeamId: next } : null,
+                );
+                abortTeamRequests(team.id);
+              }
               router.refresh();
             } catch (e) {
               setError(e instanceof Error ? e.message : "Cannot switch team");
@@ -419,6 +484,7 @@ function TeamSwitcher() {
         <small>{busy ? "Switching…" : "Recruitment workspace"}</small>
       </label>
       {error && <p role="alert">{error}</p>}
+      {dialog}
     </div>
   );
 }

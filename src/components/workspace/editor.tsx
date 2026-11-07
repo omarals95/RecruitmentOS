@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { Fragment, useId, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Search } from "lucide-react";
 import {
   RESOURCE_CONFIG,
@@ -19,11 +19,19 @@ import { Dialog } from "@/components/ui/dialog";
 import {
   useApi,
   useDebounced,
+  useUnsavedWork,
   useWorkspace,
   requestJson,
   humanError,
 } from "./client";
-import { dataOf, recordLabel, toDubaiInput, fromDubaiInput } from "./helpers";
+import { DuplicateWarning, useDuplicateLookup } from "./duplicate-warning";
+import {
+  dataOf,
+  recordLabel,
+  roleSnapshot,
+  toDubaiInput,
+  fromDubaiInput,
+} from "./helpers";
 import { recordMutation, customValueDefaults } from "./mutation";
 
 type Values = Record<string, unknown>;
@@ -95,9 +103,11 @@ export function RecordEditor({
       return result;
     },
   );
+  const [opened] = useState(() => JSON.stringify([values, refs]));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(saving || JSON.stringify([values, refs]) !== opened);
   const [copyingRole, setCopyingRole] = useState(false);
   const pending = saving || copyingRole;
   const [advanced, setAdvanced] = useState(false);
@@ -107,6 +117,12 @@ export function RecordEditor({
     resource === "tasks"
       ? "/api/v1/task-fields?pageSize=100&sort=position"
       : null,
+  );
+  const duplicates = useDuplicateLookup(
+    team?.id ?? null,
+    resource === "candidates",
+    values.email,
+    values.phone,
   );
   const update = (key: string, value: unknown) =>
     setValues((old) => ({ ...old, [key]: value }));
@@ -175,7 +191,7 @@ export function RecordEditor({
         team.id,
         `/api/v1/job-roles/${id}`,
       );
-      setValues((old) => ({ ...old, ...role.data.data }));
+      setValues((old) => ({ ...old, ...roleSnapshot(role.data.data) }));
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -268,13 +284,20 @@ export function RecordEditor({
                       ].includes(field.key)),
                 )
                 .map((field) => (
-                  <FieldInput
-                    key={field.key}
-                    field={field}
-                    value={values[field.key]}
-                    error={fieldErrors[field.key]}
-                    onChange={(value) => update(field.key, value)}
-                  />
+                  <Fragment key={field.key}>
+                    <FieldInput
+                      field={field}
+                      value={values[field.key]}
+                      error={fieldErrors[field.key]}
+                      onChange={(value) => update(field.key, value)}
+                    />
+                    {resource === "candidates" && field.key === "phone" && (
+                      <DuplicateWarning
+                        lookup={duplicates}
+                        excludeId={record?.id}
+                      />
+                    )}
+                  </Fragment>
                 ))}
               {resource === "tasks" &&
                 fields.data?.data.map((custom) => {

@@ -1,11 +1,22 @@
+import { extractionProvider } from "@/lib/ai-provider";
 import { json, runApi } from "@/lib/api";
 import { requireScope } from "@/lib/permissions";
+import { storageConfigured } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export async function GET(request: Request) {
   return runApi(request, "cvs:write", async (principal) => {
     requireScope(principal, "candidates:write");
-    // Re-enable only after hosted tenant isolation and immutable CV storage are verified.
-    return json({ data: { uploadsAvailable: false, aiAvailable: false } });
+    // Bulk uploads follow single CV upload readiness: Blob only when hosted, unknown providers false.
+    // storageConfigured reads only the environment; it never contacts a provider.
+    const configured = storageConfigured();
+    return json({
+      data: {
+        uploadsAvailable: configured,
+        // True only with an approved extraction provider; none is configured in this build.
+        aiAvailable: extractionProvider() !== null,
+        storageConfigured: configured,
+      },
+    });
   });
 }

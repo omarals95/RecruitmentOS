@@ -20,7 +20,15 @@ import {
 } from "lucide-react";
 import type { RecordDto, ResourceName } from "@/domain/records";
 import { RecordEditor } from "./editor";
-import { dataOf, formatDate, recordLabel, saveCsv } from "./helpers";
+import {
+  analyticsExportMetadata,
+  analyticsRange,
+  dataOf,
+  formatDate,
+  formatNumber,
+  recordLabel,
+  saveCsv,
+} from "./helpers";
 import { useApi, useWorkspace, requestJson, humanError } from "./client";
 import {
   BarChart,
@@ -137,7 +145,7 @@ export function Overview() {
                 value={result.data.counts.vacancies}
                 icon={BriefcaseBusiness}
                 href="/app/vacancies"
-                caption="Roles currently being recruited"
+                caption="Vacancies with status Open"
               />
               <Stat
                 label="Applications"
@@ -151,26 +159,27 @@ export function Overview() {
                 value={result.data.counts.tasks}
                 icon={CheckCheck}
                 href="/app/tasks"
-                caption="Next steps for your team"
+                caption="Tasks not in a completed bucket"
               />
             </div>
             <div className="data-reconciliation">
               <span>
-                <strong>
-                  {result.data.counts.candidates?.toLocaleString()}
-                </strong>{" "}
+                <strong>{formatNumber(result.data.counts.candidates)}</strong>{" "}
                 candidate records
               </span>
               <span>
                 <strong>
-                  {result.data.counts.cvFiles?.toLocaleString() ?? "—"}
+                  {result.data.counts.cvFiles === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.cvFiles)}
                 </strong>{" "}
                 private CV files
               </span>
               <span>
                 <strong>
-                  {result.data.counts.candidatesWithCvs?.toLocaleString() ??
-                    "—"}
+                  {result.data.counts.candidatesWithCvs === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.candidatesWithCvs)}
                 </strong>{" "}
                 candidates with CVs
               </span>
@@ -356,7 +365,7 @@ function Stat({
         </span>
       </div>
       <strong className="stat-value">
-        {typeof value === "number" ? value.toLocaleString() : "—"}
+        {typeof value === "number" ? formatNumber(value) : "—"}
       </strong>
       <div className="row space-between">
         <small>{caption}</small>
@@ -405,7 +414,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
           <div className="row space-between">
             <span>{row.name}</span>
             <strong>
-              {row.count.toLocaleString()} / {coverage.total.toLocaleString()}
+              {formatNumber(row.count)} / {formatNumber(coverage.total)}
             </strong>
           </div>
           <progress
@@ -418,7 +427,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
       <Link className="coverage-review" href="/app/source-review">
         <span>Source records needing review</span>
         <strong>
-          {coverage.reviewRequired.toLocaleString()}
+          {formatNumber(coverage.reviewRequired)}
           <ArrowUpRight size={15} aria-hidden="true" />
         </strong>
       </Link>
@@ -426,7 +435,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
   );
 }
 export function Analytics({ talent = false }: { talent?: boolean }) {
-  const { team } = useWorkspace();
+  const { team, environment } = useWorkspace();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
@@ -453,27 +462,35 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
           className="button secondary"
           disabled={!result.data}
           onClick={() => {
-            if (result.data)
-              saveCsv(
-                "RecruitmentOS-analytics.csv",
-                ["Metric", "Group", "Count"],
-                [
-                  ...result.data.stages.map((item) => [
-                    "Application stage",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.sources.map((item) => [
-                    "Application source",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.series.flatMap((item) => [
-                    ["Applications", item.date, item.applications],
-                    ["Observed hires", item.date, item.hired],
-                  ]),
-                ],
-              );
+            if (!result.data) return;
+            const now = new Date();
+            saveCsv(
+              "RecruitmentOS-analytics.csv",
+              ["Metric", "Group", "Count"],
+              [
+                ...result.data.stages.map((item) => [
+                  "Application stage",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.sources.map((item) => [
+                  "Application source",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.series.flatMap((item) => [
+                  ["Applications", item.date, item.applications],
+                  ["Observed hires", item.date, item.hired],
+                ]),
+              ],
+              analyticsExportMetadata({
+                title: talent ? "Talent insights" : "Hiring analytics",
+                from: result.data.from,
+                to: result.data.to,
+                now,
+                environment,
+              }),
+            );
           }}
         >
           Export statistics
@@ -520,6 +537,11 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
             Last 30 days
           </button>
         </form>
+      )}
+      {!talent && result.data && (
+        <p className="muted">
+          {analyticsRange(result.data.from, result.data.to)}
+        </p>
       )}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />
@@ -605,7 +627,7 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     caption="Current active application records"
                   />
                   <Stat
-                    label="Vacancies"
+                    label="Open vacancies"
                     value={result.data.counts.vacancies}
                     icon={BriefcaseBusiness}
                     href="/app/vacancies"
@@ -646,7 +668,10 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     <BarChart data={result.data.offers} />
                   </section>
                   <section className="panel">
-                    <PanelHeading title="Open roles by department" />
+                    <PanelHeading
+                      title="Open roles by department"
+                      description="Vacancies with status Open"
+                    />
                     <BarChart data={result.data.departments} />
                   </section>
                 </div>
@@ -730,6 +755,7 @@ export function ActivityScreen() {
               "onboarding",
               "checklist",
               "comment",
+              "export",
             ].map((item) => (
               <option key={item}>{item}</option>
             ))}
@@ -762,6 +788,12 @@ export function ActivityScreen() {
                     <p>
                       <Badge value={item.metadata.fromStage} /> →{" "}
                       <Badge value={item.metadata.toStage} />
+                    </p>
+                  ) : null}
+                  {item.metadata.fromStatus && item.metadata.toStatus ? (
+                    <p>
+                      <Badge value={item.metadata.fromStatus} /> →{" "}
+                      <Badge value={item.metadata.toStatus} />
                     </p>
                   ) : null}
                 </div>
