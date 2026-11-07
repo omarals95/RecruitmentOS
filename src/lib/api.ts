@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApiError } from "./errors";
 import { requirePrincipal, type Principal } from "./principal";
+import { runWithServerTiming } from "./server-timing";
 import type { Scope } from "./permissions";
 import { StorageConfigurationError, storageSetupRequired } from "./storage";
 export { ApiError } from "./errors";
@@ -200,12 +201,18 @@ export async function runApi(
   handler: (principal: Principal) => Promise<Response>,
   options?: { humanOnly?: boolean },
 ): Promise<Response> {
-  try {
-    checkOrigin(request);
-    return await handler(
-      await requirePrincipal(request, scope, options?.humanOnly),
-    );
-  } catch (error) {
-    return errorResponse(error, request);
-  }
+  // Every response, success or error, carries only durations and a round-trip count.
+  return runWithServerTiming(async (finish) => {
+    let response: Response;
+    try {
+      checkOrigin(request);
+      response = await handler(
+        await requirePrincipal(request, scope, options?.humanOnly),
+      );
+    } catch (error) {
+      response = errorResponse(error, request);
+    }
+    response.headers.set("Server-Timing", finish());
+    return response;
+  });
 }

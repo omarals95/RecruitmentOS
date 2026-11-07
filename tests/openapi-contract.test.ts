@@ -470,6 +470,8 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/teams/bootstrap",
         "GET /api/v1/teams/storage-settings",
         "PUT /api/v1/teams/storage-settings",
+        "POST /api/v1/speed-samples",
+        "GET /api/v1/teams/speed",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {

@@ -13,10 +13,12 @@ import {
 import { dataRoleHelpers, identityRoleHelpers } from "@/db/connection-boundary";
 import type { Principal } from "@/lib/principal";
 import { roleScopes, type Role } from "@/lib/permissions";
+import { countPgliteRoundTrips } from "@/lib/server-timing";
 import { installTenantContextKey } from "@/lib/tenant-context";
 import { readRuntimeRoleTemplate } from "../../scripts/runtime-role-template";
 export async function createTestDb() {
-  const client = new PGlite();
+  // The same round-trip counting as src/db/index.ts, so Server-Timing reads alike in tests.
+  const client = countPgliteRoundTrips(new PGlite());
   await applyMigrations(client);
   await installTenantContextKey(client);
   const db = drizzle(client, { schema }) as unknown as AppDb;

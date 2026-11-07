@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   CalendarDays,
@@ -11,8 +11,15 @@ import {
 } from "lucide-react";
 import { dubaiToday, type RecordDto } from "@/domain/records";
 import { RecordEditor } from "./editor";
-import { useWorkspace, requestJson, humanError } from "./client";
+import {
+  useCachedQuery,
+  useWorkspace,
+  requestJson,
+  humanError,
+} from "./client";
 import { dataOf, formatDate, recordLabel } from "./helpers";
+import { useReadyTiming } from "./speed-log";
+import { calendarDays, interviewRangePath } from "./tab-requests";
 import {
   Badge,
   EmptyState,
@@ -24,31 +31,8 @@ import {
   type ListResponse,
 } from "./records-screen";
 
-export function calendarDays(
-  anchor: string,
-  view: "month" | "week" | "day",
-): string[] {
-  const date = new Date(`${anchor}T12:00:00Z`);
-  let start = new Date(date);
-  let count = 1;
-  if (view === "month") {
-    start = new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 12),
-    );
-    const weekday = (start.getUTCDay() + 6) % 7;
-    start.setUTCDate(start.getUTCDate() - weekday);
-    count = 42;
-  }
-  if (view === "week") {
-    start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
-    count = 7;
-  }
-  return Array.from({ length: count }, (_, index) => {
-    const day = new Date(start);
-    day.setUTCDate(start.getUTCDate() + index);
-    return day.toISOString().slice(0, 10);
-  });
-}
+export { calendarDays } from "./tab-requests";
+
 function shiftDate(anchor: string, view: string, direction: number) {
   const date = new Date(`${anchor}T12:00:00Z`);
   if (view === "month") {
@@ -98,10 +82,6 @@ export function CalendarScreen() {
   const [mode, setMode] = useState<"calendar" | "list">("calendar");
   const [view, setView] = useState<"month" | "week" | "day">("month");
   const [anchor, setAnchor] = useState(dubaiToday());
-  const [events, setEvents] = useState<RecordDto[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [revision, setRevision] = useState(0);
   const [editor, setEditor] = useState<{
     record?: RecordDto;
     prefill?: Record<string, unknown>;
@@ -128,30 +108,18 @@ export function CalendarScreen() {
       active = false;
     };
   }, [team, linkedRecord, mode]);
-  // Calendar fetch spans several pages; reset the visible loading state before starting that external request.
-  useEffect(() => {
-    let active = true;
-    if (!team || mode !== "calendar") return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize loading with the externally selected calendar range.
-    setLoading(true);
-    setError("");
-    (async () => {
+  // The range spans several pages; it is cached per range, shown at once on return and refreshed.
+  const teamId = team?.id;
+  const loadRange = useCallback(
+    async (signal: AbortSignal) => {
       const all: RecordDto[] = [];
       let page = 1;
       let total: number;
-      const end = new Date(`${days[days.length - 1]}T12:00:00Z`);
-      end.setUTCDate(end.getUTCDate() + 1);
       do {
-        const query = new URLSearchParams({
-          page: String(page),
-          pageSize: "100",
-          startFrom: `${days[0]}T00:00:00+04:00`,
-          startTo: `${end.toISOString().slice(0, 10)}T00:00:00+04:00`,
-          sort: "createdAt",
-        });
         const response = await requestJson<ListResponse>(
-          team.id,
-          `/api/v1/interviews?${query}`,
+          teamId!,
+          interviewRangePath(days, page),
+          { signal },
         );
         all.push(...response.data);
         total = response.pagination.totalPages;
@@ -160,19 +128,17 @@ export function CalendarScreen() {
           throw new Error(
             "This calendar range contains more than 10,000 interviews. Narrow the date range.",
           );
-      } while (page <= total && active);
-      if (active) setEvents(all.filter((r) => days.includes(eventDay(r))));
-    })()
-      .catch((e: unknown) => {
-        if (active) setError(humanError(e));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [team, days, revision, mode]);
+      } while (page <= total);
+      return all.filter((r) => days.includes(eventDay(r)));
+    },
+    [teamId, days],
+  );
+  const range = useCachedQuery<RecordDto[]>(
+    mode === "calendar" ? `${interviewRangePath(days, 1)}#range` : null,
+    loadRange,
+  );
+  const events = range.data ?? [];
+  useReadyTiming("tab.interviews", !!range.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -279,12 +245,9 @@ export function CalendarScreen() {
                 </div>
               </div>
             </div>
-            {error ? (
-              <LoadError
-                message={error}
-                retry={() => setRevision((n) => n + 1)}
-              />
-            ) : loading ? (
+            {range.error ? (
+              <LoadError message={range.error} retry={range.refresh} />
+            ) : range.loading ? (
               <Loading />
             ) : view === "day" ? (
               <div className="daily-agenda">
@@ -391,7 +354,7 @@ export function CalendarScreen() {
           record={detail}
           onClose={() => setDetail(null)}
           onEdit={() => setEditor({ record: detail })}
-          onRefresh={() => setRevision((n) => n + 1)}
+          onRefresh={range.refresh}
           onCreate={() => {}}
           onUpdated={setDetail}
         />
@@ -403,7 +366,7 @@ export function CalendarScreen() {
           onClose={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
-            setRevision((n) => n + 1);
+            range.refresh();
           }}
         />
       )}

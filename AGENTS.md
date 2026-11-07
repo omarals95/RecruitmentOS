@@ -48,6 +48,8 @@ npm run format:check    # prettier; format only the files you changed
 
 `npm audit --audit-level=moderate` also runs in CI. Never run a repo-wide `--fix` or `prettier --write .`.
 
+Measurement (local PGlite only, never a hosted database): `npm run bench:round-trips` signs in the fictional seed account in process and prints database round trips, db ms and total ms per common action from the `Server-Timing` header. It refuses to run unless `DATABASE_MODE=pglite` and `ALLOW_LOCAL_DB=true`.
+
 ## Non-negotiable rules
 
 - Fictional data only. Never add real candidate records, CVs, the owner's personal CV, credentials, database dumps or private reports to the repository, tests, logs or screenshots.

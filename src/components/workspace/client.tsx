@@ -10,10 +10,15 @@ import {
   type ReactNode,
 } from "react";
 import {
-  failedResourceState,
-  resourceSnapshot,
-  type ResourceState,
-} from "./resource-state";
+  createDataCache,
+  DISABLED_SNAPSHOT,
+  LOADING_SNAPSHOT,
+  type CacheIdentity,
+  type CacheSnapshot,
+  type Loader,
+} from "./data-cache";
+import type { Requester } from "./optimistic";
+import { speedLog, startSpeedLog } from "./speed-log";
 
 export interface WorkspaceIdentity {
   user: { id: string; name: string; email: string };
@@ -30,6 +35,13 @@ export function WorkspaceProvider({
   value: WorkspaceIdentity;
   children: ReactNode;
 }) {
+  const userId = value.user.id;
+  const teamId = value.team?.id ?? null;
+  // Children subscribe first; then everything cached for another user or team is dropped.
+  useEffect(() => {
+    dataCache.setIdentity(teamId ? { userId, teamId } : null);
+    startSpeedLog()?.setTeam(teamId);
+  }, [userId, teamId]);
   return (
     <WorkspaceContext.Provider value={value}>
       {children}
@@ -111,6 +123,13 @@ export async function requestJson<T>(
       credentials: "same-origin",
       cache: "no-store",
     });
+    // One in five responses gives a route timing: method, path pattern and Server-Timing only.
+    if (teamId)
+      speedLog()?.route(
+        init.method ?? "GET",
+        path,
+        response.headers.get("server-timing"),
+      );
     let body: unknown;
     try {
       body = await response.json();
@@ -126,6 +145,7 @@ export async function requestJson<T>(
     }
     if (!response.ok) throw errorFromBody(response.status, body);
     // The duplicate lookup is a read-only POST, so it must not refresh open views.
+    if (teamId && entry.write) dataCache.afterWrite(teamId, path, body);
     if (typeof window !== "undefined" && entry.write)
       window.dispatchEvent(
         new CustomEvent("recruitmentos:data-changed", {
@@ -246,62 +266,79 @@ export function useSwitchNotice() {
     () => null,
   );
 }
+/** Every workspace read: one in-memory cache for this browser tab, keyed by user, team and path. */
+export const dataCache = createDataCache((teamId, path, signal) =>
+  requestJson(teamId, path, { signal }),
+);
+/** requestJson for one team, in the shape the optimistic actions take. */
+export function teamRequester(teamId: string): Requester {
+  return <T,>(path: string, init?: RequestInit) =>
+    requestJson<T>(teamId, path, init);
+}
+/** Team switch and sign-out: nothing cached for one team may be shown in another. */
+export function clearWorkspaceCache() {
+  dataCache.clear();
+  speedLog()?.clear();
+}
+/**
+ * Cached data at once (refreshing in the background), or loading without it. `load` replaces the
+ * single GET for reads such as the whole-vacancy board; keep it stable with useCallback.
+ */
+export function useCachedQuery<T>(path: string | null, load?: Loader) {
+  const { user, team } = useWorkspace();
+  const userId = user.id;
+  const teamId = team?.id;
+  const enabled = !!path && !!teamId;
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      enabled
+        ? dataCache.subscribe(
+            { userId, teamId: teamId! },
+            path!,
+            listener,
+            load,
+          )
+        : () => {},
+    [enabled, userId, teamId, path, load],
+  );
+  const getSnapshot = useCallback(
+    () =>
+      enabled
+        ? dataCache.getSnapshot({ userId, teamId: teamId! }, path!)
+        : DISABLED_SNAPSHOT,
+    [enabled, userId, teamId, path],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, () =>
+    enabled ? LOADING_SNAPSHOT : DISABLED_SNAPSHOT,
+  ) as CacheSnapshot<T>;
+  const refresh = useCallback(() => {
+    if (enabled)
+      void dataCache.revalidate({ userId, teamId: teamId! }, path!, true);
+  }, [enabled, userId, teamId, path]);
+  const setData = useCallback(
+    (data: T | null) => {
+      if (enabled) dataCache.set({ userId, teamId: teamId! }, path!, data);
+    },
+    [enabled, userId, teamId, path],
+  );
+  return { ...snapshot, refresh, setData };
+}
 export function useApi<T>(path: string | null) {
-  const { team } = useWorkspace();
-  const [state, setState] = useState<ResourceState<T> | null>(null);
-  const [revision, setRevision] = useState(0);
-  const key = JSON.stringify([team?.id || "", path || ""]);
-  const refresh = useCallback(() => setRevision((n) => n + 1), []);
-  useEffect(() => {
-    const onChange = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{ teamId: string | null; path: string }>
-      ).detail;
-      if (detail.teamId !== team?.id || !path) return;
-      const changedResource = detail.path.split("/")[3];
-      const currentResource = path.split("/")[3]?.split("?")[0];
-      if (
-        currentResource === changedResource ||
-        [
-          "overview",
-          "analytics",
-          "activity",
-          "notifications",
-          "search",
-        ].includes(currentResource)
-      )
-        refresh();
-    };
-    window.addEventListener("recruitmentos:data-changed", onChange);
-    return () =>
-      window.removeEventListener("recruitmentos:data-changed", onChange);
-  }, [team, path, refresh]);
-  useEffect(() => {
-    let active = true;
-    if (!path || !team) return;
-    const controller = new AbortController();
-    requestJson<T>(team.id, path, { signal: controller.signal })
-      .then((value) => {
-        if (active) setState({ key, revision, data: value, error: "" });
-      })
-      .catch((error: unknown) => {
-        if (active && !isAbortError(error))
-          setState((previous) =>
-            failedResourceState(previous, key, revision, error),
-          );
-      });
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [team, path, key, revision]);
-  const setData = (data: T | null) =>
-    setState({ key, revision, data, error: "" });
-  return {
-    ...resourceSnapshot(state, key, revision, !!path && !!team),
-    refresh,
-    setData,
-  };
+  return useCachedQuery<T>(path);
+}
+/** The signed-in user and active team, for cache calls outside a hook. */
+export function useCacheIdentity(): CacheIdentity | null {
+  const { user, team } = useWorkspace();
+  return team ? { userId: user.id, teamId: team.id } : null;
+}
+const NO_PENDING: ReadonlySet<string> = new Set();
+/** Records whose quick action is still saving; their controls stay disabled. */
+export function usePendingKeys(): ReadonlySet<string> {
+  return useSyncExternalStore(
+    dataCache.subscribePending,
+    dataCache.pendingKeys,
+    () => NO_PENDING,
+  );
 }
 export function useDebounced<T>(value: T, delay = 250) {
   const [settled, setSettled] = useState(value);

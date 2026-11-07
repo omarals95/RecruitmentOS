@@ -2,22 +2,27 @@ import Link from "next/link";
 
 export function SettingsNavigation({
   active,
+  role,
 }: {
-  active: "profile" | "team" | "api-tokens";
+  active: "profile" | "team" | "api-tokens" | "speed";
+  /** Speed is listed only for team owners and admins. */
+  role?: string | null;
 }) {
+  const sections: [typeof active, string][] = [
+    ["profile", "My profile"],
+    ["team", "Team & access"],
+    ["api-tokens", "API tokens"],
+    ...(role === "owner" || role === "admin"
+      ? [["speed", "Speed"] as [typeof active, string]]
+      : []),
+  ];
   return (
     <nav
       className="settings-nav"
       aria-label="Settings sections"
       style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 24 }}
     >
-      {(
-        [
-          ["profile", "My profile"],
-          ["team", "Team & access"],
-          ["api-tokens", "API tokens"],
-        ] as const
-      ).map(([key, label]) => (
+      {sections.map(([key, label]) => (
         <Link
           key={key}
           href={`/app/settings/${key}`}

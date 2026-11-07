@@ -33,6 +33,7 @@ import {
   fromDubaiInput,
 } from "./helpers";
 import { recordMutation, customValueDefaults } from "./mutation";
+import { startSpeedTimer } from "./speed-log";
 
 type Values = Record<string, unknown>;
 const REFERENCE_LABELS: Record<ReferenceField, string> = {
@@ -159,6 +160,13 @@ export function RecordEditor({
       return;
     }
     setSaving(true);
+    // Click to saved, for the two editor saves the speed log times.
+    const timed =
+      resource === "candidates"
+        ? startSpeedTimer("candidate.save")
+        : resource === "interviews" && !record
+          ? startSpeedTimer("interview.schedule")
+          : null;
     try {
       const serialized = JSON.stringify(input);
       let key = idempotency.current.get(serialized);
@@ -175,6 +183,7 @@ export function RecordEditor({
           body: serialized,
         },
       );
+      timed?.();
       onSaved(response.data);
     } catch (e) {
       setError(humanError(e));

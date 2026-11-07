@@ -130,6 +130,8 @@ const expectedData = {
           : ["INSERT", "SELECT", "UPDATE"],
       ]),
     ),
+    // Speed samples are written and purged, never updated.
+    "app.speed_samples": ["DELETE", "INSERT", "SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -369,10 +371,13 @@ describe("split runtime role template", () => {
       ).rows.map((row) => row.name);
     const data = (await collect("data")).evidence;
     const identity = (await collect("identity")).evidence;
-    for (const table of await tables("app"))
+    // Every app table is in the reviewed matrix, with exactly its privileges.
+    for (const table of await tables("app")) {
+      expect(Object.keys(expectedData.tablePrivileges), table).toContain(table);
       expect(data.tablePrivileges[table], table).toEqual(
-        expect.arrayContaining(["INSERT", "SELECT", "UPDATE"]),
+        (expectedData.tablePrivileges as Record<string, string[]>)[table],
       );
+    }
     for (const table of await tables("auth"))
       expect(identity.tablePrivileges[table], table).toContain("SELECT");
   });
@@ -435,7 +440,9 @@ describe("split runtime role template", () => {
   it("denies the data role TRUNCATE, role switching, identity, key, ledger and marker writes", async () => {
     await harness.dataDb();
     await expectDenied([
-      ...appTables.map((table) => `TRUNCATE app.${table}`),
+      ...[...appTables, "speed_samples"].map(
+        (table) => `TRUNCATE app.${table}`,
+      ),
       `SET ROLE ${splitRoles.identity}`,
       `SET ROLE ${splitRoles.owner}`,
       'SELECT * FROM auth."user"',

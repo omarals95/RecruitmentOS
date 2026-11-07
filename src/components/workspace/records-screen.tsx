@@ -50,7 +50,6 @@ import { DisplayModeToggle, type DisplayMode } from "./display-mode-toggle";
 import { Dialog } from "@/components/ui/dialog";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
-import { personalStateMutation } from "./mutation";
 import {
   activeFilterCount,
   checklistProgress,
@@ -74,22 +73,36 @@ import {
 } from "./helpers";
 import {
   ClientError,
-  isAbortError,
+  dataCache,
+  teamRequester,
   useApi,
+  useCacheIdentity,
+  useCachedQuery,
   useDebounced,
+  usePendingKeys,
   useUnsavedWork,
   useWorkspace,
   requestExport,
   requestJson,
   humanError,
 } from "./client";
+import { moveRecord, saveFollowup, updateRecord } from "./optimistic";
+import { startSpeedTimer, useReadyTiming } from "./speed-log";
+import type { SpeedTab } from "@/domain/speed";
+
+import { Loading } from "./skeleton";
 import {
-  failedResourceState,
-  resourceSnapshot,
-  type ResourceState,
-} from "./resource-state";
+  BUCKETS_PATH,
+  defaultListQuery,
+  listPath,
+  listSearchParams,
+  screenDefinitions,
+  viewsPath,
+} from "./tab-requests";
 
 export type { ListResponse } from "./helpers";
+export { screenDefinitions } from "./tab-requests";
+export { Loading } from "./skeleton";
 function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   const buttons = [
@@ -136,123 +149,35 @@ const tableColumns: Partial<Record<ResourceName, string[]>> = {
   buckets: ["name", "position"],
   "task-fields": ["name", "type", "required"],
 };
-export const screenDefinitions: Record<
-  string,
-  { title: string; description: string; resource: ResourceName }
-> = {
-  candidates: {
-    title: "Candidates",
-    description: "Your talent directory, with the source details that matter.",
-    resource: "candidates",
-  },
-  shortlist: {
-    title: "My shortlist",
-    description: "Candidates you have personally saved for a closer look.",
-    resource: "candidates",
-  },
-  vacancies: {
-    title: "Vacancies",
-    description: "Every vacancy your team manages, from draft to closed.",
-    resource: "vacancies",
-  },
-  roles: {
-    title: "Job roles",
-    description: "Reusable role descriptions to start your next vacancy.",
-    resource: "job-roles",
-  },
-  pipeline: {
-    title: "Applications",
-    description:
-      "Move every conversation forward, one considered step at a time.",
-    resource: "applications",
-  },
-  tasks: {
-    title: "Recruitment tasks",
-    description: "Your workflow, your buckets, your next steps.",
-    resource: "tasks",
-  },
-  interviews: {
-    title: "Interviews",
-    description: "Plan conversations and keep the whole team in the loop.",
-    resource: "interviews",
-  },
-  offers: {
-    title: "Offers",
-    description:
-      "Track the details between a good conversation and a decision.",
-    resource: "offers",
-  },
-  onboarding: {
-    title: "Onboarding",
-    description: "Give every new starter a thoughtful beginning.",
-    resource: "onboarding",
-  },
-  "source-review": {
-    title: "Source review",
-    description:
-      "Resolve missing or ambiguous source information without guessing.",
-    resource: "candidates",
-  },
-};
-
 /** Most applications the whole-vacancy board loads; above it the board is replaced by a message. */
 const BOARD_LIMIT = 1000;
-/** Every application matching `query` (no page), reloaded on refresh and on application changes. */
+/**
+ * Every application matching `query` (no page), kept in the workspace cache: shown at once on
+ * return and refreshed in the background. Application writes patch it in place.
+ */
 function useWholePipeline(query: string | null) {
   const { team } = useWorkspace();
-  const [state, setState] = useState<ResourceState<
-    Awaited<ReturnType<typeof loadAllPages>>
-  > | null>(null);
-  const [revision, setRevision] = useState(0);
-  const key = JSON.stringify([team?.id || "", query || ""]);
-  const refresh = useCallback(() => setRevision((n) => n + 1), []);
-  useEffect(() => {
-    if (!team || !query) return;
-    const onChange = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{ teamId: string | null; path: string }>
-      ).detail;
-      if (
-        detail.teamId === team.id &&
-        detail.path.split("/")[3] === "applications"
-      )
-        refresh();
-    };
-    window.addEventListener("recruitmentos:data-changed", onChange);
-    return () =>
-      window.removeEventListener("recruitmentos:data-changed", onChange);
-  }, [team, query, refresh]);
-  useEffect(() => {
-    if (!team || !query) return;
-    let active = true;
-    const controller = new AbortController();
-    const fetchPage = (page: number) =>
-      requestJson<ListResponse>(
-        team.id,
-        `/api/v1/applications?${query}&page=${page}&pageSize=100`,
-        { signal: controller.signal },
-      );
-    (async () => {
+  const teamId = team?.id;
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      const fetchPage = (page: number) =>
+        requestJson<ListResponse>(
+          teamId!,
+          `/api/v1/applications?${query}&page=${page}&pageSize=100`,
+          { signal },
+        );
       let loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
       // The pipeline changed between pages; one more pass usually settles it.
       if (!loaded.tooMany && !loaded.complete)
         loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
-      if (active) setState({ key, revision, data: loaded, error: "" });
-    })().catch((error: unknown) => {
-      if (active && !isAbortError(error))
-        setState((previous) =>
-          failedResourceState(previous, key, revision, error),
-        );
-    });
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [team, query, key, revision]);
-  return {
-    ...resourceSnapshot(state, key, revision, !!query && !!team),
-    refresh,
-  };
+      return loaded;
+    },
+    [teamId, query],
+  );
+  return useCachedQuery<Awaited<ReturnType<typeof loadAllPages>>>(
+    query ? `/api/v1/applications?${query}#board` : null,
+    load,
+  );
 }
 
 export function RecordsScreen({ section }: { section: string }) {
@@ -263,27 +188,29 @@ export function RecordsScreen({ section }: { section: string }) {
   const resource = config.resource;
   const { team, role } = useWorkspace();
   const canWrite = !!team && role !== "viewer";
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [category, setCategory] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
-  const [skills, setSkills] = useState<string[]>([]);
-  const [certifications, setCertifications] = useState<string[]>([]);
-  const [shortlisted, setShortlisted] = useState(section === "shortlist");
-  const [reviewStatus, setReviewStatus] = useState("");
-  const [emirate, setEmirate] = useState("");
-  const [degree, setDegree] = useState("");
-  const [education, setEducation] = useState("");
-  const [minYears, setMinYears] = useState("");
-  const [maxYears, setMaxYears] = useState("");
-  const [vacancy, setVacancy] = useState("");
-  const [archived, setArchived] = useState(false);
-  const [sort, setSort] = useState(
-    resource === "candidates" ? "name" : "updatedAt",
+  // The same defaults tab-requests.ts prefetches, so a prefetched list is this screen's first key.
+  const [initial] = useState(() => defaultListQuery(section));
+  const [search, setSearch] = useState(initial.search);
+  const [status, setStatus] = useState(initial.status);
+  const [category, setCategory] = useState(initial.category);
+  const [categories, setCategories] = useState<string[]>(initial.categories);
+  const [skills, setSkills] = useState<string[]>(initial.skills);
+  const [certifications, setCertifications] = useState<string[]>(
+    initial.certifications,
   );
-  const [direction, setDirection] = useState("asc");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [shortlisted, setShortlisted] = useState(initial.shortlisted);
+  const [reviewStatus, setReviewStatus] = useState(initial.reviewStatus);
+  const [emirate, setEmirate] = useState(initial.emirate);
+  const [degree, setDegree] = useState(initial.degree);
+  const [education, setEducation] = useState(initial.education);
+  const [minYears, setMinYears] = useState(initial.minYears);
+  const [maxYears, setMaxYears] = useState(initial.maxYears);
+  const [vacancy, setVacancy] = useState(initial.vacancy);
+  const [archived, setArchived] = useState(initial.archived);
+  const [sort, setSort] = useState(initial.sort);
+  const [direction, setDirection] = useState(initial.direction);
+  const [page, setPage] = useState(initial.page);
+  const [pageSize, setPageSize] = useState(initial.pageSize);
   const [mode, setMode] = useState<DisplayMode>(
     resource === "tasks" || resource === "applications"
       ? "board"
@@ -314,55 +241,58 @@ export function RecordsScreen({ section }: { section: string }) {
   } | null>(null);
   const [exporting, setExporting] = useState(false);
   const debounced = useDebounced(search);
-  const params = useMemo(() => {
-    const p = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-      search: debounced,
+  const params = useMemo(
+    () =>
+      listSearchParams(section, {
+        page,
+        pageSize,
+        search: debounced,
+        sort,
+        direction,
+        archived,
+        status,
+        reviewStatus,
+        category,
+        emirate,
+        degree,
+        vacancy,
+        shortlisted,
+        categories,
+        skills,
+        certifications,
+        education,
+        minYears,
+        maxYears,
+      }),
+    [
+      page,
+      pageSize,
+      debounced,
       sort,
       direction,
-    });
-    if (archived) p.set("includeArchived", "true");
-    if (status) p.set(resource === "applications" ? "stage" : "status", status);
-    if (reviewStatus) p.set("reviewStatus", reviewStatus);
-    if (category) p.set("folderCategory", category);
-    if (emirate) p.set("residenceEmirate", emirate);
-    if (degree) p.set("degreeLevel", degree);
-    if (vacancy) p.set("vacancyId", vacancy);
-    if (shortlisted) p.set("shortlisted", "true");
-    if (categories.length) p.set("categories", JSON.stringify(categories));
-    if (skills.length) p.set("skills", JSON.stringify(skills));
-    if (certifications.length)
-      p.set("certifications", JSON.stringify(certifications));
-    if (education.trim()) p.set("education", education.trim());
-    if (minYears) p.set("minYearsExperience", minYears);
-    if (maxYears) p.set("maxYearsExperience", maxYears);
-    if (section === "source-review") p.set("needsReview", "true");
-    return p;
-  }, [
-    page,
-    pageSize,
-    debounced,
-    sort,
-    direction,
-    archived,
-    status,
-    category,
-    emirate,
-    degree,
-    vacancy,
-    resource,
-    section,
-    categories,
-    skills,
-    certifications,
-    education,
-    minYears,
-    maxYears,
-    shortlisted,
-    reviewStatus,
-  ]);
-  const result = useApi<ListResponse>(`/api/v1/${resource}?${params}`);
+      archived,
+      status,
+      category,
+      emirate,
+      degree,
+      vacancy,
+      section,
+      categories,
+      skills,
+      certifications,
+      education,
+      minYears,
+      maxYears,
+      shortlisted,
+      reviewStatus,
+    ],
+  );
+  const result = useApi<ListResponse>(listPath(resource, params));
+  // The interviews tab is timed by its calendar, which shows this list only on request.
+  useReadyTiming(
+    section === "interviews" ? null : `tab.${section as SpeedTab}`,
+    !!result.data,
+  );
   // With a vacancy selected, the application board covers the whole pipeline in a stable order.
   const boardQuery = useMemo(() => {
     if (resource !== "applications" || mode !== "board" || !vacancy)
@@ -376,13 +306,11 @@ export function RecordsScreen({ section }: { section: string }) {
   }, [resource, mode, vacancy, params]);
   const board = useWholePipeline(boardQuery);
   const buckets = useApi<ListResponse>(
-    resource === "tasks"
-      ? "/api/v1/buckets?pageSize=100&sort=position&direction=asc"
-      : null,
+    resource === "tasks" ? BUCKETS_PATH : null,
   );
   const views = useApi<ListResponse>(
     resource === "candidates" || resource === "applications"
-      ? `/api/v1/views?pageSize=100&area=${resource === "candidates" ? "directory" : "applications"}`
+      ? viewsPath(resource)
       : null,
   );
   // A changed server-side query invalidates page-local selection and pagination together.
@@ -427,6 +355,7 @@ export function RecordsScreen({ section }: { section: string }) {
       active = false;
     };
   }, [team, resource, linkedRecord]);
+  // A background revalidation: the current records stay on screen while it runs.
   const refresh = () => {
     result.refresh();
     board.refresh();
@@ -435,38 +364,44 @@ export function RecordsScreen({ section }: { section: string }) {
     setSelected([]);
   };
   const saved = (record: RecordDto) => {
+    const edited = !!editor?.record;
     setEditor(null);
     setNotice(
       `${RESOURCE_CONFIG[kindToResource[record.kind]].singular} saved.`,
     );
     if (detail?.id === record.id) setDetail(record);
-    refresh();
+    // An edit is already patched into every cached copy; a create still refreshes the lists.
+    if (!edited) refresh();
   };
-  const move = async (record: RecordDto, value: string) => {
-    if (!team) return;
+  const move = (record: RecordDto, value: string) => {
+    if (!team || (resource !== "tasks" && resource !== "applications")) return;
+    if (
+      value ===
+      (resource === "tasks" ? record.bucketId : String(dataOf(record).stage))
+    )
+      return;
     setError("");
+    setNotice("");
     setConflict(null);
-    try {
-      await requestJson(team.id, `/api/v1/${resource}/${record.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          version: record.version,
-          ...(resource === "tasks"
-            ? { bucketId: value }
-            : { data: { stage: value } }),
-        }),
-      });
-      refresh();
-      setNotice(
-        resource === "tasks" ? "Task moved." : "Application stage updated.",
-      );
-    } catch (e) {
-      // A board has no draft to keep: reread it and offer the move again.
-      if (e instanceof ClientError && e.status === 409) {
-        setConflict({ record, target: value });
-        refresh();
-      } else setError(humanError(e));
-    }
+    const saved = startSpeedTimer(
+      resource === "tasks" ? "task.move" : "application.stage",
+    );
+    // The card moves at once; a failed save puts it back and rereads only this record.
+    void moveRecord(dataCache, teamRequester(team.id), {
+      teamId: team.id,
+      resource,
+      record,
+      target: value,
+      label: `Moving ${recordLabel(record)} to ${moveTargetName(value)}`,
+    }).then((outcome) => {
+      if (outcome.ok) saved();
+      if (outcome.ok)
+        setNotice(
+          resource === "tasks" ? "Task moved." : "Application stage updated.",
+        );
+      else if (outcome.conflict) setConflict({ record, target: value });
+      else if (outcome.message) setError(outcome.message);
+    });
   };
   const moveAgain = async () => {
     if (!team || !conflict) return;
@@ -479,7 +414,7 @@ export function RecordsScreen({ section }: { section: string }) {
         team.id,
         `/api/v1/${resource}/${record.id}`,
       );
-      await move(latest.data, target);
+      move(latest.data, target);
     } catch (e) {
       setError(humanError(e));
     }
@@ -681,8 +616,8 @@ export function RecordsScreen({ section }: { section: string }) {
       {conflict && (
         <div className="notice error" role="alert">
           {recordLabel(conflict.record)} was changed by someone else, so your
-          move to {moveTargetName(conflict.target)} was not applied. The board
-          now shows the latest version.
+          move to {moveTargetName(conflict.target)} was not saved and has been
+          undone. The board now shows the latest version.
           <div className="row">
             <button
               className="button small"
@@ -1357,10 +1292,7 @@ export function RecordsScreen({ section }: { section: string }) {
           onCreate={(nextResource, refs, prefill) =>
             setEditor({ resource: nextResource, references: refs, prefill })
           }
-          onUpdated={(record) => {
-            setDetail(record);
-            refresh();
-          }}
+          onUpdated={setDetail}
         />
       )}
       {bulkCv && (
@@ -1495,14 +1427,6 @@ function FilterTags({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-export function Loading() {
-  return (
-    <div className="loading-state" role="status">
-      <LoaderCircle size={25} className="spin" aria-hidden="true" />
-      <span>Loading your workspace…</span>
     </div>
   );
 }
@@ -1659,6 +1583,8 @@ function Kanban({
   canWrite: boolean;
   emptyText?: string;
 }) {
+  // A card whose move is still saving cannot be moved again with a stale version.
+  const pending = usePendingKeys();
   const columns =
     resource === "tasks"
       ? buckets.map((b) => ({
@@ -1712,7 +1638,8 @@ function Kanban({
                 "text/recruitmentos-record",
               );
               const record = records.find((r) => r.id === id);
-              if (record && canWrite) onMove(record, column.id);
+              if (record && canWrite && !pending.has(record.id))
+                onMove(record, column.id);
             }}
           >
             <h2 style={{ borderTopColor: column.color }}>
@@ -1723,7 +1650,9 @@ function Kanban({
               {cards.map((record) => (
                 <article
                   className="kanban-card"
-                  draggable={canWrite && !record.archivedAt}
+                  draggable={
+                    canWrite && !record.archivedAt && !pending.has(record.id)
+                  }
                   onDragStart={(e) =>
                     e.dataTransfer.setData(
                       "text/recruitmentos-record",
@@ -1774,7 +1703,11 @@ function Kanban({
                       </span>
                       <select
                         aria-label={`Move ${recordLabel(record)} to`}
-                        disabled={!canWrite || !!record.archivedAt}
+                        disabled={
+                          !canWrite ||
+                          !!record.archivedAt ||
+                          pending.has(record.id)
+                        }
                         value={
                           resource === "tasks"
                             ? record.bucketId || ""
@@ -1936,7 +1869,7 @@ export function RecordDetail({
   const { team, role } = useWorkspace();
   const [tab, setTab] = useState<string>(initialTab);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const busy = usePendingKeys().has(record.id);
   const [archiveDestination, setArchiveDestination] = useState("");
   const [roleReview, setRoleReview] = useState(false);
   const canWrite = role !== "viewer";
@@ -1944,32 +1877,34 @@ export function RecordDetail({
   const data = dataOf(record);
   // The write schema allows only http(s), but a stored value is rechecked before it becomes a link.
   const meetingUrl = safeExternalUrl(data.meetingUrl);
-  const archive = async () => {
-    if (!team) return;
-    setBusy(true);
+  const archive = () => {
+    if (!team || busy) return;
     setError("");
-    try {
-      const response = await requestJson<{ data: RecordDto }>(
-        team.id,
-        `/api/v1/${resource}/${record.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            version: record.version,
-            archived: !record.archivedAt,
-            ...(record.kind === "bucket" && archiveDestination
-              ? { moveToBucketId: archiveDestination }
-              : {}),
-          }),
-        },
-      );
-      onUpdated(response.data);
-      onRefresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusy(false);
-    }
+    const archived = !record.archivedAt;
+    void updateRecord(dataCache, teamRequester(team.id), {
+      teamId: team.id,
+      resource,
+      record,
+      next: {
+        ...record,
+        archivedAt: archived ? new Date().toISOString() : null,
+      },
+      body: {
+        version: record.version,
+        archived,
+        ...(record.kind === "bucket" && archiveDestination
+          ? { moveToBucketId: archiveDestination }
+          : {}),
+      },
+      label: `${archived ? "Archiving" : "Restoring"} ${recordLabel(record)}`,
+      local: (value) => {
+        if (value) onUpdated(value);
+      },
+    }).then((outcome) => {
+      if (!outcome.ok) setError(outcome.message);
+      // Archiving a bucket also moves its tasks on the server.
+      else if (record.kind === "bucket") onRefresh();
+    });
   };
   const details = (
     <>
@@ -2750,40 +2685,33 @@ interface PersonalState {
 }
 function CandidateFollowup({ candidateId }: { candidateId: string }) {
   const { team, role } = useWorkspace();
-  const result = useApi<{ data: PersonalState }>(
-    `/api/v1/candidates/${candidateId}/state`,
-  );
+  const identity = useCacheIdentity();
+  const path = `/api/v1/candidates/${candidateId}/state`;
+  const result = useApi<{ data: PersonalState }>(path);
   const [draft, setDraft] = useState<PersonalState | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
+  const saving = usePendingKeys().has(path);
   const [saved, setSaved] = useState(false);
   useUnsavedWork(dirty);
   const current = draft ?? result.data?.data ?? null;
-  const save = async (e: React.FormEvent) => {
+  const save = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!current || !team || saving) return;
-    setSaving(true);
+    if (!current || !team || !identity || saving) return;
     setError("");
-    setSaved(false);
-    try {
-      const response = await requestJson<{ data: PersonalState }>(
-        team.id,
-        `/api/v1/candidates/${candidateId}/state`,
-        {
-          method: "PATCH",
-          body: JSON.stringify(personalStateMutation(current)),
-        },
-      );
-      setDraft(response.data);
-      setDirty(false);
-      setSaved(true);
-      result.refresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setSaving(false);
-    }
+    // Shown as saved at once; on failure the draft stays, marked unsaved, with the reason.
+    void saveFollowup(dataCache, teamRequester(team.id), {
+      identity,
+      candidateId,
+      draft: current,
+      form: (state) => {
+        setDraft(state.draft);
+        setDirty(state.dirty);
+        setSaved(!state.dirty);
+      },
+    }).then((outcome) => {
+      if (!outcome.ok && outcome.message) setError(outcome.message);
+    });
   };
   if (result.error && !current)
     return <LoadError message={result.error} retry={result.refresh} />;
@@ -3054,10 +2982,7 @@ function RelatedRecords({
           onEdit={() => setEdit(selectedRecord)}
           onCreate={onCreate}
           onRefresh={result.refresh}
-          onUpdated={(value) => {
-            setSelectedRecord(value);
-            result.refresh();
-          }}
+          onUpdated={setSelectedRecord}
         />
       )}
       {edit && (
@@ -3066,9 +2991,9 @@ function RelatedRecords({
           record={edit}
           onClose={() => setEdit(null)}
           onSaved={(value) => {
+            // The saved record is already patched into this list.
             setEdit(null);
             setSelectedRecord(value);
-            result.refresh();
           }}
         />
       )}
@@ -3408,6 +3333,7 @@ function SaveView({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [manage, setManage] = useState<RecordDto | null>(null);
+  const pending = usePendingKeys();
   const allViews = useApi<ListResponse>(
     `/api/v1/views?pageSize=100&includeArchived=true&area=${resource === "candidates" ? "directory" : "applications"}`,
   );
@@ -3478,29 +3404,26 @@ function SaveView({
                       <button
                         type="button"
                         className="button secondary small"
-                        disabled={saving}
-                        onClick={async () => {
+                        disabled={saving || pending.has(view.id)}
+                        onClick={() => {
                           if (!team || saving) return;
-                          setSaving(true);
                           setError("");
-                          try {
-                            await requestJson(
-                              team.id,
-                              `/api/v1/views/${view.id}`,
-                              {
-                                method: "PATCH",
-                                body: JSON.stringify({
-                                  version: view.version,
-                                  archived: !view.archivedAt,
-                                }),
-                              },
-                            );
-                            allViews.refresh();
-                          } catch (e) {
-                            setError(humanError(e));
-                          } finally {
-                            setSaving(false);
-                          }
+                          const archived = !view.archivedAt;
+                          void updateRecord(dataCache, teamRequester(team.id), {
+                            teamId: team.id,
+                            resource: "views",
+                            record: view,
+                            next: {
+                              ...view,
+                              archivedAt: archived
+                                ? new Date().toISOString()
+                                : null,
+                            },
+                            body: { version: view.version, archived },
+                            label: `${archived ? "Archiving" : "Restoring"} ${recordLabel(view)}`,
+                          }).then((outcome) => {
+                            if (!outcome.ok) setError(outcome.message);
+                          });
                         }}
                       >
                         {view.archivedAt ? "Restore" : "Archive"}

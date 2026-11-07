@@ -190,7 +190,7 @@ function TokenSettingsContent() {
         </div>
         <KeyRound aria-hidden="true" size={28} />
       </header>
-      <SettingsNavigation active="api-tokens" />
+      <SettingsNavigation active="api-tokens" role={role} />
       {error && (
         <div className="notice error" role="alert">
           {error}

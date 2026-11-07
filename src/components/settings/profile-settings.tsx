@@ -37,7 +37,7 @@ export function ProfileSettings({
 }: {
   providers: { google: boolean; microsoft: boolean };
 }) {
-  const { user } = useWorkspace();
+  const { user, role } = useWorkspace();
   const [name, setName] = useState(user.name);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -160,7 +160,7 @@ export function ProfileSettings({
         </div>
         <UserRound size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation active="profile" />
+      <SettingsNavigation active="profile" role={role} />
       {error && (
         <div className="notice error" role="alert">
           {error} Your unsaved form is retained.

@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { DrizzleQueryError, sql } from "drizzle-orm";
 import type { TeamTx } from "@/db";
+import type { TransactionSnapshot } from "@/db/deadlines";
 import { ApiError } from "./errors";
 import { SCOPES } from "./permissions";
 import type { Principal } from "./principal";
@@ -51,19 +52,16 @@ export async function installTenantContextKey(client: {
 
 /**
  * Signs exactly one assertion for this transaction and installs it. Only withTeam and the
- * identity-side token transaction call this; withTeam calls it right after the transaction's
- * deadline statement (no savepoint, no xid), before any other statement.
+ * identity-side token transactions call this, with the snapshot their first statement read
+ * (withDeadlinesAndSnapshot: deadlines, pid, xid, marker and clock). withTeam calls it as the next
+ * statement, before any other statement or savepoint; tenant_context.install rechecks pid and xid.
  */
 export async function installTenantContext(
   tx: TeamTx,
   principal: Principal,
+  snapshot: TransactionSnapshot,
 ): Promise<void> {
   const { key, id } = signingKey();
-  const [snapshot] = (
-    await tx.execute<{ pid: number; xid: string; env: string; now: string }>(
-      sql`select pg_backend_pid() as pid, pg_current_xact_id()::text as xid, (select id::text from db_boundary.connection_marker) as env, floor(extract(epoch from clock_timestamp()) * 1000)::bigint::text as now`,
-    )
-  ).rows;
   const payload = JSON.stringify({
     aud: AUDIENCE,
     kid: id,

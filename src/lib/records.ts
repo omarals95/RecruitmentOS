@@ -1134,19 +1134,30 @@ export async function listRecords(
     query.get("pageSize") || 30,
   );
   return withTeam(p, async (tx) => {
-    const [{ total }] = await tx
-      .select({ total: count() })
-      .from(records)
-      .where(condition);
+    // The page carries the matching total; only an empty page past the first needs its own count.
     const rows = await tx
-      .select()
+      .select({
+        record: records,
+        total: sql<number>`count(*) over ()`.mapWith(Number),
+      })
       .from(records)
       .where(condition)
       .orderBy(...orderBy)
       .limit(pageSize)
       .offset((page - 1) * pageSize);
+    const total =
+      rows[0]?.total ??
+      (page > 1
+        ? (
+            await tx.select({ total: count() }).from(records).where(condition)
+          )[0].total
+        : 0);
     return {
-      data: await decorate(tx, p, rows.map(dto)),
+      data: await decorate(
+        tx,
+        p,
+        rows.map((row) => dto(row.record)),
+      ),
       pagination: {
         page,
         pageSize,

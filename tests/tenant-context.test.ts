@@ -26,7 +26,12 @@ import {
   dataRoleBoundaryQuery,
   identityRoleBoundaryQuery,
 } from "@/db/connection-boundary";
+import {
+  withDeadlinesAndSnapshot,
+  type TransactionSnapshot,
+} from "@/db/deadlines";
 import { withTeam } from "@/lib/db-team";
+import { installTenantContext } from "@/lib/tenant-context";
 import {
   authenticateApiToken,
   createToken,
@@ -733,6 +738,39 @@ describe("signed tenant context under separate nonowner data and identity roles"
       await dataTransaction(async () => {
         await expect(attempt(), label).rejects.toMatchObject(denied);
       });
+  });
+
+  it("rejects an app-signed context whose snapshot names another backend or transaction or has expired", async () => {
+    const attempt = async (change: (snapshot: TransactionSnapshot) => object) =>
+      withDeadlinesAndSnapshot(await harness.dataDb(), (tx, snapshot) =>
+        installTenantContext(tx, ownerA, {
+          ...snapshot,
+          ...change(snapshot),
+        } as TransactionSnapshot),
+      );
+    await expect(attempt(() => ({}))).resolves.toBeUndefined();
+    for (const change of [
+      (s: TransactionSnapshot) => ({ pid: Number(s.pid) + 1 }),
+      (s: TransactionSnapshot) => ({ xid: String(Number(s.xid) + 1) }),
+      (s: TransactionSnapshot) => ({ now: String(Number(s.now) - 61_000) }),
+    ])
+      await expect(attempt(change)).rejects.toMatchObject({
+        status: 403,
+        code: "tenant_context_denied",
+      });
+    const key = process.env.TENANT_CONTEXT_SIGNING_KEY!;
+    vi.stubEnv(
+      "TENANT_CONTEXT_SIGNING_KEY",
+      "OtherFictionalTenantContextKeyForTestsOnly00",
+    );
+    try {
+      await expect(attempt(() => ({}))).rejects.toMatchObject({
+        status: 403,
+        code: "tenant_context_denied",
+      });
+    } finally {
+      vi.stubEnv("TENANT_CONTEXT_SIGNING_KEY", key);
+    }
   });
 
   it("stops granting access when an assertion expires mid-transaction", async () => {

@@ -10,7 +10,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
-import { withDeadlines } from "@/db/deadlines";
+import { withDeadlines, withDeadlinesAndSnapshot } from "@/db/deadlines";
 import {
   apiTokens,
   apiRateLimits,
@@ -338,10 +338,10 @@ export async function createToken(
     );
   assertTenantContextKey();
   const db = await getIdentityDb();
-  return withDeadlines(db, async (tx) => {
+  return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
     const role = await liveHuman(tx, p);
     // Lock the user row first; the context lets the audit helper pass activity RLS.
-    await installTenantContext(tx, p);
+    await installTenantContext(tx, p, snapshot);
     const scopes = effectiveTokenScopes(parsed.data.scopes, role);
     if (scopes.length !== parsed.data.scopes.length)
       throw new ApiError(
@@ -389,9 +389,9 @@ export async function createOAuthGrant(
   human(p);
   assertTenantContextKey();
   const db = await getIdentityDb();
-  return withDeadlines(db, async (tx) => {
+  return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
     const role = await liveHuman(tx, p);
-    await installTenantContext(tx, p);
+    await installTenantContext(tx, p, snapshot);
     const scopes = effectiveTokenScopes(input.scopes, role);
     if (!scopes.length || scopes.length !== new Set(input.scopes).size)
       throw new ApiError(
@@ -468,9 +468,9 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
     throw new ApiError(404, "token_not_found", "The API token was not found.");
   assertTenantContextKey();
   const db = await getIdentityDb();
-  await withDeadlines(db, async (tx) => {
+  await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
     const role = await liveHuman(tx, p);
-    await installTenantContext(tx, p);
+    await installTenantContext(tx, p, snapshot);
     const canManageTeam = role === "owner" || role === "admin";
     const [found] = await tx
       .select()

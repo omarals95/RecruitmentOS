@@ -14,6 +14,10 @@ import {
   StorageSettingsForm,
   type StorageSettingsData,
 } from "../src/components/settings/storage-settings";
+import {
+  SpeedPanel,
+  SpeedSettings,
+} from "../src/components/settings/speed-settings";
 import { rules } from "./helpers/css";
 
 const workspace = {
@@ -217,5 +221,73 @@ describe("CV storage settings", () => {
         usage,
       }),
     ).not.toContain(belowNotice);
+  });
+});
+
+describe("speed settings", () => {
+  const speedLinks = (role: string | null) =>
+    renderToStaticMarkup(
+      <SettingsNavigation active="team" role={role} />,
+    ).includes('href="/app/settings/speed"');
+  it("lists Speed in the settings navigation for owners and admins only", () => {
+    expect(speedLinks("owner")).toBe(true);
+    expect(speedLinks("admin")).toBe(true);
+    expect(speedLinks("recruiter")).toBe(false);
+    expect(speedLinks("viewer")).toBe(false);
+    expect(speedLinks(null)).toBe(false);
+  });
+  it("tells recruiters and viewers who opens the page that only owners and admins can view it", () => {
+    for (const role of ["recruiter", "viewer"]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={{ ...workspace, role }}>
+          <SpeedSettings />
+        </WorkspaceProvider>,
+      );
+      expect(markup).toContain(
+        "Only team owners and admins can view speed timings.",
+      );
+      expect(markup).not.toMatch(/<input|<select|<table/);
+    }
+  });
+  it("shows typical and slow times with sample counts, db times for routes and what is kept", () => {
+    const markup = renderToStaticMarkup(
+      <SpeedPanel
+        error=""
+        rows={[
+          {
+            kind: "action",
+            name: "task.move",
+            samples: 5,
+            medianMs: 300,
+            p95Ms: 480,
+          },
+          {
+            kind: "route",
+            name: "GET /api/v1/tasks",
+            samples: 4,
+            medianMs: 20,
+            p95Ms: 30,
+            medianDbMs: 3,
+            p95DbMs: null,
+          },
+        ]}
+      />,
+    );
+    for (const text of [
+      "last 30 days of timings and route names only",
+      "no names, ids or content",
+      "task.move",
+      "300 ms",
+      "480 ms",
+      "GET /api/v1/tasks",
+      "Typical database",
+      "3 ms",
+      "Not reported",
+    ])
+      expect(markup).toContain(text);
+    expect(markup).not.toMatch(/<input|<select|<button/);
+    expect(renderToStaticMarkup(<SpeedPanel error="" rows={[]} />)).toContain(
+      "No timings have been recorded yet.",
+    );
   });
 });

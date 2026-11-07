@@ -29,7 +29,22 @@ import {
   recordLabel,
   saveCsv,
 } from "./helpers";
-import { useApi, useWorkspace, requestJson, humanError } from "./client";
+import {
+  dataCache,
+  teamRequester,
+  useApi,
+  useCacheIdentity,
+  usePendingKeys,
+  useWorkspace,
+} from "./client";
+import { markNotificationsRead } from "./optimistic";
+import { useReadyTiming } from "./speed-log";
+import {
+  activityPath,
+  analyticsPath,
+  NOTIFICATIONS_PATH,
+  OVERVIEW_PATH,
+} from "./tab-requests";
 import {
   BarChart,
   HiringMetrics,
@@ -96,7 +111,8 @@ interface AnalyticsData extends HiringMetricData {
 }
 export function Overview() {
   const { team, user, role } = useWorkspace();
-  const result = useApi<OverviewData>("/api/v1/overview");
+  const result = useApi<OverviewData>(OVERVIEW_PATH);
+  useReadyTiming("tab.overview", !!result.data);
   const [editor, setEditor] = useState<ResourceName | null>(null);
   if (!team) return <NoTeam />;
   return (
@@ -439,10 +455,9 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
-  const result = useApi<AnalyticsData>(
-    `/api/v1/analytics?from=${dates.from}&to=${dates.to}`,
-  );
-  const overview = useApi<OverviewData>(talent ? "/api/v1/overview" : null);
+  const result = useApi<AnalyticsData>(analyticsPath(dates.from, dates.to));
+  useReadyTiming(talent ? "tab.insights" : "tab.analytics", !!result.data);
+  const overview = useApi<OverviewData>(talent ? OVERVIEW_PATH : null);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -703,9 +718,8 @@ export function ActivityScreen() {
   const result = useApi<{
     data: ActivityItem[];
     pagination: { total: number; totalPages: number };
-  }>(
-    `/api/v1/activity?page=${page}&pageSize=50&search=${encodeURIComponent(search)}&kind=${encodeURIComponent(kind)}`,
-  );
+  }>(activityPath(page, search, kind));
+  useReadyTiming("tab.activity", !!result.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -847,25 +861,23 @@ export function Notifications() {
     unreadCount?: number;
     total?: number;
     limited?: boolean;
-  }>("/api/v1/notifications");
+  }>(NOTIFICATIONS_PATH);
+  useReadyTiming("tab.notifications", !!result.data);
+  const identity = useCacheIdentity();
   const [show, setShow] = useState("all");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const mark = async (keys: string[]) => {
-    if (!team) return;
-    setBusy(true);
+  const busy = usePendingKeys().has(NOTIFICATIONS_PATH);
+  // Read at once here and in the navigation count; undone with a message if the save fails.
+  const mark = (keys: string[]) => {
+    if (!team || !identity || busy) return;
     setError("");
-    try {
-      await requestJson(team.id, "/api/v1/notifications", {
-        method: "POST",
-        body: JSON.stringify({ keys }),
-      });
-      result.refresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusy(false);
-    }
+    void markNotificationsRead(dataCache, teamRequester(team.id), {
+      identity,
+      path: NOTIFICATIONS_PATH,
+      keys,
+    }).then((outcome) => {
+      if (!outcome.ok && outcome.message) setError(outcome.message);
+    });
   };
   if (!team) return <NoTeam />;
   const items =

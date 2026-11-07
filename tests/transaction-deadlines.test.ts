@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { TeamTx } from "../src/db";
 import {
+  DEADLINES_AND_SNAPSHOT_SQL,
   DEADLINES_SQL,
   STATEMENT_TIMEOUT_MS,
   TRANSACTION_TIMEOUT_MS,
@@ -68,6 +69,56 @@ describe("per-transaction database deadlines", () => {
     expect(DEADLINES_SQL).toBe(
       "select set_config('statement_timeout', '10000', true), set_config('transaction_timeout', '20000', true)",
     );
+    // Context transactions set the same deadlines and read the signed snapshot in one statement.
+    expect(DEADLINES_AND_SNAPSHOT_SQL).toBe(
+      "select set_config('statement_timeout', '10000', true) as statement_timeout, set_config('transaction_timeout', '20000', true) as transaction_timeout, pg_backend_pid() as pid, pg_current_xact_id()::text as xid, (select id::text from db_boundary.connection_marker) as env, floor(extract(epoch from clock_timestamp()) * 1000)::bigint::text as now",
+    );
+  });
+
+  it("opens context transactions with the combined statement and the others with the unchanged deadlines", async () => {
+    stubLocalAuthReadiness();
+    resetAuthPurgeThrottle();
+    // The first statement after BEGIN of every transaction, in order.
+    const original = fixture.db.transaction.bind(fixture.db);
+    const first: string[] = [];
+    const spy = vi
+      .spyOn(fixture.db, "transaction")
+      .mockImplementation((work, config) =>
+        original(async (tx) => {
+          const execute = tx.execute.bind(tx);
+          let seen = false;
+          vi.spyOn(tx, "execute").mockImplementation((query) => {
+            if (!seen) {
+              seen = true;
+              first.push(
+                (query as { queryChunks?: { value?: string[] }[] }).queryChunks
+                  ?.flatMap((chunk) => chunk.value ?? [])
+                  .join("") ?? "",
+              );
+            }
+            return execute(query);
+          });
+          return work(tx);
+        }, config),
+      );
+    try {
+      await withTeam(owner, read);
+      const created = await createToken(owner, {
+        name: "Fictional first-statement token",
+        scopes: ["candidates:read"],
+      });
+      await authenticateApiToken(created.token, CLIENT_IP);
+    } finally {
+      spy.mockRestore();
+    }
+    // withTeam and token creation install a context; authentication and the purges do not.
+    expect(first).toEqual([
+      DEADLINES_AND_SNAPSHOT_SQL,
+      DEADLINES_AND_SNAPSHOT_SQL,
+      DEADLINES_SQL,
+      DEADLINES_SQL,
+      DEADLINES_SQL,
+    ]);
   });
 
   it("sets both deadlines inside withTeam and resets them after commit and after an error", async () => {
