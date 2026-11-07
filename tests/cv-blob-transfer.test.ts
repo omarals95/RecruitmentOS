@@ -35,6 +35,8 @@ import {
   getCvChunk,
   getCvDownload,
   getCvManifest,
+  listCandidateCvs,
+  listCandidateCvsPage,
 } from "@/lib/cvs";
 import { withTeam } from "@/lib/db-team";
 import { createRecord } from "@/lib/records";
@@ -43,6 +45,7 @@ import type { StorageBinding, StorageGateway } from "@/lib/storage";
 import { downloadVerifiedCv } from "@/components/cv-transfer";
 import { POST as reserveRoute } from "@/app/api/v1/candidates/[id]/cvs/uploads/route";
 import { POST as completeRoute } from "@/app/api/v1/cvs/uploads/[id]/complete/route";
+import { GET as listRoute } from "@/app/api/v1/candidates/[id]/cvs/route";
 import { GET as downloadRoute } from "@/app/api/v1/cvs/[id]/download/route";
 import { GET as manifestRoute } from "@/app/api/v1/cvs/[id]/manifest/route";
 import { GET as chunkRoute } from "@/app/api/v1/cvs/[id]/chunks/route";
@@ -153,7 +156,7 @@ describe("private Blob CV transfer behind a fake client", () => {
     return { store: [row], team: [row] };
   };
   async function bearer(
-    scopes: Principal["scopes"] = ["cvs:read", "cvs:write"],
+    scopes: Principal["scopes"] = ["candidates:read", "cvs:read", "cvs:write"],
   ) {
     const created = await createToken(owner, {
       name: `Fictional Blob test ${randomUUID().slice(0, 8)}`,
@@ -736,10 +739,60 @@ describe("private Blob CV transfer behind a fake client", () => {
   describe("download", () => {
     const large = fictionalPdf(5 * MiB, 11);
 
+    it("refuses every CV read to a cvs:read token without candidates:read before any storage call", async () => {
+      const fake = fakeBlob();
+      configured.current = { binding: blobBinding, gateway: fake.gateway };
+      const id = await readyBlobCv(fake, fictionalPdf(1000));
+      const { token } = await bearer(["cvs:read"]);
+      const before = {
+        reads: fake.state.reads,
+        signs: fake.state.signs,
+        calls: fake.state.calls.length,
+      };
+      for (const response of [
+        await listRoute(
+          request(`/api/v1/candidates/${candidateId}/cvs`, token),
+          params(candidateId),
+        ),
+        await downloadRoute(
+          request(`/api/v1/cvs/${id}/download`, token),
+          params(id),
+        ),
+        await manifestRoute(
+          request(`/api/v1/cvs/${id}/manifest`, token),
+          params(id),
+        ),
+        await chunkRoute(
+          request(`/api/v1/cvs/${id}/chunks?index=0`, token),
+          params(id),
+        ),
+      ]) {
+        expect(response.status).toBe(403);
+        expect((await response.json()).error.code).toBe("scope_required");
+      }
+      const reader = { ...owner, scopes: ["cvs:read"] } as Principal;
+      for (const read of [
+        () => listCandidateCvs(reader, candidateId),
+        () => listCandidateCvsPage(reader, candidateId),
+        () => getCvDownload(reader, id, fake.gateway),
+        () => getCvManifest(reader, id, fake.gateway),
+        () => getCvChunk(reader, id, 0, fake.gateway),
+      ])
+        await expect(read()).rejects.toMatchObject({
+          status: 403,
+          code: "scope_required",
+        });
+      expect({
+        reads: fake.state.reads,
+        signs: fake.state.signs,
+        calls: fake.state.calls.length,
+      }).toEqual(before);
+    });
+
     it("returns a manifest with no provider call, URL or pathname", async () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
-      const { token } = await bearer(["cvs:read"]);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
       const small = fictionalPdf(1000);
       for (const [bytes, chunkCount] of [
         [large, 2],
@@ -775,7 +828,7 @@ describe("private Blob CV transfer behind a fake client", () => {
     it("serves each chunk from one full verified read with trusted headers", async () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
-      const { token } = await bearer(["cvs:read"]);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
       const id = await readyBlobCv(fake, large);
       const parts: Buffer[] = [];
       for (const index of [0, 1]) {
@@ -818,7 +871,7 @@ describe("private Blob CV transfer behind a fake client", () => {
     it("refuses malformed or out-of-range chunk indexes before any provider read", async () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
-      const { token } = await bearer(["cvs:read"]);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
       const id = await readyBlobCv(fake, large);
       const reads = fake.state.reads;
       for (const query of [
@@ -850,7 +903,7 @@ describe("private Blob CV transfer behind a fake client", () => {
     it("fails closed when the object is replaced or deleted between chunks", async () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
-      const { token } = await bearer(["cvs:read"]);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
       const id = await readyBlobCv(fake, large);
       const key = await objectKey(id);
       const chunk = (index: number) =>
@@ -900,7 +953,7 @@ describe("private Blob CV transfer behind a fake client", () => {
       const fake = fakeBlob();
       configured.current = { binding: blobBinding, gateway: fake.gateway };
       const id = await readyBlobCv(fake, large);
-      const first = await bearer(["cvs:read"]);
+      const first = await bearer(["candidates:read", "cvs:read"]);
       const chunk = (index: number) =>
         chunkRoute(
           request(`/api/v1/cvs/${id}/chunks?index=${index}`, first.token),
@@ -913,7 +966,7 @@ describe("private Blob CV transfer behind a fake client", () => {
       expect(refused.status).toBe(401);
       expect(fake.state.reads).toBe(reads);
 
-      const second = await bearer(["cvs:read"]);
+      const second = await bearer(["candidates:read", "cvs:read"]);
       let returned: unknown;
       await expect(
         downloadVerifiedCv(
@@ -1227,7 +1280,7 @@ describe("private Blob CV transfer behind a fake client", () => {
       await completeCvUpload(owner, s3Ready.data.id, s3.gateway);
       const blobReads = blob.state.reads,
         s3Calls = s3.calls.length;
-      const { token } = await bearer(["cvs:read"]);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
 
       configured.current = { binding: blobBinding, gateway: blob.gateway };
       const download = await downloadRoute(

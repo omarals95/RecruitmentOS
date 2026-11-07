@@ -1265,6 +1265,42 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(await comments()).toBe(before + 1);
   });
 
+  it("answers a comment on a candidate without candidate scopes exactly as a missing record", async () => {
+    const comments = () =>
+      count(
+        "SELECT count(*)::int AS count FROM app.records WHERE team_id=$1 AND kind='comment'",
+        [TEAM],
+      );
+    const before = await comments();
+    const attempt = async (scopes: string[], parentRecordId: string) =>
+      (
+        await call(
+          (await apiToken(owner.userId, scopes)).token,
+          "add_comment",
+          {
+            idempotencyKey: `fictional-candidate-comment-${randomUUID()}`,
+            parentRecordId,
+            body: "Fictional comment on a candidate.",
+          },
+        )
+      ).structuredContent;
+    const missing = await attempt(["recruitment:write"], randomUUID());
+    const hidden = await attempt(["recruitment:write"], ids.candidate);
+    expect(missing.error?.code).toBe("not_found");
+    expect(hidden).toEqual(missing);
+    expect(
+      (await attempt(["recruitment:write", "candidates:read"], ids.candidate))
+        .error?.code,
+    ).toBe("scope_required");
+    expect(await comments()).toBe(before);
+    const allowed = await attempt(
+      ["recruitment:write", "candidates:read", "candidates:write"],
+      ids.candidate,
+    );
+    expect(allowed.error).toBeUndefined();
+    expect(await comments()).toBe(before + 1);
+  });
+
   it("returns prompt-injection text only as labelled data and changes nothing", async () => {
     const reader = await apiToken(owner.userId, [
       "candidates:read",

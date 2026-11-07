@@ -194,12 +194,16 @@ export function GET() {
       },
     };
     const scope = resource === "candidates" ? "candidates" : "recruitment";
+    const candidateCommentRead =
+      kind === "comment"
+        ? " Comments on a candidate also need candidates:read: without it they are left out of lists and pagination.total and answered as 404 not_found."
+        : "";
     paths[`/api/v1/${resource}`] = {
       get: operation(
         [`${scope}:read`],
         {
           summary: `List ${resource}`,
-          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.`,
+          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.${candidateCommentRead}`,
         },
         {
           "200": {
@@ -234,7 +238,7 @@ export function GET() {
         [`${scope}:write`],
         {
           summary: `Create ${kind}`,
-          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.`,
+          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.${kind === "comment" ? " A comment on a candidate also needs candidates:read and candidates:write: without candidates:read the parent is answered as 400 invalid_reference, as for a missing record; without candidates:write it returns 403." : ""}`,
           requestBody: jsonBody(input, createExamples[kind]),
         },
         {
@@ -260,7 +264,12 @@ export function GET() {
     paths[`/api/v1/${resource}/{id}`] = {
       get: operation(
         [`${scope}:read`],
-        { summary: `Get ${kind}` },
+        {
+          summary: `Get ${kind}`,
+          ...(candidateCommentRead
+            ? { description: `Requires ${scope}:read.${candidateCommentRead}` }
+            : {}),
+        },
         { "200": { description: "{data:record}." } },
         { params: [idParameter] },
       ),
@@ -1095,11 +1104,11 @@ export function GET() {
   };
   paths["/api/v1/candidates/{id}/cvs"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "List private CV references",
         description:
-          "Requires cvs:read; returns {data,pagination} with the full total. Each reference has downloadProtocol: s3-url-v1 (use /download), blob-chunks-v1 (use /manifest and /chunks) or null when not ready. Storage keys, object versions, digests and store ids are not exposed.",
+          "Requires cvs:read and candidates:read (without candidates:read, 403 scope_required before any storage call); returns {data,pagination} with the full total. Each reference has downloadProtocol: s3-url-v1 (use /download), blob-chunks-v1 (use /manifest and /chunks) or null when not ready. Storage keys, object versions, digests and store ids are not exposed.",
       },
       { "200": { description: "{data: CV references, pagination}." } },
       {
@@ -1211,11 +1220,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/download"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Get a short-lived private CV download",
         description:
-          "Requires cvs:read. S3 references only (downloadProtocol s3-url-v1); Blob references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. S3 references only (downloadProtocol s3-url-v1); Blob references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Returns {url,expiresAt}; link is a bearer credential and must not be logged.",
       },
       { "200": { description: "{url, expiresAt}." } },
       { params: [idParameter] },
@@ -1223,11 +1232,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/manifest"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Read a Blob CV download manifest",
         description:
-          "Requires cvs:read. Disabled until Blob CV storage is enabled. For downloadProtocol blob-chunks-v1 only; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. For downloadProtocol blob-chunks-v1 only; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH. Makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.",
       },
       {
         "200": {
@@ -1250,11 +1259,11 @@ export function GET() {
   };
   paths["/api/v1/cvs/{id}/chunks"] = {
     get: operation(
-      ["cvs:read"],
+      ["cvs:read", "candidates:read"],
       {
         summary: "Read one verified Blob CV chunk",
         description:
-          "Requires cvs:read. Disabled until Blob CV storage is enabled. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
+          "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. The bytes are always sent as application/octet-stream with Content-Disposition: attachment and nosniff, never as the stored type. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
       },
       {
         "200": {

@@ -279,9 +279,15 @@ describe("OpenAPI contract", () => {
       expect(schemas).toContain(`{"const":"${protocol}"}`);
     }
     expect(reservation).toContain('"propertyName":"protocol"');
-    for (const path of ["/api/v1/cvs/{id}/manifest", "/api/v1/cvs/{id}/chunks"])
+    for (const path of [
+      "/api/v1/candidates/{id}/cvs",
+      "/api/v1/cvs/{id}/download",
+      "/api/v1/cvs/{id}/manifest",
+      "/api/v1/cvs/{id}/chunks",
+    ])
       expect(document.paths[path].get["x-required-scopes"], path).toEqual([
         "cvs:read",
+        "candidates:read",
       ]);
     const chunks = document.paths["/api/v1/cvs/{id}/chunks"]
       .get as Operation & {

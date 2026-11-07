@@ -1276,6 +1276,95 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     ).rejects.toMatchObject({ status: 403 });
   });
 
+  it("hides comments on candidates without candidates:read and needs candidates:write to add one", async () => {
+    const person = await candidate("Fictional Hidden Comment Person");
+    const job = await vacancy("Fictional Visible Comment Vacancy");
+    const onPerson = await createRecord(owner, "comments", {
+      parentRecordId: person.id,
+      data: { body: "Fictional candidate note" },
+    });
+    const onJob = await createRecord(owner, "comments", {
+      parentRecordId: job.id,
+      data: { body: "Fictional vacancy note" },
+    });
+    const recruitment = await seedApiToken(fixture.db, owner, [
+      "recruitment:read",
+      "recruitment:write",
+    ]);
+    const page = new URLSearchParams({ pageSize: "100" });
+    const all = await listRecords(owner, "comments", page);
+    const hidden = await withTeam(owner, async (tx) =>
+      Number(
+        (
+          await tx.execute<{ n: string }>(
+            sql`select count(*) as n from app.records c join app.records parent on parent.team_id=c.team_id and parent.id=c.parent_record_id where c.team_id=${owner.teamId} and c.kind='comment' and c.archived_at is null and parent.kind='candidate'`,
+          )
+        ).rows[0].n,
+      ),
+    );
+    expect(hidden).toBeGreaterThan(0);
+    const visible = await listRecords(recruitment, "comments", page);
+    const ids = visible.data.map((row) => row.id);
+    expect(ids).toContain(onJob.id);
+    expect(ids).not.toContain(onPerson.id);
+    expect(visible.pagination.total).toBe(all.pagination.total - hidden);
+    expect(
+      await listRecords(
+        recruitment,
+        "comments",
+        new URLSearchParams({ parentRecordId: person.id }),
+      ),
+    ).toMatchObject({ data: [], pagination: { total: 0 } });
+    await expect(
+      getRecord(recruitment, "comments", onPerson.id),
+    ).rejects.toMatchObject({ status: 404, code: "not_found" });
+    expect((await getRecord(recruitment, "comments", onJob.id)).id).toBe(
+      onJob.id,
+    );
+    const refusal = (parentRecordId: string, p = recruitment) =>
+      createRecord(p, "comments", {
+        parentRecordId,
+        data: { body: "Fictional refused note" },
+      }).then(
+        () => null,
+        (error: { status: number; code: string; message: string }) => ({
+          status: error.status,
+          code: error.code,
+          message: error.message,
+        }),
+      );
+    const missing = await refusal(randomUUID());
+    expect(missing).toMatchObject({ status: 400, code: "invalid_reference" });
+    expect(await refusal(person.id)).toEqual(missing);
+    const reader = await seedApiToken(fixture.db, owner, [
+      "recruitment:read",
+      "recruitment:write",
+      "candidates:read",
+    ]);
+    expect(await refusal(person.id, reader)).toMatchObject({ status: 403 });
+    expect(
+      (
+        await createRecord(recruitment, "comments", {
+          parentRecordId: job.id,
+          data: { body: "Fictional vacancy follow-up" },
+        })
+      ).parentRecordId,
+    ).toBe(job.id);
+    const writer = await seedApiToken(fixture.db, owner, [
+      "recruitment:write",
+      "candidates:read",
+      "candidates:write",
+    ]);
+    expect(
+      (
+        await createRecord(writer, "comments", {
+          parentRecordId: person.id,
+          data: { body: "Fictional permitted note" },
+        })
+      ).parentRecordId,
+    ).toBe(person.id);
+  });
+
   it("names comment authors through the activity accessor without exposing user IDs", async () => {
     await fixture.db.execute(
       sql`update auth."user" set name='Fictional Comment Author' where id=${owner.userId}`,

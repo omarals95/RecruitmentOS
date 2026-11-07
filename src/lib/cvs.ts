@@ -22,6 +22,7 @@ import {
 import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
 import { withTeam } from "@/lib/db-team";
+import { requireScope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import type { BlobGateway } from "@/lib/blob-storage";
 import { MAX_BLOB_DOWNLOAD_SLICE_BYTES } from "@/lib/blob-integrity";
@@ -392,11 +393,17 @@ export function parseCvChunkQuery(query: URLSearchParams): number {
   return Number(value);
 }
 
+/** A CV is the candidate's personal data, so every CV read also needs candidates:read. */
+function requireCandidateRead(p: Principal) {
+  requireScope(p, "candidates:read");
+}
+
 export async function listCandidateCvsPage(
   p: Principal,
   candidateId: string,
   options: { page?: number; pageSize?: number } = {},
 ) {
+  requireCandidateRead(p);
   validId(candidateId);
   const parsed = cvPaginationSchema.safeParse(options);
   if (!parsed.success)
@@ -440,6 +447,7 @@ export async function listCandidateCvs(
   p: Principal,
   candidateId: string,
 ): Promise<CvDto[]> {
+  requireCandidateRead(p);
   validId(candidateId);
   return withTeam(p, async (tx) => {
     await assertCandidate(tx, p, candidateId, true);
@@ -805,6 +813,7 @@ export async function completeCvUpload(
 
 /** Reauthorizes every download request; archived candidates' CVs stay readable. */
 async function readyCv(p: Principal, id: string) {
+  requireCandidateRead(p);
   validId(id);
   return withTeam(p, async (tx) => {
     const [cv] = await tx

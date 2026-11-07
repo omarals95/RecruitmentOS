@@ -255,6 +255,12 @@ function owned(p: Principal, kind: RecordKind): SQL[] {
     eq(records.teamId, p.teamId),
     eq(records.kind, kind),
     ...(kind === "saved-view" ? [eq(records.privateOwnerId, p.userId)] : []),
+    // Without candidates:read, comments on candidates do not exist for the caller.
+    ...(kind === "comment" && !p.scopes.includes("candidates:read")
+      ? [
+          sql`exists(select 1 from ${records} parent where parent.team_id=${p.teamId} and parent.id=${records.parentRecordId} and parent.kind<>'candidate')`,
+        ]
+      : []),
   ];
 }
 async function find(
@@ -361,16 +367,20 @@ async function checkReferences(
       .from(records)
       .where(and(eq(records.teamId, p.teamId), eq(records.id, value)))
       .limit(1);
+    // A candidate the caller cannot read is answered exactly as a missing parent.
+    const candidateComment = kind === "comment" && parent?.kind === "candidate";
     if (
       !parent ||
       (config?.kind !== "*" && parent.kind !== config?.kind) ||
-      (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId)
+      (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId) ||
+      (candidateComment && !p.scopes.includes("candidates:read"))
     )
       throw new ApiError(
         400,
         "invalid_reference",
         `${key} does not reference the expected record in this team.`,
       );
+    if (candidateComment) permission(p, "candidates", true);
     if (parent.archivedAt && !allowArchived)
       throw new ApiError(
         400,
@@ -681,7 +691,10 @@ export async function getRecord(
   );
 }
 
-/** Kind and archive state of a record the caller can see in its team, for checks before a write. */
+/**
+ * Kind and archive state of a record the caller can see in its team, for checks before a write.
+ * A candidate is visible only with candidates:read; otherwise it is answered as missing.
+ */
 export async function recordKindOf(
   p: Principal,
   recordId: string,
@@ -697,7 +710,11 @@ export async function recordKindOf(
       .from(records)
       .where(and(eq(records.teamId, p.teamId), eq(records.id, recordId)))
       .limit(1);
-    if (!row || (row.kind === "saved-view" && row.privateOwnerId !== p.userId))
+    if (
+      !row ||
+      (row.kind === "saved-view" && row.privateOwnerId !== p.userId) ||
+      (row.kind === "candidate" && !p.scopes.includes("candidates:read"))
+    )
       throw new ApiError(404, "not_found", "Record not found in this team.");
     return { kind: row.kind as RecordKind, archived: !!row.archivedAt };
   });

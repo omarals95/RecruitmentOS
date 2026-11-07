@@ -463,7 +463,7 @@ export const TOOLS: McpTool[] = [
     name: "add_comment",
     title: "Add comment",
     description:
-      "Append a comment to an active candidate, vacancy or application. Requires an idempotencyKey; comments cannot be edited or deleted.",
+      "Append a comment to an active candidate, vacancy or application. Comments on a candidate also require candidates:read and candidates:write. Requires an idempotencyKey; comments cannot be edited or deleted.",
     scopes: ["recruitment:write"],
     writes: true,
     input: z
@@ -474,7 +474,9 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input) => {
+      // Without candidates:read, a candidate parent is answered as a missing record.
       const parent = await recordKindOf(p, input.parentRecordId);
+      if (parent.kind === "candidate") requireScope(p, "candidates:write");
       if (
         parent.archived ||
         !["candidate", "vacancy", "application"].includes(parent.kind)
