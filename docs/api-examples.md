@@ -1,6 +1,6 @@
 # API access for AI clients and integrations
 
-Create a personal access token under **Settings → API tokens** while signed in. Select the smallest set of scopes required. The token is tied to your user and the selected team. It is displayed once and is never returned by the token list. Store it in your integration's secret store, never in prompts, browser bundles, source control or screenshots.
+Create a personal access token under **Settings → API tokens** while signed in with two-step sign-in turned on; without it the page links to the setup and `POST /api/settings/tokens` answers 403 `two_step_required`. Select the smallest set of scopes required. The token is tied to your user and the selected team. It is displayed once and is never returned by the token list. Store it in your integration's secret store, never in prompts, browser bundles, source control or screenshots.
 
 The token's permissions are checked against your current verified account and live team membership on every request. Removing a member, reducing their role, revoking the token or reaching its expiry removes the corresponding access. Tokens cannot manage users, teams, invitations, roles or other tokens. API token traffic is limited to 60 authenticated requests per minute per token. Retry a 429 response with backoff; do not repeat a failed create without reusing its idempotency key.
 
