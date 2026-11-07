@@ -8,21 +8,39 @@ import {
   type ResourceName,
   type ReferenceField,
 } from "@/domain/records";
-import { useApi } from "./client";
+import { useApi, useWorkspace } from "./client";
+import {
+  CandidateErased,
+  CandidateErasureDialog,
+  CandidateErasureSection,
+  forgetErasedCandidate,
+  type CandidateErasureResult,
+} from "./candidate-erasure";
+import { dataOf } from "./helpers";
 import { useReadyTiming } from "./speed-log";
 import { candidateProfileRequests } from "./tab-requests";
 import { RecordEditor } from "./editor";
 import { Loading, LoadError, RecordDetail } from "./records-screen";
 
 export function CandidateProfile({ id }: { id: string }) {
+  const { team, role } = useWorkspace();
   const result = useApi<{ data: RecordDto }>(candidateProfileRequests(id)[0]);
   useReadyTiming("candidate.open", !!result.data);
+  const [erasing, setErasing] = useState(false);
+  const [erased, setErased] = useState<CandidateErasureResult | null>(null);
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;
     references?: Partial<Record<ReferenceField, string>>;
     prefill?: Record<string, unknown>;
   } | null>(null);
+  if (erased)
+    return (
+      <div className="stack">
+        <h1 className="sr-only">Candidate profile</h1>
+        <CandidateErased result={erased} />
+      </div>
+    );
   return (
     <div className="stack">
       <h1 className="sr-only">Candidate profile</h1>
@@ -68,6 +86,21 @@ export function CandidateProfile({ id }: { id: string }) {
           />
         )
       )}{" "}
+      {result.data && (
+        <CandidateErasureSection role={role} onStart={() => setErasing(true)} />
+      )}
+      {erasing && result.data && (
+        <CandidateErasureDialog
+          candidateId={id}
+          name={String(dataOf(result.data.data).name ?? "")}
+          onCancel={() => setErasing(false)}
+          onErased={(outcome) => {
+            setErasing(false);
+            setErased(outcome);
+            if (team) forgetErasedCandidate(team.id, id);
+          }}
+        />
+      )}
       {editor && (
         <RecordEditor
           {...editor}
