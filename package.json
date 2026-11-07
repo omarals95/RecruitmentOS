@@ -19,6 +19,7 @@
     "test:local": "tsx scripts/smoke-local.ts",
     "test:live-roles": "tsx scripts/live-role-tests.ts",
     "bench:round-trips": "tsx scripts/benchmark-round-trips.ts",
+    "erase:candidate": "tsx scripts/erase-candidate.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

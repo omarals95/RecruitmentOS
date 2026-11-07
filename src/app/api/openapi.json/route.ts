@@ -381,6 +381,34 @@ export function GET() {
       { params: [idParameter] },
     ),
   };
+  paths["/api/v1/candidates/{id}/erasure"] = {
+    post: operation(
+      [],
+      {
+        summary: "Permanently erase a candidate",
+        description:
+          "Session only, for data-protection requests: a signed-in team owner; admins, recruiters and viewers get 403 erasure_forbidden and Bearer tokens 403 session_required. There is no MCP tool. Send {confirmName} with the candidate's name exactly as shown (1 to 300 characters, compared after trimming, case-sensitive); a different name returns 400 erasure_confirmation_mismatch and an invalid id or body 400 invalid_input. A candidate that is not in the team, or an id of another kind of record, returns 404 not_found. In one transaction it deletes the candidate, its applications, their interviews, offers, onboarding and checklist items, and every comment on any of them; deletes every member's follow-up state and the notification reads of those records; unlinks linked tasks and replaces the name in their title, context and description with [erased candidate]; clears saved-view searches that contain the name, email or phone; tombstones the candidate's bulk import items; makes its CV uploads rejected and nameless; replaces the stored responses of idempotency keys that name an erased record, so a replay returns 409 idempotency_expired; and redacts the activity rows about those records and the candidate's AI suggestion records, keeping their type, time and actor. It records a tombstone with only the candidate id, team, owner and time, and one candidate.erased activity row with counts. Each CV file in Blob storage is deleted, confirmed missing and its charge released only once its last upload ticket expired at least 10 minutes ago; a file still waiting is deleted by a later CV storage cleanup (see /api/v1/cvs/storage-reconciliation) or a retry of this call. A retry for an erased candidate returns 200 with alreadyErased true, the same erasureId and removed null, and repeats that CV deletion. Exports already downloaded are not affected. Returns {data:{erasureId, alreadyErased, erasedAt, removed:{applications, interviews, offers, onboarding, checklistItems, comments, followUpStates, tasksUnlinked, savedViewsCleared, bulkItems, cvFiles, activityRedacted, notificationReads, idempotencyKeys} or null, cvStorage:{deleted, waiting, deleteAfter}}}: deleted and waiting count this erasure's Blob CV files with and without a confirmed deletion, and deleteAfter is the latest time after which a waiting file can be deleted, or null.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["confirmName"],
+            additionalProperties: false,
+            properties: {
+              confirmName: { type: "string", minLength: 1, maxLength: 300 },
+            },
+          },
+          { confirmName: "Amira Fictional" },
+        ),
+      },
+      {
+        "200": {
+          description:
+            "{data:{erasureId, alreadyErased, erasedAt, removed, cvStorage:{deleted, waiting, deleteAfter}}}.",
+        },
+      },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
   paths["/api/v1/candidates/duplicates"] = {
     post: operation(
       ["candidates:read"],
