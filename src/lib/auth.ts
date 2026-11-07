@@ -19,7 +19,7 @@ import {
 } from "@better-auth/core/context";
 import type { BetterAuthRateLimitStorage } from "@better-auth/core";
 import { isAPIError } from "@better-auth/core/utils/is-api-error";
-import { and, eq, sql, type SQLWrapper } from "drizzle-orm";
+import { and, eq, like, sql, type SQLWrapper } from "drizzle-orm";
 import { getIdentityDb, prepareDbPairTargets, type AppDb } from "@/db";
 import {
   apiRateLimits,
@@ -27,6 +27,7 @@ import {
   member,
   rateLimit,
   user,
+  verification,
 } from "@/db/auth-schema";
 import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
 import { ApiError } from "./errors";
@@ -206,6 +207,12 @@ const TRUST_DEVICE_SECONDS = 60 * 60 * 24 * 30;
 const presentedTrustExpiry = defineRequestState<Date | null>(() => null);
 /** Set when this request turns two-step sign-in on, so the user's other sessions end. */
 const twoStepTurnedOn = defineRequestState<boolean>(() => false);
+/** Turning two-step off or replacing the backup codes forgets every trusted device of this user. */
+const forgetTrustedDevicesOf = defineRequestState<string | null>(() => null);
+const FORGET_TRUSTED_DEVICE_PATHS = new Set([
+  "/two-factor/disable",
+  "/two-factor/generate-backup-codes",
+]);
 /** Only these paths may create a session for a user with two-step sign-in. */
 const TWO_STEP_SESSION_PATHS = new Set([
   "/sign-in/email",
@@ -572,6 +579,8 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               message: TWO_STEP_SETUP_MESSAGE,
             });
         }
+        if (session && FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path))
+          await forgetTrustedDevicesOf.set(session.user.id);
         if (ctx.path === "/sign-in/email") {
           const email = (ctx.body as { email?: unknown } | undefined)?.email;
           if (typeof email === "string")
@@ -668,10 +677,23 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
             });
         }
       }),
-      // A correct password (including a two-step challenge) clears the address's backoff.
       after: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== "/sign-in/email" || isAPIError(ctx.context.returned))
+        if (isAPIError(ctx.context.returned)) return;
+        if (FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path)) {
+          const userId = await forgetTrustedDevicesOf.get();
+          if (userId)
+            await db
+              .delete(verification)
+              .where(
+                and(
+                  like(verification.identifier, "trust-device-%"),
+                  eq(verification.value, userId),
+                ),
+              );
           return;
+        }
+        // A correct password (including a two-step challenge) clears the address's backoff.
+        if (ctx.path !== "/sign-in/email") return;
         const email = (ctx.body as { email?: unknown } | undefined)?.email;
         if (typeof email === "string")
           await db

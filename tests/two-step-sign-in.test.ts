@@ -254,6 +254,87 @@ describe("two-step sign-in through the Better Auth handler", () => {
     expect(await expired.json()).toMatchObject({ twoFactorRedirect: true });
   });
 
+  it("forgets every trusted device when backup codes are replaced or two-step sign-in is turned off", async () => {
+    const email = "forget@example.test";
+    const { cookie } = await addMember(
+      caller,
+      mail,
+      owner.cookie,
+      owner.teamId,
+      email,
+      "recruiter",
+    );
+    const { secret, backupCodes } = await caller.enableTwoStep(cookie);
+    const id = await userId(email);
+    const trustedSignIn = async () => {
+      const challenged = await caller.post("sign-in/email", {
+        email,
+        password: PASSWORD,
+      });
+      const verified = await caller.post(
+        "two-factor/verify-totp",
+        { code: await caller.code(secret), trustDevice: true },
+        { cookie: cookieOf(challenged) },
+      );
+      expect(verified.status).toBe(200);
+      return cookieOf(verified)
+        .split("; ")
+        .filter((pair) => pair.includes("session_token"))
+        .join("; ");
+    };
+    const trusted = () =>
+      h.count(
+        `SELECT count(*) FROM auth.verification WHERE identifier LIKE 'trust-device-%' AND value=$1`,
+        [id],
+      );
+    await trustedSignIn();
+    const session = await trustedSignIn();
+    expect(await trusted()).toBe(2);
+    const replaced = await caller.post(
+      "two-factor/generate-backup-codes",
+      { password: PASSWORD },
+      { cookie: session },
+    );
+    expect(replaced.status).toBe(200);
+    const fresh = ((await replaced.json()) as { backupCodes: string[] })
+      .backupCodes;
+    expect(fresh).toHaveLength(10);
+    expect(fresh).not.toContain(backupCodes[0]);
+    expect(await trusted()).toBe(0);
+    const challenged = await caller.post("sign-in/email", {
+      email,
+      password: PASSWORD,
+    });
+    expect(
+      (
+        await caller.post(
+          "two-factor/verify-backup-code",
+          { code: backupCodes[0] },
+          { cookie: cookieOf(challenged) },
+        )
+      ).status,
+    ).toBe(401);
+
+    const last = await trustedSignIn();
+    expect(await trusted()).toBe(1);
+    const disabled = await caller.post(
+      "two-factor/disable",
+      { password: PASSWORD },
+      { cookie: last },
+    );
+    expect(disabled.status).toBe(200);
+    expect(await trusted()).toBe(0);
+    expect(
+      (
+        await h.pg.query(
+          `SELECT u.two_factor_enabled, (SELECT count(*)::int FROM auth.two_factor t WHERE t.user_id=u.id) AS secrets FROM auth."user" u WHERE u.id=$1`,
+          [id],
+        )
+      ).rows,
+    ).toEqual([{ two_factor_enabled: false, secrets: 0 }]);
+    expect(await caller.session(cookieOf(disabled))).not.toBeNull();
+  });
+
   it("gates an owner or admin without two-step on every Better Auth endpoint but setup and sign-out", async () => {
     const email = "promoted@example.test";
     const added = await addMember(
