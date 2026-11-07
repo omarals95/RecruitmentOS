@@ -89,7 +89,17 @@ import {
   type ResourceState,
 } from "./resource-state";
 
+import {
+  BUCKETS_PATH,
+  defaultListQuery,
+  listPath,
+  listSearchParams,
+  screenDefinitions,
+  viewsPath,
+} from "./tab-requests";
+
 export type { ListResponse } from "./helpers";
+export { screenDefinitions } from "./tab-requests";
 function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   const buttons = [
@@ -136,65 +146,6 @@ const tableColumns: Partial<Record<ResourceName, string[]>> = {
   buckets: ["name", "position"],
   "task-fields": ["name", "type", "required"],
 };
-export const screenDefinitions: Record<
-  string,
-  { title: string; description: string; resource: ResourceName }
-> = {
-  candidates: {
-    title: "Candidates",
-    description: "Your talent directory, with the source details that matter.",
-    resource: "candidates",
-  },
-  shortlist: {
-    title: "My shortlist",
-    description: "Candidates you have personally saved for a closer look.",
-    resource: "candidates",
-  },
-  vacancies: {
-    title: "Vacancies",
-    description: "Every vacancy your team manages, from draft to closed.",
-    resource: "vacancies",
-  },
-  roles: {
-    title: "Job roles",
-    description: "Reusable role descriptions to start your next vacancy.",
-    resource: "job-roles",
-  },
-  pipeline: {
-    title: "Applications",
-    description:
-      "Move every conversation forward, one considered step at a time.",
-    resource: "applications",
-  },
-  tasks: {
-    title: "Recruitment tasks",
-    description: "Your workflow, your buckets, your next steps.",
-    resource: "tasks",
-  },
-  interviews: {
-    title: "Interviews",
-    description: "Plan conversations and keep the whole team in the loop.",
-    resource: "interviews",
-  },
-  offers: {
-    title: "Offers",
-    description:
-      "Track the details between a good conversation and a decision.",
-    resource: "offers",
-  },
-  onboarding: {
-    title: "Onboarding",
-    description: "Give every new starter a thoughtful beginning.",
-    resource: "onboarding",
-  },
-  "source-review": {
-    title: "Source review",
-    description:
-      "Resolve missing or ambiguous source information without guessing.",
-    resource: "candidates",
-  },
-};
-
 /** Most applications the whole-vacancy board loads; above it the board is replaced by a message. */
 const BOARD_LIMIT = 1000;
 /** Every application matching `query` (no page), reloaded on refresh and on application changes. */
@@ -263,27 +214,29 @@ export function RecordsScreen({ section }: { section: string }) {
   const resource = config.resource;
   const { team, role } = useWorkspace();
   const canWrite = !!team && role !== "viewer";
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [category, setCategory] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
-  const [skills, setSkills] = useState<string[]>([]);
-  const [certifications, setCertifications] = useState<string[]>([]);
-  const [shortlisted, setShortlisted] = useState(section === "shortlist");
-  const [reviewStatus, setReviewStatus] = useState("");
-  const [emirate, setEmirate] = useState("");
-  const [degree, setDegree] = useState("");
-  const [education, setEducation] = useState("");
-  const [minYears, setMinYears] = useState("");
-  const [maxYears, setMaxYears] = useState("");
-  const [vacancy, setVacancy] = useState("");
-  const [archived, setArchived] = useState(false);
-  const [sort, setSort] = useState(
-    resource === "candidates" ? "name" : "updatedAt",
+  // The same defaults tab-requests.ts prefetches, so a prefetched list is this screen's first key.
+  const [initial] = useState(() => defaultListQuery(section));
+  const [search, setSearch] = useState(initial.search);
+  const [status, setStatus] = useState(initial.status);
+  const [category, setCategory] = useState(initial.category);
+  const [categories, setCategories] = useState<string[]>(initial.categories);
+  const [skills, setSkills] = useState<string[]>(initial.skills);
+  const [certifications, setCertifications] = useState<string[]>(
+    initial.certifications,
   );
-  const [direction, setDirection] = useState("asc");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [shortlisted, setShortlisted] = useState(initial.shortlisted);
+  const [reviewStatus, setReviewStatus] = useState(initial.reviewStatus);
+  const [emirate, setEmirate] = useState(initial.emirate);
+  const [degree, setDegree] = useState(initial.degree);
+  const [education, setEducation] = useState(initial.education);
+  const [minYears, setMinYears] = useState(initial.minYears);
+  const [maxYears, setMaxYears] = useState(initial.maxYears);
+  const [vacancy, setVacancy] = useState(initial.vacancy);
+  const [archived, setArchived] = useState(initial.archived);
+  const [sort, setSort] = useState(initial.sort);
+  const [direction, setDirection] = useState(initial.direction);
+  const [page, setPage] = useState(initial.page);
+  const [pageSize, setPageSize] = useState(initial.pageSize);
   const [mode, setMode] = useState<DisplayMode>(
     resource === "tasks" || resource === "applications"
       ? "board"
@@ -314,55 +267,53 @@ export function RecordsScreen({ section }: { section: string }) {
   } | null>(null);
   const [exporting, setExporting] = useState(false);
   const debounced = useDebounced(search);
-  const params = useMemo(() => {
-    const p = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-      search: debounced,
+  const params = useMemo(
+    () =>
+      listSearchParams(section, {
+        page,
+        pageSize,
+        search: debounced,
+        sort,
+        direction,
+        archived,
+        status,
+        reviewStatus,
+        category,
+        emirate,
+        degree,
+        vacancy,
+        shortlisted,
+        categories,
+        skills,
+        certifications,
+        education,
+        minYears,
+        maxYears,
+      }),
+    [
+      page,
+      pageSize,
+      debounced,
       sort,
       direction,
-    });
-    if (archived) p.set("includeArchived", "true");
-    if (status) p.set(resource === "applications" ? "stage" : "status", status);
-    if (reviewStatus) p.set("reviewStatus", reviewStatus);
-    if (category) p.set("folderCategory", category);
-    if (emirate) p.set("residenceEmirate", emirate);
-    if (degree) p.set("degreeLevel", degree);
-    if (vacancy) p.set("vacancyId", vacancy);
-    if (shortlisted) p.set("shortlisted", "true");
-    if (categories.length) p.set("categories", JSON.stringify(categories));
-    if (skills.length) p.set("skills", JSON.stringify(skills));
-    if (certifications.length)
-      p.set("certifications", JSON.stringify(certifications));
-    if (education.trim()) p.set("education", education.trim());
-    if (minYears) p.set("minYearsExperience", minYears);
-    if (maxYears) p.set("maxYearsExperience", maxYears);
-    if (section === "source-review") p.set("needsReview", "true");
-    return p;
-  }, [
-    page,
-    pageSize,
-    debounced,
-    sort,
-    direction,
-    archived,
-    status,
-    category,
-    emirate,
-    degree,
-    vacancy,
-    resource,
-    section,
-    categories,
-    skills,
-    certifications,
-    education,
-    minYears,
-    maxYears,
-    shortlisted,
-    reviewStatus,
-  ]);
-  const result = useApi<ListResponse>(`/api/v1/${resource}?${params}`);
+      archived,
+      status,
+      category,
+      emirate,
+      degree,
+      vacancy,
+      section,
+      categories,
+      skills,
+      certifications,
+      education,
+      minYears,
+      maxYears,
+      shortlisted,
+      reviewStatus,
+    ],
+  );
+  const result = useApi<ListResponse>(listPath(resource, params));
   // With a vacancy selected, the application board covers the whole pipeline in a stable order.
   const boardQuery = useMemo(() => {
     if (resource !== "applications" || mode !== "board" || !vacancy)
@@ -376,13 +327,11 @@ export function RecordsScreen({ section }: { section: string }) {
   }, [resource, mode, vacancy, params]);
   const board = useWholePipeline(boardQuery);
   const buckets = useApi<ListResponse>(
-    resource === "tasks"
-      ? "/api/v1/buckets?pageSize=100&sort=position&direction=asc"
-      : null,
+    resource === "tasks" ? BUCKETS_PATH : null,
   );
   const views = useApi<ListResponse>(
     resource === "candidates" || resource === "applications"
-      ? `/api/v1/views?pageSize=100&area=${resource === "candidates" ? "directory" : "applications"}`
+      ? viewsPath(resource)
       : null,
   );
   // A changed server-side query invalidates page-local selection and pagination together.

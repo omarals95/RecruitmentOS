@@ -31,6 +31,12 @@ import {
 } from "./helpers";
 import { useApi, useWorkspace, requestJson, humanError } from "./client";
 import {
+  activityPath,
+  analyticsPath,
+  NOTIFICATIONS_PATH,
+  OVERVIEW_PATH,
+} from "./tab-requests";
+import {
   BarChart,
   HiringMetrics,
   SeriesChart,
@@ -96,7 +102,7 @@ interface AnalyticsData extends HiringMetricData {
 }
 export function Overview() {
   const { team, user, role } = useWorkspace();
-  const result = useApi<OverviewData>("/api/v1/overview");
+  const result = useApi<OverviewData>(OVERVIEW_PATH);
   const [editor, setEditor] = useState<ResourceName | null>(null);
   if (!team) return <NoTeam />;
   return (
@@ -439,10 +445,8 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
-  const result = useApi<AnalyticsData>(
-    `/api/v1/analytics?from=${dates.from}&to=${dates.to}`,
-  );
-  const overview = useApi<OverviewData>(talent ? "/api/v1/overview" : null);
+  const result = useApi<AnalyticsData>(analyticsPath(dates.from, dates.to));
+  const overview = useApi<OverviewData>(talent ? OVERVIEW_PATH : null);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -703,9 +707,7 @@ export function ActivityScreen() {
   const result = useApi<{
     data: ActivityItem[];
     pagination: { total: number; totalPages: number };
-  }>(
-    `/api/v1/activity?page=${page}&pageSize=50&search=${encodeURIComponent(search)}&kind=${encodeURIComponent(kind)}`,
-  );
+  }>(activityPath(page, search, kind));
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -847,7 +849,7 @@ export function Notifications() {
     unreadCount?: number;
     total?: number;
     limited?: boolean;
-  }>("/api/v1/notifications");
+  }>(NOTIFICATIONS_PATH);
   const [show, setShow] = useState("all");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);

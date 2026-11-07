@@ -13,6 +13,7 @@ import { dubaiToday, type RecordDto } from "@/domain/records";
 import { RecordEditor } from "./editor";
 import { useWorkspace, requestJson, humanError } from "./client";
 import { dataOf, formatDate, recordLabel } from "./helpers";
+import { calendarDays, interviewRangePath } from "./tab-requests";
 import {
   Badge,
   EmptyState,
@@ -24,31 +25,8 @@ import {
   type ListResponse,
 } from "./records-screen";
 
-export function calendarDays(
-  anchor: string,
-  view: "month" | "week" | "day",
-): string[] {
-  const date = new Date(`${anchor}T12:00:00Z`);
-  let start = new Date(date);
-  let count = 1;
-  if (view === "month") {
-    start = new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 12),
-    );
-    const weekday = (start.getUTCDay() + 6) % 7;
-    start.setUTCDate(start.getUTCDate() - weekday);
-    count = 42;
-  }
-  if (view === "week") {
-    start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
-    count = 7;
-  }
-  return Array.from({ length: count }, (_, index) => {
-    const day = new Date(start);
-    day.setUTCDate(start.getUTCDate() + index);
-    return day.toISOString().slice(0, 10);
-  });
-}
+export { calendarDays } from "./tab-requests";
+
 function shiftDate(anchor: string, view: string, direction: number) {
   const date = new Date(`${anchor}T12:00:00Z`);
   if (view === "month") {
@@ -139,19 +117,10 @@ export function CalendarScreen() {
       const all: RecordDto[] = [];
       let page = 1;
       let total: number;
-      const end = new Date(`${days[days.length - 1]}T12:00:00Z`);
-      end.setUTCDate(end.getUTCDate() + 1);
       do {
-        const query = new URLSearchParams({
-          page: String(page),
-          pageSize: "100",
-          startFrom: `${days[0]}T00:00:00+04:00`,
-          startTo: `${end.toISOString().slice(0, 10)}T00:00:00+04:00`,
-          sort: "createdAt",
-        });
         const response = await requestJson<ListResponse>(
           team.id,
-          `/api/v1/interviews?${query}`,
+          interviewRangePath(days, page),
         );
         all.push(...response.data);
         total = response.pagination.totalPages;

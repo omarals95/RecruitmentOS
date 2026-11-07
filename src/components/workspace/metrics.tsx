@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useApi } from "./client";
+import { OFFER_STATS_PATH } from "./tab-requests";
 import { formatDate, formatNumber } from "./helpers";
 
 interface Count {
@@ -284,7 +285,7 @@ export function OfferStats() {
   const result = useApi<{
     offers: { name: string; count: number }[];
     declineReasons?: { name: string; count: number }[];
-  }>("/api/v1/analytics");
+  }>(OFFER_STATS_PATH);
   return (
     <>
       {result.data && (

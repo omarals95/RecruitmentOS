@@ -7,6 +7,10 @@ import {
   assertTenantContextKey,
   installTenantContextKey,
 } from "../lib/tenant-context";
+import {
+  countPgClientRoundTrips,
+  countPgliteRoundTrips,
+} from "../lib/server-timing";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
 import { assertStorageSchema } from "./storage-schema";
 import {
@@ -68,7 +72,10 @@ function logConnectionErrors(pool: Pool): Pool {
     console.error(`database_connection_error category=${category}${sqlState}`);
   };
   pool.on("error", log("pool"));
-  pool.on("connect", (client) => client.on("error", log("client")));
+  // Every checked-out client, and so every pool query, counts its round trips for Server-Timing.
+  pool.on("connect", (client) =>
+    countPgClientRoundTrips(client).on("error", log("client")),
+  );
   return pool;
 }
 
@@ -229,8 +236,13 @@ async function createDb(): Promise<AppDb> {
     const { PGlite } = await import("@electric-sql/pglite");
     const { drizzle } = await import("drizzle-orm/pglite");
     const { resolve } = await import("node:path");
-    const client = new PGlite(
-      resolve(process.cwd(), process.env.PGLITE_DATA_DIR || ".local/database"),
+    const client = countPgliteRoundTrips(
+      new PGlite(
+        resolve(
+          process.cwd(),
+          process.env.PGLITE_DATA_DIR || ".local/database",
+        ),
+      ),
     );
     await applyMigrations(client);
     // The PGlite process is the owner here; other databases get the key from db:migrate.

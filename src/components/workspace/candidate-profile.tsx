@@ -9,11 +9,12 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { useApi } from "./client";
+import { candidateProfileRequests } from "./tab-requests";
 import { RecordEditor } from "./editor";
 import { Loading, LoadError, RecordDetail } from "./records-screen";
 
 export function CandidateProfile({ id }: { id: string }) {
-  const result = useApi<{ data: RecordDto }>(`/api/v1/candidates/${id}`);
+  const result = useApi<{ data: RecordDto }>(candidateProfileRequests(id)[0]);
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;

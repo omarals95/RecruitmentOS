@@ -47,8 +47,9 @@ import {
   type WorkspaceIdentity,
 } from "./client";
 import { initials } from "./helpers";
+import { NOTIFICATIONS_PATH } from "./tab-requests";
 
-const navigation: {
+export const navigation: {
   label: string;
   href: string;
   icon: LucideIcon;
@@ -187,7 +188,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     data?: { read: boolean }[];
     notifications?: { read: boolean }[];
     unreadCount?: number;
-  }>("/api/v1/notifications");
+  }>(NOTIFICATIONS_PATH);
   const unread =
     notifications.data?.unreadCount ??
     (

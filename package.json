@@ -18,6 +18,7 @@
     "import:legacy": "tsx scripts/import-legacy.ts",
     "test:local": "tsx scripts/smoke-local.ts",
     "test:live-roles": "tsx scripts/live-role-tests.ts",
+    "bench:round-trips": "tsx scripts/benchmark-round-trips.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
