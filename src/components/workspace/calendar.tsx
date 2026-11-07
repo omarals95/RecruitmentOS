@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   CalendarDays,
@@ -11,7 +11,12 @@ import {
 } from "lucide-react";
 import { dubaiToday, type RecordDto } from "@/domain/records";
 import { RecordEditor } from "./editor";
-import { useWorkspace, requestJson, humanError } from "./client";
+import {
+  useCachedQuery,
+  useWorkspace,
+  requestJson,
+  humanError,
+} from "./client";
 import { dataOf, formatDate, recordLabel } from "./helpers";
 import { calendarDays, interviewRangePath } from "./tab-requests";
 import {
@@ -76,10 +81,6 @@ export function CalendarScreen() {
   const [mode, setMode] = useState<"calendar" | "list">("calendar");
   const [view, setView] = useState<"month" | "week" | "day">("month");
   const [anchor, setAnchor] = useState(dubaiToday());
-  const [events, setEvents] = useState<RecordDto[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [revision, setRevision] = useState(0);
   const [editor, setEditor] = useState<{
     record?: RecordDto;
     prefill?: Record<string, unknown>;
@@ -106,21 +107,18 @@ export function CalendarScreen() {
       active = false;
     };
   }, [team, linkedRecord, mode]);
-  // Calendar fetch spans several pages; reset the visible loading state before starting that external request.
-  useEffect(() => {
-    let active = true;
-    if (!team || mode !== "calendar") return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize loading with the externally selected calendar range.
-    setLoading(true);
-    setError("");
-    (async () => {
+  // The range spans several pages; it is cached per range, shown at once on return and refreshed.
+  const teamId = team?.id;
+  const loadRange = useCallback(
+    async (signal: AbortSignal) => {
       const all: RecordDto[] = [];
       let page = 1;
       let total: number;
       do {
         const response = await requestJson<ListResponse>(
-          team.id,
+          teamId!,
           interviewRangePath(days, page),
+          { signal },
         );
         all.push(...response.data);
         total = response.pagination.totalPages;
@@ -129,19 +127,16 @@ export function CalendarScreen() {
           throw new Error(
             "This calendar range contains more than 10,000 interviews. Narrow the date range.",
           );
-      } while (page <= total && active);
-      if (active) setEvents(all.filter((r) => days.includes(eventDay(r))));
-    })()
-      .catch((e: unknown) => {
-        if (active) setError(humanError(e));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [team, days, revision, mode]);
+      } while (page <= total);
+      return all.filter((r) => days.includes(eventDay(r)));
+    },
+    [teamId, days],
+  );
+  const range = useCachedQuery<RecordDto[]>(
+    mode === "calendar" ? `${interviewRangePath(days, 1)}#range` : null,
+    loadRange,
+  );
+  const events = range.data ?? [];
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -248,12 +243,9 @@ export function CalendarScreen() {
                 </div>
               </div>
             </div>
-            {error ? (
-              <LoadError
-                message={error}
-                retry={() => setRevision((n) => n + 1)}
-              />
-            ) : loading ? (
+            {range.error ? (
+              <LoadError message={range.error} retry={range.refresh} />
+            ) : range.loading ? (
               <Loading />
             ) : view === "day" ? (
               <div className="daily-agenda">
@@ -360,7 +352,7 @@ export function CalendarScreen() {
           record={detail}
           onClose={() => setDetail(null)}
           onEdit={() => setEditor({ record: detail })}
-          onRefresh={() => setRevision((n) => n + 1)}
+          onRefresh={range.refresh}
           onCreate={() => {}}
           onUpdated={setDetail}
         />
@@ -372,7 +364,7 @@ export function CalendarScreen() {
           onClose={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
-            setRevision((n) => n + 1);
+            range.refresh();
           }}
         />
       )}

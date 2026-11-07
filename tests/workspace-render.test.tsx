@@ -5,6 +5,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { existsSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -16,6 +17,8 @@ vi.mock("next/navigation", () => ({
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
+import { Loading } from "../src/components/workspace/records-screen";
+import WorkspaceLoading from "../src/app/app/loading";
 import {
   BulkCvImport,
   BulkCvImportDialog,
@@ -66,6 +69,36 @@ describe("workspace shell", () => {
     )?.[0];
     expect(button).toBeDefined();
     expect(button).toContain('aria-label="Search your workspace"');
+  });
+});
+
+describe("loading skeletons", () => {
+  it("renders list-row placeholders with a status and the screen-reader text", () => {
+    expect(
+      existsSync(new URL("../src/app/app/loading.tsx", import.meta.url)),
+    ).toBe(true);
+    for (const markup of [
+      renderToStaticMarkup(<Loading />),
+      renderToStaticMarkup(<WorkspaceLoading />),
+    ]) {
+      expect(markup).toMatch(/<div class="skeleton-list" role="status">/);
+      expect(markup).toContain(
+        '<span class="sr-only">Loading your workspace…</span>',
+      );
+      expect(markup.match(/class="skeleton-row"/g)).toHaveLength(5);
+      expect(markup).not.toContain("spin");
+    }
+  });
+  it("draws the placeholders with existing colour variables only", () => {
+    const css = rules("src/app/globals.css");
+    const block = css.find((item) => item.selector === ".skeleton-block");
+    expect(block?.body).toMatch(/background:\s*var\(--surface-subtle\)/);
+    for (const item of css.filter((rule) =>
+      rule.selector.startsWith(".skeleton"),
+    ))
+      expect(item.body, item.selector).not.toMatch(
+        /#[0-9a-f]{3,8}\b|rgb\(|hsl\(/i,
+      );
   });
 });
 

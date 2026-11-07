@@ -1178,6 +1178,42 @@ input[type="color"] {
   color: var(--muted);
   font-size: 12px;
 }
+/* Skeleton rows while a screen has nothing cached yet; existing colours only. */
+.skeleton-list {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px;
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.skeleton-block {
+  display: block;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.skeleton-line {
+  flex: 1;
+}
+.skeleton-line.short {
+  flex: 0 0 22%;
+}
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
 .spin {
   animation: spin 1s linear infinite;
 }

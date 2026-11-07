@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Building2, Plus, RefreshCw, UserPlus, Users } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import {
+  clearWorkspaceCache,
   humanError,
   requestJson,
   useWorkspace,
@@ -152,6 +153,7 @@ function TeamSettingsContent() {
           organizationId: id,
         });
         ensure(result);
+        clearWorkspaceCache();
         window.location.assign("/app");
       },
       "Team selected.",

@@ -29,7 +29,15 @@ import {
   recordLabel,
   saveCsv,
 } from "./helpers";
-import { useApi, useWorkspace, requestJson, humanError } from "./client";
+import {
+  dataCache,
+  teamRequester,
+  useApi,
+  useCacheIdentity,
+  usePendingKeys,
+  useWorkspace,
+} from "./client";
+import { markNotificationsRead } from "./optimistic";
 import {
   activityPath,
   analyticsPath,
@@ -850,24 +858,21 @@ export function Notifications() {
     total?: number;
     limited?: boolean;
   }>(NOTIFICATIONS_PATH);
+  const identity = useCacheIdentity();
   const [show, setShow] = useState("all");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const mark = async (keys: string[]) => {
-    if (!team) return;
-    setBusy(true);
+  const busy = usePendingKeys().has(NOTIFICATIONS_PATH);
+  // Read at once here and in the navigation count; undone with a message if the save fails.
+  const mark = (keys: string[]) => {
+    if (!team || !identity || busy) return;
     setError("");
-    try {
-      await requestJson(team.id, "/api/v1/notifications", {
-        method: "POST",
-        body: JSON.stringify({ keys }),
-      });
-      result.refresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusy(false);
-    }
+    void markNotificationsRead(dataCache, teamRequester(team.id), {
+      identity,
+      path: NOTIFICATIONS_PATH,
+      keys,
+    }).then((outcome) => {
+      if (!outcome.ok && outcome.message) setError(outcome.message);
+    });
   };
   if (!team) return <NoTeam />;
   const items =

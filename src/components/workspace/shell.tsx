@@ -36,6 +36,8 @@ import { Dialog } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   abortTeamRequests,
+  clearWorkspaceCache,
+  dataCache,
   hasUnsavedWork,
   hasWritesInFlight,
   setSwitchNotice,
@@ -47,7 +49,7 @@ import {
   type WorkspaceIdentity,
 } from "./client";
 import { initials } from "./helpers";
-import { NOTIFICATIONS_PATH } from "./tab-requests";
+import { NOTIFICATIONS_PATH, prefetchTabs } from "./tab-requests";
 
 export const navigation: {
   label: string;
@@ -196,6 +198,32 @@ function Shell({ children }: { children: React.ReactNode }) {
       notifications.data?.notifications ||
       []
     ).filter((item) => !item.read).length;
+  // Once per team, in idle time: the daily tabs' first reads, so opening them is instant.
+  const teamId = team?.id;
+  useEffect(() => {
+    if (!teamId) return;
+    const identity = { userId: user.id, teamId };
+    let cancelled = false;
+    const start = () => {
+      if (!cancelled)
+        void prefetchTabs(
+          (path) => dataCache.prefetch(identity, path),
+          (path) => dataCache.has(identity, path),
+        );
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(start, { timeout: 3000 });
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback(handle);
+      };
+    }
+    const timer = window.setTimeout(start, 1000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [user.id, teamId]);
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -342,6 +370,7 @@ function Shell({ children }: { children: React.ReactNode }) {
                     throw new Error(
                       result.error.message || "Unable to sign out",
                     );
+                  clearWorkspaceCache();
                   router.push("/sign-in");
                   router.refresh();
                 } catch (e) {
@@ -464,6 +493,7 @@ function TeamSwitcher() {
                 );
                 abortTeamRequests(team.id);
               }
+              clearWorkspaceCache();
               router.refresh();
             } catch (e) {
               setError(e instanceof Error ? e.message : "Cannot switch team");
