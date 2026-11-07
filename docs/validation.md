@@ -1,5 +1,72 @@
 # Validation before deployment
 
+## Update: speed (P1-18)
+
+**What changed.** Functions are set to `fra1` (Frankfurt) in `vercel.json`, next to Neon and Blob; it applies on the owner's next deployment. Every `runApi` response carries `Server-Timing: total;dur=<ms>, db;dur=<ms>, dbrt;desc="<count>"`, counted per request across both database pools (every statement, `BEGIN`, `COMMIT` and `ROLLBACK`). Signed-context transactions read the backend, transaction, marker and clock in the same statement as the deadlines, and `listRecords` reads the total with the page (`count(*) over ()`), with the old count only for an empty page past the first. In the browser, quick actions update at once and roll back with a message, every read is cached per user, team and path (shown at once, refreshed in the background), the daily tabs are prefetched and screens show skeletons. Vercel Speed Insights and the built-in speed log (migration `0020`, Workspace settings > Speed) record real-use timings.
+
+**Round trips: before and after.** `npm run bench:round-trips` on the worktree's fictional PGlite database, signed in as the fictional seed owner. Counts include the Better Auth session lookup (2 round trips) and the membership select; times are medians of 5 runs after one warm-up. "Before" is commit `d3cd6d1` (instrumentation only), "after" is this branch.
+
+| Action               | Request                                                                           | Before | After | db ms before → after | total ms before → after |
+| -------------------- | --------------------------------------------------------------------------------- | -----: | ----: | -------------------: | ----------------------: |
+| move task            | `PATCH /api/v1/tasks/:id`                                                         |     14 |    13 |          14.6 → 11.3 |             20.3 → 15.5 |
+| change stage         | `PATCH /api/v1/applications/:id`                                                  |     14 |    13 |          13.8 → 11.1 |             19.4 → 16.0 |
+| open Overview        | `GET /api/v1/overview`                                                            |     24 |    22 |          22.1 → 25.1 |             27.9 → 31.2 |
+| open Candidates      | `GET /api/v1/candidates?page=1&pageSize=25&search=&sort=name&direction=asc`       |     10 |     8 |            8.4 → 6.3 |              11.6 → 8.9 |
+| open Candidates      | `GET /api/v1/views?pageSize=100&area=directory`                                   |     10 |     8 |            8.6 → 4.5 |              12.1 → 6.6 |
+| open My shortlist    | `GET /api/v1/candidates?…&shortlisted=true`                                       |     10 |     8 |            7.5 → 4.2 |              10.8 → 6.0 |
+| open My shortlist    | `GET /api/v1/views?pageSize=100&area=directory`                                   |     10 |     8 |            7.3 → 4.2 |              10.2 → 5.9 |
+| open Vacancies       | `GET /api/v1/vacancies?page=1&pageSize=25&search=&sort=updatedAt&direction=asc`   |     10 |     8 |            6.7 → 4.2 |               9.7 → 6.0 |
+| open Job roles       | `GET /api/v1/job-roles?…`                                                         |     10 |     8 |            7.2 → 5.0 |              10.2 → 7.8 |
+| open Applications    | `GET /api/v1/applications?…`                                                      |     11 |     9 |            8.7 → 5.3 |              12.1 → 7.3 |
+| open Applications    | `GET /api/v1/views?pageSize=100&area=applications`                                |     10 |     8 |            7.7 → 4.6 |              10.6 → 6.3 |
+| open Tasks           | `GET /api/v1/tasks?page=1&pageSize=25&search=&sort=updatedAt&direction=asc`       |     10 |     8 |            6.5 → 4.9 |               9.3 → 7.1 |
+| open Tasks           | `GET /api/v1/buckets?pageSize=100&sort=position&direction=asc`                    |     10 |     8 |            7.0 → 4.7 |               9.9 → 6.7 |
+| open Interviews      | `GET /api/v1/interviews?page=1&pageSize=100&startFrom=…&startTo=…&sort=createdAt` |     10 |     8 |            8.1 → 4.9 |              11.5 → 7.0 |
+| open Offers          | `GET /api/v1/offers?…`                                                            |     10 |     8 |            6.9 → 5.1 |               9.5 → 7.3 |
+| open Offers          | `GET /api/v1/analytics`                                                           |     21 |    20 |          21.9 → 15.7 |             25.3 → 18.7 |
+| open Onboarding      | `GET /api/v1/onboarding?…`                                                        |     12 |    10 |            9.4 → 5.8 |              12.9 → 7.8 |
+| open Analytics       | `GET /api/v1/analytics?from=&to=`                                                 |     21 |    20 |          20.2 → 20.6 |             23.3 → 24.4 |
+| open Talent insights | `GET /api/v1/analytics?from=&to=`                                                 |     21 |    20 |          19.8 → 18.6 |             23.0 → 21.7 |
+| open Talent insights | `GET /api/v1/overview`                                                            |     24 |    22 |          19.7 → 19.0 |             25.3 → 24.5 |
+| open Source review   | `GET /api/v1/candidates?…&needsReview=true`                                       |     10 |     8 |            7.2 → 5.4 |               9.8 → 7.6 |
+| open Source review   | `GET /api/v1/views?pageSize=100&area=directory`                                   |     10 |     8 |            6.0 → 5.0 |               8.5 → 7.3 |
+| open Activity        | `GET /api/v1/activity?page=1&pageSize=50&search=&kind=`                           |     10 |     9 |            9.9 → 9.0 |             12.8 → 11.7 |
+| open Notifications   | `GET /api/v1/notifications`                                                       |     10 |     9 |            9.8 → 9.5 |             12.7 → 11.7 |
+| open candidate       | `GET /api/v1/candidates/:id` (the profile's only first-load GET)                  |      9 |     8 |            5.5 → 5.0 |               7.9 → 7.0 |
+| save candidate       | `PATCH /api/v1/candidates/:id`                                                    |     12 |    11 |            9.7 → 7.4 |             13.3 → 11.0 |
+| schedule interview   | `POST /api/v1/interviews`                                                         |     14 |    13 |            9.4 → 8.7 |             12.8 → 12.5 |
+
+Each page load also requests the shell's notification count (`GET /api/v1/notifications`) once. `tests/round-trip-budget.test.ts` asserts the counts with the session lookup mocked: `GET /api/v1/tasks?page=1&pageSize=25` 8 → **6**, `GET /api/v1/candidates/:id` 7 → **6**, `PATCH /api/v1/tasks/:id` bucket move 12 → **11**, `PATCH /api/v1/applications/:id` stage change 12 → **11** (the before values were confirmed on the instrumentation commit), plus correct `pagination.total` on the first page, a middle page and a page past the end.
+
+**What remains for a simple read** (`GET /api/v1/tasks`, 6 after the session lookup):
+
+1. Membership select on the identity pool: the caller's current team role, read on every request (no cached role).
+2. `BEGIN`: one transaction holds the signed context and the deadlines.
+3. Deadlines and snapshot in one statement: `statement_timeout` and `transaction_timeout` (SRS-NFR-05), plus the pid, xid, environment marker and clock the context is signed for.
+4. `select tenant_context.install(payload, signature)`: checks the HMAC, pid, xid, expiry, membership and token state before any row policy allows access.
+5. The page with its total (`count(*) over ()`) under FORCE row-level security.
+6. `COMMIT`: the context and deadlines end with the transaction.
+
+**What remains for a simple write** (task bucket move, 11): the same first four, then `lockTeam` (team advisory lock that serialises writes), `find … FOR UPDATE` (row lock and the version check behind 409), `checkReferences` (the bucket belongs to the team and is active), `checkCustomValues` (required and typed custom task fields), the update, the `audit()` activity insert, and `COMMIT`. A stage change has `uniqueChecks` (one active application per candidate and vacancy) and `decorate` (labels) instead of the two task checks.
+
+**The owner's target is not met.** The target of at most 4 round trips for a simple read and 6 for a simple write is not reached (6 and 11). The signature must cover a server-read pid and xid, so the snapshot cannot merge into `tenant_context.install` without changing the security protocol; merging `BEGIN` would need a custom transaction runner, and the write checks and audit would need query rewrites. Further cuts need an owner decision: a cookie-cached session (revocation delay), the role carried in the session, a changed context protocol or a custom transaction runner (spec Assumption 1). With functions in `fra1` beside the database each round trip costs about 1-2 ms instead of about 90 ms across the Atlantic.
+
+**Follow-up (not changed).** Application cards label their candidate and vacancy with one cached `GET` each (`ReferenceLabel`): a 25-card Applications board issues up to 25 candidate GETs plus one per distinct vacancy (8 round trips each, session included). The cache now shares these requests across cards and screens; changing how cards get their labels is out of scope.
+
+**Browser check.** `npm run dev -- --port 5420` on the worktree's PGlite (the worktree's `.env.local` pointed `BETTER_AUTH_URL` at the port for the check, then back), fictional seed owner, `agent-browser`:
+
+- Tasks: changing a card's "Move … to" select showed the card in the new column 17 ms after the change event, with its select disabled and no skeleton or spinner on the board; it stayed disabled until the PATCH returned (2.4 s on the first dev compile), then "Task moved." showed, the select was enabled again, and no task or bucket list was requested again (only the shown notifications revalidated).
+- Tasks → Candidates → Tasks: the task board was on screen 80 ms after the click, from the cache; the route skeleton (`src/app/app/loading.tsx`) showed for about 45 ms while the dev server answered, with no spinner or blank area.
+- Team switch: after creating a fictional second team, switching from Fictional Studio to it with the team switcher showed no Fictional Studio task in any of 57 sampled frames on the second team; its board was empty.
+- Settings → Speed as the owner, after moves and tab switches and a wait over 10 seconds: actions (`tab.candidates`, `tab.overview`, `tab.pipeline`, `tab.tasks`, `tab.vacancies`, `task.move`) and API routes (for example `GET /api/v1/candidates/[id]`, `GET /api/v1/tasks`) with typical, slow and database times and sample counts; the dev server logged each `POST /api/v1/speed-samples` as 202.
+- The browser was closed and the dev server stopped afterwards.
+
+**Not representative.** `next dev` compiles routes on first use and PGlite runs in the server process, so local milliseconds (and the dev PATCH times above) say little about hosted speed; the round-trip counts are the portable result. `npm run build && npm run start` is the closer local measurement.
+
+**Validation.** Node v24.20.0: `npm run typecheck`, `npm run lint`, `npm test` (974 Vitest tests in 78 files, none skipped), `npm run test:storage` (57 native storage tests), `npm run build`, Prettier on every changed file and `npm audit --audit-level=moderate` (found 0 vulnerabilities) all pass. `@vercel/speed-insights` is pinned at 2.0.0. Migration `0020_speed_log.sql` applied to the worktree's PGlite with `npm run db:migrate`. New tests: `tests/round-trip-budget.test.ts`, `tests/data-cache.test.ts`, `tests/optimistic-actions.test.ts`, `tests/tab-requests.test.ts`, `tests/speed-insights.test.ts`, `tests/speed-log.test.ts`; extended: `tests/transaction-deadlines.test.ts`, `tests/tenant-context.test.ts`, `tests/workspace-render.test.tsx`, `tests/settings-ui.test.tsx`, `tests/runtime-role-grants.test.ts`, `tests/openapi-contract.test.ts`.
+
+No remote service was contacted other than the npm registry for `@vercel/speed-insights` and `npm audit`: tests and the benchmark use PGlite and fictional data only, and Speed Insights renders nothing outside production builds. Owner steps: deploy to apply `fra1`; apply `0020` on Preview, rerun the role template, `scripts/db-role-evidence.ts` and `npm run test:live-roles`; turn Neon scale-to-zero off for the Production compute; then P1-20 in the Vercel dashboard.
+
 ## Update: security patch release (P1-19)
 
 **Local validation.** On 7 November 2026, with Node v24.20.0, job 031 passed `npm run typecheck`, `npm run lint`, `npm test` (924 Vitest tests in 72 files, none skipped), `npm run test:storage` (57 native storage tests), `npm run build` (Next.js 16.4.5), Prettier repo-wide (`npx prettier --check . --end-of-line auto`; a plain `npm run format:check` reports this Windows checkout's CRLF working copies, as recorded for jobs 029 and 030) and `npm audit` (`found 0 vulnerabilities`; `npm audit --audit-level=moderate` exits 0). `npm ls` shows next and `@next/eslint-plugin-next` 16.4.5, `better-auth`, `@better-auth/core` and `@better-auth/drizzle-adapter` 1.7.18, `@vercel/oidc` 4.0.7, `@vercel/functions` 3.11.0, `@electric-sql/pglite` 0.5.15, the three S3 packages 3.1164.0, `@aws-sdk/credential-provider-web-identity` 3.972.88, `lucide-react` 1.70.0, `vitest` 5.1.0, `write-excel-file` 4.1.1 (now pinned exactly), TypeScript 6.0.3 and `@types/node` 24.19.2; no dependency was added or removed and no `overrides` entry was needed. Migration `0019_blob_upload_abuse_controls.sql` applied to the worktree's PGlite with `npm run db:migrate`.
