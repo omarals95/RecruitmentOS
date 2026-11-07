@@ -23,7 +23,7 @@ This runbook covers what to do when a migration fails, when a release has to be 
   1. Stop. Do not rerun blindly and do not deploy the new code.
   2. Inspect the ledger and the actual schema. The command prints only a generic line, so reproduce the failure against a restored copy or a local database if the cause is unclear.
   3. Fix forward with a **new** migration file. Never edit a file that is already in any ledger, and never delete ledger rows: the next run would apply that file again on top of its earlier result.
-  4. Rerun `npm run db:migrate`. Files already in the ledger are skipped, and the run continues from the first unapplied file.
+  4. Rerun `npm run db:migrate` for a local database. For a hosted database, rerun the migration using the procedure in [neon-database-runbook.md](neon-database-runbook.md#run-the-migration-against-a-neon-database). Files already in the ledger are skipped, and the run continues from the first unapplied file.
 - `tests/migration-upgrade.test.ts` rehearses this: a fictional failing file leaves no ledger row and no partial table, the existing data is unchanged, and the run continues once the file is removed.
 
 ## Release rollback

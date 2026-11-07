@@ -35,7 +35,7 @@ npm run db:seed
 npm run dev
 ```
 
-Open `http://localhost:3000`. The seed command prints the fictional local login. The local seed is disabled in production and never creates a cloud account or uploads a CV. Email links appear only in the development terminal. S3 upload controls show a setup message until private storage is configured.
+Open `http://localhost:3000`. The seed command prints the fictional local login. The local seed is disabled in production and never creates a cloud account or uploads a CV. Email links appear only in the development terminal. CV upload controls show a setup message until private storage is configured.
 
 ## Validation
 
