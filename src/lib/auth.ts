@@ -556,6 +556,13 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
                 "Authentication requests must come from this application.",
             });
         }
+        // The plugin can return the stored secret again; it is shown only once, during setup.
+        if (ctx.path === "/two-factor/get-totp-uri")
+          throw new APIError("FORBIDDEN", {
+            code: "two_step_key_hidden",
+            message:
+              "The authenticator key is shown only once, during setup. Turn two-step sign-in off and on again to add a new authenticator.",
+          });
         // Owners and admins without two-step sign-in may only set it up or sign out.
         const gated =
           !TWO_STEP_SETUP_PATHS.has(ctx.path) &&
@@ -695,12 +702,23 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         // A correct password (including a two-step challenge) clears the address's backoff.
         if (ctx.path !== "/sign-in/email") return;
         const email = (ctx.body as { email?: unknown } | undefined)?.email;
-        if (typeof email === "string")
+        if (typeof email !== "string") return;
+        // A failure must not stop the plugin's after hook, which ends a challenged password session.
+        try {
           await db
             .delete(apiRateLimits)
             .where(
               eq(apiRateLimits.key, signInBackoffKey(email, config.secret)),
             );
+        } catch (error) {
+          const code = (
+            (error as { cause?: { code?: unknown } } | null)?.cause ??
+            (error as { code?: unknown } | null)
+          )?.code;
+          console.error(
+            `sign_in_backoff_clear_failed${typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? ` sqlstate=${code}` : ""}`,
+          );
+        }
       }),
     },
     plugins: [

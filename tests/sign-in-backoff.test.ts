@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   BOOTSTRAP_EMAIL,
   PASSWORD,
@@ -127,6 +127,35 @@ describe("per-email sign-in backoff", () => {
     expect(statuses.every((status) => status === 401 || status === 429)).toBe(
       true,
     );
+  });
+
+  it("still ends the challenged password session when clearing the backoff fails", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await h.asOwner(
+      "REVOKE DELETE ON auth.api_rate_limits FROM identity_flow_runtime;",
+    );
+    try {
+      const sessions = () =>
+        h.count(
+          `SELECT count(*) FROM auth.session s JOIN auth."user" u ON u.id=s.user_id WHERE u.email=$1`,
+          [BOOTSTRAP_EMAIL],
+        );
+      const before = await sessions();
+      const correct = await attempt(BOOTSTRAP_EMAIL, PASSWORD);
+      expect(correct.status).toBe(200);
+      expect(JSON.parse(correct.body)).toMatchObject({
+        twoFactorRedirect: true,
+      });
+      expect(await sessions()).toBe(before);
+      const lines = logged.mock.calls.map((call) => call.join(" "));
+      expect(lines).toContain("sign_in_backoff_clear_failed sqlstate=42501");
+      for (const line of lines) expect(line).not.toContain(BOOTSTRAP_EMAIL);
+    } finally {
+      await h.asOwner(
+        "GRANT DELETE ON auth.api_rate_limits TO identity_flow_runtime;",
+      );
+      logged.mockRestore();
+    }
   });
 
   it("stores only a keyed hash of the address under the sign-in-email prefix", async () => {

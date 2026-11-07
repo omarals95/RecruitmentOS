@@ -171,6 +171,16 @@ describe("two-step sign-in through the Better Auth handler", () => {
     );
     expect(right.status).toBe(200);
     expect(await caller.session(cookieOf(right))).not.toBeNull();
+    // The stored key is never returned again, even with a two-step session and the password.
+    const again = await caller.post(
+      "two-factor/get-totp-uri",
+      { password: PASSWORD },
+      { cookie: cookieOf(right) },
+    );
+    expect(again.status).toBe(403);
+    const hidden = await again.text();
+    expect(JSON.parse(hidden)).toMatchObject({ code: "two_step_key_hidden" });
+    expect(hidden).not.toContain("otpauth");
 
     const backup = async () => {
       const again = await caller.post("sign-in/email", {
