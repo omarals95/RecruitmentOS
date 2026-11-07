@@ -13,8 +13,9 @@
 --   scripts/db-role-evidence.ts compares each role's effective privileges with the grants below.
 -- - It never sets passwords. The operator sets each password separately, for example with
 --   \password recruitmentos_data in psql, never in this file, shell history or logs.
--- - It has been verified only on PGlite and a throwaway local PostgreSQL. It has not been run on
---   Neon, and applying it does not open the hosted tenant_isolation_pending guard.
+-- - It is verified on PGlite and a throwaway local PostgreSQL. In the owner's run it has been
+--   applied to the Neon Preview database, with scripts/db-role-evidence.ts at zero drift. It is
+--   not verified on Production. Applying it removes no hosted startup check.
 --
 -- Plain SQL only (no psql meta-commands), one transaction; any refusal rolls back everything.
 BEGIN;
