@@ -1,5 +1,7 @@
 # Private CV storage on AWS S3 and Vercel
 
+> **Legacy and dormant.** Hosted environments use private Vercel Blob CV storage only (DEC-01, resolved by the owner on 7 November 2026; see [deployment §5](deployment.md#5-cv-storage)). The S3 code path stays only as a dormant legacy option selected by an explicit `CV_STORAGE_PROVIDER=s3`; it is not used for Preview or Production, and nothing below is required to run RecruitmentOS.
+
 No bucket or IAM role is created by building/running this repository. Configure the following only when deployment access has been granted. Keep preview/test storage separate from production. Choose an approved AWS/Neon/Vercel region before moving actual candidate data.
 
 ## Required bucket settings

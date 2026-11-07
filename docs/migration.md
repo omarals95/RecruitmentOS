@@ -8,7 +8,7 @@ No real candidate data is bundled with this project or used by its tests. Nothin
 
 1. Make a private backup of the entire old Resume folder, including the old dashboard subfolder and recovered attachments. Keep a separate backup of the destination database before updating an existing team.
 2. Save and close Excel. Stop the old dashboard cleanly so its SQLite state has no active WAL or rollback journal. Do not delete database sidecars to force an import.
-3. Deploy/configure RecruitmentOS, including its database, verified sign-in and private versioned S3 bucket. Test those connections with fictional records first.
+3. Deploy/configure RecruitmentOS, including its database, verified sign-in and private Vercel Blob store. Test those connections with fictional records first.
 4. Create the destination team with an owner or administrator account. Prefer a new, empty team. Do **not** initialize its sample workflow/default buckets before migration: a bucket with the same name but a different identity creates a visible conflict rather than being silently merged.
 5. Retain stable Candidate IDs, Source IDs, task IDs and all other source IDs. Two different candidates must not share a Candidate ID. Do not rename IDs to avoid a validation message: they preserve notes and relationships.
 
@@ -81,9 +81,9 @@ try {
 
 The API argument must be a clean HTTPS origin, without credentials, a path, query or fragment. HTTP is accepted only for local development at `localhost`, `127.0.0.1` or `[::1]`. Copy the exact team ID from the team settings/API examples; a token is restricted to its team and live role.
 
-Applying first enumerates target records, then creates records in dependency order. Legacy IDs map to new server-generated UUIDs. The script stays below the API token's 60 requests/minute limit, so a large directory can take a substantial time. Keep the computer awake and do not change source files during the run.
+Applying first enumerates target records, then creates records in dependency order. Legacy IDs map to new server-generated UUIDs. The script stays below the API token's 60 requests/minute limit, so a large directory can take a substantial time. Keep the computer awake and do not change source files during the run. If the team's CV upload rate limit (Team & access, CV storage) is on, turn it off or raise it before applying: the importer does not retry a 429 `CV_UPLOAD_RATE_LIMITED`.
 
-CV bytes are read only in apply mode and only beneath the explicitly selected source root. The API issues a short-lived upload ticket tagged with its protocol, and the importer follows that tag, never the hostname: an `s3-form-v1` form POST to an HTTPS AWS S3 endpoint, or a `blob-put-v1` PUT to exactly `https://vercel.com/api/blob/` (Blob storage is currently disabled). Any other protocol is reported as `UNSUPPORTED_UPLOAD_PROTOCOL` and no bytes are sent. The RecruitmentOS API token is sent only to the chosen application origin. The server validates the stored bytes and pins an S3 version or a Blob SHA-256 before a CV becomes ready.
+CV bytes are read only in apply mode and only beneath the explicitly selected source root. The API issues a short-lived upload ticket tagged with its protocol, and the importer follows that tag, never the hostname: an `s3-form-v1` form POST to an HTTPS AWS S3 endpoint, or a `blob-put-v1` PUT to exactly `https://vercel.com/api/blob/` (the hosted Blob protocol). Any other protocol is reported as `UNSUPPORTED_UPLOAD_PROTOCOL` and no bytes are sent. The RecruitmentOS API token is sent only to the chosen application origin. The server validates the stored bytes and pins an S3 version or a Blob SHA-256 before a CV becomes ready.
 
 ## What is preserved
 
