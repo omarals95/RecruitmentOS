@@ -12,13 +12,15 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const LIMIT_MS = 60_000;
 let dataDir: string;
 
-async function run(script: string) {
+async function run(script: string, args: string[] = []) {
   const env: Record<string, string> = {
     DATABASE_MODE: "pglite",
     ALLOW_LOCAL_DB: "true",
     PGLITE_DATA_DIR: dataDir,
     TENANT_CONTEXT_SIGNING_KEY: process.env.TENANT_CONTEXT_SIGNING_KEY!,
     DEV_SEED_PASSWORD: "FictionalSeedPassword-0001",
+    // The seed encrypts the fictional owner's authenticator key with it.
+    BETTER_AUTH_SECRET: "fictional-scripts-exit-secret-0123456789",
     IDENTITY_DATABASE_URL: "",
     DATABASE_URL: "",
   };
@@ -33,12 +35,16 @@ async function run(script: string) {
     stderr: string;
     timedOut: boolean;
   }>((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", script], {
-      cwd: root,
-      // NODE_ENV stays unset, as with npm run db:migrate and db:seed.
-      env: env as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", script, ...args],
+      {
+        cwd: root,
+        // NODE_ENV stays unset, as with npm run db:migrate and db:seed.
+        env: env as NodeJS.ProcessEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let stdout = "",
       stderr = "",
       timedOut = false;
@@ -59,17 +65,22 @@ async function run(script: string) {
   });
 }
 
-async function expectExit(script: string, line: string) {
-  const result = await run(script);
+async function expectExit(
+  script: string,
+  line: string,
+  args: string[] = [],
+  code = 0,
+) {
+  const result = await run(script, args);
   expect(result.timedOut, `${script} still running after ${LIMIT_MS} ms`).toBe(
     false,
   );
-  expect(result.code, result.stderr).toBe(0);
+  expect(result.code, result.stderr).toBe(code);
   // A boolean, so a failure never prints stdout.
   expect(result.stdout.includes(line), `${script} printed ${line}`).toBe(true);
 }
 
-describe("db:migrate and db:seed exit on their own", () => {
+describe("db:migrate, db:seed and two-step:reset exit on their own", () => {
   beforeAll(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "recruitmentos-scripts-exit-"));
   });
@@ -110,6 +121,29 @@ describe("db:migrate and db:seed exit on their own", () => {
       expectExit(
         "scripts/seed-local.ts",
         "Fictional seed account already exists. No records changed.",
+      ),
+    LIMIT_MS + 30_000,
+  );
+
+  it(
+    "resets the fictional owner's two-step sign-in and exits",
+    () =>
+      expectExit(
+        "scripts/reset-two-step.ts",
+        "Two-step sign-in was reset for 1 account.",
+        ["--email", "recruiter@example.test", "--confirm"],
+      ),
+    LIMIT_MS + 30_000,
+  );
+
+  it(
+    "reports an unknown address and exits with 1",
+    () =>
+      expectExit(
+        "scripts/reset-two-step.ts",
+        "No account matched.",
+        ["--email", "nobody@example.test", "--confirm"],
+        1,
       ),
     LIMIT_MS + 30_000,
   );
