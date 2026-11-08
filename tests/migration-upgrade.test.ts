@@ -14,12 +14,16 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
+import { withDeadlinesAndSnapshot } from "../src/db/deadlines";
 import { eraseCandidate } from "../src/lib/candidate-erasure";
 import { listCandidateCvs } from "../src/lib/cvs";
 import { roleScopes, type Role } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { getCandidateState, getRecord, listRecords } from "../src/lib/records";
-import { installTenantContextKey } from "../src/lib/tenant-context";
+import {
+  installTenantContext,
+  installTenantContextKey,
+} from "../src/lib/tenant-context";
 
 // A populated fictional workspace written by the 0006 schema, upgraded in place through every
 // later migration. Candidates already hold a controlled review status and no bucket is named Done,
@@ -293,7 +297,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 7 }]);
+    ).toEqual([{ version: 8 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -453,7 +457,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 7 }]);
+    ).toEqual([{ version: 8 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -583,7 +587,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 7 }]);
+    ).toEqual([{ version: 8 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -604,5 +608,135 @@ describe("upgrade from 0027 to the company workspace", () => {
       );
       expect(body, table).toMatch(seed);
     }
+  });
+});
+
+// Teams, members, company authority and a leftover context row written by the 0028 schema,
+// upgraded through 0029: the context gains the derived columns and install returns them.
+describe("upgrade from 0028 to the signed context that derives the workspace", () => {
+  const pg = new PGlite();
+  const company = "00000000-0000-4000-a000-000000000001";
+  const admin = principal(
+    "context-upgrade-admin",
+    "context-upgrade-team",
+    "recruiter",
+  );
+  const leftover = {
+    pid: 1,
+    xid: "1",
+    team_id: "context-upgrade-team",
+    actor_id: "context-upgrade-owner",
+    auth_type: "session",
+    token_id: null,
+    scopes: ["candidates:read"],
+  };
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0028_workspace_company_authority.sql");
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('context-upgrade-owner','Fictional Upgrade Owner','context-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('context-upgrade-team','Fictional Upgrade Team','context-upgrade-team','context-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('context-upgrade-mo','context-upgrade-team','context-upgrade-owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('context-upgrade-admin','Fictional Upgrade Admin','context-upgrade-admin@example.test',true,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('context-upgrade-ma','context-upgrade-team','context-upgrade-admin','recruiter');
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,plan_access) VALUES
+        ('${company}','context-upgrade-admin','admin','{boards,templates}',true);
+      INSERT INTO tenant_context.contexts(pid,xid,team_id,actor_id,auth_type,token_id,scopes,expires_at) VALUES
+        (1,'1','context-upgrade-team','context-upgrade-owner','session',NULL,'{candidates:read}',now()+interval '1 hour');`);
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("adds the derived context columns and keeps the leftover row with nulls and defaults", async () => {
+    expect(
+      (
+        await pg.query(
+          "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'tenant_context' AND table_name = 'contexts' AND ordinal_position > 8 ORDER BY ordinal_position",
+        )
+      ).rows,
+    ).toEqual(
+      [
+        ["workspace_id", "uuid", "YES", null],
+        ["member_role", "text", "YES", null],
+        ["company_level", "text", "YES", null],
+        ["company_areas", "ARRAY", "NO", "'{}'::text[]"],
+        ["plan_access", "boolean", "NO", "false"],
+      ].map(([column_name, data_type, is_nullable, column_default]) => ({
+        column_name,
+        data_type,
+        is_nullable,
+        column_default,
+      })),
+    );
+    expect(
+      (
+        await pg.query(
+          "SELECT pid, xid::text, team_id, actor_id, auth_type, token_id, scopes, workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        ...leftover,
+        workspace_id: null,
+        member_role: null,
+        company_level: null,
+        company_areas: [],
+        plan_access: false,
+      },
+    ]);
+  });
+
+  it("leaves one install, (text, text, text[]) returning jsonb, and storage schema 8", async () => {
+    expect(
+      (
+        await pg.query(
+          "SELECT oidvectortypes(p.proargtypes) AS args, p.prorettype::regtype::text AS returns, p.prosecdef AS definer FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'install'",
+        )
+      ).rows,
+    ).toEqual([
+      { args: "text, text, text[]", returns: "jsonb", definer: true },
+    ]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 8 }]);
+  });
+
+  it("installs an upgraded member's context with the derived workspace and company authority", async () => {
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    const { access, xid } = await withDeadlinesAndSnapshot(
+      db,
+      async (tx, snapshot) => ({
+        access: await installTenantContext(tx, admin, snapshot),
+        xid: snapshot.xid,
+      }),
+    );
+    expect(access).toEqual({
+      scopes: admin.scopes,
+      workspaceId: company,
+      memberRole: "recruiter",
+      companyLevel: "admin",
+      companyAreas: ["boards", "templates"],
+    });
+    expect(
+      (
+        await pg.query(
+          "SELECT workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE xid = $1::xid8",
+          [xid],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        workspace_id: company,
+        member_role: "recruiter",
+        company_level: "admin",
+        company_areas: ["boards", "templates"],
+        plan_access: true,
+      },
+    ]);
   });
 });

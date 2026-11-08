@@ -34,6 +34,7 @@ import {
 } from "@/db/deadlines";
 import { withTeam } from "@/lib/db-team";
 import { installTenantContext } from "@/lib/tenant-context";
+import { SCOPES } from "@/lib/permissions";
 import {
   authenticateApiToken,
   createToken,
@@ -68,6 +69,7 @@ const TABLES = [
   "speed_sample_budgets",
 ] as const;
 const AUDIENCE = "recruitmentos-tenant-context-v1";
+const COMPANY = "00000000-0000-4000-a000-000000000001";
 const testKey = () =>
   Buffer.from(process.env.TENANT_CONTEXT_SIGNING_KEY!, "base64url");
 const keyId = (key: Buffer) =>
@@ -154,8 +156,20 @@ describe("signed tenant context under separate nonowner data and identity roles"
     const payload = typeof claim === "string" ? claim : JSON.stringify(claim);
     try {
       await on(tx).execute(
-        sql`SELECT tenant_context.install(${payload},${signature ?? sign(payload)})`,
+        sql`SELECT tenant_context.install(${payload},${signature ?? sign(payload)},'{}'::text[])`,
       );
+    } catch (error) {
+      throw (error as Error).cause ?? error;
+    }
+  }
+  /** A validly signed direct install with the given unsigned cache hint; returns the access state. */
+  async function installed(claim: Claim | string, cached: string | null) {
+    const payload = typeof claim === "string" ? claim : JSON.stringify(claim);
+    try {
+      const { rows } = await harness.db.execute<{ access: unknown }>(
+        sql`SELECT tenant_context.install(${payload},${sign(payload)},${cached}::text[]) AS access`,
+      );
+      return rows[0].access;
     } catch (error) {
       throw (error as Error).cause ?? error;
     }
@@ -167,6 +181,14 @@ describe("signed tenant context under separate nonowner data and identity roles"
     return rows.map((row) => row.team_id);
   }
   const denied = { code: "42501", message: "Tenant context rejected" };
+  // ownerA is the first seeded user, so the initial administrator and company owner (0028).
+  const ownerAccess = {
+    scopes: [...SCOPES],
+    workspaceId: COMPANY,
+    memberRole: "owner",
+    companyLevel: "owner",
+    companyAreas: [],
+  };
 
   beforeAll(async () => {
     stubLocalAuthReadiness();
@@ -765,7 +787,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
           ...change(snapshot),
         } as TransactionSnapshot),
       );
-    await expect(attempt(() => ({}))).resolves.toBeUndefined();
+    await expect(attempt(() => ({}))).resolves.toEqual(ownerAccess);
     for (const change of [
       (s: TransactionSnapshot) => ({ pid: Number(s.pid) + 1 }),
       (s: TransactionSnapshot) => ({ xid: String(Number(s.xid) + 1) }),
@@ -882,6 +904,115 @@ describe("signed tenant context under separate nonowner data and identity roles"
     await expect(
       withTeam(leaverA, () => Promise.resolve()),
     ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
+  });
+
+  const memberAccess = () => ({
+    scopes: [...memberA.scopes],
+    workspaceId: COMPANY,
+    memberRole: "recruiter",
+    companyLevel: null,
+    companyAreas: [],
+  });
+
+  it("passes the access state install derived to withTeam's work", async () => {
+    expect(
+      await withTeam(ownerA, (tx, access) => Promise.resolve(access)),
+    ).toEqual(ownerAccess);
+    expect(
+      await withTeam(memberA, (tx, access) => Promise.resolve(access)),
+    ).toEqual(memberAccess());
+  });
+
+  it("rejects a context for a team with no workspace mapping", async () => {
+    await (
+      await harness.asOwner()
+    ).execute(
+      sql`DELETE FROM app.workspace_teams WHERE team_id = ${ownerB.teamId}`,
+    );
+    try {
+      await dataTransaction(async () => {
+        await expect(install(await claimFor(ownerB))).rejects.toMatchObject(
+          denied,
+        );
+      });
+      await expect(
+        withTeam(ownerB, () => Promise.resolve()),
+      ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
+    } finally {
+      await (
+        await harness.asOwner()
+      ).execute(
+        sql`INSERT INTO app.workspace_teams(team_id, workspace_id) VALUES (${ownerB.teamId}, ${COMPANY}::uuid)`,
+      );
+    }
+    expect(
+      await withTeam(ownerB, (tx, access) =>
+        Promise.resolve(access.workspaceId),
+      ),
+    ).toBe(COMPANY);
+  });
+
+  it("rejects a validly signed payload that adds a workspace or company field", async () => {
+    for (const extra of [
+      { workspace: COMPANY },
+      { workspaceId: COMPANY },
+      { companyLevel: "owner" },
+      { companyAreas: ["fields"] },
+    ])
+      await dataTransaction(async () => {
+        await expect(
+          install({ ...(await claimFor(memberA)), ...extra }),
+          JSON.stringify(extra),
+        ).rejects.toMatchObject(denied);
+      });
+  });
+
+  it("gives the same checks, stored row and result for every cached hint", async () => {
+    const client = await asData();
+    const xids: string[] = [];
+    const results: unknown[] = [];
+    for (const cached of [
+      null,
+      "{}",
+      "{fictional-version-1,fictional-version-2}",
+    ]) {
+      await client.exec("BEGIN");
+      try {
+        const claim = await claimFor(memberA);
+        results.push(await installed(claim, cached));
+        xids.push(claim.xid);
+        await client.exec("COMMIT");
+      } catch (error) {
+        await client.exec("ROLLBACK");
+        throw error;
+      }
+      await dataTransaction(async () => {
+        const claim = await claimFor(memberA);
+        await expect(
+          installed({ ...claim, exp: claim.exp - 31_000 }, cached),
+          String(cached),
+        ).rejects.toMatchObject(denied);
+      });
+    }
+    expect(results).toEqual([memberAccess(), memberAccess(), memberAccess()]);
+    await harness.asSuperuser();
+    const { rows } = await harness.client.query(
+      "SELECT team_id, actor_id, auth_type, token_id, scopes, workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE xid::text IN ($1, $2, $3)",
+      xids,
+    );
+    const stored = {
+      team_id: memberA.teamId,
+      actor_id: memberA.userId,
+      auth_type: "session",
+      token_id: null,
+      scopes: [...memberA.scopes],
+      workspace_id: COMPANY,
+      member_role: "recruiter",
+      company_level: null,
+      company_areas: [],
+      plan_access: false,
+    };
+    expect(rows).toEqual([stored, stored, stored]);
   });
 
   it("keeps token audit rows out of the data role's reach so revocation cannot be blocked", async () => {
