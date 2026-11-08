@@ -4,8 +4,8 @@ export function SettingsNavigation({
   active,
   role,
 }: {
-  active: "profile" | "team" | "api-tokens" | "speed";
-  /** Speed is listed only for team owners and admins. */
+  active: "profile" | "team" | "api-tokens" | "speed" | "about";
+  /** Speed is listed only for team owners and admins; About for everyone. */
   role?: string | null;
 }) {
   const sections: [typeof active, string][] = [
@@ -15,6 +15,7 @@ export function SettingsNavigation({
     ...(role === "owner" || role === "admin"
       ? [["speed", "Speed"] as [typeof active, string]]
       : []),
+    ["about", "About"],
   ];
   return (
     <nav

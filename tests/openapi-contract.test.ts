@@ -44,7 +44,7 @@ interface Document {
   };
 }
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const PUBLIC_PATHS = ["/api/openapi.json", "/api/auth/{path}"];
+const PUBLIC_PATHS = ["/api/openapi.json", "/api/auth/{path}", "/api/version"];
 const apiRoot = fileURLToPath(new URL("../src/app/api", import.meta.url));
 
 function routeFiles(dir: string): string[] {

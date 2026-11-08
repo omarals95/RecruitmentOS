@@ -57,20 +57,22 @@ describe("Content-Security-Policy connect-src by configured CV storage provider"
       expect((await csp(provider)).others).toEqual(baseline);
   });
 
-  it("sends HSTS without preload and an opener isolation policy on every rule, for every provider", async () => {
+  it("sends HSTS without preload and an opener isolation policy on every path, for every provider", async () => {
     for (const provider of [undefined, "blob", "s3"]) {
       vi.stubEnv("CV_STORAGE_PROVIDER", provider);
-      const rules = await config.headers!();
-      expect(rules.length).toBeGreaterThan(0);
-      for (const rule of rules) {
-        const header = (key: string) =>
-          rule.headers.find((item) => item.key === key)?.value;
-        expect(header("Strict-Transport-Security")).toBe(
-          "max-age=63072000; includeSubDomains",
-        );
-        expect(header("Cross-Origin-Opener-Policy")).toBe("same-origin");
-      }
-      expect(rules.map((rule) => rule.source)).toContain("/(.*)");
+      const [rule, ...others] = await config.headers!();
+      expect(rule.source).toBe("/(.*)");
+      const header = (key: string) =>
+        rule.headers.find((item) => item.key === key)?.value;
+      expect(header("Strict-Transport-Security")).toBe(
+        "max-age=63072000; includeSubDomains",
+      );
+      expect(header("Cross-Origin-Opener-Policy")).toBe("same-origin");
+      // Later rules only add X-App-Version to paths the first rule already covers.
+      for (const other of others)
+        expect(other.headers.map((item) => item.key)).toEqual([
+          "X-App-Version",
+        ]);
     }
   });
 });

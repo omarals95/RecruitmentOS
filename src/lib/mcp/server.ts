@@ -20,6 +20,7 @@ import {
   notReady,
   resourceMetadataUrl,
 } from "@/lib/oauth";
+import { appVersion } from "@/lib/app-version";
 import { requireMcpPrincipal, type Principal } from "@/lib/principal";
 import { TOOLS, callTool, listTools } from "./tools";
 
@@ -73,7 +74,11 @@ async function readMessage(request: Request): Promise<unknown> {
 /** One server per request, built after authentication; it advertises only tools. */
 export function createMcpServer(p: Principal): Server {
   const server = new Server(
-    { name: "recruitmentos", title: "RecruitmentOS", version: "1.0.0" },
+    {
+      name: "recruitmentos",
+      title: "RecruitmentOS",
+      version: appVersion().version,
+    },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
