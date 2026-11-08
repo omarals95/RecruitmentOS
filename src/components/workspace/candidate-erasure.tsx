@@ -189,12 +189,8 @@ export function CandidateErasureDialog({
   );
 }
 
-/** What replaces the profile once the erasure succeeded. */
-export function CandidateErased({
-  result,
-}: {
-  result: CandidateErasureResult;
-}) {
+/** The success text, with the CV storage sentence when the erasure had CV files. */
+export function erasedMessage(result: CandidateErasureResult): string {
   const { deleted, waiting, deleteAfter } = result.cvStorage;
   const storage =
     waiting > 0
@@ -202,10 +198,21 @@ export function CandidateErased({
       : deleted > 0
         ? " Their CV files were deleted from storage."
         : "";
+  return `Candidate permanently erased.${storage}`;
+}
+
+/** The success status, focusable from script, and the way back to the list. */
+export function CandidateErasedView({
+  message,
+  statusRef,
+}: {
+  message: string;
+  statusRef?: RefObject<HTMLParagraphElement | null>;
+}) {
   return (
     <div className="stack">
-      <p className="notice success" role="status">
-        Candidate permanently erased.{storage}
+      <p ref={statusRef} className="notice success" role="status" tabIndex={-1}>
+        {message}
       </p>
       <div>
         <Link href="/app/candidates" className="text-link">
@@ -213,6 +220,33 @@ export function CandidateErased({
         </Link>
       </div>
     </div>
+  );
+}
+
+/**
+ * What replaces the profile once the erasure succeeded. The status renders empty and gets its
+ * text on the next frame, so screen readers announce it; focus then moves to it, after the
+ * closed dialog has restored focus to the button that no longer exists.
+ */
+export function CandidateErased({
+  result,
+}: {
+  result: CandidateErasureResult;
+}) {
+  const [shown, setShown] = useState(false);
+  const status = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  useEffect(() => {
+    if (shown) status.current?.focus();
+  }, [shown]);
+  return (
+    <CandidateErasedView
+      message={shown ? erasedMessage(result) : ""}
+      statusRef={status}
+    />
   );
 }
 

@@ -5,8 +5,10 @@ import { Dialog } from "../src/components/ui/dialog";
 import { humanError, requestJson } from "../src/components/workspace/client";
 import {
   CandidateErased,
+  CandidateErasedView,
   CandidateErasureDialogView,
   CandidateErasureSection,
+  erasedMessage,
 } from "../src/components/workspace/candidate-erasure";
 import { formatDate } from "../src/components/workspace/helpers";
 
@@ -174,23 +176,26 @@ describe("typed erasure confirmation", () => {
     });
 
     it("replaces the profile with a status, the CV storage sentence and Back to candidates", () => {
+      // The text the status receives after mount, rendered through the view.
       const erased = (cvStorage: {
         deleted: number;
         waiting: number;
         deleteAfter: string | null;
       }) =>
         renderToStaticMarkup(
-          <CandidateErased
-            result={{
+          <CandidateErasedView
+            message={erasedMessage({
               erasureId: "00000000-0000-4000-8000-0000000000e1",
               alreadyErased: false,
               cvStorage,
-            }}
+            })}
           />,
         );
       const status = (markup: string) =>
         text(
-          /<p class="notice success" role="status">[^<]*<\/p>/.exec(markup)![0],
+          /<p class="notice success" role="status" tabindex="-1">[^<]*<\/p>/.exec(
+            markup,
+          )![0],
         );
       const deleted = erased({ deleted: 1, waiting: 0, deleteAfter: null });
       expect(status(deleted)).toBe(
@@ -213,6 +218,25 @@ describe("typed erasure confirmation", () => {
         expect(markup).not.toContain("<dialog");
         expect(markup).not.toContain("Permanently erase candidate");
       }
+    });
+
+    it("renders the success status empty and focusable first, so its text is announced", () => {
+      const markup = renderToStaticMarkup(
+        <CandidateErased
+          result={{
+            erasureId: "00000000-0000-4000-8000-0000000000e1",
+            alreadyErased: false,
+            cvStorage: { deleted: 1, waiting: 0, deleteAfter: null },
+          }}
+        />,
+      );
+      expect(markup).toContain(
+        '<p class="notice success" role="status" tabindex="-1"></p>',
+      );
+      expect(markup).not.toContain("Candidate permanently erased.");
+      expect(markup).toMatch(
+        /<a class="text-link" href="\/app\/candidates">Back to candidates<\/a>/,
+      );
     });
   });
 });
