@@ -78,7 +78,7 @@ describe("storage reference migration and startup check", () => {
       status: 503,
       code: "storage_schema_mismatch",
     });
-    expect(STORAGE_SCHEMA_VERSION).toBe(9);
+    expect(STORAGE_SCHEMA_VERSION).toBe(10);
     await expect(assertStorageSchema(pg)).resolves.toBeUndefined();
   });
 
@@ -105,14 +105,14 @@ describe("storage reference migration and startup check", () => {
     });
 
   it("refuses a marker the owner changed to another version", async () => {
-    await pg.exec("UPDATE db_boundary.storage_schema SET version=10");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version=11");
     try {
       await expect(assertStorageSchema(pg)).rejects.toMatchObject({
         status: 503,
         code: "storage_schema_mismatch",
       });
     } finally {
-      await pg.exec("UPDATE db_boundary.storage_schema SET version=9");
+      await pg.exec("UPDATE db_boundary.storage_schema SET version=10");
     }
   });
 

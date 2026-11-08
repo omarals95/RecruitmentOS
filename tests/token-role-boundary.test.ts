@@ -14,6 +14,7 @@ import {
   revokeToken,
 } from "../src/lib/api-tokens";
 import { hashToken } from "../src/lib/api-token-policy";
+import type { Scope } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { POST as tokenRoute } from "../src/app/oauth/token/route";
 import { createSplitRoleDb, seedIdentity, splitRoles } from "./helpers/db";
@@ -188,6 +189,35 @@ describe("token create/revoke and audit in one identity-role transaction", () =>
         "INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary) VALUES('team','owner','session','token.created','api-token','Forged')",
       ),
     ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("refuses the directory and plan scopes for every role like an unknown scope, writing nothing", async () => {
+    const before = await counts();
+    const refusal = (scopes: Scope[]) =>
+      createToken(owner, { name: "Fictional ceiling token", scopes }).then(
+        () => expect.unreachable(),
+        (error: unknown) => error,
+      );
+    const unknown = await refusal(["admin:all" as Scope]);
+    expect(unknown).toMatchObject({
+      status: 400,
+      code: "invalid_token_request",
+    });
+    for (const p of [recruiterA, viewer, owner])
+      for (const scope of [
+        "directory:read",
+        "directory:write",
+        "plans:read",
+        "plans:write",
+      ] as const)
+        await expect(
+          createToken(p, {
+            name: "Fictional ceiling token",
+            scopes: [scope],
+          }),
+          `${p.role} ${scope}`,
+        ).rejects.toEqual(unknown);
+    expect(await counts()).toEqual(before);
   });
 
   describe("reuse revocation audit", () => {

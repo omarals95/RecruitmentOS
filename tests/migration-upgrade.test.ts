@@ -298,7 +298,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 9 }]);
+    ).toEqual([{ version: 10 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -458,7 +458,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 9 }]);
+    ).toEqual([{ version: 10 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -588,7 +588,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 9 }]);
+    ).toEqual([{ version: 10 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -704,7 +704,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 9 }]);
+    ).toEqual([{ version: 10 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -803,7 +803,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 9 }]);
+    ).toEqual([{ version: 10 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -877,5 +877,81 @@ describe("upgrade from 0029 to the configuration store", () => {
         )
       ).rows,
     ).toEqual([{ level: "admin", areas: ["fields"] }]);
+  });
+});
+
+// A team with an owner, a recruiter and a viewer written by the 0030 schema, upgraded through 0031:
+// install keeps its one overload and its grants, and only owners and admins reach the new scopes.
+describe("upgrade from 0030 to the explicit scope ceilings", () => {
+  const pg = new PGlite();
+  const grantee = "ceiling_upgrade_runtime";
+  const member = (userId: string, role: Role) =>
+    principal(userId, "ceiling-upgrade-team", role);
+  const owner = member("ceiling-upgrade-owner", "owner");
+  const recruiter = member("ceiling-upgrade-recruiter", "recruiter");
+  const viewer = member("ceiling-upgrade-viewer", "viewer");
+  const overloads = async () =>
+    (
+      await pg.query(
+        "SELECT oidvectortypes(p.proargtypes) AS args, p.prorettype::regtype::text AS returns, p.prosecdef AS definer, p.proacl::text AS acl FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'install'",
+      )
+    ).rows;
+  let before: Awaited<ReturnType<typeof overloads>>;
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0030_config_store.sql");
+    await pg.exec(`CREATE ROLE ${grantee} NOLOGIN;
+      GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO ${grantee};
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('ceiling-upgrade-owner','Fictional Upgrade Owner','ceiling-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('ceiling-upgrade-team','Fictional Upgrade Team','ceiling-upgrade-team','ceiling-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('ceiling-upgrade-mo','ceiling-upgrade-team','ceiling-upgrade-owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('ceiling-upgrade-recruiter','Fictional Upgrade Recruiter','ceiling-upgrade-recruiter@example.test',true,false),
+        ('ceiling-upgrade-viewer','Fictional Upgrade Viewer','ceiling-upgrade-viewer@example.test',true,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('ceiling-upgrade-mr','ceiling-upgrade-team','ceiling-upgrade-recruiter','recruiter'),
+        ('ceiling-upgrade-mv','ceiling-upgrade-team','ceiling-upgrade-viewer','viewer');`);
+    before = await overloads();
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps one install, (text, text, text[]) returning jsonb, with its grants, and sets storage schema 10", async () => {
+    expect(before).toEqual([
+      expect.objectContaining({
+        args: "text, text, text[]",
+        returns: "jsonb",
+        definer: true,
+        acl: expect.stringContaining(`${grantee}=X/`),
+      }),
+    ]);
+    expect(await overloads()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 10 }]);
+  });
+
+  it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    const install = (p: Principal) =>
+      withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+        installTenantContext(tx, p, snapshot),
+      );
+    expect(owner.scopes).toHaveLength(11);
+    expect(await install(owner)).toMatchObject({
+      scopes: owner.scopes,
+      memberRole: "owner",
+    });
+    for (const p of [recruiter, viewer]) {
+      expect(await install(p), p.role).toMatchObject({ scopes: p.scopes });
+      await expect(
+        install({ ...p, scopes: [...p.scopes, "plans:read"] }),
+        p.role,
+      ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
+    }
   });
 });

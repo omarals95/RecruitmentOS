@@ -1,7 +1,7 @@
-import type { Scope } from "./permissions";
+import type { ApiTokenScope } from "./permissions";
 import type { McpScope } from "./permissions";
 
-export const scopeDescriptions: Record<Scope, string> = {
+export const scopeDescriptions: Record<ApiTokenScope, string> = {
   "candidates:read": "Read candidate facts",
   "candidates:write": "Create and edit candidates",
   "recruitment:read": "Read jobs, pipeline and tasks",
