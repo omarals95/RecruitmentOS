@@ -202,6 +202,88 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     ).rejects.toMatchObject({ status: 409 });
   });
 
+  it("writes an update's comment in the same transaction, and none without the option", async () => {
+    const person = await candidate("Fictional Comment Mover");
+    const job = await vacancy("Comment move vacancy");
+    const app = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Screening" },
+    });
+    const comments = () =>
+      withTeam(owner, (tx) =>
+        tx
+          .select({ id: records.id, data: records.data })
+          .from(records)
+          .where(
+            and(
+              eq(records.teamId, owner.teamId),
+              eq(records.kind, "comment"),
+              eq(records.parentRecordId, app.id),
+            ),
+          ),
+      );
+    const events = async () =>
+      (
+        await withTeam(owner, (tx) =>
+          tx
+            .select({ count: count() })
+            .from(activity)
+            .where(eq(activity.teamId, owner.teamId)),
+        )
+      )[0].count;
+    const plain = await updateRecord(owner, "applications", app.id, {
+      version: 1,
+      data: { stage: "Interview" },
+    });
+    expect(plain).not.toHaveProperty("commentId");
+    expect(await comments()).toEqual([]);
+    const moved = await updateRecord(
+      owner,
+      "applications",
+      app.id,
+      { version: 2, data: { stage: "Rejected" } },
+      { comment: "Moved to Rejected. Reason: Fictional reason" },
+    );
+    expect(moved.version).toBe(3);
+    expect(await comments()).toEqual([
+      {
+        id: moved.commentId,
+        data: { body: "Moved to Rejected. Reason: Fictional reason" },
+      },
+    ]);
+    await updateRecord(owner, "applications", app.id, {
+      version: 3,
+      archived: true,
+    });
+    const before = await events();
+    // An archived parent refuses the comment, so the stage change rolls back with it.
+    await expect(
+      updateRecord(
+        owner,
+        "applications",
+        app.id,
+        { version: 4, data: { stage: "Withdrawn" } },
+        { comment: "Moved to Withdrawn. Reason: Fictional reason" },
+      ),
+    ).rejects.toMatchObject({ code: "archived_reference" });
+    const after = await getRecord(owner, "applications", app.id);
+    expect(after.version).toBe(4);
+    expect(after.data).toMatchObject({ stage: "Rejected" });
+    expect(await comments()).toHaveLength(1);
+    expect(await events()).toBe(before);
+    await expect(
+      updateRecord(
+        owner,
+        "applications",
+        app.id,
+        { version: 4, data: { stage: "Screening" } },
+        { comment: " " },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect((await getRecord(owner, "applications", app.id)).version).toBe(4);
+  });
+
   it("allows one active application when duplicate creates race", async () => {
     const person = await candidate("Fictional Race Applicant");
     const job = await vacancy("Fictional race vacancy");

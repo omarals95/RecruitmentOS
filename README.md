@@ -9,7 +9,7 @@ A React and TypeScript recruitment workspace, built with Next.js for Vercel, Neo
 - Candidate directory, factual filters, saved views, personal shortlist and notes, evidence/source review, multiple CV versions, comments, exports and bulk vacancy assignment.
 - Job roles, vacancies, application pipelines, configurable task buckets and fields, interviews/calendar, offers, onboarding/checklists, reminders, analytics and audit history.
 - User/team-scoped API tokens with explicit read/write/CV/import scopes, expiration, revocation and persistent rate limits.
-- A remote MCP endpoint for AI assistants such as Claude, with API-token or consented OAuth access, read-only tools by default and audited calls ([docs/mcp.md](docs/mcp.md)).
+- A remote MCP endpoint for AI assistants such as Claude, with API-token or consented OAuth access, read tools, and write tools only with write scopes, and audited calls ([docs/mcp.md](docs/mcp.md)).
 - A dry-run-first migration tool for the earlier Excel/SQLite dashboard. Real records are never bundled with this project.
 
 PostgreSQL is the live data store. Excel imports and exports are transfer tools; they are not a two-way sync. Cloud CV actions open/download private objects; Windows File Explorer is not available from a cloud deployment. Source folder names remain descriptive categories, not an assessment of a candidate's suitability.
