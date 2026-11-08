@@ -21,6 +21,8 @@ export const NOT_FOUND =
   "Candidate not found in this team. Nothing was changed.";
 export const MISMATCH =
   "The confirmation name does not match the candidate's name. Nothing was changed.";
+export const SETTLEMENT_FAILED =
+  "Candidate erasure stopped: the team's CV storage records need checking. Nothing was changed.";
 
 const flags = ["team", "candidate", "owner", "confirm-name"] as const;
 export type EraseArguments = Record<(typeof flags)[number], string>;
@@ -130,7 +132,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
             ? USAGE
             : code === "erasure_forbidden"
               ? REFUSED
-              : "Candidate erasure failed. Check the database connections and TENANT_CONTEXT_SIGNING_KEY; nothing about the candidate is printed.",
+              : code === "erasure_storage_settlement_failed"
+                ? SETTLEMENT_FAILED
+                : "Candidate erasure failed. Check the database connections and TENANT_CONTEXT_SIGNING_KEY; nothing about the candidate is printed.",
     );
     return 1;
   } finally {

@@ -501,6 +501,9 @@ describe("OpenAPI contract", () => {
       "cvStorage",
       "deleteAfter",
       "There is no MCP tool",
+      "erasure_storage_settlement_failed",
+      "whole phrase",
+      "at least 3 characters",
     ])
       expect(text).toContain(code);
   });

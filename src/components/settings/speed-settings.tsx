@@ -99,7 +99,7 @@ function SpeedTable({
 }) {
   return (
     <div className="table-wrap">
-      <table className="data-table">
+      <table className="data-table speed-table">
         <caption className="sr-only">{title}</caption>
         <thead>
           <tr>

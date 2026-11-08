@@ -57,6 +57,22 @@ const forbidden = () =>
     "erasure_forbidden",
     "Only a team owner can permanently erase a candidate.",
   );
+/**
+ * The ledger trigger refused to move a CV's charge (its store or team usage row is missing). Logs
+ * one safe line with the correlation ID the response carries; the transaction rolls back.
+ */
+function settlementFailed() {
+  const correlationId = crypto.randomUUID();
+  console.error(
+    `erasure_storage_settlement_failed correlationId=${correlationId}`,
+  );
+  return new ApiError(
+    500,
+    "erasure_storage_settlement_failed",
+    "The candidate could not be erased because the team's CV storage records need checking. Nothing was changed.",
+    correlationId,
+  );
+}
 function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const parsed = schema.safeParse(value);
   if (!parsed.success)
@@ -161,13 +177,16 @@ export async function eraseCandidate(
       return rows[0]?.result ?? null;
     } catch (error) {
       const cause = error instanceof DrizzleQueryError ? error.cause : error;
-      const code = (cause as { code?: unknown } | undefined)?.code;
+      const { code, message } =
+        (cause as { code?: unknown; message?: unknown } | undefined) ?? {};
       if (code === "RQ003")
         throw new ApiError(
           400,
           "erasure_confirmation_mismatch",
           "Type the candidate's name exactly as shown to confirm.",
         );
+      if (code === "42501" && message === "Storage settlement rejected")
+        throw settlementFailed();
       if (code === "42501") throw forbidden();
       throw error;
     }

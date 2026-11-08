@@ -41,6 +41,10 @@
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.settings-page .speed-table code {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
 @media (max-width: 600px) {
   .settings-nav {
     gap: 6px;

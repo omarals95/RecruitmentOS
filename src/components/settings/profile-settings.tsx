@@ -181,7 +181,9 @@ export function TwoStepPanel({
             password. Both forget your trusted devices.
           </p>
           <label className="field">
-            <span>Confirm with your password</span>
+            <span>
+              Password to create new backup codes or turn off two-step sign-in
+            </span>
             <input
               required
               type="password"

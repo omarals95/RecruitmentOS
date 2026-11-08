@@ -3,8 +3,8 @@
 
 -- Owner sessions with two-step sign-in only. Team and actor come from the verified context; the
 -- target must be another member of that team, in no team the actor does not own (RQ004), with
--- something to reset (RQ003 otherwise). Removes the
--- target's secret, backup codes, sessions, trusted devices and pending challenges in this transaction.
+-- something to reset (RQ003 otherwise). In this transaction it removes the target's secret, backup
+-- codes, sessions, trusted devices and pending challenges.
 CREATE FUNCTION tenant_context.reset_two_step(target_user_id text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE

@@ -37,7 +37,7 @@ The current authentication implementation accepts one exact origin per environme
 
 Both Blob stores must be private and connected only to their own environment. The server refuses Blob while `BLOB_READ_WRITE_TOKEN` is present, and names the store explicitly from `BLOB_STORE_ID` on every call with the request's OIDC token; the separation of Preview and Production stores under OIDC still needs hosted verification. Team limits and store budgets are application limits, not hard Blob or billing caps: configure usage monitoring and spend alerts after confirming account options.
 
-`CV_STORAGE_PROVIDER=blob` must be set in each hosted environment before its build. The CSP is fixed at build time and, since job 031, an unset or empty provider allows no upload host in `connect-src`, so a build without it blocks every browser CV upload until the variable is set and the app rebuilt.
+`CV_STORAGE_PROVIDER=blob` must be set in each hosted environment before its build. The CSP is fixed at build time and, since job 031, an unset or empty provider allows no upload host in `connect-src`, and since job 038 the server refuses an unset, empty or blank provider on Vercel with 503 `STORAGE_SETUP_REQUIRED`, so a build without it offers no CV upload until the variable is set and the app rebuilt.
 
 ## Planned verification
 

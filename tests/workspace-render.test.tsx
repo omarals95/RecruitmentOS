@@ -77,6 +77,26 @@ describe("workspace shell", () => {
     expect(button).toBeDefined();
     expect(button).toContain('aria-label="Search your workspace"');
   });
+  it("offers team creation in the switcher only to people who may create a team", () => {
+    const switcher = (canCreateTeam: boolean) => {
+      const value = { ...workspace, team: null, role: null, canCreateTeam };
+      return renderToStaticMarkup(
+        <WorkspaceProvider value={value}>
+          <WorkspaceShell identity={value}>
+            <p>Fictional page</p>
+          </WorkspaceShell>
+        </WorkspaceProvider>,
+      );
+    };
+    const allowed = switcher(true);
+    expect(allowed).toMatch(
+      /<option value=""[^>]*>Create or join a team<\/option>/,
+    );
+    expect(allowed).not.toContain("No team yet");
+    const member = switcher(false);
+    expect(member).toMatch(/<option value=""[^>]*>No team yet<\/option>/);
+    expect(member).not.toContain("Create or join a team");
+  });
 });
 
 describe("loading skeletons", () => {

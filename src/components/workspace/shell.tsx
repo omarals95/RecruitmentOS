@@ -435,7 +435,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 function TeamSwitcher() {
-  const { team } = useWorkspace();
+  const { team, canCreateTeam } = useWorkspace();
   const router = useRouter();
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState("");
@@ -504,7 +504,11 @@ function TeamSwitcher() {
             }
           }}
         >
-          {!team && <option value="">Create or join a team</option>}
+          {!team && (
+            <option value="">
+              {canCreateTeam ? "Create or join a team" : "No team yet"}
+            </option>
+          )}
           {teams.map((item) => (
             <option key={item.id} value={item.id}>
               {item.name}

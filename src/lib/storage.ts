@@ -87,9 +87,14 @@ export interface StorageGateway {
   signDownload(key: string, version: string, name: string): Promise<string>;
 }
 
-/** Unset or empty selects Blob; s3 stays only as the dormant legacy option. */
+/**
+ * Unset or empty selects Blob off Vercel only. A hosted deployment must name its provider, because
+ * the build-time CSP allows no upload host without it; there "" means not set up. s3 stays only as
+ * the dormant legacy option.
+ */
 function selectedProvider(env: Record<string, string | undefined>) {
-  const provider = env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || "blob";
+  const provider =
+    env.CV_STORAGE_PROVIDER?.trim().toLowerCase() || (env.VERCEL ? "" : "blob");
   return provider === "vercel-blob" ? "blob" : provider;
 }
 const BLOB_STORE_PATTERN = /^store_[A-Za-z0-9]{1,128}$/;
@@ -124,6 +129,11 @@ const providerUnsupported = () =>
     "The configured CV storage provider is not supported.",
     "provider_unsupported",
   );
+const notConfigured = () =>
+  new StorageConfigurationError(
+    STORAGE_SETUP_REQUIRED_MESSAGE,
+    "not_configured",
+  );
 
 /** Reads only the environment; it never contacts a provider. Off Vercel is development. */
 export function resolveStorageBinding(
@@ -142,15 +152,13 @@ export function resolveStorageBinding(
     environment = env.VERCEL_ENV;
   }
   const provider = selectedProvider(env);
+  if (!provider) throw notConfigured();
   if (provider !== "s3" && provider !== "blob") throw providerUnsupported();
   const store = (
     provider === "blob" ? env.BLOB_STORE_ID : env.S3_BUCKET_NAME
   )?.trim();
   if (!store || (provider === "blob" && !BLOB_STORE_PATTERN.test(store)))
-    throw new StorageConfigurationError(
-      STORAGE_SETUP_REQUIRED_MESSAGE,
-      "not_configured",
-    );
+    throw notConfigured();
   return { provider, environment, store };
 }
 
@@ -300,12 +308,9 @@ export async function getStorage(): Promise<StorageGateway | BlobGateway> {
       }),
     );
   }
+  if (!provider) throw notConfigured();
   if (provider !== "s3") throw providerUnsupported();
-  if (!storageConfigured())
-    throw new StorageConfigurationError(
-      STORAGE_SETUP_REQUIRED_MESSAGE,
-      "not_configured",
-    );
+  if (!storageConfigured()) throw notConfigured();
   let credentials;
   if (process.env.AWS_ROLE_ARN) {
     if (process.env.VERCEL !== "1")

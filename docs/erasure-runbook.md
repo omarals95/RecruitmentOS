@@ -16,7 +16,7 @@ Only a team owner can erase, and only while signed in (the app or the owner-run 
    - Open each match and check the possible-duplicates lookup in its editor.
    - Note each candidate id from the URL (`/app/candidates/<id>`). Erase each record separately.
 3. **Check for a legal hold.** None is implemented in the app, so the owner decides whether any reason requires keeping the data, and records that decision outside the app.
-4. **Search free text the app does not edit.** Erasure removes comments on the candidate and its applications, interviews, offers and onboarding, replaces the name in tasks linked to the candidate and clears saved-view searches that contain the name, email or phone. It does not edit:
+4. **Search free text the app does not edit.** Erasure removes comments on the candidate and its applications, interviews, offers and onboarding, replaces the name in tasks linked to the candidate and clears saved-view searches that contain the email or phone, or the name as a whole word or phrase in any case (no letter or digit directly before or after it; names of at least 3 characters only, so a search for "Al" or "Annabel" stays when erasing "Al" or "Ann"). It does not edit:
    - comments on other records (vacancies, other candidates, tasks);
    - vacancy and job-role notes;
    - tasks that mention the candidate but are not linked to them.
@@ -52,6 +52,7 @@ npm run erase:candidate -- --team <team id or slug> --candidate <candidate id> -
   - the email does not belong to a user with a verified email who is an `owner` of that team;
   - the candidate is not in that team ("Candidate not found in this team. Nothing was changed.");
   - the name does not match ("The confirmation name does not match the candidate's name. Nothing was changed.");
+  - the team's CV storage records cannot settle a CV file's charge ("Candidate erasure stopped: the team's CV storage records need checking. Nothing was changed."); the app answers 500 `erasure_storage_settlement_failed` with a correlation id for the same case;
   - the database connections or signing key are not usable.
 - **Output.** Only the erasure id, whether it was already erased, the counts and the CV storage figures; never a name, email, phone or file name. Outside Vercel no Blob gateway is built, so CV files are reported as waiting; the next CV storage cleanup deletes them.
 
@@ -93,7 +94,7 @@ npm run erase:candidate -- --team <team id or slug> --candidate <candidate id> -
 - **Possible-duplicate counts** on other candidates' import evidence (a number, never a name or id).
 - **Legacy S3 objects**, if the team ever stored CVs in S3. Their charges are released, but the objects are not deleted by the app; delete them by hand by object key (the erased upload rows list the keys).
 - **Blob provider-side retention**: how long Vercel Blob keeps deleted data internally is set by the provider's policy and is unknown here.
-- **Neon backups and point-in-time history** until their retention window passes. After any restore to a point before an erasure, rerun the script for each erasure in the owner's request log.
+- **Neon backups and point-in-time history** until their retention window passes. After any restore to a point before an erasure, rerun the script for each erasure in the owner's request log. The log deliberately holds no name, so read the candidate's current name for `--confirm-name` from the restored record itself: open `/app/candidates/<candidate id>` as an owner of that team and copy the name exactly as shown.
 - **Exports already downloaded**: CSV files on people's devices are outside the app (see "Before erasing").
 - **Legacy source files**: the legacy importer reads the original CV folders and spreadsheets. Remove the person from those sources before any re-import, because a re-import would create the candidate again.
 
@@ -104,4 +105,4 @@ Keep a log outside the app, with no personal data, one line per erasure:
 | Date received | Date erased | Team | Candidate id | Erasure id |
 | ------------- | ----------- | ---- | ------------ | ---------- |
 
-It is the list to rerun after a database restore and the evidence that each request was handled.
+It is the list to rerun after a database restore and the evidence that each request was handled. After a restore, take the name for `--confirm-name` from the restored record (open its profile as an owner), never from the log.

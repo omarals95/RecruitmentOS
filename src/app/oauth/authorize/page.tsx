@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { ShieldCheck } from "lucide-react";
 import { OAuthConsent } from "@/components/auth/oauth-consent";
 import { getAuthOptions } from "@/lib/auth";
-import { twoStepSetupRequired } from "@/lib/auth-policy";
+import { canCreateTeam, twoStepSetupRequired } from "@/lib/auth-policy";
 import { getSession } from "@/lib/auth-session";
 import { checkAuthorizeRequest, consentTeams } from "@/lib/oauth";
 
@@ -82,13 +82,25 @@ export default async function Authorize({
   const teams = await consentTeams(identity.user.id);
   const { request } = check;
   if (!teams.length)
-    return (
+    return canCreateTeam(
+      identity.user,
+      teams.map((team) => team.role),
+    ) ? (
       <Card
         title="Create or join a team first"
         description={`${request.client.name} can only be connected to a team you belong to.`}
       >
         <Link className="button" href="/app/settings/team">
           Create or join a team
+        </Link>
+      </Card>
+    ) : (
+      <Card
+        title="Join a team first"
+        description={`${request.client.name} can only be connected to a team you belong to. Accept the email invitation from your team owner, then try again.`}
+      >
+        <Link className="button secondary" href="/app">
+          Go to your workspace
         </Link>
       </Card>
     );

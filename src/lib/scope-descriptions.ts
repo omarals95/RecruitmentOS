@@ -23,6 +23,6 @@ export const mcpScopeDescriptions: Record<McpScope, string> = {
   "candidates:write":
     "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
   "recruitment:write":
-    "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
+    "Create, edit, archive and restore recruitment records and tasks, move stages, comment and save views; candidate comments and archives also need candidate access",
   "cvs:write": "Upload CVs and start bulk imports",
 };

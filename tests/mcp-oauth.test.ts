@@ -123,6 +123,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       verified?: boolean;
       team?: string | null;
       twoStep?: boolean;
+      initialAdmin?: boolean;
     } = {},
   ) {
     const cookie = `fictional-session=${userId}-${randomBytes(4).toString("hex")}`;
@@ -133,6 +134,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
         email: `${userId}@example.test`,
         emailVerified: options.verified ?? true,
         twoFactorEnabled: options.twoStep ?? true,
+        initialAdmin: options.initialAdmin ?? false,
       },
       session: { activeOrganizationId: options.team ?? TEAM },
     });
@@ -611,7 +613,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       "Read job roles, vacancies, applications, interviews, offers, onboarding, tasks, comments, record history, dashboard numbers, and your own reminders and saved views",
       "Read the text of your team's CVs, which shares CV contents with this app, and see CV file names, types and sizes (also needs candidate access)",
       "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
-      "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
+      "Create, edit, archive and restore recruitment records and tasks, move stages, comment and save views; candidate comments and archives also need candidate access",
       "Upload CVs and start bulk imports",
     ]) {
       expect(Object.values(mcpScopeDescriptions)).toContain(text);
@@ -621,6 +623,9 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect(page.html).not.toContain("Create and edit");
     expect(mcpScopeDescriptions["cvs:write"]).toBe(
       "Upload CVs and start bulk imports",
+    );
+    expect(mcpScopeDescriptions["recruitment:write"]).toBe(
+      "Create, edit, archive and restore recruitment records and tasks, move stages, comment and save views; candidate comments and archives also need candidate access",
     );
     expect(mcpScopeDescriptions["cvs:read"]).toContain(
       "shares CV contents with this app",
@@ -645,9 +650,26 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       (await authorize(params, signIn("oauth-unverified", { verified: false })))
         .redirect,
     ).toBe("/verify-email");
+    // Only the initial administrator or an owner may create a team.
     const loner = await authorize(params, signIn("oauth-loner"));
-    expect(loner.html).toContain("Create or join a team first");
+    for (const text of [
+      "Join a team first",
+      "Fictional Consent App can only be connected to a team you belong to. Accept the email invitation from your team owner, then try again.",
+      'href="/app">Go to your workspace</a>',
+    ])
+      expect(loner.html, text).toContain(text);
+    expect(loner.html).not.toMatch(/create/i);
+    expect(loner.html).not.toContain("/app/settings/team");
     expect(loner.html).not.toContain("Approve");
+    const admin = await authorize(
+      params,
+      signIn("oauth-loner", { initialAdmin: true }),
+    );
+    expect(admin.html).toContain("Create or join a team first");
+    expect(admin.html).toContain(
+      'href="/app/settings/team">Create or join a team</a>',
+    );
+    expect(admin.html).not.toContain("Approve");
     const owner = signIn("oauth-owner");
     const page = await authorize(params, owner);
     for (const text of [

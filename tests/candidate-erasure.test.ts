@@ -79,6 +79,7 @@ import {
   main as eraseScript,
   MISMATCH,
   REFUSED,
+  SETTLEMENT_FAILED,
   USAGE,
 } from "../scripts/erase-candidate";
 import {
@@ -195,7 +196,9 @@ describe("candidate erasure", () => {
     recruiterA: Principal,
     viewerA: Principal,
     ownerB: Principal,
-    recruiterB: Principal;
+    recruiterB: Principal,
+    ownerC: Principal,
+    recruiterC: Principal;
   const fake = fakeBlob();
   let canary: Built, second: Built, teamB: Built, bulkVersion: Built;
   let canaryCv: { id: string; key: string };
@@ -591,6 +594,15 @@ describe("candidate erasure", () => {
     recruiterB = await seedIdentity(fixture.db, {
       userId: "erase-recruiter-b",
       teamId: "erase-b",
+      role: "recruiter",
+    });
+    ownerC = await seedIdentity(fixture.db, {
+      userId: "erase-owner-c",
+      teamId: "erase-c",
+    });
+    recruiterC = await seedIdentity(fixture.db, {
+      userId: "erase-recruiter-c",
+      teamId: "erase-c",
       role: "recruiter",
     });
     await enforceTestRls(fixture.db);
@@ -1360,6 +1372,170 @@ describe("candidate erasure", () => {
       expect(
         await listCandidateCvs(recruiterA, y.data.candidateId!),
       ).toHaveLength(1);
+    });
+  });
+
+  describe("saved-view clearing by name", () => {
+    /** Erases a fresh candidate while other members hold views with these searches; true means cleared. */
+    async function expectCleared(
+      person: { name: string; email?: string },
+      searches: Record<string, boolean>,
+    ) {
+      const candidate = (
+        await createRecord(ownerA, "candidates", { data: person })
+      ).id;
+      const views: string[] = [];
+      for (const [index, search] of Object.keys(searches).entries())
+        views.push(
+          (
+            await createRecord(index % 2 ? adminA : recruiterA, "views", {
+              data: {
+                name: `Fictional clearing view ${views.length + 1}`,
+                area: "directory",
+                query: { search },
+              },
+            })
+          ).id,
+        );
+      const erased = await eraseCandidate(ownerA, candidate, {
+        confirmName: person.name,
+      });
+      const rows = await asOwner<{ id: string; search: string }>(
+        "SELECT id, data->'query'->>'search' AS search FROM app.records WHERE id = ANY($1::uuid[])",
+        [views],
+      );
+      const after = new Map(rows.map((row) => [row.id, row.search]));
+      expect(
+        Object.fromEntries(
+          Object.keys(searches).map((search, index) => [
+            search,
+            after.get(views[index]) === "",
+          ]),
+        ),
+      ).toEqual(searches);
+      expect(erased.removed?.savedViewsCleared).toBe(
+        Object.values(searches).filter(Boolean).length,
+      );
+    }
+
+    it("clears a search naming the whole name in any case and keeps longer words", async () => {
+      await expectCleared(
+        { name: "Sam Lee" },
+        {
+          "sam lee": true,
+          "Sam Lee, Dubai": true,
+          "Samuel Leeds": false,
+          "sam leer": false,
+        },
+      );
+      await expectCleared({ name: "Ann" }, { Annabel: false, ann: true });
+    });
+
+    it("never clears by a name under 3 characters, but still by email", async () => {
+      await expectCleared(
+        { name: "Al", email: "al.fictional@example.test" },
+        { al: false, "AL.Fictional@example.test": true },
+      );
+    });
+
+    it("matches regex characters in a name literally", async () => {
+      await expectCleared(
+        { name: "Jo (Test)" },
+        {
+          "jo (test), Dubai": true,
+          "Jo Test": false,
+          "Jo (Test)x": false,
+          "jo t": false,
+        },
+      );
+    });
+  });
+
+  describe("a storage settlement failure", () => {
+    let candidate: string;
+    beforeAll(async () => {
+      await bootstrapTeam(ownerC);
+      await holdCooldown(ownerC.teamId);
+      candidate = (
+        await createRecord(ownerC, "candidates", {
+          data: { name: "Fictional Settlement Candidate" },
+        })
+      ).id;
+      await readyCv(ownerC, candidate, "fictional-settlement-cv.pdf");
+      await asOwner("DELETE FROM app.storage_usage WHERE team_id=$1", [
+        ownerC.teamId,
+      ]);
+    });
+    const candidateExists = async () =>
+      (await asOwner("SELECT id FROM app.records WHERE id=$1", [candidate]))
+        .length === 1;
+
+    it("answers 500 erasure_storage_settlement_failed, logs one id-only line and erases nothing", async () => {
+      signIn(ownerC);
+      const { result, output } = await captureConsole(() =>
+        post(candidate, { confirmName: "Fictional Settlement Candidate" }),
+      );
+      expect(result).toMatchObject({
+        status: 500,
+        body: {
+          error: {
+            code: "erasure_storage_settlement_failed",
+            message:
+              "The candidate could not be erased because the team's CV storage records need checking. Nothing was changed.",
+            correlationId: expect.any(String),
+          },
+        },
+      });
+      const lines = output
+        .split("\n")
+        .filter((line) =>
+          line.includes("erasure_storage_settlement_failed correlationId="),
+        );
+      expect(lines).toEqual([
+        `erasure_storage_settlement_failed correlationId=${result.body.error.correlationId}`,
+      ]);
+      expect(output).not.toContain("Fictional Settlement Candidate");
+      expect(output).not.toContain("fictional-settlement-cv");
+      expect(await candidateExists()).toBe(true);
+      expect(
+        await asOwner(
+          "SELECT id FROM app.candidate_erasures WHERE candidate_id=$1",
+          [candidate],
+        ),
+      ).toEqual([]);
+    });
+
+    it("prints its own line from the script and keeps 403 for every other refusal", async () => {
+      const { result, output } = await captureConsole(() =>
+        eraseScript([
+          "--team",
+          ownerC.teamId,
+          "--candidate",
+          candidate,
+          "--owner",
+          `${ownerC.userId}@example.test`,
+          "--confirm-name",
+          "Fictional Settlement Candidate",
+        ]),
+      );
+      expect(result).toBe(1);
+      expect(output.split("\n").at(-1)).toBe(SETTLEMENT_FAILED);
+      signIn(recruiterC);
+      expect(
+        await post(candidate, {
+          confirmName: "Fictional Settlement Candidate",
+        }),
+      ).toMatchObject({
+        status: 403,
+        body: { error: { code: "erasure_forbidden" } },
+      });
+      // The helper's own 42501 (not an owner in the database) stays a 403.
+      await expect(
+        eraseCandidate({ ...recruiterC, role: "owner" }, candidate, {
+          confirmName: "Fictional Settlement Candidate",
+        }),
+      ).rejects.toMatchObject({ status: 403, code: "erasure_forbidden" });
+      expect(await candidateExists()).toBe(true);
     });
   });
 });

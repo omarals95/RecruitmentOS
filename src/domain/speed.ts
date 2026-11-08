@@ -37,6 +37,9 @@ export const SPEED_MAX_MS = 600_000;
 export const SPEED_MAX_SAMPLES = 50;
 export const SPEED_MAX_BODY_BYTES = 16_384;
 export const SPEED_RETENTION_DAYS = 30;
+/** Samples stored per clock hour; the rest of a post is dropped and the post still answers 202. */
+export const SPEED_USER_HOURLY_ROWS = 120;
+export const SPEED_TEAM_HOURLY_ROWS = 1000;
 
 export function isSpeedAction(name: string): name is SpeedAction {
   return (SPEED_ACTIONS as readonly string[]).includes(name);

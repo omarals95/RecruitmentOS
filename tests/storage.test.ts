@@ -69,18 +69,13 @@ test("S3 storage is unconfigured without bucket, region and explicit credentials
   );
 });
 const hostedBlob = {
+  CV_STORAGE_PROVIDER: "blob",
   BLOB_STORE_ID: "store_fictional",
   VERCEL: "1",
   VERCEL_ENV: "preview",
 };
-test("Blob is the default and reads as set up only when hosted with a valid store and no static token", () => {
-  for (const provider of [
-    undefined,
-    "",
-    "blob",
-    "vercel-blob",
-    " Vercel-Blob ",
-  ]) {
+test("Blob reads as set up only when hosted with a valid store and no static token", () => {
+  for (const provider of ["blob", "vercel-blob", " Vercel-Blob "]) {
     const env = { ...hostedBlob, CV_STORAGE_PROVIDER: provider };
     assert.equal(storageConfigured(env), true, String(provider));
     assert.deepEqual(resolveStorageBinding(env), {
@@ -131,6 +126,32 @@ test("Blob is the default and reads as set up only when hosted with a valid stor
       error instanceof StorageConfigurationError &&
       error.reason === "provider_unsupported",
   );
+});
+test("a hosted deployment without a provider is refused, as the build-time CSP allows no upload host", () => {
+  for (const provider of [undefined, "", "  "]) {
+    const env = { ...hostedBlob, CV_STORAGE_PROVIDER: provider };
+    assert.equal(storageConfigured(env), false, String(provider));
+    assert.throws(
+      () => resolveStorageBinding(env),
+      (error: unknown) =>
+        error instanceof StorageConfigurationError &&
+        error.reason === "not_configured",
+      String(provider),
+    );
+  }
+  // Off Vercel an unset provider still selects Blob.
+  for (const provider of [undefined, ""])
+    assert.deepEqual(
+      resolveStorageBinding({
+        BLOB_STORE_ID: "store_fictional",
+        CV_STORAGE_PROVIDER: provider,
+      }),
+      {
+        provider: "blob",
+        environment: "development",
+        store: "store_fictional",
+      },
+    );
 });
 test("an unknown provider fails closed even when S3 credentials exist", async () => {
   const fictional = {
@@ -399,6 +420,10 @@ test("the hosted Blob gateway takes only the fresh request OIDC token and refuse
     delete process.env.VERCEL_OIDC_TOKEN;
     process.env.VERCEL = "1";
     process.env.VERCEL_ENV = "preview";
+    clear = requestContext(fresh);
+    await assert.rejects(getStorage(), reason("not_configured"));
+    clear();
+    process.env.CV_STORAGE_PROVIDER = "blob";
     for (const value of ["vercel_blob_rw_fictional_0000000000000000", ""]) {
       process.env.BLOB_READ_WRITE_TOKEN = value;
       clear = requestContext(fresh);
