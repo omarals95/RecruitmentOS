@@ -646,6 +646,13 @@ Ordered per SRS §14 sequencing. Each package is independently testable. "Local"
 - **Local:** done on PGlite with fictional data. With the fixture and enforced row-level security, `GET /api/v1/vacancies/:id`, the Applications tab list and the whole-vacancy board page take 5–25 ms locally; the overview's round trips went from 22 to 17. The remaining overview and list-total cost is the per-row `tenant_context.allows` policy (about 23 µs a row), which this job does not change.
 - **Owner steps:** none beyond deploying; then check the team switcher in dark theme and the Speed panel's `GET /api/v1/vacancies/[id]`, `GET /api/v1/applications` and `tab.overview` on Preview. Occasional 1.2–1.9 s samples on other routes are most likely Neon scale-to-zero wake-ups ([deployment.md](../deployment.md#2-neon-postgresql)).
 
+### R2-00 Release 2 design (job 041)
+
+- **Requirements covered:** the design of Release 2 epics R2-01 to R2-12 ([ROADMAP.md](../ROADMAP.md#release-2--configurable-platform)), the merged R1.6 items R16-01 to R16-10 and R12-01, R12-02, R12-03 and R12-07, against BRD FR-ACC-03, FR-ADM-01, FR-TASK-02, FR-TASK-03 and SRS-SEC-03, SRS-DATA-01, SRS-DATA-02 and SRS-NFR-01. No row status changes.
+- **Files touched:** `docs/release-2/architecture.md` (tenancy decision, 13 design sections, threat model additions, open decisions D1 to D15, traceability), `docs/release-2/build-plan.md` (66 items in R2a to R2d, each with dependencies, migrations, acceptance criteria and tests, and a Preview check per milestone), `docs/ROADMAP.md` (link), this entry.
+- **Local:** design only, no code. No application code, migration, test or dependency changed.
+- **Owner steps:** review the design and decide the open decisions before R2 jobs are queued.
+
 ### WP-16 MCP endpoint
 
 - **Requirements covered:** SRS-API-01..05, SRS-TOK-01..04, SRS-SEC-06, SRS-SEC-07, SRS-AI-06, BRD FR-ADM-02

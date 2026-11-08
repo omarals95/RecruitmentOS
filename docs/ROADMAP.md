@@ -122,6 +122,10 @@ Each milestone ends with a Preview release the owner tests. Existing data is mig
 | 4   | Template emails are sent through the app's own sender (Resend, recruitmentos.ae) in Release 2; sending from users' Outlook or Gmail arrives with the integrations release.                 |
 | 5   | Recruitment plan figures are headcount and cost in AED, by year with optional quarters, hidden from everyone except roles granted access.                                                  |
 
+### Release 2 design
+
+Design only (job 041): [architecture](release-2/architecture.md) and [build plan](release-2/build-plan.md). The owner reviews the design and decides its open decisions before any R2 build job is queued.
+
 ## R1.1 — Feedback loop
 
 Closes top gaps 1, 2, 7 and 8 from the analysis.
