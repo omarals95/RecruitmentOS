@@ -135,6 +135,8 @@ const workspaceWrites = [
 ];
 /** Written by the data role under company authority, closed to the identity role (0030). */
 const configTables = ["config_objects", "config_versions", "config_layouts"];
+/** Levels and units under allows_workspace; closure rows only from the owner's trigger (0033). */
+const orgTables = ["org_levels", "org_units", "org_unit_closure"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -167,6 +169,10 @@ const expectedData = {
         ["DELETE", "INSERT", "SELECT", "UPDATE"],
       ]),
     ),
+    // The organisation hierarchy: no runtime delete, and only reads of the closure (0033).
+    "app.org_levels": ["INSERT", "SELECT", "UPDATE"],
+    "app.org_units": ["INSERT", "SELECT", "UPDATE"],
+    "app.org_unit_closure": ["SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -518,6 +524,7 @@ describe("split runtime role template", () => {
         "speed_sample_budgets",
         ...workspaceTables,
         ...configTables,
+        ...orgTables,
       ].map((table) => `TRUNCATE app.${table}`),
       ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
@@ -573,7 +580,7 @@ describe("split runtime role template", () => {
       "SELECT * FROM tenant_context.config_history(NULL, NULL, 50)",
       ...workspaceTables.map((table) => `SELECT * FROM app.${table}`),
       ...workspaceWrites,
-      ...configTables.flatMap((table) => [
+      ...[...configTables, ...orgTables].flatMap((table) => [
         `SELECT * FROM app.${table}`,
         `DELETE FROM app.${table}`,
       ]),
@@ -757,6 +764,60 @@ describe("split runtime role template", () => {
         )
       ).rows,
     ).toEqual([{ state: "published", number: 1 }]);
+  });
+
+  it("denies the data role every closure write; only the owner's trigger writes it (0033)", async () => {
+    // The same fictional company owner as the case above; seeding is idempotent.
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    const asCompanyOwner = <T>(work: (tx: TeamTx) => Promise<T>) =>
+      harness.dataDb().then((db) =>
+        withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+          await installTenantContext(tx, owner, snapshot);
+          return work(tx);
+        }),
+      );
+    const unit = await asCompanyOwner(async (tx) => {
+      await tx.execute(
+        sql`insert into app.org_levels(workspace_id, name, depth) select workspace_id, 'Fictional level', 0 from app.workspace_teams where team_id = ${owner.teamId}`,
+      );
+      const { rows } = await tx.execute<{ id: string }>(
+        sql`insert into app.org_units(workspace_id, level_id, name, code) select workspace_id, (select id from app.org_levels), 'Fictional unit', 'GRANTS-1' from app.workspace_teams where team_id = ${owner.teamId} returning id`,
+      );
+      return rows[0].id;
+    });
+    const closure = async () => {
+      await harness.asSuperuser();
+      return (
+        await harness.client.query(
+          "SELECT ancestor_id, descendant_id, depth FROM app.org_unit_closure",
+        )
+      ).rows;
+    };
+    expect(await closure()).toEqual([
+      { ancestor_id: unit, descendant_id: unit, depth: 0 },
+    ]);
+    for (const statement of [
+      `INSERT INTO app.org_unit_closure(workspace_id, ancestor_id, descendant_id, depth) SELECT workspace_id, id, id, 1 FROM app.org_units WHERE id = '${unit}'`,
+      `UPDATE app.org_unit_closure SET depth = 3 WHERE descendant_id = '${unit}'`,
+      `DELETE FROM app.org_unit_closure WHERE descendant_id = '${unit}'`,
+      `DELETE FROM app.org_units WHERE id = '${unit}'`,
+      "DELETE FROM app.org_levels",
+    ])
+      await expect(
+        asCompanyOwner((tx) => tx.execute(sql.raw(statement))),
+        statement,
+      ).rejects.toMatchObject({
+        cause: {
+          code: "42501",
+          message: expect.stringMatching(/permission denied/),
+        },
+      });
+    expect(await closure()).toEqual([
+      { ancestor_id: unit, descendant_id: unit, depth: 0 },
+    ]);
   });
 });
 
