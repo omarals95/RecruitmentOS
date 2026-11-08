@@ -26,9 +26,10 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Migration:** adds `app.workspaces`, `app.workspace_teams` and `app.workspace_admins` (new). It inserts one workspace with a fixed id, maps every team to it (`ON CONFLICT DO NOTHING`) and makes the initial administrator (`auth."user".initial_admin`) the first company owner. It also adds:
   - the owner-owned trigger function `app.map_new_team()` (new) on `auth.organization` insert, which refuses when more than one workspace exists;
   - the owner-run helper `tenant_context.set_workspace_authority(text, text, text[], boolean)` (new), callable only from a session context whose actor is a company owner, which refuses to remove or demote the last company owner;
+  - the owner-owned trigger function `app.suspend_workspace_authority()` (new) on `auth.member` delete, which sets `app.workspace_admins.suspended_at` when the user is no longer a member of any team of the workspace;
   - an owner-only `workspace-authority` branch in the `app.activity` insert policy.
 
-  FORCE row-level security on the three tables. Role template: `SELECT` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`, no write grant on any of them for either runtime role. Marker: +1.
+  FORCE row-level security on the three tables; `app.workspace_admins` is readable in full by company owners and admins and otherwise only one's own row. Role template: `SELECT` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`, no write grant on any of them for either runtime role. Marker: +1.
 
 - **Acceptance criteria:**
   1. After `npm run db:migrate` on a fictional `0027` baseline with two teams, both teams map to the one workspace, the initial administrator is the only company owner, and running the migration twice changes nothing.
@@ -36,7 +37,9 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
   3. Neither runtime role can insert, update or delete in any of the three tables.
   4. The owner of a team created later is not a company owner; their call of the helper is refused, and so is a company admin's.
   5. A company owner grants a fictional member the `fields` area and plan access, and each change writes one audit row; removing the last company owner is refused.
-  6. No existing test changes.
+  6. A member without company authority reads only their own `app.workspace_admins` row, if any.
+  7. A company admin removed from every team is suspended; re-inviting them restores no company authority until a company owner clears the suspension, which is audited.
+  8. No existing test changes.
 - **Test approach:** `tests/workspace-tenancy.test.ts` (new, PGlite); `tests/migration-upgrade.test.ts` and `tests/runtime-role-grants.test.ts` extended; `scripts/live-role-tests.ts` gains the write-denied cases and a team-B owner calling the helper.
 - **Docs:** `docs/identity-boundary-plan.md` (new "Company workspace" part), `docs/deployment.md`.
 
@@ -49,7 +52,7 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Acceptance criteria:**
   1. `src/lib/tenant-context.ts` passes the third argument (an empty array for now) and `withTeam` makes the returned access state available to the work function.
   2. A context for a team with no workspace mapping is rejected with `42501`.
-  3. A team owner without a `app.workspace_admins` row gets a context with no company level, areas or plan access.
+  3. A team owner without an `app.workspace_admins` row, or with a suspended one, gets a context with no company level, areas or plan access.
   4. Every existing rejection case in `tests/tenant-context.test.ts` still fails the same way.
   5. `tests/round-trip-budget.test.ts` still counts 6, 11 and 15.
 - **Test approach:** `tests/tenant-context.test.ts`, `tests/round-trip-budget.test.ts`, `tests/runtime-role-grants.test.ts`, `tests/connection-boundary.test.ts`; `scripts/live-role-tests.ts` gains forged-workspace, missing-mapping and team-owner-without-company-authority cases, run directly and through a throwaway PgBouncer in transaction mode.
@@ -74,9 +77,9 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-01, R16-09.
 - **Size:** 3 h.
 - **Depends on:** R2a-01.
-- **Migration:** adds `app.config_objects` (with the nullable `team_id` for team task boards), `app.config_versions` and `app.config_layouts` (new), the trigger function `app.guard_config_version()` (new), the policy helper `tenant_context.allows_workspace(uuid, text, text)` (new; writes need the context's company authority for the area, or, for a `task-board` object of the context's own team, team owner or admin), the audit helper `tenant_context.audit_config(uuid, text)` (new) and the read helper `tenant_context.config_history(uuid, timestamptz, int)` (new); recreates the `app.activity` insert policy with one owner-only `config` branch. Role template: `SELECT, INSERT, UPDATE, DELETE` on the three tables and `EXECUTE` on the three helpers for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.config_objects` (with the nullable `team_id` for team task boards), `app.config_versions` and `app.config_layouts` (new), the trigger function `app.guard_config_version()` (new; it refuses a `state` change from a runtime role), the owner-run publish helper `tenant_context.publish_config_version(uuid)` (new; it checks the context's company authority for the object's area, assigns the number and moves `current_version_id`), the policy helper `tenant_context.allows_workspace(uuid, text, text)` (new; writes need the context's company authority for the area, or, for a `task-board` object of the context's own team, team owner or admin), the audit helper `tenant_context.audit_config(uuid, text)` (new) and the read helper `tenant_context.config_history(uuid, timestamptz, int)` (new); recreates the `app.activity` insert policy with one owner-only `config` branch. Role template: `SELECT, INSERT, UPDATE, DELETE` on the three tables and `EXECUTE` on the four helpers for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
-  1. A new service `src/lib/config-store.ts` (new) creates a draft, edits it, publishes it and retires a version; a published body cannot be changed or deleted by any runtime role.
+  1. A new service `src/lib/config-store.ts` (new) creates a draft, edits it, publishes it through `tenant_context.publish_config_version` and retires a version. A published body cannot be changed or deleted by any runtime role, and a direct `UPDATE` of `state` by a runtime role is refused.
   2. Each change writes exactly one `config` activity row whose metadata has no body.
   3. A runtime role cannot insert a `config` activity row directly.
   4. A context of a team in another workspace reads no configuration row (two workspaces inserted by the owner in the test).
@@ -203,12 +206,12 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-07.
 - **Size:** 3 h.
 - **Depends on:** R2a-04.
-- **Migration:** adds `app.org_levels`, `app.org_units` and `app.org_unit_closure` (new) with the trigger function `app.maintain_org_closure()` (new); read policies for the workspace and write policies for the company `organisation` area through `allows_workspace`; and the owner-owned trigger function `app.guard_scope_sources()` (new) on `app.org_units`, which refuses a `parent_id` change or an archive unless the context's `company_level` is owner. Role template: `SELECT, INSERT, UPDATE` on the three tables for `recruitmentos_data` (closure rows written only by the trigger). Marker: +1.
+- **Migration:** adds `app.org_levels`, `app.org_units` and `app.org_unit_closure` (new) with the trigger function `app.maintain_org_closure()` (new); read policies for the workspace and write policies for the company `organisation` area through `allows_workspace`; and the owner-owned trigger function `app.guard_scope_sources()` (new) on `app.org_units`, which refuses a `parent_id` change or an archive, and an insert that gives an existing unit a new effective parent (effective-dated rows), unless the context's `company_level` is owner. Role template: `SELECT, INSERT, UPDATE` on the three tables for `recruitmentos_data` (closure rows written only by the trigger). Marker: +1.
 - **Acceptance criteria:**
   1. A new service `src/lib/org.ts` (new) and routes under `/api/v1/org-units` (new) create, rename, move and archive units and levels.
   2. A move under the unit's own subtree is refused.
   3. The closure table is correct after every operation for a fictional 500-unit, 6-level tree.
-  4. A company admin with the `organisation` area creates and renames units, but cannot move or archive one; a company owner can, and each move writes a `scope.home_units_changed` row.
+  4. A company admin with the `organisation` area creates and renames units, but cannot move or archive one, either by update or by inserting a new effective row for it; a company owner can, and each move writes a `scope.home_units_changed` row.
   5. Every change is audited.
 - **Test approach:** `tests/org-units.test.ts` (new, PGlite); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` cross-workspace, runtime-closure-write and admin-moves-unit-denied cases.
 - **Docs:** `docs/api-examples.md`, `docs/user-guide.md`.
@@ -218,11 +221,17 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-07.
 - **Size:** 3 h.
 - **Depends on:** R2a-03, R2a-13.
-- **Migration:** adds `app.positions`, `app.employees` and `app.employee_positions` (new). Employee reads need `directory:read` and write `directory:write` in the context, through a new helper `tenant_context.allows_directory(uuid, text)` (new). `app.guard_scope_sources()` is extended to `app.employees` (any `user_id` change), `app.employee_positions` (any change for an employee with a user link) and `app.positions` (an `org_unit_id` change for a position held by a linked employee): each needs a company owner context and writes a `scope.home_units_changed` row. Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.positions`, `app.employees` and `app.employee_positions` (new). Employee reads need `directory:read` and write `directory:write` in the context, through a new helper `tenant_context.allows_directory(uuid, text)` (new). `app.guard_scope_sources()` is extended, on inserts as well as updates, to:
+  - `app.employees`: any `user_id` change, and an insert with `user_id` already set;
+  - `app.employee_positions`: any change for an employee with a user link;
+  - `app.positions`: an `org_unit_id` change, or a new effective row with another unit, for a position held by a linked employee.
+
+  Each of these changes each needs a company owner context and writes a `scope.home_units_changed` row. Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
+
 - **Acceptance criteria:**
   1. Routes under `/api/v1/positions` and `/api/v1/employees` (new) create, update, archive and page through them, with the directory filters of §6.3 (unit including descendants, level, position, status).
   2. An employee links to at most one user per workspace.
-  3. Only a company owner links or unlinks a user, or changes a linked employee's positions; a member with `directory:write`, a company admin and a team owner are refused by the service and by direct SQL, including for their own employee row.
+  3. Only a company owner links or unlinks a user, creates an employee already linked to a user, or changes a linked employee's positions (including through a new effective position row). A member with `directory:write`, a company admin and a team owner are refused by the service and by direct SQL, including for their own employee row.
   4. Each such change is listed on the company owners' home screen with role assignments.
   5. A role with directory rule `basic` gets no work email or phone (service-layer rule, D16).
   6. A context without `directory:read` reads no employee row.
@@ -282,7 +291,7 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
   1. Vacancies take an org unit; their applications, interviews, offers, onboarding, checklist items and comments get it from the trigger, including after the vacancy's unit changes.
   2. `scopeFilter` applies the §3.5 table for `unit` and `assigned` roles in list, get, export, search, notifications, overview and analytics.
   3. A record outside scope is answered as 404, and as a missing parent in references.
-  4. Neither runtime role can insert, update or delete `app.record_assignments` directly. The helpers refuse a record outside the caller's scope, a target user outside the team, self-assignment by a caller whose scope for that kind is not `all`, and the `approver` relation from anything but the engine.
+  4. Neither runtime role can insert, update or delete `app.record_assignments` directly. The helpers refuse a record outside the caller's scope, a target user outside the team, self-assignment by a caller whose scope for that kind is not `all`, and, until R2c-04 adds approval requests, the `approver` relation outright.
   5. Round-trip counts unchanged for scope `all` and for a scoped principal.
 - **Test approach:** `tests/org-scope.test.ts` (new) with the 500-unit fixture; `tests/round-trip-budget.test.ts` (hiring-manager case); `tests/records-postgres.test.ts` unchanged; `scripts/live-role-tests.ts` direct-insert-denied and scoped-self-assignment-denied cases.
 - **Docs:** `docs/security.md`, `docs/user-guide.md`.
@@ -296,16 +305,19 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
   - on `app.records` for all commands;
   - on `app.activity` (by `record_id`);
   - on `app.uploads` (by `candidate_id`);
-  - on `app.record_assignments` (by `record_id`).
+  - on `app.record_assignments` (by `record_id`);
+  - on `app.idempotency` for all commands, requiring `actor_key = tenant_context.context_actor_key()` (a fifth new owner-owned helper), plus a new `role_version_id` column on `app.idempotency`.
 
-  Tables added later get theirs in their own items. Role template: `EXECUTE` on the four helpers for `recruitmentos_data`. Marker: +1.
+  Tables added later get theirs in their own items. Role template: `EXECUTE` on the five helpers for `recruitmentos_data`. Marker: +1.
 
 - **Acceptance criteria:**
   1. Under a scoped context, a direct `SELECT` as the data role returns only in-scope rows. This holds for `app.records`, `app.activity`, `app.uploads` and `app.record_assignments`, and an `UPDATE` or `INSERT` of an out-of-scope record is refused.
-  2. Scope `all` contexts see exactly what they saw before.
-  3. Candidate erasure and every owner-run helper still work, and no policy recurses.
-  4. With the 2,000-candidate fixture, the overview and list database times are within 10% of the previous release locally.
-- **Test approach:** `tests/record-scope-rls.test.ts` (new); `tests/candidate-erasure.test.ts`; `npm run bench:round-trips -- --fixture`; `scripts/live-role-tests.ts` direct-SQL scope cases per table through the pooler.
+  2. Under any context, a direct `SELECT` on `app.idempotency` returns only rows of the context's own actor key; another member's cached responses, including the record and CV write paths, are not readable.
+  3. `idempotent` in `src/lib/records.ts` stores the role version with each response. A replay after the actor's role version changed discards the cached body and returns the record's current state through the normal read path; every replay is redacted under the current role.
+  4. Scope `all` contexts see exactly what they saw before.
+  5. Candidate erasure (which updates idempotency rows of every actor as the owner) and every owner-run helper still work, and no policy recurses.
+  6. With the 2,000-candidate fixture, the overview and list database times are within 10% of the previous release locally.
+- **Test approach:** `tests/record-scope-rls.test.ts` (new); `tests/candidate-erasure.test.ts`; `tests/records-postgres.test.ts` (idempotent replay after a role change); `npm run bench:round-trips -- --fixture`; `scripts/live-role-tests.ts` direct-SQL scope cases per table, and a scoped context reading no other actor's idempotency row, through the pooler.
 - **Docs:** `docs/identity-boundary-plan.md` ("Record scope"), `docs/validation.md`.
 
 ### R2a-20 Team tasks: label, assignees and links
@@ -576,9 +588,10 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Migration:** adds `app.outbox` (new, team-keyed, FORCE row-level security, rows written in the record's transaction and claimed with `FOR UPDATE SKIP LOCKED`), with the restrictive scope policy of §3.5 keyed by `record_id`. Role template: `SELECT, INSERT, UPDATE` on `app.outbox` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. Post-actions assign (through `tenant_context.add_assignment`), create a task, require an approval group and notify run in the transition's transaction; a failure rolls the transition back.
-  2. Outside effects go to the outbox and are delivered after commit with retries; failures are visible in the record's history.
-  3. No post-action type can change a status, a role, company authority or an approver assignment.
-  4. A scoped context reads no outbox row of an out-of-scope record by direct SQL.
+  2. An assign post-action targets only record-derived people (the person making the transition, the vacancy's assigned recruiter or hiring manager, a named relation on the application); the workflow schema refuses a fixed user id or role.
+  3. Outside effects go to the outbox and are delivered after commit with retries; failures are visible in the record's history.
+  4. No post-action type can change a status, a role, company authority or an approver assignment.
+  5. A scoped context reads no outbox row of an out-of-scope record by direct SQL.
 - **Test approach:** `tests/workflow-engine.test.ts` (post-action cases), `tests/outbox.test.ts` (new); `scripts/live-role-tests.ts` outbox cross-team and scope cases.
 - **Docs:** `docs/security.md`.
 
@@ -587,15 +600,23 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Epics:** R2-04, R16-05.
 - **Size:** 3 h.
 - **Depends on:** R2c-03.
-- **Migration:** adds `app.approval_requests` and `app.approval_decisions` (new; decisions also store `record_id`), team-keyed under FORCE row-level security, each with the restrictive scope policy of §3.5 keyed by `record_id`. Role template: `SELECT, INSERT, UPDATE` on both for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.approval_requests` (with `members`, the group's user ids resolved at opening) and `app.approval_decisions` (new; decisions also store `record_id`). Both are team-keyed under FORCE row-level security, each with the restrictive scope policy of §3.5 keyed by `record_id`. It also adds:
+  - a decisions insert policy that requires `approver_id` to be the context's actor and in the request's `members` (or their recorded delegate, from R2c-05);
+  - requests inserted only with `state = pending`, and no runtime update of `state`;
+  - the owner-run helper `tenant_context.close_approval_request(uuid)` (new), which computes the outcome from the stored decisions;
+  - a new body of `tenant_context.add_assignment` that accepts the `approver` relation only when an open request for that record names the target user.
+
+  Role template: `SELECT, INSERT` on both tables and `EXECUTE` on the new helper for `recruitmentos_data`. Marker: +1.
+
 - **Acceptance criteria:**
   1. Any-one, all, majority and sequential rules close requests as §4.5 describes; one rejection closes any rule.
   2. Requesters cannot approve their own requests.
-  3. Approvers can read the fields their group names for that record only; the engine adds their `approver` assignment through the helper.
-  4. Approval outcomes cannot target the Hired or Rejected categories.
-  5. Every decision is audited with the rule applied.
-  6. A scoped context reads no request or decision of an out-of-scope record by direct SQL.
-- **Test approach:** `tests/approvals.test.ts` (new); `scripts/live-role-tests.ts` approval and scope cases.
+  3. Approvers can read the fields their group names for that record only; the engine adds their `approver` assignment through the helper, which refuses an `approver` for a user no open request names.
+  4. By direct SQL, a member cannot insert a decision for another approver or for a request that does not name them, and cannot change a request's state.
+  5. Approval outcomes cannot target the Hired or Rejected categories.
+  6. Every decision is audited with the rule applied.
+  7. A scoped context reads no request or decision of an out-of-scope record by direct SQL.
+- **Test approach:** `tests/approvals.test.ts` (new); `scripts/live-role-tests.ts` approval, forged-decision, state-flip and scope cases.
 - **Docs:** `docs/user-guide.md`, `docs/security.md`.
 
 ### R2c-05 Delegates, out-of-office cover and SLA reminders
@@ -617,14 +638,15 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Epics:** R2-04, R16-07, R16-09.
 - **Size:** 3 h.
 - **Depends on:** R2c-02, R2c-04.
-- **Migration:** none.
+- **Migration:** a new body of `tenant_context.publish_config_version` (same signature). It refuses a workflow, template or plan-settings draft whose approval-group membership (users and roles) differs from the current published version unless the context's `company_level` is owner, and audits such a publish as `config.approvers_changed`. Role template: unchanged. Marker: +1.
 - **Acceptance criteria:**
   1. Publishing a workflow refuses, with a list, unreachable statuses, inescapable loops, groups without members or outcomes, conditions on deleted or archived fields, sensitive-field conditions and rule paths into Hired or Rejected.
-  2. Saving or publishing a condition on a field hidden from the author's role is refused.
+  2. Saving or publishing a condition on a field hidden from the author's role is refused. The publish screen says when approval-group membership changed and that only a company owner can publish it.
   3. Publishing warns when an offered transition depends on a field the receiving role cannot see.
-  4. Published versions are immutable.
-  5. Each publish is audited with its version number.
-- **Test approach:** `tests/workflow-publish.test.ts` (new).
+  4. A company admin with the `workflows` area cannot publish a draft whose approval group names themselves, or that adds or removes any user or role in a group. This holds through the service and by calling the helper directly. A company owner can, and the publish is listed with role assignments on the company owners' home screen.
+  5. Published versions are immutable.
+  6. Each publish is audited with its version number.
+- **Test approach:** `tests/workflow-publish.test.ts` (new), `tests/config-store.test.ts` (new in R2a-04; approver-membership publish cases); `scripts/live-role-tests.ts` company-admin-self-approver-denied case.
 - **Docs:** `docs/user-guide.md`.
 
 ### R2c-07 In-flight migration with an explicit status mapping
@@ -663,7 +685,7 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Depends on:** R2a-11, R2c-06.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Company admins with the `workflows` area (and company owners) edit statuses, transitions, conditions, validators, post-actions and approval groups in lists, tables and dialogs.
+  1. Company admins with the `workflows` area (and company owners) edit statuses, transitions, conditions, validators, post-actions and approval groups in lists, tables and dialogs. Approval-group members can be changed in a draft by anyone with the area, but only a company owner can publish that change. Assign post-actions offer only record-derived targets.
   2. The editor shows publish problems inline and the in-flight mapping step.
   3. Everything works by keyboard, with announced changes, at 360 px and 200% zoom.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11; workflow cases); manual screen-reader and keyboard checks recorded in `docs/accessibility-checklist.md`.
@@ -989,9 +1011,10 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Acceptance criteria:**
   1. Members with plan access edit draft scenario versions in a year-by-unit grid with quarters optional.
   2. Submitting creates an approval request for the configured approvers; approval makes the version the plan of record and supersedes the previous one.
-  3. The Recruitment plan settings tab sets granularity and approvers.
-  4. Every state change is audited without figures.
-- **Test approach:** `tests/plans.test.ts`, `tests/approvals.test.ts`, `tests/plan-ui.test.tsx` (new).
+  3. The Recruitment plan settings tab sets granularity and approvers. Approvers can be changed only by a company owner (the approver-membership rule of R2c-06), and only people who already hold plan access can be named.
+  4. Being a plan approver grants no plan access: `allows_plan` ignores approval membership. A plan approval request whose group resolves to any member without plan access is refused when it would open.
+  5. Every state change is audited without figures.
+- **Test approach:** `tests/plans.test.ts` (new in R2d-12), `tests/approvals.test.ts` (new in R2c-04; a plan-access holder who is not a company owner cannot extend access by naming an approver), `tests/plan-ui.test.tsx` (new).
 - **Docs:** `docs/user-guide.md`, `docs/accessibility-checklist.md`.
 
 ### R2d-14 Plan versus actual
@@ -1004,9 +1027,10 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
   1. For a unit and below, a year or quarter and the approved version, the plan screen shows planned headcount and cost against open vacancies, offers, observed hires and accepted-offer spend in AED (§9.3), all from `tenant_context.plan_actuals`.
   2. The helper refuses a context without plan access and `plans:read`, returns only aggregates (no record id, name, single-record date or per-team breakdown), and works for units of the context's workspace only.
   3. Spend is left out when the caller's role hides `offer.amount`, and is suppressed with "fewer than 5 offers" for a cell built from fewer than 5 accepted offers.
-  4. Offers in other currencies or hourly pay are left out and counted.
-  5. Imported hires without an observed event are not counted.
-  6. The stakeholder home shows the member's part of the plan only with plan access.
+  4. Suppression is complementary: a unit's direct offers form their own cell; a parent's spend is shown only when every child cell (including the direct cell) is shown, and a year's only when every quarter is shown. A test fixture where parent minus children, or year minus quarters, would isolate one offer shows no spend for that parent or year.
+  5. Offers in other currencies or hourly pay are left out and counted.
+  6. Imported hires without an observed event are not counted.
+  7. The stakeholder home shows the member's part of the plan only with plan access.
 - **Test approach:** `tests/plans.test.ts` (new in R2d-12; actuals on the fictional fixture, a one-offer cell, a hidden-amount role), `tests/stakeholder-home.test.tsx` (new in R2c-18); `scripts/live-role-tests.ts` cases: helper denied without plan access; no team's rows readable directly across teams.
 - **Docs:** `docs/user-guide.md`.
 
