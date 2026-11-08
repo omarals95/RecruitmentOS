@@ -104,6 +104,16 @@ export function activeFilterCount(
     filters.archived,
   ].filter(Boolean).length;
 }
+/** Whether a filter tag already holds this value, ignoring case and surrounding spaces. */
+export function hasFilterTag(values: string[], value: string) {
+  const wanted = value.trim().toLowerCase();
+  return values.some((item) => item.trim().toLowerCase() === wanted);
+}
+/** Adds a typed filter value; an empty value or a case variant of an existing tag is ignored. */
+export function addFilterTag(values: string[], draft: string): string[] {
+  const value = draft.trim();
+  return value && !hasFilterTag(values, value) ? [...values, value] : values;
+}
 /** The forced My shortlist and Source review constraints are not user filters. */
 export function isFiltered(
   search: string,

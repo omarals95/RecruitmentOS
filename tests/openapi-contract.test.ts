@@ -480,6 +480,31 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents skill suggestions, case-insensitive skill filters and application labels", () => {
+    const suggestions = document.paths["/api/v1/candidates/suggestions"].get;
+    expect(suggestions["x-required-scopes"]).toEqual(["candidates:read"]);
+    const text = JSON.stringify(suggestions);
+    for (const phrase of [
+      "no query parameters",
+      "invalid_query",
+      "active candidates",
+      "most common spelling",
+      "at most 200",
+      "skills: string[]",
+      "certifications: string[]",
+    ])
+      expect(text).toContain(phrase);
+    const list = JSON.stringify(document.paths["/api/v1/candidates"].get);
+    expect(list).toContain("ignoring case and surrounding spaces");
+    for (const name of ["skills", "certifications"])
+      expect(list).toContain(`"name":"${name}"`);
+    const record = document.components.schemas.RecordDto.properties!;
+    expect(JSON.stringify(record.candidateLabel)).toContain(
+      "Left out without candidates:read",
+    );
+    expect(JSON.stringify(record.vacancyLabel)).toContain("Untitled vacancy");
+  });
+
   it("documents candidate erasure as session-only, owner-only and typed", () => {
     const erasure = document.paths["/api/v1/candidates/{id}/erasure"].post;
     expect(erasure["x-session-only"]).toBe(true);

@@ -52,7 +52,9 @@ import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
 import {
   activeFilterCount,
+  addFilterTag,
   checklistProgress,
+  hasFilterTag,
   dataOf,
   display,
   exportSummary,
@@ -93,6 +95,7 @@ import type { SpeedTab } from "@/domain/speed";
 import { Loading } from "./skeleton";
 import {
   BUCKETS_PATH,
+  CANDIDATE_SUGGESTIONS_PATH,
   defaultListQuery,
   listPath,
   listSearchParams,
@@ -326,6 +329,14 @@ export function RecordsScreen({ section }: { section: string }) {
     resource === "candidates" || resource === "applications"
       ? viewsPath(resource)
       : null,
+  );
+  // Skill and certification suggestions load on the first focus of either input, not with the tab.
+  const [suggesting, setSuggesting] = useState(false);
+  const suggest = useCallback(() => setSuggesting(true), []);
+  const suggestions = useApi<{
+    data: { skills: string[]; certifications: string[] };
+  }>(
+    resource === "candidates" && suggesting ? CANDIDATE_SUGGESTIONS_PATH : null,
   );
   // A changed server-side query invalidates page-local selection and pagination together.
   useEffect(() => {
@@ -829,11 +840,15 @@ export function RecordsScreen({ section }: { section: string }) {
                 label="All of these skills"
                 values={skills}
                 onChange={setSkills}
+                suggestions={suggestions.data?.data.skills ?? []}
+                onFocus={suggest}
               />
               <FilterTags
                 label="All of these certifications"
                 values={certifications}
                 onChange={setCertifications}
+                suggestions={suggestions.data?.data.certifications ?? []}
+                onFocus={suggest}
               />
               <label>
                 Education contains
@@ -1140,15 +1155,15 @@ export function RecordsScreen({ section }: { section: string }) {
                     {resource === "applications" && (
                       <>
                         <td data-label="Candidate">
-                          <ReferenceLabel
-                            resource="candidates"
-                            id={record.candidateId}
+                          <ApplicationReference
+                            record={record}
+                            field="candidate"
                           />
                         </td>
                         <td data-label="Vacancy">
-                          <ReferenceLabel
-                            resource="vacancies"
-                            id={record.vacancyId}
+                          <ApplicationReference
+                            record={record}
+                            field="vacancy"
                           />
                         </td>
                       </>
@@ -1389,16 +1404,29 @@ export function RecordsScreen({ section }: { section: string }) {
 export function Badge({ value }: { value: unknown }) {
   return <span className={`badge ${badgeTone(value)}`}>{display(value)}</span>;
 }
-function FilterTags({
+/**
+ * Filter values as removable tags. With `suggestions`, the input offers them in a native datalist,
+ * leaving out values already chosen; `onFocus` lets the screen load them on first use.
+ */
+export function FilterTags({
   label,
   values,
   onChange,
+  suggestions,
+  onFocus,
 }: {
   label: string;
   values: string[];
   onChange: (values: string[]) => void;
+  suggestions?: string[];
+  onFocus?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  const listId = useId();
+  const add = () => {
+    onChange(addFilterTag(values, draft));
+    setDraft("");
+  };
   return (
     <div className="filter-tags">
       <label>
@@ -1408,26 +1436,31 @@ function FilterTags({
             value={draft}
             placeholder="Add a value"
             aria-label={label}
+            list={suggestions ? listId : undefined}
+            onFocus={onFocus}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                if (draft.trim()) {
-                  onChange([...new Set([...values, draft.trim()])]);
-                  setDraft("");
-                }
+                if (draft.trim()) add();
               }
             }}
           />
+          {suggestions && (
+            <datalist id={listId}>
+              {suggestions
+                .filter((value) => !hasFilterTag(values, value))
+                .map((value) => (
+                  <option key={value} value={value} />
+                ))}
+            </datalist>
+          )}
           <button
             className="icon-button"
             aria-label={`Add ${label.toLowerCase()} filter`}
             type="button"
             disabled={!draft.trim()}
-            onClick={() => {
-              onChange([...new Set([...values, draft.trim()])]);
-              setDraft("");
-            }}
+            onClick={add}
           >
             <Plus size={15} />
           </button>
@@ -1588,7 +1621,7 @@ export function RecordCard({
     </article>
   );
 }
-function Kanban({
+export function Kanban({
   resource,
   records,
   buckets,
@@ -1685,9 +1718,9 @@ function Kanban({
                 >
                   <button className="card-title" onClick={() => onOpen(record)}>
                     {resource === "applications" ? (
-                      <ReferenceLabel
-                        resource="candidates"
-                        id={record.candidateId}
+                      <ApplicationReference
+                        record={record}
+                        field="candidate"
                         plain
                       />
                     ) : (
@@ -1696,9 +1729,9 @@ function Kanban({
                   </button>
                   {resource === "applications" && (
                     <div className="muted">
-                      <ReferenceLabel
-                        resource="vacancies"
-                        id={record.vacancyId}
+                      <ApplicationReference
+                        record={record}
+                        field="vacancy"
                         plain
                       />
                     </div>
@@ -1761,6 +1794,27 @@ function Kanban({
       })}
     </div>
   );
+}
+/**
+ * An application's candidate or vacancy name from the list itself (candidateLabel, vacancyLabel),
+ * so a board or table sends no request per card. A missing label reads as a refused read does.
+ */
+export function ApplicationReference({
+  record,
+  field,
+  plain = false,
+}: {
+  record: RecordDto;
+  field: "candidate" | "vacancy";
+  plain?: boolean;
+}) {
+  const id = field === "candidate" ? record.candidateId : record.vacancyId;
+  const label =
+    field === "candidate" ? record.candidateLabel : record.vacancyLabel;
+  if (!id) return <span className="muted">Not linked</span>;
+  if (!label) return <span>Unavailable record</span>;
+  if (plain || field !== "candidate") return <span>{label}</span>;
+  return <Link href={`/app/candidates/${id}`}>{label}</Link>;
 }
 export function ReferenceLabel({
   resource,

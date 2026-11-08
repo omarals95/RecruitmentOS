@@ -5,7 +5,9 @@ import { activity, idempotency, records } from "@/db/schema";
 import { withTeam } from "@/lib/db-team";
 import {
   bulkApplications,
+  candidateSuggestions,
   createRecord,
+  exportRecords,
   getCandidateState,
   getRecord,
   listRecords,
@@ -17,6 +19,10 @@ import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
 import { roleSnapshot } from "@/components/workspace/helpers";
 import { interviewsOnDay } from "@/components/workspace/calendar";
+import {
+  defaultListQuery,
+  listSearchParams,
+} from "@/components/workspace/tab-requests";
 import {
   createTestDb,
   enforceTestRls,
@@ -31,7 +37,8 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     other: Principal,
     viewer: Principal,
     bucketRace: Principal,
-    rollback: Principal;
+    rollback: Principal,
+    suggesting: Principal;
   beforeAll(async () => {
     fixture = await createTestDb();
     owner = await seedIdentity(fixture.db);
@@ -51,6 +58,10 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     viewer = await seedIdentity(fixture.db, {
       userId: "test-viewer",
       role: "viewer",
+    });
+    suggesting = await seedIdentity(fixture.db, {
+      userId: "suggestion-owner",
+      teamId: "suggestion-team",
     });
     await fixture.client
       .exec(`CREATE FUNCTION app.records_test_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -794,6 +805,216 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       await expect(
         listRecords(owner, "tasks", new URLSearchParams({ [key]: value })),
       ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+  });
+
+  it("matches skills and certifications ignoring case and surrounding spaces, all of them", async () => {
+    const tag = randomUUID().slice(0, 8);
+    const make = (name: string, data: Record<string, unknown>) =>
+      createRecord(owner, "candidates", {
+        data: { name: `Fictional Case ${tag} ${name}`, ...data },
+      });
+    const first = await make("First", {
+      skills: ["React", "TypeScript"],
+      certifications: ["Fictional PMP", "Fictional CPA"],
+    });
+    const second = await make("Second", {
+      skills: [" react "],
+      certifications: [" fictional pmp "],
+    });
+    const third = await make("Third", {
+      skills: ["REACT", "Go"],
+      certifications: ["FICTIONAL PMP", "Fictional ACCA"],
+    });
+    const none = await make("None", {});
+    const broken = await make("Broken", {});
+    // Trimmed on write; the case is kept as typed.
+    expect(second.data).toMatchObject({
+      skills: ["react"],
+      certifications: ["fictional pmp"],
+    });
+    // A non-array value written below the service must neither match nor break the query.
+    await withTeam(owner, (tx) =>
+      tx
+        .update(records)
+        .set({
+          data: sql`${records.data} || '{"skills":"React","certifications":{"name":"Fictional PMP"}}'::jsonb`,
+        })
+        .where(eq(records.id, broken.id)),
+    );
+    const query = (filters: Record<string, string>) =>
+      new URLSearchParams({
+        search: `"Fictional Case ${tag}"`,
+        pageSize: "100",
+        ...filters,
+      });
+    const ids = async (filters: Record<string, string>) =>
+      (await listRecords(owner, "candidates", query(filters))).data
+        .map((row) => row.id)
+        .sort();
+    const three = [first.id, second.id, third.id].sort();
+    for (const value of ["react", "REACT ", "React"])
+      expect(await ids({ skills: JSON.stringify([value]) }), value).toEqual(
+        three,
+      );
+    expect(
+      await ids({ skills: JSON.stringify(["react", "typescript"]) }),
+    ).toEqual([first.id]);
+    for (const value of ["fictional pmp", "FICTIONAL PMP ", "Fictional PMP"])
+      expect(
+        await ids({ certifications: JSON.stringify([value]) }),
+        value,
+      ).toEqual(three);
+    expect(
+      await ids({
+        certifications: JSON.stringify(["fictional pmp", "FICTIONAL CPA"]),
+      }),
+    ).toEqual([first.id]);
+    expect(
+      await ids({
+        skills: JSON.stringify(["react"]),
+        certifications: JSON.stringify(["fictional acca"]),
+      }),
+    ).toEqual([third.id]);
+    for (const key of ["skills", "certifications"]) {
+      const all = await ids({ [key]: JSON.stringify(["Fictional nowhere"]) });
+      expect(all).toEqual([]);
+      expect(await ids({ [key]: JSON.stringify(["react", "pmp"]) })).toEqual(
+        [],
+      );
+    }
+    expect(await ids({})).toContain(none.id);
+    expect(await ids({})).toContain(broken.id);
+    // Empty values are still refused, and the bounds and error codes are unchanged.
+    for (const invalid of [
+      JSON.stringify(["  "]),
+      JSON.stringify(Array.from({ length: 101 }, (_, i) => `Skill ${i}`)),
+      JSON.stringify(["x".repeat(201)]),
+    ])
+      await expect(
+        listRecords(owner, "candidates", query({ skills: invalid })),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
+    await expect(
+      listRecords(owner, "candidates", query({ certifications: "react" })),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    // Folder categories keep their exact "any of" match.
+    await make("Category", { folderCategories: ["Fictional Ops"] });
+    expect(
+      await ids({ categories: JSON.stringify(["fictional ops"]) }),
+    ).toEqual([]);
+
+    // A saved view stored in any case lists the same candidates, applied as the screen applies it.
+    const view = await createRecord(owner, "views", {
+      data: {
+        name: `Fictional case view ${tag}`,
+        area: "directory",
+        query: {
+          search: `"Fictional Case ${tag}"`,
+          skills: ["react"],
+          certifications: ["FICTIONAL pmp"],
+        },
+      },
+    });
+    const stored = (await getRecord(owner, "views", view.id)).data as {
+      query: Record<string, unknown>;
+    };
+    expect(stored.query).toMatchObject({
+      skills: ["react"],
+      certifications: ["FICTIONAL pmp"],
+    });
+    const params = listSearchParams("candidates", {
+      ...defaultListQuery("candidates"),
+      search: String(stored.query.search),
+      skills: (stored.query.skills as unknown[]).map(String),
+      certifications: (stored.query.certifications as unknown[]).map(String),
+      pageSize: 100,
+    });
+    expect(
+      (await listRecords(owner, "candidates", params)).data
+        .map((row) => row.id)
+        .sort(),
+    ).toEqual(three);
+
+    // The export shares the filter and names only the filter keys in its audit row.
+    const exported = await exportRecords(
+      owner,
+      "candidates",
+      new URLSearchParams({
+        search: `"Fictional Case ${tag}"`,
+        skills: JSON.stringify(["react"]),
+      }),
+    );
+    expect(exported.rows.map((row) => row.id).sort()).toEqual(three);
+    const [audit] = await withTeam(owner, (tx) =>
+      tx
+        .select({ metadata: activity.metadata })
+        .from(activity)
+        .where(
+          and(eq(activity.teamId, owner.teamId), eq(activity.kind, "export")),
+        )
+        .orderBy(sql`${activity.createdAt} desc`)
+        .limit(1),
+    );
+    expect(audit.metadata).toEqual({
+      resource: "candidates",
+      rows: 3,
+      filters: ["search", "skills"],
+    });
+  });
+
+  it("suggests the team's skills and certifications, one entry per case variant", async () => {
+    const make = (data: Record<string, unknown>, p = suggesting) =>
+      createRecord(p, "candidates", {
+        data: { name: "Fictional Suggestion Person", ...data },
+      });
+    await make({ skills: ["React", "TypeScript"], certifications: ["PMP"] });
+    await make({ skills: [" react "], certifications: ["pmp"] });
+    await make({ skills: ["REACT", "Go"], certifications: ["Pmp"] });
+    await make({ skills: ["React"], certifications: ["Fictional CIPD"] });
+    const archived = await make({
+      skills: ["Fictional archived skill"],
+      certifications: ["Fictional archived certificate"],
+    });
+    await updateRecord(suggesting, "candidates", archived.id, {
+      version: archived.version,
+      archived: true,
+    });
+    await make({ skills: ["Fictional other team skill"] }, other);
+    const first = await candidateSuggestions(suggesting, new URLSearchParams());
+    // Most candidates first, then alphabetically; "React" is the most common spelling.
+    expect(first).toEqual({
+      skills: ["React", "Go", "TypeScript"],
+      certifications: ["PMP", "Fictional CIPD"],
+    });
+    // Each list stops at 200 entries.
+    for (let start = 0; start < 300; start += 100)
+      await make({
+        skills: Array.from(
+          { length: 100 },
+          (_, i) => `Fictional skill ${String(start + i).padStart(3, "0")}`,
+        ),
+      });
+    const capped = await candidateSuggestions(
+      suggesting,
+      new URLSearchParams(),
+    );
+    // React (4 candidates) first; the one-candidate values follow alphabetically, so Go and
+    // TypeScript fall after the 200th entry.
+    expect(capped.skills).toHaveLength(200);
+    expect(capped.skills[0]).toBe("React");
+    expect(capped.skills[1]).toBe("Fictional skill 000");
+    expect(capped.skills[199]).toBe("Fictional skill 198");
+    expect(capped.skills).not.toContain("Fictional archived skill");
+    expect(capped.skills).not.toContain("Fictional other team skill");
+    expect(capped.certifications).toEqual(["PMP", "Fictional CIPD"]);
+    await expect(
+      candidateSuggestions(
+        { ...suggesting, scopes: ["recruitment:read"] },
+        new URLSearchParams(),
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      candidateSuggestions(suggesting, new URLSearchParams({ field: "x" })),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
   });
 
   it("validates every bulk parent before writing and skips active duplicate pairs", async () => {
@@ -1551,6 +1772,10 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     });
     expect(app.label).toContain("FictionalUniqueLinkPerson");
     expect(app.label).toContain("FictionalUniqueLinkVacancy");
+    expect(app).toMatchObject({
+      candidateLabel: "FictionalUniqueLinkPerson",
+      vacancyLabel: "FictionalUniqueLinkVacancy",
+    });
     expect(
       (
         await listRecords(
@@ -1564,9 +1789,10 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       ...owner,
       scopes: ["recruitment:read"] as Principal["scopes"],
     };
-    expect(
-      (await getRecord(token, "applications", app.id)).label,
-    ).not.toContain("FictionalUniqueLinkPerson");
+    const limited = await getRecord(token, "applications", app.id);
+    expect(limited.label).not.toContain("FictionalUniqueLinkPerson");
+    expect(limited).not.toHaveProperty("candidateLabel");
+    expect(limited.vacancyLabel).toBe("FictionalUniqueLinkVacancy");
     expect(
       (
         await listRecords(
@@ -1590,6 +1816,23 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       data: {},
     });
     expect(start.label).toContain("FictionalUniqueLinkPerson");
+    // The list carries the same labels; an archived parent says so.
+    await updateRecord(owner, "vacancies", job.id, {
+      version: job.version,
+      archived: true,
+    });
+    const [listed] = (
+      await listRecords(
+        owner,
+        "applications",
+        new URLSearchParams({ candidateId: person.id }),
+      )
+    ).data;
+    expect(listed).toMatchObject({
+      id: app.id,
+      candidateLabel: "FictionalUniqueLinkPerson",
+      vacancyLabel: "FictionalUniqueLinkVacancy (archived)",
+    });
   });
 
   it("supports bounded saved-view tag and review filters while protecting source provenance", async () => {
