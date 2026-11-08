@@ -58,6 +58,8 @@ const metadata = (sizeBytes = 1000) => ({
   clientUploadId: randomUUID(),
 });
 const off = { maxBytes: null, maxFiles: null, uploadRequestsPerMinute: null };
+/** The CV contents setting, sent with every save; on unless a test turns it off. */
+const cvText = { mcpCvTextEnabled: true };
 
 describe("team CV storage settings and upload rate limit", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -190,6 +192,7 @@ describe("team CV storage settings and upload rate limit", () => {
       body: {
         data: {
           ...off,
+          ...cvText,
           usage: {
             usedBytes: 0,
             usedFiles: 0,
@@ -210,17 +213,19 @@ describe("team CV storage settings and upload rate limit", () => {
       maxFiles: 100,
       uploadRequestsPerMinute: 30,
     };
-    const set = await settings("PUT", owner, limit);
+    const set = await settings("PUT", owner, { ...limit, ...cvText });
     expect(set.status).toBe(200);
     expect(set.body.data).toMatchObject(limit);
     expect((await settings("GET", admin)).body.data).toMatchObject(limit);
     // An unchanged PUT writes no row.
-    expect((await settings("PUT", admin, limit)).status).toBe(200);
-    const changed = { ...limit, maxBytes: 1_500_000_000 };
-    expect((await settings("PUT", admin, changed)).body.data).toMatchObject(
-      changed,
+    expect((await settings("PUT", admin, { ...limit, ...cvText })).status).toBe(
+      200,
     );
-    const cleared = await settings("PUT", admin, off);
+    const changed = { ...limit, maxBytes: 1_500_000_000 };
+    expect(
+      (await settings("PUT", admin, { ...changed, ...cvText })).body.data,
+    ).toMatchObject(changed);
+    const cleared = await settings("PUT", admin, { ...off, ...cvText });
     expect(cleared.status).toBe(200);
     expect(cleared.body.data).toMatchObject(off);
     const rows = (await auditRows(owner.teamId)).slice(before);
@@ -247,8 +252,98 @@ describe("team CV storage settings and upload rate limit", () => {
         metadata: { before: changed, after: off },
       },
     ]);
-    expect((await settings("PUT", owner, off)).status).toBe(200);
+    expect((await settings("PUT", owner, { ...off, ...cvText })).status).toBe(
+      200,
+    );
     expect(await auditRows(owner.teamId)).toHaveLength(before + 3);
+  });
+
+  it("turns connected AI apps' CV text access off and on, auditing each change only", async () => {
+    expect((await settings("GET", fresh)).body.data.mcpCvTextEnabled).toBe(
+      true,
+    );
+    const before = (await auditRows(owner.teamId)).length;
+    const turnedOff = await settings("PUT", owner, {
+      ...off,
+      mcpCvTextEnabled: false,
+    });
+    expect(turnedOff.status).toBe(200);
+    expect(turnedOff.body.data.mcpCvTextEnabled).toBe(false);
+    expect((await settings("GET", admin)).body.data.mcpCvTextEnabled).toBe(
+      false,
+    );
+    // Unchanged: no row from either helper.
+    expect(
+      (await settings("PUT", admin, { ...off, mcpCvTextEnabled: false }))
+        .status,
+    ).toBe(200);
+    // Only the limits change: one row, from the limits helper.
+    const limit = {
+      maxBytes: 3_000_000,
+      maxFiles: 3,
+      uploadRequestsPerMinute: null,
+    };
+    expect(
+      (await settings("PUT", admin, { ...limit, mcpCvTextEnabled: false }))
+        .status,
+    ).toBe(200);
+    // Both change in one save: one row each, in the same transaction.
+    expect(
+      (await settings("PUT", admin, { ...off, ...cvText })).body.data,
+    ).toMatchObject({ ...off, ...cvText });
+    for (const p of [recruiter, viewer]) {
+      const refused = await settings("PUT", p, {
+        ...off,
+        mcpCvTextEnabled: false,
+      });
+      expect(refused.status, p.role).toBe(403);
+      expect(refused.body.error.code).toBe("storage_settings_forbidden");
+    }
+    const setting = {
+      actor_type: "session",
+      action: "storage.settings_updated",
+      summary: "Changed whether connected AI apps can read CV contents",
+    };
+    const limits = {
+      actor_type: "session",
+      action: "storage.settings_updated",
+      summary: "Updated CV storage settings",
+    };
+    const rows = (await auditRows(owner.teamId)).slice(before);
+    expect(rows.slice(0, 2)).toEqual([
+      {
+        ...setting,
+        actor_id: owner.userId,
+        metadata: {
+          before: { mcpCvTextEnabled: true },
+          after: { mcpCvTextEnabled: false },
+        },
+      },
+      {
+        ...limits,
+        actor_id: admin.userId,
+        metadata: { before: off, after: limit },
+      },
+    ]);
+    // Written in one transaction, so they share a time and come in either order.
+    expect(rows.slice(2)).toHaveLength(2);
+    expect(rows.slice(2)).toEqual(
+      expect.arrayContaining([
+        {
+          ...limits,
+          actor_id: admin.userId,
+          metadata: { before: limit, after: off },
+        },
+        {
+          ...setting,
+          actor_id: admin.userId,
+          metadata: {
+            before: { mcpCvTextEnabled: false },
+            after: { mcpCvTextEnabled: true },
+          },
+        },
+      ]),
+    );
   });
 
   it("refuses recruiters, viewers and Bearer tokens", async () => {
@@ -260,7 +355,7 @@ describe("team CV storage settings and upload rate limit", () => {
     for (const p of [recruiter, viewer]) {
       for (const [method, body] of [
         ["GET", undefined],
-        ["PUT", limit],
+        ["PUT", { ...limit, ...cvText }],
       ] as const) {
         const refused = await settings(method, p, body);
         expect(refused.status, `${p.role} ${method}`).toBe(403);
@@ -275,7 +370,7 @@ describe("team CV storage settings and upload rate limit", () => {
       const token = await settings(
         method,
         owner,
-        method === "PUT" ? limit : undefined,
+        method === "PUT" ? { ...limit, ...cvText } : undefined,
         {
           authorization: "Bearer fictional-storage-token",
         },
@@ -292,7 +387,9 @@ describe("team CV storage settings and upload rate limit", () => {
       maxBytes: 2_000_000,
       maxFiles: 2,
       uploadRequestsPerMinute: 10,
+      ...cvText,
     };
+    const { mcpCvTextEnabled: _setting, ...withoutSetting } = valid;
     for (const body of [
       { ...valid, maxFiles: null },
       { ...valid, maxBytes: null },
@@ -305,6 +402,9 @@ describe("team CV storage settings and upload rate limit", () => {
       { ...valid, uploadRequestsPerMinute: 601 },
       { ...valid, unexpected: true },
       { maxBytes: null, maxFiles: null },
+      withoutSetting,
+      { ...valid, mcpCvTextEnabled: null },
+      { ...valid, mcpCvTextEnabled: "false" },
     ]) {
       const refused = await settings("PUT", owner, body);
       expect(refused.status, JSON.stringify(body)).toBe(400);
@@ -317,7 +417,9 @@ describe("team CV storage settings and upload rate limit", () => {
       { ...valid, uploadRequestsPerMinute: 1 },
     ])
       expect((await settings("PUT", owner, body)).status).toBe(200);
-    expect((await settings("PUT", owner, off)).status).toBe(200);
+    expect((await settings("PUT", owner, { ...off, ...cvText })).status).toBe(
+      200,
+    );
     expect(await auditRows(owner.teamId)).toHaveLength(before + 5);
   });
 
@@ -357,6 +459,7 @@ describe("team CV storage settings and upload rate limit", () => {
       maxBytes: 1_000_000,
       maxFiles: 1,
       uploadRequestsPerMinute: null,
+      ...cvText,
     });
     expect(below.status).toBe(200);
     expect(below.body.data).toMatchObject({
@@ -385,7 +488,9 @@ describe("team CV storage settings and upload rate limit", () => {
       usedBytes: 2000,
     });
     // Turning the limit off lets the store budget decide again.
-    expect((await settings("PUT", quota, off)).status).toBe(200);
+    expect((await settings("PUT", quota, { ...off, ...cvText })).status).toBe(
+      200,
+    );
     expect(
       (await beginCvUpload(quota, candidate, metadata(), fake.gateway)).data
         .status,
@@ -412,6 +517,7 @@ describe("team CV storage settings and upload rate limit", () => {
           maxBytes: null,
           maxFiles: null,
           uploadRequestsPerMinute: 2,
+          ...cvText,
         })
       ).status,
     ).toBe(200);
@@ -467,7 +573,9 @@ describe("team CV storage settings and upload rate limit", () => {
       [rate.teamId],
     );
     expect((await reserve(token, candidate, metadata())).status).toBe(201);
-    expect((await settings("PUT", rate, off)).status).toBe(200);
+    expect((await settings("PUT", rate, { ...off, ...cvText })).status).toBe(
+      200,
+    );
   });
 
   describe("storage helpers under the restricted runtime role", () => {
@@ -527,6 +635,48 @@ describe("team CV storage settings and upload rate limit", () => {
       expect(await auditRows(owner.teamId)).toHaveLength(before + 1);
       expect(await limits(owner, null, null, null)).toBe(true);
       expect(await auditRows(owner.teamId)).toHaveLength(before + 2);
+    });
+
+    it("runs set_mcp_cv_text_access only for owner and admin sessions, with a value, and audits only changes", async () => {
+      const access = (p: Principal, enabled: boolean | null) =>
+        withTeam(p, async (tx) => {
+          const { rows } = await tx.execute<{ changed: boolean }>(
+            sql`select tenant_context.set_mcp_cv_text_access(${enabled}::boolean) as changed`,
+          );
+          return rows[0].changed;
+        });
+      for (const p of [
+        recruiter,
+        viewer,
+        await seedApiToken(fixture.db, owner),
+      ])
+        await expect(access(p, false), p.authType).rejects.toMatchObject(
+          code("42501"),
+        );
+      await expect(
+        fixture.client.query(
+          "SELECT tenant_context.set_mcp_cv_text_access(false)",
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(access(owner, null)).rejects.toMatchObject(code("22023"));
+      const before = (await auditRows(owner.teamId)).length;
+      expect(await access(admin, true)).toBe(false);
+      expect(await auditRows(owner.teamId)).toHaveLength(before);
+      expect(await access(admin, false)).toBe(true);
+      expect(await access(owner, true)).toBe(true);
+      expect(await auditRows(owner.teamId)).toHaveLength(before + 2);
+      // A team without a storage row gets one, set as asked.
+      const team = await seedIdentity(fixture.db, {
+        userId: "storage-cvtext-owner",
+        teamId: "storage-cvtext-team",
+      });
+      expect(await access(team, false)).toBe(true);
+      expect(
+        await asOwner(
+          "SELECT mcp_cv_text_enabled FROM app.storage_usage WHERE team_id=$1",
+          [team.teamId],
+        ),
+      ).toEqual([{ mcp_cv_text_enabled: false }]);
     });
 
     it("refuses direct blob_deleted_at writes and storage-settings audit rows from the runtime role", async () => {

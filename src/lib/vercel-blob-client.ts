@@ -1,4 +1,5 @@
 import {
+  BlobError,
   BlobNotFoundError,
   del,
   get,
@@ -6,6 +7,7 @@ import {
   issueSignedToken,
   list,
   presignUrl,
+  put,
 } from "@vercel/blob";
 import type { BlobClient } from "./blob-storage.ts";
 import { StorageConfigurationError } from "./storage.ts";
@@ -128,6 +130,27 @@ export function createVercelBlobClient(
         mimeType: result.contentType,
         uploadedAt: result.uploadedAt,
       };
+    },
+    async put(pathname, bytes, { contentType, signal }) {
+      let result;
+      try {
+        result = await put(pathname, bytes, {
+          access: "private",
+          addRandomSuffix: false,
+          allowOverwrite: false,
+          contentType,
+          abortSignal: signal,
+          ...credentials(),
+        });
+      } catch (error) {
+        // A no-overwrite refusal: the object is already there, for example from a lost response.
+        if (error instanceof BlobError && /already exists/i.test(error.message))
+          return "exists";
+        throw error;
+      }
+      if (result.pathname !== pathname)
+        throw new Error("Private Blob upload response was not usable.");
+      return "stored";
     },
     async delete(pathname, { signal }) {
       try {

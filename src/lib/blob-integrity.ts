@@ -131,6 +131,45 @@ export async function readBlobSnapshot(
   return { bytes, sha256 };
 }
 
+function assertDigest(expectedSha256: string): void {
+  if (
+    typeof expectedSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(expectedSha256)
+  )
+    throw new CvValidationError("Invalid stored document digest.");
+}
+function assertMatches(sha256: string, expectedSha256: string): void {
+  if (
+    !timingSafeEqual(
+      Buffer.from(sha256, "hex"),
+      Buffer.from(expectedSha256, "hex"),
+    )
+  )
+    throw new CvValidationError("Stored document integrity check failed.");
+}
+
+/** The whole object, released only when it matches its stored digest. */
+export async function readVerifiedBlob(
+  stream: AsyncIterable<Uint8Array>,
+  expectedSize: number,
+  expectedSha256: string,
+  options?: BlobReadOptions,
+): Promise<Buffer> {
+  try {
+    assertDigest(expectedSha256);
+    const { bytes, sha256 } = await readBlobSnapshot(
+      stream,
+      expectedSize,
+      options,
+    );
+    assertMatches(sha256, expectedSha256);
+    return bytes;
+  } catch (error) {
+    options?.controller?.abort();
+    throw error;
+  }
+}
+
 /**
  * Never release a byte until the entire retrieved object matches its stored digest.
  * The whole object is stream-hashed; only the requested slice is retained.
@@ -145,11 +184,7 @@ export async function readVerifiedBlobSlice(
 ): Promise<Buffer> {
   try {
     assertExpectedSize(expectedSize);
-    if (
-      typeof expectedSha256 !== "string" ||
-      !/^[0-9a-f]{64}$/.test(expectedSha256)
-    )
-      throw new CvValidationError("Invalid stored document digest.");
+    assertDigest(expectedSha256);
     if (
       !Number.isSafeInteger(offset) ||
       !Number.isSafeInteger(length) ||
@@ -174,13 +209,7 @@ export async function readVerifiedBlobSlice(
           slice.set(part.subarray(from - at, to - at), from - offset);
       },
     );
-    if (
-      !timingSafeEqual(
-        Buffer.from(sha256, "hex"),
-        Buffer.from(expectedSha256, "hex"),
-      )
-    )
-      throw new CvValidationError("Stored document integrity check failed.");
+    assertMatches(sha256, expectedSha256);
     return slice;
   } catch (error) {
     options?.controller?.abort();

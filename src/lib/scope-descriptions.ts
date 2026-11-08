@@ -18,9 +18,11 @@ export const mcpScopeDescriptions: Record<McpScope, string> = {
     "Search candidates, read their stated facts and evidence summaries, check possible duplicates, and read your own shortlist, follow-up status and private notes",
   "recruitment:read":
     "Read job roles, vacancies, applications, interviews, offers, onboarding, tasks, comments, record history, dashboard numbers, and your own reminders and saved views",
-  "cvs:read": "See CV file names, types and sizes, but not CV contents",
+  "cvs:read":
+    "Read the text of your team's CVs, which shares CV contents with this app, and see CV file names, types and sizes (also needs candidate access)",
   "candidates:write":
     "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
   "recruitment:write":
     "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
+  "cvs:write": "Upload CVs and start bulk imports",
 };

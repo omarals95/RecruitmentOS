@@ -337,10 +337,13 @@ describe("split runtime role template", () => {
       expect([...evidence.execute].sort(), kind).toEqual(
         [...expected.helpers].sort(),
       );
-      // Only the data role may run the cross-team bulk intake purge and the erasure helper.
+      // Only the data role may run the cross-team bulk intake purge, the erasure helper and the
+      // two MCP CV helpers (0026).
       for (const helper of [
         "tenant_context.purge_bulk_intake(uuid)",
         "tenant_context.erase_candidate(uuid,text,text)",
+        "tenant_context.set_mcp_cv_text_access(boolean)",
+        "tenant_context.audit_mcp_cv_read(text,uuid)",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
           kind === "data",
@@ -502,6 +505,8 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.claim_blob_reconciliation('store_fictional0001')",
       "SELECT tenant_context.purge_bulk_intake(NULL)",
       "SELECT tenant_context.erase_candidate(gen_random_uuid(), 'Fictional', 'app')",
+      "SELECT tenant_context.set_mcp_cv_text_access(false)",
+      "SELECT tenant_context.audit_mcp_cv_read('get_cv_text', gen_random_uuid())",
       "SELECT * FROM app.candidate_erasures",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",

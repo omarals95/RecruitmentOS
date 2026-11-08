@@ -9,13 +9,17 @@ export const SCOPES = [
   "imports:write",
 ] as const;
 export type Scope = (typeof SCOPES)[number];
-/** Scopes an OAuth client may request for the MCP endpoint; CV uploads and imports are never offered. */
+/**
+ * Scopes an OAuth client may request for the MCP endpoint. cvs:read shares CV contents and cvs:write
+ * uploads CVs; legacy imports (imports:write) are never offered.
+ */
 export const MCP_SCOPES = [
   "candidates:read",
   "recruitment:read",
   "cvs:read",
   "candidates:write",
   "recruitment:write",
+  "cvs:write",
 ] as const satisfies readonly Scope[];
 export type McpScope = (typeof MCP_SCOPES)[number];
 export type Role = "owner" | "admin" | "recruiter" | "viewer";

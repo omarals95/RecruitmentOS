@@ -180,6 +180,16 @@ function useWholePipeline(query: string | null) {
   );
 }
 
+/**
+ * The address without the import link parameter, so a reload or a shared address does not open
+ * Import CVs again.
+ */
+export function withoutImportLink(href: string): string {
+  const url = new URL(href);
+  url.searchParams.delete("import");
+  return url.toString();
+}
+
 export function RecordsScreen({ section }: { section: string }) {
   const searchParams = useSearchParams();
   const linkedRecord = searchParams.get("record");
@@ -230,7 +240,11 @@ export function RecordsScreen({ section }: { section: string }) {
   } | null>(null);
   const [detail, setDetail] = useState<RecordDto | null>(null);
   const [bulk, setBulk] = useState(false);
-  const [bulkCv, setBulkCv] = useState(false);
+  // open_bulk_import_page links to /app/candidates?import=cvs: it opens Import CVs once for a
+  // member who could open it with the button; everyone else sees the page as usual.
+  const importLink =
+    resource === "candidates" && searchParams.get("import") === "cvs";
+  const [bulkCv, setBulkCv] = useState(() => importLink && canWrite);
   const [settings, setSettings] = useState(false);
   const [saveView, setSaveView] = useState(false);
   const [notice, setNotice] = useState("");
@@ -355,6 +369,14 @@ export function RecordsScreen({ section }: { section: string }) {
       active = false;
     };
   }, [team, resource, linkedRecord]);
+  useEffect(() => {
+    if (importLink)
+      window.history.replaceState(
+        window.history.state,
+        "",
+        withoutImportLink(window.location.href),
+      );
+  }, [importLink]);
   // A background revalidation: the current records stay on screen while it runs.
   const refresh = () => {
     result.refresh();

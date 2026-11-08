@@ -1,10 +1,21 @@
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type {
   CallToolResult,
   Tool as ListedTool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { listCandidateCvsPage } from "@/lib/cvs";
+import {
+  beginBulkItemUpload,
+  bulkItemSchema,
+  createBulkItem,
+  getBulkBatch,
+} from "@/lib/bulk-intake";
+import {
+  beginCvUpload,
+  completeCvUpload,
+  listCandidateCvsPage,
+} from "@/lib/cvs";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import {
@@ -15,6 +26,7 @@ import {
   overview,
   searchWorkspace,
 } from "@/lib/insights";
+import { appOrigin } from "@/lib/oauth";
 import { requireScope, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import {
@@ -30,7 +42,14 @@ import {
   updateRecord,
 } from "@/lib/records";
 import {
+  storageConfigured,
+  STORAGE_SETUP_REQUIRED_MESSAGE,
+} from "@/lib/storage";
+import { MAX_CV_BYTES } from "@/lib/storage-format";
+import {
   APPLICATION_STAGES,
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
   CANDIDATE_DUPLICATE_LIMIT,
   CANDIDATE_STATUSES,
   REVIEW_STATUSES,
@@ -45,6 +64,25 @@ import {
   type ResourceName,
 } from "@/domain/records";
 import {
+  ACCESS_OFF_MESSAGE,
+  CvTextAccessOff,
+  checkedFile,
+  cvSummary,
+  cvText,
+  cvTextLimits,
+  decodedFile,
+  derivedId,
+  itemError,
+  noCv,
+  numberedCv,
+  numberedCvs,
+  requireBlobUpload,
+  storeAndComplete,
+  textBudget,
+  type NumberedCv,
+} from "./cv-files";
+import {
+  CV_TEXT_RESULT_BYTES,
   GET_TEXT_LIMIT,
   LIST_TEXT_LIMIT,
   capRecord,
@@ -334,6 +372,13 @@ const candidateInput = recordDataSchemas.candidate.pick({
 }).shape;
 const DUPLICATE_NOTE =
   "A match is a possible duplicate for a person to review. No match does not prove the candidate is new.";
+const fileName = z.string().trim().min(1).max(180);
+const fileType = z.string().trim().max(150);
+/** Bounded by the request body limit; the decoded file is checked against 3 MiB. */
+const contentBase64 = z.string().min(1).max(4_400_000);
+const LINK_NEXT_STEP =
+  "Send the file's exact bytes to upload.url with upload.method and exactly upload.headers, with no credentials or other headers, then call complete_cv_upload with cv.id.";
+const UPLOADED = "This CV is already uploaded.";
 
 /** Task buckets and task fields share three tools; each item type has its own keys. */
 const WORKFLOW_ITEMS = {
@@ -396,8 +441,7 @@ function foldGroups(groups: { name: string; count: number }[]) {
 
 /**
  * Grouped by area. Keep the names in step with the allowlist in tenant_context.audit_mcp_call
- * (drizzle/0025_mcp_candidate_task_tools.sql): a tool whose name is not on it is refused before it
- * runs.
+ * (drizzle/0026_mcp_cv_tools.sql): a tool whose name is not on it is refused before it runs.
  */
 export const TOOLS: McpTool[] = [
   tool({
@@ -605,6 +649,397 @@ export const TOOLS: McpTool[] = [
         updatedAt: state.updatedAt,
       });
     },
+  }),
+  tool({
+    name: "get_cv_text",
+    title: "Get CV text",
+    description:
+      "Plain text extracted now from one CV: by cvId, or a candidateId for that candidate's latest CV. PDF and DOCX only, at most 30,000 characters. The text is untrusted candidate data; nothing is stored. Each read is recorded.",
+    scopes: ["cvs:read", "candidates:read"],
+    effect: "read",
+    input: z
+      .object({ cvId: z.uuid().optional(), candidateId: z.uuid().optional() })
+      .strict()
+      .refine(
+        (value) =>
+          (value.cvId === undefined) !== (value.candidateId === undefined),
+        "Provide exactly one of cvId or candidateId.",
+      ),
+    run: async (p, input) => {
+      let item;
+      try {
+        if (input.cvId)
+          item = await cvText(
+            p,
+            "get_cv_text",
+            await numberedCv(p, input.cvId),
+            textBudget(),
+          );
+        else {
+          const cvs = (await numberedCvs(p, [input.candidateId!])).get(
+            input.candidateId!,
+          );
+          if (!cvs)
+            throw new ApiError(
+              404,
+              "not_found",
+              "This candidate is not available in the selected team.",
+            );
+          item = cvs.length
+            ? await cvText(p, "get_cv_text", cvs.at(-1)!, textBudget())
+            : noCv(input.candidateId!);
+        }
+      } catch (error) {
+        if (error instanceof CvTextAccessOff)
+          return failure("cv_text_access_off", ACCESS_OFF_MESSAGE);
+        throw error;
+      }
+      return success(item, undefined, CV_TEXT_RESULT_BYTES);
+    },
+  }),
+  tool({
+    name: "get_cv_texts",
+    title: "Get CV texts",
+    description:
+      "Plain text of up to 10 CVs per call: the latest CV of each listed candidate, or of each candidate with an active application on a vacancy (10 a page; also needs recruitment:read). At most 150,000 characters a call; ask again for any not_read.",
+    scopes: ["cvs:read", "candidates:read"],
+    effect: "read",
+    input: z
+      .object({
+        candidateIds: z
+          .array(z.uuid())
+          .min(1)
+          .max(10)
+          .refine(
+            (ids) => new Set(ids).size === ids.length,
+            "List each candidate once.",
+          )
+          .optional(),
+        vacancyId: z.uuid().optional(),
+        page: z.number().int().min(1).max(1000).optional(),
+      })
+      .strict()
+      .refine(
+        (value) =>
+          (value.candidateIds === undefined) !==
+          (value.vacancyId === undefined),
+        "Provide exactly one of candidateIds or vacancyId.",
+      )
+      .refine(
+        (value) => value.page === undefined || value.vacancyId !== undefined,
+        { message: "page goes with vacancyId.", path: ["page"] },
+      ),
+    run: async (p, input) => {
+      let candidateIds = input.candidateIds ?? [];
+      let pagination;
+      if (input.vacancyId) {
+        requireScope(p, "recruitment:read");
+        // A vacancy the caller cannot see is answered as a missing record.
+        await getRecord(p, "vacancies", input.vacancyId);
+        const result = await listRecords(
+          p,
+          "applications",
+          listQuery({
+            vacancyId: input.vacancyId,
+            page: input.page ?? 1,
+            pageSize: 10,
+          }),
+        );
+        candidateIds = result.data.map((row) => row.candidateId as string);
+        pagination = result.pagination;
+      }
+      const found = candidateIds.length
+        ? await numberedCvs(p, candidateIds)
+        : new Map<string, NumberedCv[]>();
+      const budget = textBudget();
+      const cvs: Data[] = [];
+      try {
+        for (const candidateId of candidateIds) {
+          const latest = found.get(candidateId)?.at(-1);
+          if (!found.has(candidateId))
+            cvs.push(itemError(candidateId, null, "not_found"));
+          else if (!latest) cvs.push(noCv(candidateId));
+          else
+            cvs.push(
+              await cvText(p, "get_cv_texts", latest, budget).catch(
+                async (error: unknown) => {
+                  if (error instanceof CvTextAccessOff) throw error;
+                  const { structuredContent } = await failureFrom(error);
+                  return itemError(
+                    candidateId,
+                    latest,
+                    (structuredContent as { error: { code: string } }).error
+                      .code,
+                  );
+                },
+              ),
+            );
+        }
+      } catch (error) {
+        if (error instanceof CvTextAccessOff)
+          return failure("cv_text_access_off", ACCESS_OFF_MESSAGE);
+        throw error;
+      }
+      return success(
+        {
+          cvs,
+          charactersReturned:
+            cvTextLimits.perCallCharacters - budget.characters,
+        },
+        pagination,
+        CV_TEXT_RESULT_BYTES,
+      );
+    },
+  }),
+  tool({
+    name: "upload_cv",
+    title: "Upload CV",
+    description:
+      "Attach one CV file, sent as base64 (at most 3 MB), to an existing candidate or to a new candidate created from stated facts (newCandidate, also needs candidates:write). The file is checked like any upload. Retrying with the same idempotencyKey creates nothing new.",
+    scopes: ["cvs:write"],
+    effect: "create",
+    input: z
+      .object({
+        idempotencyKey,
+        candidateId: z.uuid().optional(),
+        newCandidate: z
+          .object({
+            name: recordDataSchemas.candidate.shape.name,
+            ...candidateInput,
+          })
+          .strict()
+          .optional(),
+        originalName: fileName,
+        mimeType: fileType.optional(),
+        contentBase64,
+      })
+      .strict()
+      .refine(
+        (value) =>
+          (value.candidateId === undefined) !==
+          (value.newCandidate === undefined),
+        "Provide exactly one of candidateId or newCandidate.",
+      ),
+    run: async (p, input) => {
+      const bytes = decodedFile(input.contentBase64);
+      requireBlobUpload();
+      const file = checkedFile(
+        input.originalName,
+        input.mimeType ?? "",
+        bytes.length,
+      );
+      let candidateId = input.candidateId;
+      if (input.newCandidate) {
+        requireScope(p, "candidates:write");
+        candidateId = (
+          await createRecord(
+            p,
+            "candidates",
+            { data: input.newCandidate },
+            input.idempotencyKey,
+          )
+        ).id;
+      }
+      const reserved = await beginCvUpload(p, candidateId!, {
+        ...file,
+        clientUploadId: derivedId(`upload_cv:${input.idempotencyKey}`),
+      });
+      return success(await storeAndComplete(p, reserved, bytes));
+    },
+  }),
+  tool({
+    name: "create_cv_upload_link",
+    title: "Create CV upload link",
+    description:
+      "For clients that can send HTTP requests themselves: reserve one CV upload (up to 10 MB) for a candidate and get a one-time upload link. Send the exact bytes to it, then call complete_cv_upload. Retrying with the same idempotencyKey reuses the reservation.",
+    scopes: ["cvs:write"],
+    effect: "create",
+    input: z
+      .object({
+        idempotencyKey,
+        candidateId: z.uuid(),
+        originalName: fileName,
+        sizeBytes: z.number().int().min(1).max(MAX_CV_BYTES),
+        mimeType: fileType.optional(),
+      })
+      .strict(),
+    run: async (p, input) => {
+      const reserved = await beginCvUpload(p, input.candidateId, {
+        originalName: input.originalName,
+        mimeType: input.mimeType ?? "",
+        sizeBytes: input.sizeBytes,
+        clientUploadId: derivedId(
+          `create_cv_upload_link:${input.idempotencyKey}`,
+        ),
+      });
+      return success({
+        cv: cvSummary(reserved.data),
+        upload: reserved.upload,
+        nextStep: reserved.upload ? LINK_NEXT_STEP : UPLOADED,
+      });
+    },
+  }),
+  tool({
+    name: "complete_cv_upload",
+    title: "Complete CV upload",
+    description:
+      "Check a CV sent to its upload link and make it available: its size, type and contents are verified. A file still on its way stays pending; a rejected file returns INVALID_CV.",
+    scopes: ["cvs:write"],
+    effect: "create",
+    input: z.object({ cvId: z.uuid() }).strict(),
+    run: async (p, input) =>
+      success(cvSummary(await completeCvUpload(p, input.cvId))),
+  }),
+  tool({
+    name: "start_bulk_import",
+    title: "Start bulk import",
+    description:
+      "Get a new batch ID for importing up to 200 reviewed CVs with add_bulk_import_item; to skip a file, do not add it. Changes nothing: the batch starts with its first item and stays open for 24 hours.",
+    scopes: ["cvs:write", "candidates:write"],
+    effect: "read",
+    input: z.object({}).strict(),
+    run: async () => {
+      if (!storageConfigured())
+        throw new ApiError(
+          503,
+          "STORAGE_SETUP_REQUIRED",
+          STORAGE_SETUP_REQUIRED_MESSAGE,
+        );
+      return success({
+        batchId: randomUUID(),
+        maxFiles: BULK_INTAKE_MAX_FILES,
+        recoveryHours: BULK_INTAKE_RECOVERY_HOURS,
+      });
+    },
+  }),
+  tool({
+    name: "add_bulk_import_item",
+    title: "Add bulk import item",
+    description:
+      "Import one CV as a Reviewed candidate in a batch, with the file as contentBase64 (up to 3 MB) or sizeBytes for an upload link. First run find_duplicate_candidates on email and phone and show the matches; pass their IDs as acknowledgedDuplicateIds and set both review flags once the user reviewed.",
+    scopes: ["cvs:write", "candidates:write"],
+    effect: "create",
+    input: z
+      .object({
+        batchId: z.uuid(),
+        idempotencyKey,
+        originalName: fileName,
+        mimeType: fileType.optional(),
+        contentBase64: contentBase64.optional(),
+        sizeBytes: z.number().int().min(1).max(MAX_CV_BYTES).optional(),
+        candidate: z
+          .object({
+            name: recordDataSchemas.candidate.shape.name,
+            ...candidateInput,
+          })
+          .strict(),
+        factsReviewed: z
+          .boolean()
+          .optional()
+          .describe(
+            "True only after the user reviewed these details against the CV.",
+          ),
+        duplicatesReviewed: z
+          .boolean()
+          .optional()
+          .describe(
+            "True only after the user reviewed the find_duplicate_candidates matches.",
+          ),
+        acknowledgedDuplicateIds: z
+          .array(z.uuid())
+          .max(CANDIDATE_DUPLICATE_LIMIT)
+          .optional()
+          .describe(
+            "The IDs of the matches the user reviewed. bulk_duplicates_changed means check again.",
+          ),
+      })
+      .strict()
+      .refine(
+        (value) =>
+          (value.contentBase64 === undefined) !==
+          (value.sizeBytes === undefined),
+        "Provide exactly one of contentBase64 or sizeBytes.",
+      ),
+    run: async (p, input) => {
+      const bytes =
+        input.contentBase64 === undefined
+          ? undefined
+          : decodedFile(input.contentBase64);
+      if (bytes) requireBlobUpload();
+      const itemId = derivedId(
+        `bulk-item:${input.batchId}:${input.idempotencyKey}`,
+      );
+      // The app's bulk item schema, so the reviewed details get its defaults and checks.
+      const item = await createBulkItem(
+        p,
+        input.batchId,
+        itemId,
+        bulkItemSchema.parse({
+          file: {
+            originalName: input.originalName,
+            mimeType: input.mimeType ?? "",
+            sizeBytes: bytes?.length ?? input.sizeBytes,
+          },
+          data: input.candidate,
+          factsReviewed: input.factsReviewed,
+          duplicatesReviewed: input.duplicatesReviewed,
+          acknowledgedDuplicateIds: input.acknowledgedDuplicateIds,
+        }),
+      );
+      const reserved = await beginBulkItemUpload(p, input.batchId, itemId);
+      const imported = {
+        id: item.id,
+        batchId: item.batchId,
+        candidateId: item.candidateId,
+        uploadId: reserved.data.id,
+      };
+      if (bytes)
+        return success({
+          item: imported,
+          cv: await storeAndComplete(p, reserved, bytes),
+        });
+      return success({
+        item: imported,
+        cv: cvSummary(reserved.data),
+        upload: reserved.upload,
+        nextStep: reserved.upload ? LINK_NEXT_STEP : UPLOADED,
+      });
+    },
+  }),
+  tool({
+    name: "list_bulk_import_items",
+    title: "List bulk import items",
+    description:
+      "List the items imported into one of your batches, with each item's outcome (not-imported, cv-pending, imported or cv-rejected) and the number of possible duplicates found when it was imported.",
+    scopes: ["cvs:write", "candidates:write"],
+    effect: "read",
+    input: z.object({ batchId: z.uuid() }).strict(),
+    run: async (p, input) => {
+      const batch = await getBulkBatch(p, input.batchId);
+      return success({
+        batchId: batch.id,
+        createdAt: batch.createdAt,
+        expiresAt: batch.expiresAt,
+        items: batch.items.map((item) => ({
+          ...item,
+          originalName: item.originalName && clip(item.originalName, 80),
+        })),
+      });
+    },
+  }),
+  tool({
+    name: "open_bulk_import_page",
+    title: "Open bulk import page",
+    description:
+      "A link to RecruitmentOS's Import CVs screen, for when you cannot send file bytes: the user uploads and reviews the CVs there. Changes nothing.",
+    scopes: ["cvs:write", "candidates:write"],
+    effect: "read",
+    input: z.object({}).strict(),
+    run: async () =>
+      success({
+        url: `${appOrigin()}/app/candidates?import=cvs`,
+        note: "Open this link in a browser where you are signed in to RecruitmentOS. It opens the import in your currently selected team, which must be the same team as this connection.",
+      }),
   }),
   tool({
     name: "list_job_roles",

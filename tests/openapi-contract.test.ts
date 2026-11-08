@@ -336,7 +336,12 @@ describe("OpenAPI contract", () => {
       ),
     ).toContain("bulk_candidate_required");
     const listed = JSON.stringify(document.paths["/api/v1/cvs/bulk-batches"]);
-    for (const text of ["invalid_query", "pagination", "pageSize"])
+    for (const text of [
+      "invalid_query",
+      "pagination",
+      "pageSize",
+      "possibleDuplicates",
+    ])
       expect(listed).toContain(text);
     expect(
       JSON.stringify(document.paths["/api/v1/cvs/bulk-batches/{batchId}"]),
@@ -436,8 +441,29 @@ describe("OpenAPI contract", () => {
       "STORAGE_QUOTA_EXCEEDED",
       "storage.settings_updated",
       "application limits, not hard provider caps",
+      "mcpCvTextEnabled",
     ])
       expect(settings).toContain(text);
+    expect(
+      JSON.stringify(
+        document.paths["/api/v1/teams/storage-settings"].put.requestBody,
+      ),
+    ).toContain(
+      '"required":["maxBytes","maxFiles","uploadRequestsPerMinute","mcpCvTextEnabled"]',
+    );
+    const mcp = document.paths["/api/mcp"].post;
+    for (const text of [
+      "get_cv_text",
+      "upload_cv",
+      "create_cv_upload_link",
+      "open_bulk_import_page",
+      "cvs:write is offered",
+      "4,400,000",
+    ])
+      expect(JSON.stringify(mcp)).toContain(text);
+    expect(mcp.security).toContainEqual({
+      oauth2: expect.arrayContaining(["cvs:write"]),
+    });
     for (const path of [
       "/api/v1/candidates/{id}/cvs/uploads",
       "/api/v1/cvs/bulk-batches/{batchId}/items/{itemId}/upload",

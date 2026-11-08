@@ -12,6 +12,7 @@ export type StorageSettingsData = {
   maxBytes: number | null;
   maxFiles: number | null;
   uploadRequestsPerMinute: number | null;
+  mcpCvTextEnabled: boolean;
   usage: {
     usedBytes: number;
     usedFiles: number;
@@ -90,6 +91,7 @@ export function StorageSettingsForm({
     maxBytes: number | null;
     maxFiles: number | null;
     uploadRequestsPerMinute: number | null;
+    mcpCvTextEnabled: boolean;
   }) => void;
 }) {
   const saved =
@@ -106,6 +108,7 @@ export function StorageSettingsForm({
       ? ""
       : String(settings.uploadRequestsPerMinute),
   );
+  const [cvText, setCvText] = useState(settings.mcpCvTextEnabled);
   const { usage } = settings;
   let input: Parameters<typeof onSave>[0] | undefined;
   let problem = "";
@@ -118,6 +121,7 @@ export function StorageSettingsForm({
       uploadRequestsPerMinute: rated
         ? wholeNumber(rate, "Requests per minute", MAX_RATE)
         : null,
+      mcpCvTextEnabled: cvText,
     };
   } catch (error) {
     problem = (error as Error).message;
@@ -126,7 +130,8 @@ export function StorageSettingsForm({
     !!input &&
     input.maxBytes === settings.maxBytes &&
     input.maxFiles === settings.maxFiles &&
-    input.uploadRequestsPerMinute === settings.uploadRequestsPerMinute;
+    input.uploadRequestsPerMinute === settings.uploadRequestsPerMinute &&
+    input.mcpCvTextEnabled === settings.mcpCvTextEnabled;
   const below =
     !!input &&
     input.maxBytes !== null &&
@@ -220,6 +225,26 @@ export function StorageSettingsForm({
           />
         </label>
       )}
+      <div>
+        <label>
+          <input
+            type="checkbox"
+            checked={cvText}
+            disabled={busy}
+            aria-describedby="storage-cv-text-hint"
+            onChange={(event) => setCvText(event.target.checked)}
+          />{" "}
+          Connected AI apps can read CV contents
+        </label>
+        <small
+          id="storage-cv-text-hint"
+          className="muted"
+          style={{ display: "block" }}
+        >
+          Apps connected through MCP with CV permission can read the text of
+          this team&apos;s CVs. Each read is recorded in Activity.
+        </small>
+      </div>
       {problem && (
         <p className="notice error" role="alert">
           {problem}
@@ -245,7 +270,10 @@ export function StorageSettingsForm({
   );
 }
 
-/** Owner and admin only: the team's CV storage limit, upload rate limit and current usage. */
+/**
+ * Owner and admin only: the team's CV storage limit, upload rate limit, whether connected AI apps can
+ * read CV contents, and current usage.
+ */
 export function StorageSettings({
   busy,
   onAction,

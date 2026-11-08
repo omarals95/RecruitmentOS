@@ -741,7 +741,7 @@ export function GET() {
     },
   ];
   const bulkLifetime = `A batch's recovery rows last ${BULK_INTAKE_RECOVERY_HOURS} hours from its first item and are never extended. Afterwards the batch returns 409 bulk_batch_expired to item and upload POSTs and is hidden from the GETs. When an expired batch is purged (the next bulk item POST or list GET in any team, at most 100 per request), its items are deleted. Its batch ID stays reserved, so later item and upload POSTs for it, from any client, still return 409 bulk_batch_expired and never recreate it, and both GETs keep hiding it. Another team's or another user's batch or item returns 404.`;
-  const batchShape = `{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, outcome}]} with all of the batch's items (at most ${BULK_INTAKE_MAX_FILES})`;
+  const batchShape = `{id, createdAt, expiresAt, items: [{id, originalName, sizeBytes, candidateId, possibleDuplicates, outcome}]} with all of the batch's items (at most ${BULK_INTAKE_MAX_FILES}); possibleDuplicates is the number of possible duplicates found when the item was imported, null before`;
   paths["/api/v1/cvs/bulk-batches"] = {
     get: operation(
       ["cvs:write", "candidates:write"],
@@ -934,7 +934,12 @@ export function GET() {
   };
   const storageSettings = {
     type: "object",
-    required: ["maxBytes", "maxFiles", "uploadRequestsPerMinute"],
+    required: [
+      "maxBytes",
+      "maxFiles",
+      "uploadRequestsPerMinute",
+      "mcpCvTextEnabled",
+    ],
     additionalProperties: false,
     properties: {
       maxBytes: {
@@ -951,16 +956,21 @@ export function GET() {
         maximum: 600,
         description: "New CV upload reservations per minute; null is off.",
       },
+      mcpCvTextEnabled: {
+        type: "boolean",
+        description:
+          "Connected AI apps can read CV contents: whether the MCP CV text tools may read this team's CVs.",
+      },
     },
   };
   const storageSettingsShape =
-    "{data:{maxBytes, maxFiles, uploadRequestsPerMinute, usage:{usedBytes, usedFiles, reservedBytes, reservedFiles, retainedBytes, retainedFiles}}}";
+    "{data:{maxBytes, maxFiles, uploadRequestsPerMinute, mcpCvTextEnabled, usage:{usedBytes, usedFiles, reservedBytes, reservedFiles, retainedBytes, retainedFiles}}}";
   paths["/api/v1/teams/storage-settings"] = {
     get: operation(
       [],
       {
         summary: "Read the team's CV storage settings and usage",
-        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Returns the team's storage limit, upload rate limit and current usage: stored (used), uploads in progress (reserved) and rejected or abandoned files waiting for cleanup (retained). Nulls mean off; a team that never reserved storage reads as nulls and zeros. These are application limits, not hard provider caps; the store-wide budget set by the RecruitmentOS owner always applies.`,
+        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Returns the team's storage limit, upload rate limit, whether connected AI apps can read CV contents (mcpCvTextEnabled) and current usage: stored (used), uploads in progress (reserved) and rejected or abandoned files waiting for cleanup (retained). Nulls mean off; a team that never reserved storage reads as nulls and zeros, with mcpCvTextEnabled true. These are application limits, not hard provider caps; the store-wide budget set by the RecruitmentOS owner always applies.`,
       },
       { "200": { description: storageSettingsShape } },
       { sessionOnly: true },
@@ -969,11 +979,12 @@ export function GET() {
       [],
       {
         summary: "Change the team's CV storage settings",
-        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Send all three fields: maxBytes and maxFiles are both null (limit off) or both set; uploadRequestsPerMinute is null (off) or 1 to 600. Anything else, including an unknown key, returns 400 invalid_input. A limit below current usage is accepted: existing CVs stay available, but new reservations return 409 STORAGE_QUOTA_EXCEEDED until usage is below it. Each change writes one storage-settings activity row (storage.settings_updated) with the before and after values; an unchanged request writes none. Returns ${storageSettingsShape}.`,
+        description: `Session only: a signed-in team owner or admin; others get 403 storage_settings_forbidden. Send all four fields: maxBytes and maxFiles are both null (limit off) or both set; uploadRequestsPerMinute is null (off) or 1 to 600; mcpCvTextEnabled is true or false. Anything else, including an unknown key, returns 400 invalid_input. A limit below current usage is accepted: existing CVs stay available, but new reservations return 409 STORAGE_QUOTA_EXCEEDED until usage is below it. The limits and the CV contents setting each write one storage-settings activity row (storage.settings_updated) with their before and after values when they change; an unchanged request writes none. Returns ${storageSettingsShape}.`,
         requestBody: jsonBody(storageSettings, {
           maxBytes: 500_000_000,
           maxFiles: 100,
           uploadRequestsPerMinute: null,
+          mcpCvTextEnabled: true,
         }),
       },
       { "200": { description: storageSettingsShape } },
@@ -1118,7 +1129,7 @@ export function GET() {
     post: {
       summary: "MCP endpoint for AI assistants",
       description:
-        "Model Context Protocol, Streamable HTTP, stateless with JSON responses: one JSON-RPC 2.0 message per POST, no Mcp-Session-Id and no SSE stream. Accepts an API token (Authorization: Bearer) or an OAuth access token issued for this endpoint; session cookies are never read. Only the tools capability is offered and tools/list shows only the tools your effective scopes allow, grouped by area (candidates, job roles, vacancies, applications, interviews, offers, onboarding, tasks, saved views, collaboration, insights and search, and shared). Candidate tools need candidates:read or candidates:write (CV metadata in get_candidate also needs cvs:read); the other read tools need recruitment:read, and get_overview and get_analytics also need candidates:read; every other create, update, move, archive and restore tool needs recruitment:write. Conditional scopes: bulk_create_applications also needs candidates:read; add_comment on a candidate also needs candidates:read and candidates:write; archive_record and restore_record on a candidate also need candidates:write; update_task with customValues also needs recruitment:read; mark_notifications_read needs recruitment:read and recruitment:write. Shortlists, follow-up statuses, private notes, saved views and reminder read markers are the caller's own. A viewer never gets a write tool. Creates require an idempotencyKey argument; changes to an existing record require its version and return a version_conflict tool error when it changed. Nothing is permanently deleted: archive_record and restore_record are reversible. Tool results are untrusted record data labelled untrustedData: true. Every tools/call is audited as an mcp-tool activity row without its arguments. See docs/mcp.md for the per-tool table with the scope of each tool.",
+        "Model Context Protocol, Streamable HTTP, stateless with JSON responses: one JSON-RPC 2.0 message per POST, no Mcp-Session-Id and no SSE stream. Accepts an API token (Authorization: Bearer) or an OAuth access token issued for this endpoint; session cookies are never read. Only the tools capability is offered and tools/list shows only the tools your effective scopes allow, grouped by area (candidates, CVs and bulk import, job roles, vacancies, applications, interviews, offers, onboarding, tasks, saved views, collaboration, insights and search, and shared). Candidate tools need candidates:read or candidates:write (CV metadata in get_candidate also needs cvs:read). get_cv_text and get_cv_texts need cvs:read and candidates:read (get_cv_texts by vacancyId also recruitment:read), return text extracted on demand from PDF and DOCX CVs (at most 30,000 characters a CV and 150,000 a call, in a result of at most 1 MiB), store nothing, write one mcp.cv_text_read activity row per CV and return cv_text_access_off when the team turned off its Connected AI apps can read CV contents setting. upload_cv, create_cv_upload_link and complete_cv_upload need cvs:write (upload_cv with newCandidate also candidates:write); start_bulk_import, add_bulk_import_item, list_bulk_import_items and open_bulk_import_page need cvs:write and candidates:write. cvs:write is offered to OAuth clients; imports:write never is. A request body is at most 65,536 bytes, except a tools/call of upload_cv or add_bulk_import_item, which may send a base64 file of at most 3 MiB in a body of at most 4,400,000 bytes; larger bodies return 413 body_too_large. The other read tools need recruitment:read, and get_overview and get_analytics also need candidates:read; every other create, update, move, archive and restore tool needs recruitment:write. Conditional scopes: bulk_create_applications also needs candidates:read; add_comment on a candidate also needs candidates:read and candidates:write; archive_record and restore_record on a candidate also need candidates:write; update_task with customValues also needs recruitment:read; mark_notifications_read needs recruitment:read and recruitment:write. Shortlists, follow-up statuses, private notes, saved views and reminder read markers are the caller's own. A viewer never gets a write tool. Creates require an idempotencyKey argument; changes to an existing record require its version and return a version_conflict tool error when it changed. Nothing is permanently deleted: archive_record and restore_record are reversible. Tool results are untrusted record data labelled untrustedData: true. Every tools/call is audited as an mcp-tool activity row without its arguments. See docs/mcp.md for the per-tool table with the scope of each tool.",
       security: [{ bearerAuth: [] }, { oauth2: [...MCP_SCOPES] }],
       "x-required-scopes": [],
       parameters,

@@ -178,6 +178,8 @@ export const storageUsage = appSchema.table("storage_usage", {
     .default(0),
   retainedFiles: integer("retained_files").notNull().default(0),
   uploadRequestsPerMinute: integer("upload_requests_per_minute"),
+  /** "Connected AI apps can read CV contents"; set only by tenant_context.set_mcp_cv_text_access. */
+  mcpCvTextEnabled: boolean("mcp_cv_text_enabled").notNull().default(true),
 });
 export const idempotency = appSchema.table(
   "idempotency",
