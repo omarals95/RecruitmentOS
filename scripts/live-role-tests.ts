@@ -8,7 +8,11 @@
  *   expired tokens, a demoted owner, and concurrent last-owner removal, bootstrap claims,
  *   storage reservations and Blob read leases. Denied mutations must leave no audit row. Both
  *   runtime roles are denied every write on the company workspace tables, and a team owner without
- *   company authority cannot call tenant_context.set_workspace_authority.
+ *   company authority cannot call tenant_context.set_workspace_authority. tenant_context.install
+ *   refuses a signed payload with an extra workspace or company field and a team without a
+ *   workspace mapping, and returns the mapped workspace with no company level, areas or plan access
+ *   for a team owner without company authority. A company authority grant and a concurrent removal
+ *   of the target's last membership never leave unsuspended authority for a user in no team.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -22,8 +26,11 @@
  *   states, reminder reads, idempotency, activity, pending uploads and bulk intake batches and
  *   items as the data role under signed contexts; fixture stores and read leases as the owner. The
  *   owner-run triggers map each fixture team to the company workspace and, in the open bootstrap
- *   variant, make the fixture initial administrator company owner. It never changes budgets, keys,
- *   roles, grants, policies, migrations or settings beyond transaction-local deadlines.
+ *   variant, make the fixture initial administrator company owner. As the owner it also removes
+ *   and restores one fixture team's workspace mapping and makes one fixture user company owner,
+ *   who grants company authority to two fixture members through the helper (one audit row, and
+ *   the trigger suspends it). It never changes budgets, keys, roles, grants, policies, migrations
+ *   or settings beyond transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the contexts, leases,
@@ -46,7 +53,7 @@
  *   code never set it, so Production has none unless someone sets it there; a copy or branch of
  *   Preview carries it. The comment's value is never printed.
  */
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client, Pool } from "pg";
@@ -331,15 +338,30 @@ async function assertionFor(
     payload,
     signature: sign(payload, signer.key),
     pid: Number(rows[0].pid),
+    xid: rows[0].xid as string,
   };
 }
 
-const installSql = "SELECT tenant_context.install($1,$2)";
+/** The unsigned cache hint (third argument) is empty, as in installTenantContext. */
+const installSql =
+  "SELECT tenant_context.install($1,$2,'{}'::text[]) AS access";
+
+/** The access state install derived and returned (0029). */
+type Access = {
+  scopes: string[];
+  workspaceId: string;
+  memberRole: string;
+  companyLevel: string | null;
+  companyAreas: string[];
+};
 
 async function installAs(db: Db, signer: Signer, principal: Principal) {
   const assertion = await assertionFor(db, signer, principal);
-  await db.query(installSql, [assertion.payload, assertion.signature]);
-  return assertion;
+  const { rows } = await db.query(installSql, [
+    assertion.payload,
+    assertion.signature,
+  ]);
+  return { ...assertion, access: rows[0].access as Access };
 }
 
 /**
@@ -386,6 +408,9 @@ function fixtureNames(prefix: string) {
       c2: id("user-c2"),
       rival: id("user-rival"),
       holder: id("user-holder"),
+      // Targets of the company authority grant/removal race, each in team C only.
+      grantFirst: id("user-grant-first"),
+      removeFirst: id("user-remove-first"),
     },
     teams: { a: id("team-a"), b: id("team-b"), c: id("team-c") },
     members: {
@@ -395,6 +420,8 @@ function fixtureNames(prefix: string) {
       b2: id("member-b2"),
       c1: id("member-c1"),
       c2: id("member-c2"),
+      grantFirst: id("member-grant-first"),
+      removeFirst: id("member-remove-first"),
     },
     tokens: { live: id("token-live"), expired: id("token-expired") },
     // Blob store names allow only letters and digits after store_.
@@ -438,6 +465,7 @@ function principals(f: Fixtures) {
     ownerA: session(f.teams.a, f.users.a1, ALL_SCOPES),
     memberA: session(f.teams.a, f.users.a2, RECRUITER_SCOPES),
     ownerB: session(f.teams.b, f.users.b1, ALL_SCOPES),
+    ownerC: session(f.teams.c, f.users.c1, ALL_SCOPES),
     demotedB: session(f.teams.b, f.users.b2, ALL_SCOPES),
     viewerB: session(f.teams.b, f.users.b2, VIEWER_SCOPES),
     liveToken: {
@@ -1913,6 +1941,123 @@ async function runChecks(run: Run) {
     return pass && probe.all(["end-state", (await workspaceRows()) === before]);
   });
 
+  // install derives the workspace and company authority from owner-written rows (0029).
+  const mappedWorkspace = async (team: string) =>
+    (
+      await owner.query(
+        "SELECT workspace_id::text AS id FROM app.workspace_teams WHERE team_id = $1",
+        [team],
+      )
+    ).rows[0]?.id as string | undefined;
+  const noCompanyAuthority = (access: Access) =>
+    access.companyLevel === null &&
+    Array.isArray(access.companyAreas) &&
+    access.companyAreas.length === 0;
+  await check("forged-workspace", async (probe) => {
+    const mapped = await mappedWorkspace(f.teams.b);
+    return transaction(data, async () => {
+      probe.at("outcome");
+      const claim = JSON.parse(
+        (await assertionFor(data, signer, p.ownerB)).payload,
+      ) as Row;
+      const rejected: Outcome[] = [];
+      for (const extra of [
+        { workspace: randomUUID() },
+        { companyLevel: "owner", companyAreas: ["fields"] },
+      ]) {
+        const payload = JSON.stringify({ ...claim, ...extra });
+        rejected.push(
+          await attempt(data, installSql, [payload, sign(payload, signer.key)]),
+        );
+      }
+      probe.at("positive-control");
+      const { access } = await installAs(data, signer, p.ownerB);
+      return probe.all(...rejected.map(denial), [
+        "positive-control",
+        mapped !== undefined &&
+          access.workspaceId === mapped &&
+          noCompanyAuthority(access),
+      ]);
+    });
+  });
+
+  await check("workspace-mapping-missing", async (probe) => {
+    const removed = await owner.query(
+      "DELETE FROM app.workspace_teams WHERE team_id = $1 RETURNING workspace_id::text AS id",
+      [f.teams.c],
+    );
+    const mapped = removed.rows[0]?.id as string | undefined;
+    let rejected: Outcome | undefined;
+    try {
+      rejected = await transaction(data, async () => {
+        probe.at("outcome");
+        const assertion = await assertionFor(data, signer, p.ownerC);
+        return attempt(data, installSql, [
+          assertion.payload,
+          assertion.signature,
+        ]);
+      });
+    } finally {
+      if (mapped !== undefined)
+        await owner.query(
+          "INSERT INTO app.workspace_teams(team_id,workspace_id) VALUES($1,$2::uuid)",
+          [f.teams.c, mapped],
+        );
+    }
+    probe.at("positive-control");
+    const restored = await transaction(
+      data,
+      async () =>
+        (await installAs(data, signer, p.ownerC)).access.workspaceId === mapped,
+    );
+    return probe.all(
+      ["setup", removed.rowCount === 1 && mapped !== undefined],
+      failsWith(rejected, "42501"),
+      ["positive-control", restored],
+    );
+  });
+
+  await check("workspace-authority-none", async (probe) => {
+    const rows = await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+      [f.users.b1],
+    );
+    probe.at("install");
+    const installed = await transaction(
+      data,
+      () => installAs(data, signer, p.ownerB),
+      true,
+    );
+    probe.at("end-state");
+    // Committed context rows stay until purged; the owner reads this transaction's row.
+    const stored = (
+      await owner.query(
+        "SELECT workspace_id::text AS workspace, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE pid = $1 AND xid = $2::xid8",
+        [installed.pid, installed.xid],
+      )
+    ).rows;
+    return probe.all(
+      ["setup", rows === 0],
+      [
+        "outcome",
+        noCompanyAuthority(installed.access) &&
+          installed.access.memberRole === "owner" &&
+          installed.access.workspaceId === (await mappedWorkspace(f.teams.b)),
+      ],
+      [
+        "end-state",
+        stored.length === 1 &&
+          stored[0].workspace === installed.access.workspaceId &&
+          stored[0].member_role === "owner" &&
+          stored[0].company_level === null &&
+          Array.isArray(stored[0].company_areas) &&
+          (stored[0].company_areas as unknown[]).length === 0 &&
+          stored[0].plan_access === false,
+      ],
+    );
+  });
+
   /** A rejected install, then a valid session install and a read on the same connection. */
   const rejectedThenSession = (
     probe: Probe,
@@ -2182,6 +2327,128 @@ async function runChecks(run: Run) {
         end.total === baseline.total &&
           end.private === baseline.private &&
           end.token === baseline.token,
+      ],
+    );
+  });
+
+  // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock
+  // in set_workspace_authority's membership check (0029) orders a grant and a concurrent removal of
+  // the target's last membership: whichever commits second waits for the first.
+  await check("workspace-authority-race", async (probe) => {
+    probe.at("setup");
+    const target = async (userId: string, memberId: string) => {
+      await owner.query(
+        `INSERT INTO auth."user"(id,name,email,email_verified) VALUES($1,$2,$3,true)`,
+        [userId, `Fictional user ${f.prefix}`, `${userId}@example.test`],
+      );
+      await owner.query(
+        "INSERT INTO auth.member(id,organization_id,user_id,role) VALUES($1,$2,$3,'recruiter')",
+        [memberId, f.teams.c, userId],
+      );
+      return count(
+        owner,
+        "SELECT count(*)::int AS n FROM auth.member WHERE user_id = $1",
+        [userId],
+      );
+    };
+    // The fixture company owner; its row goes with the user at cleanup.
+    const ownerRow = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level) SELECT workspace_id,$2,'owner' FROM app.workspace_teams WHERE team_id = $1",
+      [f.teams.c, f.users.c1],
+    );
+    const memberships = [
+      await target(f.users.grantFirst, f.members.grantFirst),
+      await target(f.users.removeFirst, f.members.removeFirst),
+    ];
+    const grantSql =
+      "SELECT tenant_context.set_workspace_authority($1,'admin',ARRAY['fields'],false) AS changed";
+    const removeSql = "DELETE FROM auth.member WHERE id = $1";
+    const authority = async (userId: string) =>
+      (
+        await owner.query(
+          "SELECT suspended_at IS NOT NULL AS suspended FROM app.workspace_admins WHERE user_id = $1",
+          [userId],
+        )
+      ).rows;
+
+    /** The first statement runs and holds its locks; the second must wait until the first commits. */
+    const race = async (
+      first: { db: Client; text: string; params: unknown[] },
+      second: { db: Client; text: string; params: unknown[] },
+    ) => {
+      await first.db.query("BEGIN");
+      await second.db.query("BEGIN");
+      let firstOutcome: Outcome | undefined;
+      let secondOutcome: Outcome | undefined;
+      let overlapped: boolean | undefined;
+      let backends: number[];
+      let firstEnded = false;
+      try {
+        // The grant runs on the data connection under the fixture company owner's session context.
+        probe.at("install");
+        await installAs(data, signer, p.ownerC);
+        backends = [await backendPid(first.db), await backendPid(second.db)];
+        probe.at("outcome");
+        firstOutcome = await settle(first.db.query(first.text, first.params));
+        const pending = settle(second.db.query(second.text, second.params));
+        try {
+          probe.at("lock-overlap");
+          overlapped = await waitForWaiters(owner, [backends[1]], 1);
+        } finally {
+          await first.db.query(firstOutcome.ok ? "COMMIT" : "ROLLBACK");
+          firstEnded = true;
+        }
+        probe.at("outcome");
+        secondOutcome = await pending;
+      } finally {
+        if (!firstEnded) await first.db.query("ROLLBACK").catch(() => {});
+        await second.db.query(secondOutcome?.ok ? "COMMIT" : "ROLLBACK");
+      }
+      return { firstOutcome, secondOutcome, overlapped, backends };
+    };
+
+    const grantFirst = await race(
+      { db: data, text: grantSql, params: [f.users.grantFirst] },
+      { db: identity, text: removeSql, params: [f.members.grantFirst] },
+    );
+    const grantedThenRemoved = await authority(f.users.grantFirst);
+    const removeFirst = await race(
+      { db: identity, text: removeSql, params: [f.members.removeFirst] },
+      { db: data, text: grantSql, params: [f.users.removeFirst] },
+    );
+    probe.at("end-state");
+    const removedThenGranted = await authority(f.users.removeFirst);
+    return probe.all(
+      ["setup", ownerRow.rowCount === 1 && memberships.every((n) => n === 1)],
+      [
+        "backend-identity",
+        distinct(grantFirst.backends) && distinct(removeFirst.backends),
+      ],
+      [
+        "lock-overlap",
+        grantFirst.overlapped === true && removeFirst.overlapped === true,
+      ],
+      outcomeIs(
+        grantFirst.firstOutcome?.ok === true &&
+          grantFirst.firstOutcome.rows[0]?.changed === true,
+        grantFirst.firstOutcome,
+      ),
+      outcomeIs(
+        grantFirst.secondOutcome?.ok === true &&
+          grantFirst.secondOutcome.count === 1,
+        grantFirst.secondOutcome,
+      ),
+      outcomeIs(
+        removeFirst.firstOutcome?.ok === true &&
+          removeFirst.firstOutcome.count === 1,
+        removeFirst.firstOutcome,
+      ),
+      failsWith(removeFirst.secondOutcome, "RQ006"),
+      [
+        "end-state",
+        grantedThenRemoved.length === 1 &&
+          grantedThenRemoved[0].suspended === true &&
+          removedThenGranted.length === 0,
       ],
     );
   });
