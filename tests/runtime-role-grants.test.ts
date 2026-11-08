@@ -116,6 +116,19 @@ const authTables = [
 ];
 /** Owner-only app tables: neither runtime role holds any privilege on them (0021). */
 const ownerOnlyAppTables = ["app.candidate_erasures"];
+/** Read-only for the data role and closed to the identity role (0028). */
+const workspaceTables = ["workspaces", "workspace_teams", "workspace_admins"];
+const workspaceWrites = [
+  "INSERT INTO app.workspaces(id,name) VALUES (gen_random_uuid(),'Fictional Company')",
+  "UPDATE app.workspaces SET name = 'Fictional Company'",
+  "DELETE FROM app.workspaces",
+  "INSERT INTO app.workspace_teams(team_id,workspace_id) VALUES ('fictional-team','00000000-0000-4000-a000-000000000001')",
+  "UPDATE app.workspace_teams SET workspace_id = workspace_id",
+  "DELETE FROM app.workspace_teams",
+  "INSERT INTO app.workspace_admins(workspace_id,user_id,level) VALUES ('00000000-0000-4000-a000-000000000001','fictional','owner')",
+  "UPDATE app.workspace_admins SET suspended_at = NULL",
+  "DELETE FROM app.workspace_admins",
+];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -137,6 +150,10 @@ const expectedData = {
     "app.speed_samples": ["DELETE", "INSERT", "SELECT"],
     // One budget row per member and team, upserted, never deleted.
     "app.speed_sample_budgets": ["INSERT", "SELECT", "UPDATE"],
+    // The company workspace tables are written only by the owner, its triggers and its helper (0028).
+    "app.workspaces": ["SELECT"],
+    "app.workspace_teams": ["SELECT"],
+    "app.workspace_admins": ["SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -339,13 +356,15 @@ describe("split runtime role template", () => {
       expect([...evidence.execute].sort(), kind).toEqual(
         [...expected.helpers].sort(),
       );
-      // Only the data role may run the cross-team bulk intake purge, the erasure helper and the
-      // two MCP CV helpers (0026).
+      // Only the data role may run the cross-team bulk intake purge, the erasure helper, the
+      // two MCP CV helpers (0026) and the two company workspace helpers (0028).
       for (const helper of [
         "tenant_context.purge_bulk_intake(uuid)",
         "tenant_context.erase_candidate(uuid,text,text)",
         "tenant_context.set_mcp_cv_text_access(boolean)",
         "tenant_context.audit_mcp_cv_read(text,uuid)",
+        "tenant_context.set_workspace_authority(text,text,text[],boolean)",
+        "tenant_context.allows_workspace_admin(uuid,text)",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
           kind === "data",
@@ -461,9 +480,13 @@ describe("split runtime role template", () => {
   it("denies the data role TRUNCATE, role switching, identity, key, ledger and marker writes", async () => {
     await harness.dataDb();
     await expectDenied([
-      ...[...appTables, "speed_samples", "speed_sample_budgets"].map(
-        (table) => `TRUNCATE app.${table}`,
-      ),
+      ...[
+        ...appTables,
+        "speed_samples",
+        "speed_sample_budgets",
+        ...workspaceTables,
+      ].map((table) => `TRUNCATE app.${table}`),
+      ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
       `SET ROLE ${splitRoles.owner}`,
       'SELECT * FROM auth."user"',
@@ -509,6 +532,9 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.erase_candidate(gen_random_uuid(), 'Fictional', 'app')",
       "SELECT tenant_context.set_mcp_cv_text_access(false)",
       "SELECT tenant_context.audit_mcp_cv_read('get_cv_text', gen_random_uuid())",
+      "SELECT tenant_context.set_workspace_authority('fictional', 'admin', '{fields}', true)",
+      ...workspaceTables.map((table) => `SELECT * FROM app.${table}`),
+      ...workspaceWrites,
       "SELECT * FROM app.candidate_erasures",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",

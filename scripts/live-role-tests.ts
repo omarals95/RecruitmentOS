@@ -6,7 +6,9 @@
  *   tenant contexts, savepoint replay, pooled-connection reuse, private rows within a team, the
  *   data role writing identity rows, the identity role reading candidate data, revoked and
  *   expired tokens, a demoted owner, and concurrent last-owner removal, bootstrap claims,
- *   storage reservations and Blob read leases. Denied mutations must leave no audit row.
+ *   storage reservations and Blob read leases. Denied mutations must leave no audit row. Both
+ *   runtime roles are denied every write on the company workspace tables, and a team owner without
+ *   company authority cannot call tenant_context.set_workspace_authority.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -18,12 +20,15 @@
  * - It writes only fictional fixtures under a random run prefix: users, three teams, members and
  *   API tokens as the owner or the identity role; candidates, a vacancy, saved views, candidate
  *   states, reminder reads, idempotency, activity, pending uploads and bulk intake batches and
- *   items as the data role under signed contexts; fixture stores and read leases as the owner. It never changes budgets, keys,
+ *   items as the data role under signed contexts; fixture stores and read leases as the owner. The
+ *   owner-run triggers map each fixture team to the company workspace and, in the open bootstrap
+ *   variant, make the fixture initial administrator company owner. It never changes budgets, keys,
  *   roles, grants, policies, migrations or settings beyond transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the contexts, leases,
- *   stores, teams, users and, in the open bootstrap variant, the setup claim it created go.
+ *   stores, teams, users (with their cascaded workspace mappings and company authority) and, in
+ *   the open bootstrap variant, the setup claim it created go.
  * - It prints one JSON document of counts and static check ids, never a URL, host, port,
  *   username, password, the marker, the key, its id, a payload, a signature, row data or driver
  *   error text. Exit codes: 0 every check passed and no fixture remains; 1 a check failed, an
@@ -125,6 +130,14 @@ const APP_TABLES = [
   "bulk_intake_batches",
   "bulk_intake_items",
 ] as const;
+/** The company workspace tables (0028), under FORCE RLS with owner-only writes. */
+const WORKSPACE_TABLES = [
+  "workspaces",
+  "workspace_teams",
+  "workspace_admins",
+] as const;
+/** The one company workspace every team maps to. */
+const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
 const RECRUITER_SCOPES = SCOPES.filter((scope) => scope !== "imports:write");
 const VIEWER_SCOPES = SCOPES.filter((scope) => scope.endsWith(":read"));
@@ -465,6 +478,9 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     ["app.idempotency", ...team],
     ["app.storage_usage", ...team],
     ["app.records", ...team],
+    // Both cascade from the fixture teams and users; the owner-only policies let the owner count them.
+    ["app.workspace_teams", ...team],
+    ["app.workspace_admins", "user_id LIKE $1", [f.pattern]],
     ["tenant_context.contexts", ...team],
     ["storage_ledger.blob_read_leases", ...store],
     ["storage_ledger.stores", ...store],
@@ -592,12 +608,12 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         WHERE n.nspname = 'app' AND c.relname = ANY($1::text[]))::int AS forced,
       (SELECT t.tgenabled::text FROM pg_catalog.pg_trigger t
         WHERE t.tgrelid = 'app.activity'::regclass AND t.tgname = 'immutable_activity') AS trigger`,
-    [[...APP_TABLES]],
+    [[...APP_TABLES, ...WORKSPACE_TABLES]],
   );
   return {
     restored:
       failure === undefined &&
-      rows[0].forced === APP_TABLES.length &&
+      rows[0].forced === APP_TABLES.length + WORKSPACE_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -1799,6 +1815,103 @@ async function runChecks(run: Run) {
       );
     }),
   );
+
+  // The company workspace tables (0028): the owner, its triggers and its helper write them.
+  const workspaceRows = () =>
+    transaction(owner, async () => {
+      const { rows } = await owner.query(
+        `SELECT (SELECT string_agg(row_to_json(w)::text, ',' ORDER BY w.id) FROM app.workspaces w) AS workspaces,
+          (SELECT string_agg(row_to_json(t)::text, ',' ORDER BY t.team_id) FROM app.workspace_teams t) AS teams,
+          (SELECT string_agg(row_to_json(a)::text, ',' ORDER BY a.workspace_id, a.user_id) FROM app.workspace_admins a) AS admins,
+          (SELECT count(*) FROM app.activity WHERE team_id LIKE $1 AND kind = 'workspace-authority')::int AS audits`,
+        [f.pattern],
+      );
+      return JSON.stringify(rows[0]);
+    });
+  const workspaceWrites: [string, unknown[]][] = [
+    [
+      "INSERT INTO app.workspaces(id,name) VALUES(gen_random_uuid(),$1)",
+      [`Fictional company ${f.prefix}`],
+    ],
+    ["UPDATE app.workspaces SET name = name", []],
+    ["DELETE FROM app.workspaces WHERE id = $1::uuid", [COMPANY_WORKSPACE]],
+    [
+      "INSERT INTO app.workspace_teams(team_id,workspace_id) VALUES($1,$2::uuid)",
+      [`${f.prefix}-team-forged`, COMPANY_WORKSPACE],
+    ],
+    [
+      "UPDATE app.workspace_teams SET workspace_id = workspace_id WHERE team_id = $1",
+      [f.teams.a],
+    ],
+    ["DELETE FROM app.workspace_teams WHERE team_id = $1", [f.teams.a]],
+    [
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level) VALUES($1::uuid,$2,'owner')",
+      [COMPANY_WORKSPACE, f.users.b1],
+    ],
+    [
+      "UPDATE app.workspace_admins SET plan_access = true WHERE user_id LIKE $1",
+      [f.pattern],
+    ],
+    ["DELETE FROM app.workspace_admins WHERE user_id LIKE $1", [f.pattern]],
+  ];
+  await check("workspace-write-denied", async (probe) => {
+    const before = await workspaceRows();
+    const dataPass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const conditions: Condition[] = [];
+      for (const [text, params] of workspaceWrites)
+        conditions.push(denial(await attempt(data, text, params)));
+      probe.at("positive-control");
+      return probe.all(...conditions, [
+        "positive-control",
+        (await count(
+          data,
+          "SELECT count(*)::int AS n FROM app.workspace_teams WHERE team_id = $1",
+          [f.teams.a],
+        )) === 1,
+      ]);
+    });
+    const identityPass = await transaction(identity, async () => {
+      probe.at("outcome");
+      const conditions: Condition[] = [];
+      for (const [text, params] of workspaceWrites)
+        conditions.push(denial(await attempt(identity, text, params)));
+      return probe.all(...conditions);
+    });
+    probe.at("end-state");
+    return (
+      dataPass &&
+      identityPass &&
+      probe.all(["end-state", (await workspaceRows()) === before])
+    );
+  });
+
+  await check("workspace-authority-team-owner", async (probe) => {
+    const before = await workspaceRows();
+    const pass = await transaction(
+      data,
+      async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerB);
+        probe.at("outcome");
+        const refused = await attempt(
+          data,
+          "SELECT tenant_context.set_workspace_authority($1,'admin',ARRAY['fields'],true)",
+          [f.users.b2],
+        );
+        probe.at("positive-control");
+        return probe.all(failsWith(refused, "42501"), [
+          "positive-control",
+          (await ownRecords(data, f.teams.b)) > 0,
+        ]);
+      },
+      true,
+    );
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await workspaceRows()) === before]);
+  });
 
   /** A rejected install, then a valid session install and a read on the same connection. */
   const rejectedThenSession = (

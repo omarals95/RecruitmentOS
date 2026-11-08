@@ -26,6 +26,8 @@ export const dataRoleHelpers = [
   "tenant_context.erase_candidate(uuid,text,text)",
   "tenant_context.set_mcp_cv_text_access(boolean)",
   "tenant_context.audit_mcp_cv_read(text,uuid)",
+  "tenant_context.set_workspace_authority(text,text,text[],boolean)",
+  "tenant_context.allows_workspace_admin(uuid,text)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",

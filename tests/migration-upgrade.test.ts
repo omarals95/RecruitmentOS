@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -292,7 +293,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 6 }]);
+    ).toEqual([{ version: 7 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -452,7 +453,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 6 }]);
+    ).toEqual([{ version: 7 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -509,5 +510,99 @@ describe("upgrade from 0020 to candidate erasure", () => {
         )
       ).rows,
     ).toEqual([{ erased: true, original_name: null, candidate_id: null }]);
+  });
+});
+
+// Teams and members written by the 0027 schema, upgraded through 0028: one company workspace above
+// both teams, with only the initial administrator as company owner.
+describe("upgrade from 0027 to the company workspace", () => {
+  const pg = new PGlite();
+  const company = "00000000-0000-4000-a000-000000000001";
+  const workspaceRows = async () =>
+    Object.fromEntries(
+      await Promise.all(
+        ["workspaces", "workspace_teams", "workspace_admins"].map(
+          async (table) => [
+            table,
+            (await pg.query(`SELECT * FROM app.${table} ORDER BY 1, 2`)).rows,
+          ],
+        ),
+      ),
+    );
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0027_release_1_cleanup.sql");
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('workspace-upgrade-admin','Fictional Upgrade Admin','workspace-upgrade-admin@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('workspace-upgrade-team-a','Fictional Upgrade Team A','workspace-upgrade-team-a','workspace-upgrade-admin');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('workspace-upgrade-ma','workspace-upgrade-team-a','workspace-upgrade-admin','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('workspace-upgrade-owner-b','Fictional Upgrade Owner B','workspace-upgrade-owner-b@example.test',true,false),
+        ('workspace-upgrade-viewer','Fictional Upgrade Viewer','workspace-upgrade-viewer@example.test',true,false);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('workspace-upgrade-team-b','Fictional Upgrade Team B','workspace-upgrade-team-b','workspace-upgrade-owner-b');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('workspace-upgrade-mb','workspace-upgrade-team-b','workspace-upgrade-owner-b','owner'),
+        ('workspace-upgrade-mv','workspace-upgrade-team-a','workspace-upgrade-viewer','viewer');`);
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("maps both teams to the one workspace and makes only the initial administrator company owner", async () => {
+    expect(
+      (await pg.query("SELECT id, name FROM app.workspaces")).rows,
+    ).toEqual([{ id: company, name: "Company" }]);
+    expect(
+      (
+        await pg.query(
+          "SELECT team_id, workspace_id FROM app.workspace_teams ORDER BY team_id",
+        )
+      ).rows,
+    ).toEqual([
+      { team_id: "workspace-upgrade-team-a", workspace_id: company },
+      { team_id: "workspace-upgrade-team-b", workspace_id: company },
+    ]);
+    expect(
+      (
+        await pg.query(
+          "SELECT workspace_id, user_id, level, areas, plan_access, granted_by, suspended_at FROM app.workspace_admins",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        workspace_id: company,
+        user_id: "workspace-upgrade-admin",
+        level: "owner",
+        areas: [],
+        plan_access: false,
+        granted_by: null,
+        suspended_at: null,
+      },
+    ]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 7 }]);
+  });
+
+  it("changes nothing when the migrations run again", async () => {
+    const before = await workspaceRows();
+    await applyMigrations(pg);
+    expect(await workspaceRows()).toEqual(before);
+  });
+
+  it("makes every seed insert of the migration idempotent", async () => {
+    const [file] = (
+      await migrationFiles(join(process.cwd(), "drizzle"))
+    ).filter((name) => name.startsWith("0028_"));
+    const body = await readFile(join(process.cwd(), "drizzle", file), "utf8");
+    for (const table of ["workspaces", "workspace_teams", "workspace_admins"]) {
+      const seed = new RegExp(
+        String.raw`^INSERT INTO app\.${table}\([^;]*?ON CONFLICT \([a-z_, ]+\) DO NOTHING;`,
+        "m",
+      );
+      expect(body, table).toMatch(seed);
+    }
   });
 });
