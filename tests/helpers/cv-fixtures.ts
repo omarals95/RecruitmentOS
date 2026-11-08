@@ -1,4 +1,4 @@
-import { crc32 } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 
 // Synthetic CV files built from fictional text inside the tests; nothing is read from disk.
 
@@ -39,6 +39,56 @@ export function pdfWithText(lines: string[]): Buffer {
     body += `${String(offset).padStart(10, "0")} 00000 n \n`;
   body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return Buffer.from(body, "latin1");
+}
+
+/**
+ * A small, valid PDF (a decompression bomb): its page lists one FlateDecode content stream `copies`
+ * times, and the stream inflates to one line of fictional text and `inflatedBytes` spaces.
+ */
+export function deflateBombPdf(inflatedBytes: number, copies = 1): Buffer {
+  const stream = deflateSync(
+    Buffer.concat([
+      Buffer.from("BT /F1 10 Tf 40 800 Td (Fictional bomb CV) Tj ET\n"),
+      Buffer.alloc(inflatedBytes, 0x20),
+    ]),
+    { level: 9 },
+  );
+  const parts: Buffer[] = [];
+  const offsets: number[] = [];
+  let length = 0;
+  const add = (part: string | Buffer) => {
+    const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part, "latin1");
+    parts.push(bytes);
+    length += bytes.length;
+  };
+  const object = (n: number, body: string | Buffer[]) => {
+    offsets[n] = length;
+    add(`${n} 0 obj\n`);
+    for (const piece of typeof body === "string" ? [body] : body) add(piece);
+    add("\nendobj\n");
+  };
+  add("%PDF-1.4\n");
+  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  object(
+    3,
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents [${Array(copies).fill("4 0 R").join(" ")}] /Resources << /Font << /F1 5 0 R >> >> >>`,
+  );
+  object(4, [
+    Buffer.from(
+      `<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`,
+      "latin1",
+    ),
+    stream,
+    Buffer.from("\nendstream", "latin1"),
+  ]);
+  object(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const xref = length;
+  add(`xref\n0 6\n0000000000 65535 f \n`);
+  for (let n = 1; n <= 5; n++)
+    add(`${String(offsets[n]).padStart(10, "0")} 00000 n \n`);
+  add(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return Buffer.concat(parts);
 }
 
 /** A stored (uncompressed) ZIP archive with correct CRCs. */

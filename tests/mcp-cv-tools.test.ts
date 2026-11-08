@@ -41,7 +41,13 @@ import { NOTICE } from "../src/lib/mcp/results";
 import { SCOPES, roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { createRecord } from "../src/lib/records";
-import { docxWithText, pdfWithText, zip } from "./helpers/cv-fixtures";
+import { cvExtractionLimits, extractCvText } from "../src/lib/cv-text";
+import {
+  deflateBombPdf,
+  docxWithText,
+  pdfWithText,
+  zip,
+} from "./helpers/cv-fixtures";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { blobBinding, fakeBlob } from "./helpers/fake-blob";
 import { ORIGIN, mcpHarness, type Result } from "./helpers/mcp";
@@ -375,6 +381,53 @@ describe("MCP CV text, upload and bulk import tools over real migrations and RLS
       }
       // Each of the six reads was audited once.
       expect(await cvReads(reader.id)).toHaveLength(6);
+    });
+
+    it("stops a PDF decompression bomb at the extraction memory cap, well before the deadline", async () => {
+      // 200 KB on disk; its content stream is listed 8 times and inflates to 200 MiB each time.
+      // Without the cap, extracting it held over 3 GB until the 10 s deadline (job 037, round 2).
+      const bomb = deflateBombPdf(200 * 1024 * 1024, 8);
+      expect(bomb.length).toBeLessThan(3 * 1024 * 1024);
+      expect(cvExtractionLimits.memoryBytes).toBe(512 * 1024 * 1024);
+      const person = await candidate();
+      const cv = await storedCv(person, "fictional-bomb.pdf", bomb);
+      const reader = await apiToken(owner.userId, READER);
+      const base = process.memoryUsage.rss();
+      let peak = 0;
+      const sampler = setInterval(() => {
+        peak = Math.max(peak, process.memoryUsage.rss() - base);
+      }, 5);
+      const started = Date.now();
+      try {
+        expect(
+          textOf(await call(reader.token, "get_cv_text", { cvId: cv })),
+        ).toMatchObject({
+          status: "text_not_available",
+          message: NOT_AVAILABLE,
+        });
+      } finally {
+        clearInterval(sampler);
+      }
+      expect(Date.now() - started).toBeLessThan(8_000);
+      expect(peak).toBeLessThan(1024 * 1024 * 1024);
+      // A lower cap ends it sooner; ordinary CVs still extract, also several at once.
+      cvExtractionLimits.memoryBytes = 64 * 1024 * 1024;
+      try {
+        expect(await extractCvText(MIME.pdf, bomb)).toBeNull();
+      } finally {
+        cvExtractionLimits.memoryBytes = 512 * 1024 * 1024;
+      }
+      const results = await Promise.all(
+        [1, 2, 3, 4].map((n) =>
+          extractCvText(MIME.pdf, pdfWithText([`Fictional parallel ${n}`])),
+        ),
+      );
+      expect(results.map((result) => result?.text)).toEqual([
+        "Fictional parallel 1",
+        "Fictional parallel 2",
+        "Fictional parallel 3",
+        "Fictional parallel 4",
+      ]);
     });
 
     it("cuts a CV at 30,000 characters and a call at 150,000, in item order", async () => {
