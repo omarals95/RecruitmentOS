@@ -150,6 +150,16 @@ describe("sign-in version", () => {
         renderToStaticMarkup(<AuthForm mode={mode} options={options} />),
       ).not.toContain(versionLabel());
   });
+  it("keeps the version line small, outranking the .auth-card > p rule", () => {
+    const all = rules("src/app/globals.css");
+    const paragraph = all.find((rule) => rule.selector === ".auth-card > p");
+    const version = all.find(
+      (rule) => rule.selector === ".auth-card > .auth-version",
+    );
+    expect(paragraph?.body).toMatch(/font-size:\s*13px/);
+    expect(version?.body).toMatch(/font-size:\s*10px/);
+    expect(version?.body).toMatch(/margin:\s*16px 0 0/);
+  });
 });
 
 describe("loading skeletons", () => {

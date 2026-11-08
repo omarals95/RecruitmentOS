@@ -28,16 +28,24 @@ export function AboutSettings() {
 }
 
 export function AboutPanel() {
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<{
+    copied: boolean;
+    text: string;
+  } | null>(null);
   const { version, build, commit, environment, builtAt } = appVersion();
   async function copyDetails() {
     try {
       await navigator.clipboard.writeText(versionDetails());
-      setNotice("Details copied. Paste them into your bug report.");
+      setNotice({
+        copied: true,
+        text: "Details copied. Paste them into your bug report.",
+      });
     } catch {
-      setNotice(
-        "Copy is unavailable in this browser. Copy the details shown above instead.",
-      );
+      // Neutral, not success: nothing was copied.
+      setNotice({
+        copied: false,
+        text: "Copy is unavailable in this browser. Copy the details shown above instead.",
+      });
     }
   }
   return (
@@ -74,8 +82,11 @@ export function AboutPanel() {
         </button>
       </div>
       {notice && (
-        <p className="notice success" role="status">
-          {notice}
+        <p
+          className={notice.copied ? "notice success" : "notice"}
+          role="status"
+        >
+          {notice.text}
         </p>
       )}
     </section>
