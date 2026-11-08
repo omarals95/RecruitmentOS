@@ -14,14 +14,16 @@ Principles that apply to every release:
 ## At a glance
 
 ```
-Phase 1  Usable core (go-live)        ── in progress, factory backlog
+Phase 1  Usable core (go-live)        ── in progress, factory backlog (Release 1)
+Release 2 Configurable platform      ── admin portal: screens & fields, types, workflow builder, boards, roles & permissions,
+                                        org chart & directory, templates, AI connections, recruitment plan, team tasks
 R1.1     Feedback loop                ── scorecards, real users, pipeline speed, duplicates
 R1.2     Hiring managers & approvals  ── requester role, approvals, interview kits, debrief
 R1.3     Integrations marketplace v1  ── Outlook, Gmail, Google/Microsoft calendars, Teams, Slack, Discord
 R1.4     Insights                     ── customisable dashboards, widgets, goals, scheduled reports
 R1.5     Compliance & data lifecycle  ── retention, erasure, consent, data requests, Emiratisation tracker
-R1.6     Workflow designer            ── custom hiring pipeline: stages, screens, fields, conditions, approval groups
-R2.0     Reach & region               ── careers page, job boards, WhatsApp/SMS, Arabic/RTL, mobile, live AI
+R1.6     Workflow designer            ── merged into Release 2 (8 November 2026)
+R3       Reach & region               ── careers page, job boards, WhatsApp/SMS, Arabic/RTL, mobile, live AI
 ```
 
 ## Phase 1 — Usable core (go-live release)
@@ -57,6 +59,64 @@ R2.0     Reach & region               ── careers page, job boards, WhatsApp/
 | P1-22 | **Added to Phase 1:** two-step sign-in (job 034, SEC-12): authenticator app and backup codes, required for owners and admins and for creating API tokens or connecting apps; 30-day trusted devices; owner reset and owner-run recovery script; per-email sign-in backoff (migrations `0022`, `0023`) | Done locally (job 034); the owner applies `0022` and `0023` plus the role template on Preview | Owner decision 2026-11-07 (SEC-12) |
 
 **Go-live gate:** all Phase 1 items done; full CI green on the release commit; Preview smoke checks; Production evidence script and live-role tests pass; backup and restore rehearsed; owner approval to deploy.
+
+## Release 2 — Configurable platform
+
+_Owner request, 8 November 2026; owner decisions of 8 November 2026 recorded below. Release 1 (Phase 1) is not changed by this plan._
+
+Release 2 turns RecruitmentOS from a fixed recruitment app into a workspace the owner configures, in the spirit of Jira: screens and fields, workflows, boards, roles and permissions, an organisation model, document templates, AI connections and a multi-year recruitment plan, all from one **Admin portal**. It absorbs the earlier **R1.6 Workflow designer** item (the Sanad-style request of 6 November: approvals, screens, mandatory/optional fields, if/then/else conditions, approval groups).
+
+### Epics
+
+| ID    | Epic                                         | What the owner gets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R2-01 | **Admin portal**                             | One admin area (owner and admins, plus custom roles that are granted it) with tabs: Screens & fields, Categories & types, Workflows, Boards, Roles & permissions, Organisation, Templates, AI connections (MCP), Recruitment plan settings, and the existing members, CV storage, speed and token settings. Every change is versioned and audited.                                                                                                                                                                                                                                                                                              |
+| R2-02 | **Screen and field builder**                 | For each record type (tasks, applications, candidates, job roles, vacancies, offers, interviews): add, rename, reorder, group and hide fields; mark them mandatory or optional; choose the data type (short text, long text, rich text, number, money with currency, percentage, date, date-time, dropdown, multi-select, checkbox, person, org unit, URL, email, phone, file, lookup to another record). Default values, help text, validation (min/max, pattern). Different screens per category/type and per action (create, edit, view, transition). Built-in system fields (for example candidate name) can be relabelled but not removed. |
+| R2-03 | **Categories and types**                     | Owner-defined categories and types for applications, vacancies and job roles (for example "Emiratisation", "Executive", "Internal transfer", "Contractor"). A type selects its screen set and its workflow, like Jira's issue types and schemes.                                                                                                                                                                                                                                                                                                                                                                                                |
+| R2-04 | **Workflow builder (applications pipeline)** | Drag-and-drop canvas: add and name steps (statuses), connect them with named transitions, set conditions (who may move it, field rules such as "salary above X"), validators (fields required before a transition), and post-actions (notify, assign, create a task, send a template, require an approval group). Workflows are versioned; publishing migrates in-flight applications with an explicit status mapping; a test mode walks a sample application through. Approval groups with any-one, all, majority or sequential rules. One workflow per application type, with a default. Later reusable for requisitions and offers.          |
+| R2-05 | **Boards and views (Jira-style Kanban)**     | Boards built on a workflow: columns mapped to one or more statuses, swimlanes (by vacancy, recruiter, type, department), quick filters, card fields chosen per board, WIP limits, saved and shared views, list and board modes.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| R2-06 | **Role-based access control**                | Owner-defined roles with permissions per page (module), per action (view, create, edit, transition, archive, export, erase, approve), per field (hidden, read-only, editable, e.g. salary or offer amount) and per record scope (all records, my org unit and below in the org chart, records I am assigned to or a stakeholder in). Built-in roles (owner, admin, recruiter, viewer, hiring manager, interviewer) are starting templates. Enforced on the server, in the REST API, in exports and in the AI connector (MCP), not just hidden in the UI.                                                                                        |
+| R2-07 | **Organisation model and org chart**         | Configurable hierarchy levels (for example Company > Division > Department > Section > Unit), positions (roles), employees and vacancies placed in the hierarchy. Two views: an interactive org chart (hierarchy) and a searchable directory with filters. Vacancies show as open positions in the chart. Employees are directory records that can optionally be linked to a user account. Import from Excel; HRIS sync later through the integrations marketplace.                                                                                                                                                                             |
+| R2-08 | **Document and message templates**           | Templates for emails, offer letters, interview invitations and follow-ups. Three ways to create one: upload a Word (.docx) file with placeholders, upload a PDF and place fields on it, or use a drag-and-drop builder. Dynamic fields from any record (candidate, vacancy, offer, interviewer, org unit), conditional blocks, versioning, preview with real data, generate PDF or DOCX, send by email, and optional approval before an offer letter goes out.                                                                                                                                                                                  |
+| R2-09 | **AI connections (MCP) tab**                 | Every connected AI app and API token in one place: who connected it, which team, scopes, last used, calls per day, the tool-call audit, revoke, and per-connection limits (read-only, no CV text, no writes) on top of the user's role. Workspace switches: allow AI connections, allow writes, allow CV contents.                                                                                                                                                                                                                                                                                                                              |
+| R2-10 | **Recruitment plan (workforce plan)**        | A multi-year plan (5, 10 or more years) by org unit at any configured level: hiring budget per year (headcount and cost, in AED), roles expected to be hired each year or quarter, linked to job roles and positions, with plan versus actual (open vacancies, offers, hires, spend) and variance. Scenario versions (draft, approved), approval by the configured approvers, confidential by default through RBAC.                                                                                                                                                                                                                             |
+| R2-11 | **Stakeholder and hiring-manager views**     | Hiring managers and stakeholders see only what relates to them: their org unit (from the org chart) or records they are assigned to (from RBAC): their vacancies, candidates on them, interviews and feedback, approvals waiting, their part of the recruitment plan. A simple home screen for them.                                                                                                                                                                                                                                                                                                                                            |
+| R2-12 | **General team tasks**                       | "Recruitment tasks" become general team tasks (the hiring process lives in the applications pipeline). Task boards per team or project, assignees, due dates, priorities, custom fields from R2-02, optional links to any record. Existing tasks are migrated as they are.                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Build order (dependencies)
+
+| Milestone                           | Contents                                                                                                    | Why this order                                                                 |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **R2a: Foundations**                | R2-01 admin portal shell, R2-06 roles and permissions engine, R2-07 organisation model, R2-12 general tasks | Every later screen, workflow and view depends on permissions and the org scope |
+| **R2b: Configurable records**       | R2-02 screen and field builder, R2-03 categories and types                                                  | Workflows and boards need configurable fields and types                        |
+| **R2c: Workflows and boards**       | R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder views                                     | The pipeline moves onto configured workflows                                   |
+| **R2d: Documents, AI and planning** | R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan                                           | Use fields, org units and permissions from earlier milestones                  |
+
+Each milestone ends with a Preview release the owner tests. Existing data is migrated in place: today's fixed fields become system fields on default screens, today's stages become the default workflow, and today's roles become role templates, so nothing breaks on day one.
+
+### Technical notes
+
+- Records already keep their fields in a JSON `data` column with schema validation, so custom fields fit without a new table per entity; field definitions, screens, workflows and permission schemes become versioned configuration rows per workspace.
+- Permissions must be checked in one place (the service layer used by the UI, REST, exports and MCP) and field-level hiding must apply to API and MCP results, search and exports. Database row-level security keeps team isolation; RBAC adds finer rules inside a team.
+- The workflow engine validates every transition on the server; the canvas is only an editor.
+- Template rendering runs server-side; PDF field placement uses coordinates on the uploaded PDF; DOCX uses placeholders. Uploaded templates go through the same storage and validation path as CVs.
+- Org chart and directory hold employee personal data, so they fall under the erasure and retention rules from Release 1 and R1.5.
+
+### Relationship to the existing roadmap
+
+- **R1.6 Workflow designer** is merged into R2-02 to R2-05.
+- **R1.2 Hiring managers and approvals:** hiring-manager home (R12-01) and approval chains (R12-02, R12-03) are delivered through R2-04 and R2-11; candidate email templates (R12-07) through R2-08. Scorecards and interview kits (R1.1, R12-04, R12-05) stay where they are.
+- R1.1 Feedback loop, R1.3 Integrations, R1.4 Insights and R1.5 Compliance keep their content and follow Release 2.
+
+### Owner decisions (8 November 2026)
+
+| #   | Decision                                                                                                                                                                                   |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Release 2 comes straight after Release 1; R1.1 to R1.5 follow it; R1.6 is merged into Release 2.                                                                                           |
+| 2   | Employees in the org chart are directory records added in the app or imported from Excel, optionally linked to a user account; HRIS sync comes later through the integrations marketplace. |
+| 3   | One workspace is one company: fields, workflows, roles and the org chart are configured once for the company and shared by its teams.                                                      |
+| 4   | Template emails are sent through the app's own sender (Resend, recruitmentos.ae) in Release 2; sending from users' Outlook or Gmail arrives with the integrations release.                 |
+| 5   | Recruitment plan figures are headcount and cost in AED, by year with optional quarters, hidden from everyone except roles granted access.                                                  |
 
 ## R1.1 — Feedback loop
 
@@ -148,6 +208,8 @@ Closes top gap 9. Requires the owner's privacy and retention policy decisions fi
 
 ## R1.6 — Workflow designer
 
+_Merged into [Release 2 — Configurable platform](#release-2--configurable-platform) on 8 November 2026 (R2-02 to R2-05). Kept here for its detailed requirements._
+
 _Owner request, 6 November 2026. Reference: the end-to-end hiring flow in the Sanad recruitment management system (requisition → approval → job posting → applications → shortlisting → interview scheduling → offer letter → onboarding, with hiring manager and recruiter hand-offs)._
 
 **Goal:** each team designs its own hiring pipeline instead of the fixed seven stages: which stages exist, what each stage asks for, who must approve, and which path a record takes depending on its data.
@@ -169,7 +231,7 @@ _Owner request, 6 November 2026. Reference: the end-to-end hiring flow in the Sa
 
 **Depends on:** R1.1 (users as owners and interviewers), R1.2 (approvals built on this engine), R1.3 (notification and calendar hooks).
 
-## R2.0 — Reach and region
+## R3 — Reach and region
 
 | ID     | Item                                                                                            |
 | ------ | ----------------------------------------------------------------------------------------------- |
