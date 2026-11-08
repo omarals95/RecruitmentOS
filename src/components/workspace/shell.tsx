@@ -31,6 +31,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { versionLabel } from "@/lib/app-version";
 import { useTheme, type Theme } from "@/components/theme-provider";
 import { Dialog } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -427,6 +428,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         </main>
         <footer className="workspace-footer">
           <span>RecruitmentOS · Your team&apos;s recruitment workspace</span>
+          <span>{versionLabel()}</span>
           <span>Dates and times: Asia/Dubai (UTC+4)</span>
         </footer>
       </div>

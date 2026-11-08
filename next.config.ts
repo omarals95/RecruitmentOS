@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { NextConfig } from "next";
+import { resolveBuildInfo } from "./src/lib/build-info";
 
 /** The installed folders of a package and its runtime dependencies, nested installs included. */
 function installedPackages(name: string, from: string, found: Set<string>) {
@@ -33,8 +34,24 @@ const cvTextFiles = [
   ),
 ];
 
+// next build evaluates this file in its build workers too; they inherit the first evaluation's
+// time through the environment, so every page and route of one build shows one build number.
+process.env.APP_BUILT_AT ??= new Date().toISOString();
+const buildInfo = resolveBuildInfo(
+  process.env,
+  process.cwd(),
+  new Date(process.env.APP_BUILT_AT),
+);
+
 const config: NextConfig = {
   poweredByHeader: false,
+  env: {
+    NEXT_PUBLIC_APP_VERSION: buildInfo.version,
+    NEXT_PUBLIC_APP_BUILD: buildInfo.build,
+    NEXT_PUBLIC_APP_COMMIT: buildInfo.commit,
+    NEXT_PUBLIC_APP_ENVIRONMENT: buildInfo.environment,
+    NEXT_PUBLIC_APP_BUILT_AT: buildInfo.builtAt,
+  },
   serverExternalPackages: [
     "pg",
     "@electric-sql/pglite",
@@ -75,6 +92,10 @@ const config: NextConfig = {
             value: `default-src 'self'; script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'${uploadHosts}${process.env.NODE_ENV === "development" ? " ws://localhost:* ws://127.0.0.1:*" : ""}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'${process.env.NODE_ENV === "production" ? "; upgrade-insecure-requests" : ""}`,
           },
         ],
+      },
+      {
+        source: "/api/:path*",
+        headers: [{ key: "X-App-Version", value: buildInfo.version }],
       },
     ];
   },

@@ -43,6 +43,8 @@ import {
   AI_EXTRACTION_LIMITS_TEXT,
   AI_EXTRACTION_PURPOSE,
 } from "../src/domain/cv-extraction";
+import { AuthForm } from "../src/components/auth/auth-form";
+import { versionLabel } from "../src/lib/app-version";
 import { rules } from "./helpers/css";
 
 const workspace = {
@@ -96,6 +98,67 @@ describe("workspace shell", () => {
     const member = switcher(false);
     expect(member).toMatch(/<option value=""[^>]*>No team yet<\/option>/);
     expect(member).not.toContain("Create or join a team");
+  });
+  it("shows the version label in the footer, which the phone rule leaves visible", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_VERSION", "1.0.0");
+    vi.stubEnv("NEXT_PUBLIC_APP_BUILD", "20261108.1430");
+    try {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <WorkspaceShell identity={workspace}>
+            <p>Fictional page</p>
+          </WorkspaceShell>
+        </WorkspaceProvider>,
+      );
+      const footer =
+        /<footer class="workspace-footer">([\s\S]*?)<\/footer>/.exec(
+          markup,
+        )?.[1];
+      expect(versionLabel()).toBe("Version 1.0.0 (build 20261108.1430)");
+      const spans = [...(footer ?? "").matchAll(/<span>(.*?)<\/span>/g)].map(
+        (match) => match[1],
+      );
+      expect(spans).toContain(versionLabel());
+      // At phone width .workspace-footer span:last-child hides only the timezone line.
+      expect(spans.at(-1)).toBe("Dates and times: Asia/Dubai (UTC+4)");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("sign-in version", () => {
+  const options = {
+    configured: true,
+    google: false,
+    microsoft: false,
+    emailPassword: true as const,
+    publicSignup: false,
+    bootstrapConfigured: false,
+  };
+  it("shows the version label below the auth footer in sign-in mode only", () => {
+    const signIn = renderToStaticMarkup(
+      <AuthForm mode="sign-in" options={options} />,
+    );
+    expect(signIn).toMatch(
+      new RegExp(
+        `</footer><p class="auth-version">${versionLabel().replace(/[().]/g, "\\$&")}</p>`,
+      ),
+    );
+    for (const mode of ["sign-up", "forgot-password"] as const)
+      expect(
+        renderToStaticMarkup(<AuthForm mode={mode} options={options} />),
+      ).not.toContain(versionLabel());
+  });
+  it("keeps the version line small, outranking the .auth-card > p rule", () => {
+    const all = rules("src/app/globals.css");
+    const paragraph = all.find((rule) => rule.selector === ".auth-card > p");
+    const version = all.find(
+      (rule) => rule.selector === ".auth-card > .auth-version",
+    );
+    expect(paragraph?.body).toMatch(/font-size:\s*13px/);
+    expect(version?.body).toMatch(/font-size:\s*10px/);
+    expect(version?.body).toMatch(/margin:\s*16px 0 0/);
   });
 });
 

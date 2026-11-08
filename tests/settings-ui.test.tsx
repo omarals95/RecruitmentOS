@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import { SettingsNavigation } from "../src/components/settings/settings-navigation";
 import {
@@ -24,6 +24,7 @@ import {
   SpeedPanel,
   SpeedSettings,
 } from "../src/components/settings/speed-settings";
+import { AboutSettings } from "../src/components/settings/about-settings";
 import { rules } from "./helpers/css";
 
 const workspace = {
@@ -346,6 +347,50 @@ describe("speed settings", () => {
     );
     expect(names?.body).toMatch(/white-space:\s*nowrap/);
     expect(names?.body).toMatch(/overflow-wrap:\s*normal/);
+  });
+});
+
+describe("about settings", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("lists About in the settings navigation for every role", () => {
+    for (const role of ["owner", "admin", "recruiter", "viewer", null])
+      expect(
+        renderToStaticMarkup(<SettingsNavigation active="team" role={role} />),
+        String(role),
+      ).toContain('href="/app/settings/about"');
+  });
+  it("shows version, build, commit, environment and UTC build time with Copy details to any member", () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_VERSION", "1.0.0");
+    vi.stubEnv("NEXT_PUBLIC_APP_BUILD", "20261108.1430");
+    vi.stubEnv("NEXT_PUBLIC_APP_COMMIT", "f09caa4");
+    vi.stubEnv("NEXT_PUBLIC_APP_ENVIRONMENT", "Preview");
+    vi.stubEnv("NEXT_PUBLIC_APP_BUILT_AT", "2026-11-08T14:30:59.000Z");
+    for (const value of [
+      workspace,
+      { ...workspace, role: "viewer" },
+      { ...workspace, team: null, role: null },
+    ]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={value}>
+          <AboutSettings />
+        </WorkspaceProvider>,
+      );
+      expect(markup).toContain("<h1>About</h1>");
+      expect(markup).toMatch(
+        /<a [^>]*aria-current="page" href="\/app\/settings\/about"/,
+      );
+      for (const [label, text] of [
+        ["Version", "1.0.0"],
+        ["Build", "20261108.1430"],
+        ["Commit", "f09caa4"],
+        ["Environment", "Preview"],
+        ["Build time", "2026-11-08 14:30 UTC"],
+      ])
+        expect(markup).toContain(`<dt>${label}</dt><dd>${text}</dd>`);
+      expect(markup).toMatch(
+        /<button type="button"[^>]*>Copy details<\/button>/,
+      );
+    }
   });
 });
 

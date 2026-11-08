@@ -1562,6 +1562,34 @@ export function GET() {
       responses: { "200": { description: "OpenAPI 3.1 document." } },
     },
   };
+  paths["/api/version"] = {
+    get: {
+      summary: "Read the application version and build",
+      security: [],
+      "x-required-scopes": [],
+      responses: {
+        "200": {
+          description:
+            "Semantic version, UTC build number, short commit and environment.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["version", "build", "commit", "environment"],
+                additionalProperties: false,
+                properties: {
+                  version: { type: "string", example: "1.0.0" },
+                  build: { type: "string", example: "20261108.1430" },
+                  commit: { type: "string", example: "f09caa4" },
+                  environment: { type: "string", example: "Preview" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
   const authDetails = {
     security: [],
     "x-required-scopes": [],

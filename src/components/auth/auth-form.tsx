@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { ArrowRight, ShieldCheck } from "lucide-react";
+import { versionLabel } from "@/lib/app-version";
 import { authClient } from "@/lib/auth-client";
 import type { AuthOptions } from "@/lib/auth";
 import { safeNext } from "@/lib/safe-next";
@@ -455,6 +456,7 @@ export function AuthForm({
             </Link>
           )}
         </footer>
+        {mode === "sign-in" && <p className="auth-version">{versionLabel()}</p>}
         {mode === "sign-up" && !options.publicSignup && (
           <p className="auth-help">
             Registration is by invitation. The configured first administrator

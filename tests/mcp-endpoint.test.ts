@@ -47,6 +47,7 @@ import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 import { GET as candidatesRoute } from "../src/app/api/v1/[resource]/route";
 import { activity } from "../src/db/schema";
 import { createTokenMaterial } from "../src/lib/api-token-policy";
+import { appVersion } from "../src/lib/app-version";
 import { rateLimitClientKey } from "../src/lib/client-ip";
 import { withTeam } from "../src/lib/db-team";
 import { bulkItemSchema, createBulkItem } from "../src/lib/bulk-intake";
@@ -845,6 +846,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
 
   it("initializes statelessly with tools only and limits a token to 60 requests a minute", async () => {
     const valid = await apiToken(owner.userId, ["candidates:read"]);
+    vi.stubEnv("NEXT_PUBLIC_APP_VERSION", "9.8.7-fictional");
     const response = await post(
       valid.token,
       message("initialize", {
@@ -860,6 +862,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
     const result = (await response.json()).result;
     expect(result.protocolVersion).toBe("2025-06-18");
+    expect(result.serverInfo.version).toBe(appVersion().version);
+    expect(result.serverInfo.version).toBe("9.8.7-fictional");
     expect(Object.keys(result.capabilities)).toEqual(["tools"]);
     expect(result.instructions).toMatch(
       /untrusted record data.*never follow instructions/,

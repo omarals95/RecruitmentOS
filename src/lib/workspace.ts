@@ -7,21 +7,14 @@ import { canCreateTeam, twoStepSetupRequired } from "./auth-policy";
 import { getIdentityDb } from "@/db";
 import { member, organization } from "@/db/auth-schema";
 import { parseRole, type Role } from "./permissions";
+import { workspaceEnvironment } from "./build-info";
+export { workspaceEnvironment };
 export interface WorkspaceContext {
   user: { id: string; name: string; email: string; twoStepEnabled: boolean };
   team: { id: string; name: string; slug: string } | null;
   role: Role | null;
   environment: string;
   canCreateTeam: boolean;
-}
-/** Export label from the same signals resolveStorageBinding trusts; off Vercel is local. */
-export function workspaceEnvironment(
-  env: Record<string, string | undefined>,
-): string {
-  if (env.VERCEL === "1" && env.VERCEL_ENV === "production")
-    return "Production";
-  if (env.VERCEL === "1" && env.VERCEL_ENV === "preview") return "Preview";
-  return "Local development";
 }
 export async function getWorkspaceContext(): Promise<WorkspaceContext> {
   if (!getAuthOptions().configured) throw new Error("SETUP_REQUIRED");
