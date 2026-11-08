@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
@@ -297,7 +298,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 8 }]);
+    ).toEqual([{ version: 9 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -457,7 +458,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 8 }]);
+    ).toEqual([{ version: 9 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -587,7 +588,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 8 }]);
+    ).toEqual([{ version: 9 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -703,7 +704,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 8 }]);
+    ).toEqual([{ version: 9 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -738,5 +739,143 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
         plan_access: true,
       },
     ]);
+  });
+});
+
+// Teams, members, company authority and activity written by the 0029 schema under a non-superuser
+// migration owner, upgraded through 0030: the configuration store starts empty under FORCE RLS, and
+// the re-created activity insert policy still takes the authority helper's audit row.
+describe("upgrade from 0029 to the configuration store", () => {
+  const pg = new PGlite();
+  const owner = "config_upgrade_owner";
+  const company = "00000000-0000-4000-a000-000000000001";
+  const companyOwner = principal(
+    "config-upgrade-owner",
+    "config-upgrade-team",
+    "owner",
+  );
+  const rows = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    return Object.fromEntries(
+      await Promise.all(
+        [
+          "app.workspaces",
+          "app.workspace_teams",
+          "app.workspace_admins",
+          "app.activity",
+          "auth.member",
+        ].map(async (table) => [
+          table,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+        ]),
+      ),
+    );
+  };
+  let before: Awaited<ReturnType<typeof rows>>;
+
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0029_signed_context_workspace.sql");
+    // Fixture rows as the bootstrap superuser, which bypasses RLS; the triggers still run as the owner.
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('config-upgrade-owner','Fictional Upgrade Owner','config-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('config-upgrade-team','Fictional Upgrade Team','config-upgrade-team','config-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('config-upgrade-mo','config-upgrade-team','config-upgrade-owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('config-upgrade-admin','Fictional Upgrade Admin','config-upgrade-admin@example.test',true,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('config-upgrade-ma','config-upgrade-team','config-upgrade-admin','recruiter');
+      INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary,metadata) VALUES
+        ('config-upgrade-team','config-upgrade-owner','session','workspace_authority.changed','workspace-authority','Fictional earlier change','{}');`);
+    before = await rows();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every existing row and sets storage schema 9", async () => {
+    expect(await rows()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 9 }]);
+  });
+
+  it("adds the three configuration tables empty, under FORCE RLS", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const tables = ["config_layouts", "config_objects", "config_versions"];
+    expect(
+      (
+        await pg.query(
+          `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, pg_get_userbyid(c.relowner) AS owner
+           FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace
+           WHERE s.nspname = 'app' AND c.relkind = 'r' AND c.relname LIKE 'config\\_%' ORDER BY c.relname`,
+        )
+      ).rows,
+    ).toEqual(
+      tables.map((relname) => ({
+        relname,
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        owner,
+      })),
+    );
+    for (const table of tables)
+      expect(
+        (await pg.query(`SELECT count(*)::int AS n FROM app.${table}`)).rows,
+        table,
+      ).toEqual([{ n: 0 }]);
+  });
+
+  it("still audits a workspace-authority change through the re-created insert policy", async () => {
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    const changed = await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+      await installTenantContext(tx, companyOwner, snapshot);
+      const result = await tx.execute<{ changed: boolean }>(
+        sql`select tenant_context.set_workspace_authority('config-upgrade-admin', 'admin', '{fields}', false) as changed`,
+      );
+      return result.rows[0].changed;
+    });
+    expect(changed).toBe(true);
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          "SELECT team_id, actor_id, action, metadata->'after' AS after FROM app.activity WHERE kind = 'workspace-authority' ORDER BY created_at",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        team_id: "config-upgrade-team",
+        actor_id: "config-upgrade-owner",
+        action: "workspace_authority.changed",
+        after: null,
+      },
+      {
+        team_id: "config-upgrade-team",
+        actor_id: "config-upgrade-owner",
+        action: "workspace_authority.changed",
+        after: {
+          level: "admin",
+          areas: ["fields"],
+          planAccess: false,
+          suspended: false,
+        },
+      },
+    ]);
+    expect(
+      (
+        await pg.query(
+          "SELECT level, areas FROM app.workspace_admins WHERE workspace_id = $1 AND user_id = 'config-upgrade-admin'",
+          [company],
+        )
+      ).rows,
+    ).toEqual([{ level: "admin", areas: ["fields"] }]);
   });
 });

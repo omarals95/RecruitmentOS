@@ -109,6 +109,9 @@ GRANT SELECT, INSERT, UPDATE ON TABLE app.speed_sample_budgets TO recruitmentos_
 GRANT SELECT ON TABLE app.workspaces TO recruitmentos_data;
 GRANT SELECT ON TABLE app.workspace_teams TO recruitmentos_data;
 GRANT SELECT ON TABLE app.workspace_admins TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_objects TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_versions TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_layouts TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;
@@ -130,6 +133,11 @@ GRANT EXECUTE ON FUNCTION tenant_context.set_mcp_cv_text_access(boolean) TO recr
 GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_cv_read(text, uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_workspace_authority(text, text, text[], boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.allows_workspace_admin(uuid, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.allows_workspace(uuid, text, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.publish_config_version(uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.retire_config_version(uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.audit_config(uuid, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.config_history(uuid, timestamp with time zone, integer) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and

@@ -13,6 +13,11 @@
  *   workspace mapping, and returns the mapped workspace with no company level, areas or plan access
  *   for a team owner without company authority. A company authority grant and a concurrent removal
  *   of the target's last membership never leave unsuspended authority for a user in no team.
+ *   A context reads no configuration row of another workspace, the data role cannot insert a
+ *   config activity row and tenant_context.audit_config refuses a duplicate publish audit, and a
+ *   team owner without company authority cannot write company configuration (direct SQL or
+ *   tenant_context.publish_config_version) but can write their own team's task board, which
+ *   another team cannot read.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -29,8 +34,12 @@
  *   variant, make the fixture initial administrator company owner. As the owner it also removes
  *   and restores one fixture team's workspace mapping and makes one fixture user company owner,
  *   who grants company authority to two fixture members through the helper (one audit row, and
- *   the trigger suspends it). It never changes budgets, keys, roles, grants, policies, migrations
- *   or settings beyond transaction-local deadlines.
+ *   the trigger suspends it). As the owner it makes the team A fixture owner company owner, writes
+ *   fixture configuration objects keyed by the run prefix, and briefly inserts a second fixture
+ *   workspace (team creation fails on the database while it exists) with one object, removing
+ *   both in the same check; the data role commits one task board in fixture team B. It never
+ *   changes budgets, keys, roles, grants, policies, migrations or settings beyond
+ *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the contexts, leases,
@@ -142,6 +151,12 @@ const WORKSPACE_TABLES = [
   "workspaces",
   "workspace_teams",
   "workspace_admins",
+] as const;
+/** The configuration store (0030), under FORCE RLS with allows_workspace policies. */
+const CONFIG_TABLES = [
+  "config_objects",
+  "config_versions",
+  "config_layouts",
 ] as const;
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
@@ -509,6 +524,20 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     // Both cascade from the fixture teams and users; the owner-only policies let the owner count them.
     ["app.workspace_teams", ...team],
     ["app.workspace_admins", "user_id LIKE $1", [f.pattern]],
+    // Fixture configuration: company objects by key, task boards by team; versions and layouts
+    // cascade from their object. The owner-only policies let the owner count and delete them.
+    [
+      "app.config_layouts",
+      "version_id IN (SELECT v.id FROM app.config_versions v JOIN app.config_objects o ON o.id = v.object_id WHERE o.key LIKE $1 OR o.team_id LIKE $1)",
+      [f.pattern],
+    ],
+    [
+      "app.config_versions",
+      "object_id IN (SELECT o.id FROM app.config_objects o WHERE o.key LIKE $1 OR o.team_id LIKE $1)",
+      [f.pattern],
+    ],
+    ["app.config_objects", "key LIKE $1 OR team_id LIKE $1", [f.pattern]],
+    ["app.workspaces", "name LIKE $1", [f.pattern]],
     ["tenant_context.contexts", ...team],
     ["storage_ledger.blob_read_leases", ...store],
     ["storage_ledger.stores", ...store],
@@ -615,6 +644,10 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       owner,
       async () => {
         for (const table of [
+          // The guard lets the owner delete published versions; the second workspace goes after
+          // its objects.
+          "app.config_objects",
+          "app.workspaces",
           "tenant_context.contexts",
           "storage_ledger.blob_read_leases",
           "storage_ledger.stores",
@@ -636,12 +669,13 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         WHERE n.nspname = 'app' AND c.relname = ANY($1::text[]))::int AS forced,
       (SELECT t.tgenabled::text FROM pg_catalog.pg_trigger t
         WHERE t.tgrelid = 'app.activity'::regclass AND t.tgname = 'immutable_activity') AS trigger`,
-    [[...APP_TABLES, ...WORKSPACE_TABLES]],
+    [[...APP_TABLES, ...WORKSPACE_TABLES, ...CONFIG_TABLES]],
   );
   return {
     restored:
       failure === undefined &&
-      rows[0].forced === APP_TABLES.length + WORKSPACE_TABLES.length &&
+      rows[0].forced ===
+        APP_TABLES.length + WORKSPACE_TABLES.length + CONFIG_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -2328,6 +2362,250 @@ async function runChecks(run: Run) {
           end.private === baseline.private &&
           end.token === baseline.token,
       ],
+    );
+  });
+
+  // The configuration store (0030). The owner writes the company fixtures directly; every data-role
+  // write that would audit is rolled back, after denied-mutations-no-audit.
+  const configKey = (name: string) => `${f.prefix}-cfg-${name}`;
+  const ownerConfig = async (workspace: string, key: string) => {
+    const { rows } = await owner.query(
+      "INSERT INTO app.config_objects(workspace_id,type,key,created_by) VALUES($1::uuid,'workflow',$2,$3) RETURNING id::text AS id",
+      [workspace, key, f.users.a1],
+    );
+    const object = rows[0].id as string;
+    const version = (
+      await owner.query(
+        `INSERT INTO app.config_versions(object_id,workspace_id,body,created_by) VALUES($1::uuid,$2::uuid,'{"label":"Fictional workflow"}',$3) RETURNING id::text AS id`,
+        [object, workspace, f.users.a1],
+      )
+    ).rows[0].id as string;
+    await owner.query(
+      "UPDATE app.config_objects SET draft_version_id = $2::uuid WHERE id = $1::uuid",
+      [object, version],
+    );
+    return { object, version };
+  };
+  const companyDraft = await ownerConfig(
+    COMPANY_WORKSPACE,
+    configKey("company"),
+  );
+  const configRows = (db: Db, column: string, id: string) =>
+    count(
+      db,
+      `SELECT ((SELECT count(*) FROM app.config_objects WHERE ${column} = $1::uuid)
+        + (SELECT count(*) FROM app.config_versions WHERE ${column === "id" ? "object_id" : column} = $1::uuid)
+        + (SELECT count(*) FROM app.config_layouts l JOIN app.config_versions v ON v.id = l.version_id
+            WHERE v.${column === "id" ? "object_id" : column} = $1::uuid))::int AS n`,
+      [id],
+    );
+
+  await check("config-cross-workspace", async (probe) => {
+    probe.at("setup");
+    // A second fixture workspace briefly makes team creation fail on this database (D15).
+    const other = randomUUID();
+    await owner.query(
+      "INSERT INTO app.workspaces(id,name) VALUES($1::uuid,$2)",
+      [other, `${f.prefix}-workspace`],
+    );
+    let pass: boolean;
+    try {
+      const foreign = await ownerConfig(other, configKey("foreign"));
+      await owner.query(
+        "INSERT INTO app.config_layouts(version_id,workspace_id,layout) VALUES($1::uuid,$2::uuid,'{}')",
+        [foreign.version, other],
+      );
+      const seeded = await configRows(owner, "workspace_id", other);
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerA);
+        probe.at("outcome");
+        const read = await configRows(data, "workspace_id", other);
+        const planted = await attempt(
+          data,
+          "INSERT INTO app.config_objects(workspace_id,type,key) VALUES($1::uuid,'workflow',$2)",
+          [other, configKey("planted")],
+        );
+        probe.at("positive-control");
+        return probe.all(
+          ["setup", seeded === 3],
+          ["outcome", read === 0],
+          denial(planted),
+          [
+            "positive-control",
+            (await configRows(data, "id", companyDraft.object)) === 2,
+          ],
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.config_objects WHERE workspace_id = $1::uuid",
+        [other],
+      );
+      await owner.query("DELETE FROM app.workspaces WHERE id = $1::uuid", [
+        other,
+      ]);
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await count(
+          owner,
+          "SELECT count(*)::int AS n FROM app.workspaces WHERE id = $1::uuid",
+          [other],
+        )) === 0,
+      ])
+    );
+  });
+
+  await check("config-forged-audit", async (probe) => {
+    probe.at("setup");
+    // The fixture team A owner becomes company owner; the row goes with the user at cleanup.
+    await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level) VALUES($1::uuid,$2,'owner') ON CONFLICT DO NOTHING",
+      [COMPANY_WORKSPACE, f.users.a1],
+    );
+    const audits = (db: Db) =>
+      count(
+        db,
+        "SELECT count(*)::int AS n FROM app.activity WHERE kind = 'config' AND team_id = $1",
+        [f.teams.a],
+      );
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const forged: Outcome[] = [];
+      for (const action of [
+        "config.draft_created",
+        "config.published",
+        "config.retired",
+        "config.archived",
+        "config.layout_changed",
+      ])
+        forged.push(
+          await attempt(
+            data,
+            "INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary,metadata) VALUES($1,$2,'session',$3,'config','Forged','{}')",
+            [f.teams.a, f.users.a1, action],
+          ),
+        );
+      probe.at("positive-control");
+      const published = await attempt(
+        data,
+        "SELECT tenant_context.publish_config_version($1::uuid) AS number",
+        [companyDraft.version],
+      );
+      probe.at("outcome");
+      const duplicate = await attempt(
+        data,
+        "SELECT tenant_context.audit_config($1::uuid,'config.published')",
+        [companyDraft.version],
+      );
+      return probe.all(
+        ...forged.map(denial),
+        outcomeIs(
+          published.ok && published.rows[0]?.number === 1,
+          published,
+          "positive-control",
+        ),
+        failsWith(duplicate, "RQ007"),
+        ["outcome", (await audits(data)) === 1],
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await audits(owner)) === 0]);
+  });
+
+  await check("config-team-owner-write", async (probe) => {
+    const draftState = () =>
+      owner
+        .query(
+          "SELECT state, note, body::text AS body FROM app.config_versions WHERE id = $1::uuid",
+          [companyDraft.version],
+        )
+        .then(({ rows }) => JSON.stringify(rows));
+    const before = await draftState();
+    const companyPass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerB);
+      probe.at("outcome");
+      return probe.all(
+        denial(
+          await attempt(
+            data,
+            "INSERT INTO app.config_objects(workspace_id,type,key) VALUES($1::uuid,'workflow',$2)",
+            [COMPANY_WORKSPACE, configKey("denied")],
+          ),
+        ),
+        denial(
+          await attempt(
+            data,
+            `INSERT INTO app.config_versions(object_id,workspace_id,body) VALUES($1::uuid,$2::uuid,'{"label":"Denied"}')`,
+            [companyDraft.object, COMPANY_WORKSPACE],
+          ),
+        ),
+        leftAlone(
+          await attempt(
+            data,
+            "UPDATE app.config_versions SET note = 'Denied' WHERE id = $1::uuid",
+            [companyDraft.version],
+          ),
+        ),
+        leftAlone(
+          await attempt(
+            data,
+            "UPDATE app.config_objects SET archived_at = now() WHERE id = $1::uuid",
+            [companyDraft.object],
+          ),
+        ),
+        failsWith(
+          await attempt(
+            data,
+            "SELECT tenant_context.publish_config_version($1::uuid)",
+            [companyDraft.version],
+          ),
+          "42501",
+        ),
+      );
+    });
+    // The same owner's own team task board, committed; it goes with team B at cleanup.
+    probe.at("positive-control");
+    const board = await transaction(
+      data,
+      async () => {
+        await installAs(data, signer, p.ownerB);
+        const { rows } = await data.query(
+          "INSERT INTO app.config_objects(workspace_id,team_id,type,key) VALUES($1::uuid,$2,'task-board',$3) RETURNING id::text AS id",
+          [COMPANY_WORKSPACE, f.teams.b, configKey("board")],
+        );
+        await data.query(
+          `INSERT INTO app.config_versions(object_id,workspace_id,body) VALUES($1::uuid,$2::uuid,'{"label":"Fictional board"}')`,
+          [rows[0].id, COMPANY_WORKSPACE],
+        );
+        return rows[0].id as string;
+      },
+      true,
+    );
+    const seen = async (principal: Principal) =>
+      transaction(data, async () => {
+        await installAs(data, signer, principal);
+        return configRows(data, "id", board);
+      });
+    probe.at("outcome");
+    const teamA = await seen(p.ownerA);
+    probe.at("positive-control");
+    const teamB = await seen(p.ownerB);
+    probe.at("end-state");
+    return (
+      companyPass &&
+      probe.all(
+        ["outcome", teamA === 0],
+        ["positive-control", teamB === 2],
+        ["end-state", (await draftState()) === before],
+      )
     );
   });
 

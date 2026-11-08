@@ -162,7 +162,7 @@ describe("database pool preflight", () => {
     configure();
     vi.stubEnv("IDENTITY_DATABASE_URL", "");
     vi.stubEnv("DATABASE_URL", "postgresql://data:fake@[::1]/neondb");
-    mocks.query.mockResolvedValue({ rows: [{ version: 8 }] });
+    mocks.query.mockResolvedValue({ rows: [{ version: 9 }] });
     await expect(getDb()).resolves.toBeTruthy();
     expect(mocks.pools).toHaveLength(1);
     expect(mocks.pools[0].ssl).toBeUndefined();

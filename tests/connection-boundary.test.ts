@@ -162,6 +162,30 @@ describe("database identity separation", () => {
           )
         ).rows,
       ).toEqual([{ args: "payload text, signature text, cached text[]" }]);
+      // A multi-word type is matched in catalog spelling (0030): the granted history helper passes,
+      // a same-name overload with another argument type does not.
+      expect(dataRoleHelpers).toContain(
+        "tenant_context.config_history(uuid,timestamp with time zone,integer)",
+      );
+      expect(
+        (
+          await harness.client.query<{ args: string }>(
+            "SELECT pg_catalog.oidvectortypes(p.proargtypes) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'config_history'",
+          )
+        ).rows,
+      ).toEqual([{ args: "uuid, timestamp with time zone, integer" }]);
+      await harness.asOwner();
+      await harness.client.exec(`
+        CREATE FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) RETURNS text
+          LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 'extra' $$;
+        REVOKE ALL ON FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) TO ${splitRoles.data};`);
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        "DROP FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer)",
+      );
+      expect(await unsafe("data")).toBe(false);
       await harness.asOwner();
       await harness.client.exec(`
         CREATE FUNCTION tenant_context.extra_helper() RETURNS text LANGUAGE sql

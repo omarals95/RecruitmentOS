@@ -28,6 +28,11 @@ export const dataRoleHelpers = [
   "tenant_context.audit_mcp_cv_read(text,uuid)",
   "tenant_context.set_workspace_authority(text,text,text[],boolean)",
   "tenant_context.allows_workspace_admin(uuid,text)",
+  "tenant_context.allows_workspace(uuid,text,text)",
+  "tenant_context.publish_config_version(uuid)",
+  "tenant_context.retire_config_version(uuid)",
+  "tenant_context.audit_config(uuid,text)",
+  "tenant_context.config_history(uuid,timestamp with time zone,integer)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text,text[])",
@@ -42,7 +47,8 @@ function indirectPrivilegeQuery(allowed: readonly string[]) {
   // Match catalog columns; name lookups would fail without schema USAGE.
   const signatures = allowed
     .map((signature) => {
-      const [, name, args] = /^tenant_context\.(\w+)\(([\w,[\]]*)\)$/.exec(
+      // Catalog spelling: a type name may hold spaces (timestamp with time zone).
+      const [, name, args] = /^tenant_context\.(\w+)\(([\w, [\]]*)\)$/.exec(
         signature,
       )!;
       return `('${name}','${args.replaceAll(",", ", ")}')`;
