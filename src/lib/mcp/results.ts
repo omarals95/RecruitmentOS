@@ -7,6 +7,8 @@ export const LIST_TEXT_LIMIT = 500;
 export const GET_TEXT_LIMIT = 4000;
 const TAG_LIMIT = 50;
 const RESULT_BYTES = 65536;
+/** Only the CV text tools; the doubled result stays under Vercel's 4.5 MB response limit. */
+export const CV_TEXT_RESULT_BYTES = 1_048_576;
 
 type Pagination = {
   page: number;
@@ -83,6 +85,7 @@ export async function failureFrom(error: unknown): Promise<CallToolResult> {
 export function success(
   data: unknown,
   pagination?: Pagination,
+  maxBytes: number = RESULT_BYTES,
 ): CallToolResult {
   const payload = {
     untrustedData: true,
@@ -91,7 +94,7 @@ export function success(
     ...(pagination ? { pagination } : {}),
   };
   const text = JSON.stringify(payload);
-  if (new TextEncoder().encode(text).byteLength > RESULT_BYTES)
+  if (new TextEncoder().encode(text).byteLength > maxBytes)
     return failure(
       "result_too_large",
       "The result is too large. Use a smaller pageSize or narrower filters.",

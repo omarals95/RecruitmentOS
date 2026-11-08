@@ -9,15 +9,21 @@ import { existsSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+const navigation = vi.hoisted(() => ({ params: new URLSearchParams() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/app/pipeline",
   useRouter: () => ({ push: () => {}, refresh: () => {} }),
+  useSearchParams: () => navigation.params,
 }));
 
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
-import { Loading } from "../src/components/workspace/records-screen";
+import {
+  Loading,
+  RecordsScreen,
+  withoutImportLink,
+} from "../src/components/workspace/records-screen";
 import WorkspaceLoading from "../src/app/app/loading";
 import {
   BulkCvImport,
@@ -208,6 +214,40 @@ describe("confirm dialog", () => {
 });
 
 describe("Import CVs", () => {
+  it("opens from /app/candidates?import=cvs for a member who can import, and not for a viewer", () => {
+    const candidates = (role: string, search: string) => {
+      navigation.params = new URLSearchParams(search);
+      try {
+        return renderToStaticMarkup(
+          <WorkspaceProvider value={{ ...workspace, role }}>
+            <RecordsScreen section="candidates" />
+          </WorkspaceProvider>,
+        );
+      } finally {
+        navigation.params = new URLSearchParams();
+      }
+    };
+    const dialogTitle = ">Import CVs</h2>";
+    expect(candidates("recruiter", "import=cvs")).toContain(dialogTitle);
+    expect(candidates("recruiter", "")).not.toContain(dialogTitle);
+    expect(candidates("recruiter", "import=other")).not.toContain(dialogTitle);
+    const page = candidates("viewer", "import=cvs");
+    expect(page).not.toContain(dialogTitle);
+    // The page itself still shows, with the button disabled as usual.
+    expect(page).toMatch(
+      /<button[^>]*disabled=""[^>]*>[\s\S]*?Import CVs<\/button>/,
+    );
+    // After opening, the parameter leaves the address, so a reload does not open it again.
+    expect(
+      withoutImportLink(
+        "http://localhost:3000/app/candidates?import=cvs&record=fictional",
+      ),
+    ).toBe("http://localhost:3000/app/candidates?record=fictional");
+    expect(
+      withoutImportLink("http://localhost:3000/app/candidates?import=cvs"),
+    ).toBe("http://localhost:3000/app/candidates");
+  });
+
   it("shows only the capability check before the availability answer arrives", () => {
     const markup = renderToStaticMarkup(
       <WorkspaceProvider value={workspace}>

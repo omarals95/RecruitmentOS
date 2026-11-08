@@ -23,6 +23,23 @@ vi.mock("@/db", async (original) => ({
   getDb: pools.data,
   getIdentityDb: pools.identity,
 }));
+// The CV tools reach the fake Blob client through the storage module.
+const configured = vi.hoisted(() => ({
+  current: undefined as undefined | { binding: unknown; gateway: unknown },
+}));
+vi.mock("@/lib/storage", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/storage")>();
+  return {
+    ...original,
+    storageConfigured: () => true,
+    resolveStorageBinding: () => {
+      if (!configured.current)
+        throw new original.StorageConfigurationError("No fake storage.");
+      return configured.current.binding;
+    },
+    getStorage: async () => configured.current?.gateway,
+  };
+});
 
 import * as mcpRoute from "../src/app/api/mcp/route";
 import { GET as activityRoute } from "../src/app/api/v1/activity/route";
@@ -32,6 +49,8 @@ import { activity } from "../src/db/schema";
 import { createTokenMaterial } from "../src/lib/api-token-policy";
 import { rateLimitClientKey } from "../src/lib/client-ip";
 import { withTeam } from "../src/lib/db-team";
+import { bulkItemSchema, createBulkItem } from "../src/lib/bulk-intake";
+import { beginCvUpload } from "../src/lib/cvs";
 import { TOOLS } from "../src/lib/mcp/tools";
 import { NOTICE } from "../src/lib/mcp/results";
 import { SCOPES, roleScopes } from "../src/lib/permissions";
@@ -49,6 +68,8 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import { pdfWithText } from "./helpers/cv-fixtures";
+import { blobBinding, fakeBlob } from "./helpers/fake-blob";
 import { ORIGIN, mcpHarness } from "./helpers/mcp";
 import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
@@ -72,6 +93,15 @@ const TOOL_NAMES = [
   "update_candidate",
   "get_my_candidate_state",
   "update_my_candidate_state",
+  "get_cv_text",
+  "get_cv_texts",
+  "upload_cv",
+  "create_cv_upload_link",
+  "complete_cv_upload",
+  "start_bulk_import",
+  "add_bulk_import_item",
+  "list_bulk_import_items",
+  "open_bulk_import_page",
   "list_job_roles",
   "create_job_role",
   "update_job_role",
@@ -186,6 +216,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
       )
     )[0].version;
   const key = () => `scope-${randomUUID()}`;
+  const fake = fakeBlob();
+  const scopePdf = pdfWithText(["Fictional scope check CV"]);
   /** Valid arguments for one tool; updates read the record's current version first. */
   const validArgs = async (name: string): Promise<Record<string, unknown>> => {
     const args: Record<string, () => Promise<Record<string, unknown>>> = {
@@ -204,6 +236,64 @@ describe("MCP endpoint over real migrations and RLS", () => {
         jobTitle: "Fictional Scope Title",
       }),
       get_my_candidate_state: async () => ({ candidateId: ids.candidate }),
+      // A candidate without a ready CV: the text tools answer no_cv and read nothing.
+      get_cv_text: async () => ({ candidateId: ids.scopeApplicant }),
+      get_cv_texts: async () => ({ candidateIds: [ids.scopeApplicant] }),
+      upload_cv: async () => ({
+        idempotencyKey: key(),
+        candidateId: ids.scopeApplicant,
+        originalName: "fictional-scope.pdf",
+        contentBase64: scopePdf.toString("base64"),
+      }),
+      create_cv_upload_link: async () => ({
+        idempotencyKey: key(),
+        candidateId: ids.scopeApplicant,
+        originalName: "fictional-scope-link.pdf",
+        sizeBytes: scopePdf.length,
+      }),
+      complete_cv_upload: async () => {
+        const reserved = await beginCvUpload(owner, ids.scopeApplicant, {
+          originalName: "fictional-scope-complete.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: scopePdf.length,
+          clientUploadId: randomUUID(),
+        });
+        fake.objects.set(
+          new URL(reserved.upload!.url).searchParams.get("pathname")!,
+          { bytes: scopePdf, mimeType: "application/pdf" },
+        );
+        return { cvId: reserved.data.id };
+      },
+      start_bulk_import: async () => ({}),
+      add_bulk_import_item: async () => ({
+        batchId: randomUUID(),
+        idempotencyKey: key(),
+        originalName: "fictional-scope-bulk.pdf",
+        sizeBytes: scopePdf.length,
+        candidate: { name: `Bulk Scope Fictional ${key()}` },
+        factsReviewed: true,
+        duplicatesReviewed: true,
+      }),
+      list_bulk_import_items: async () => {
+        const batchId = randomUUID();
+        await createBulkItem(
+          owner,
+          batchId,
+          randomUUID(),
+          bulkItemSchema.parse({
+            file: {
+              originalName: "fictional-scope-listed.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: scopePdf.length,
+            },
+            data: { name: `Listed Scope Fictional ${key()}` },
+            factsReviewed: true,
+            duplicatesReviewed: true,
+          }),
+        );
+        return { batchId };
+      },
+      open_bulk_import_page: async () => ({}),
       update_my_candidate_state: async () => ({
         candidateId: ids.scopeApplicant,
         version: await stateVersion(ids.scopeApplicant),
@@ -377,6 +467,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
       teamId: OTHER_TEAM,
     });
     await enforceTestRls(fixture.db);
+    configured.current = { binding: blobBinding, gateway: fake.gateway };
     const evidence = Array.from({ length: 15 }, (_, n) => ({
       field: `Fictional evidence ${n}`,
       page: n + 1,
@@ -905,6 +996,57 @@ describe("MCP endpoint over real migrations and RLS", () => {
     );
   });
 
+  it("reads larger bodies only for the two base64 upload tools, and only after authentication", async () => {
+    const writer = await apiToken(owner.userId, ["cvs:write"]);
+    const big = (name: string, size: number) =>
+      JSON.stringify(
+        message("tools/call", {
+          name,
+          arguments: { padding: "x".repeat(size) },
+        }),
+      );
+    const other = await post(writer.token, big("get_candidate", 1_000_000));
+    expect(other.status).toBe(413);
+    expect((await other.json()).error.code).toBe("body_too_large");
+    // Let through to the tool, which refuses the unknown argument.
+    const upload = await post(writer.token, big("upload_cv", 1_000_000));
+    expect(upload.status).toBe(200);
+    expect((await upload.json()).result.structuredContent.error.code).toBe(
+      "invalid_input",
+    );
+    for (const body of [big("upload_cv", 4_400_001), "x".repeat(4_400_001)]) {
+      const over = await post(writer.token, body);
+      expect(over.status).toBe(413);
+      const { error } = await over.json();
+      expect(error.code).toBe("body_too_large");
+      expect(error.message).toContain("create_cv_upload_link");
+    }
+    let pulled = 0;
+    const unread = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulled++;
+          controller.enqueue(new Uint8Array(1_000_000));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const anonymous = await mcpRoute.POST(
+      new Request(`${ORIGIN}/api/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "x-forwarded-for": CLIENT_IP,
+        },
+        body: unread,
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(anonymous.status).toBe(401);
+    expect(pulled).toBe(0);
+  });
+
   it("lists, refuses and audits each tool by every one of its required scopes", async () => {
     expect(TOOLS.map((item) => item.name)).toEqual(TOOL_NAMES);
     for (const definition of TOOLS) {
@@ -914,13 +1056,14 @@ describe("MCP endpoint over real migrations and RLS", () => {
         definition.name,
       ).toBeLessThanOrEqual(300);
     }
-    // Annotations by name, for a token with all five MCP scopes.
+    // Annotations by name, for a token with all six MCP scopes.
     const writer = await apiToken(owner.userId, [
       "candidates:read",
       "candidates:write",
       "recruitment:read",
       "recruitment:write",
       "cvs:read",
+      "cvs:write",
     ]);
     const annotations = Object.fromEntries(
       (
@@ -933,7 +1076,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(Object.keys(annotations).sort()).toEqual([...TOOL_NAMES].sort());
     for (const [name, hints] of Object.entries(annotations))
       expect(hints, name).toEqual(
-        /^(list|get|search|find)_/.test(name)
+        /^(list|get|search|find|start|open)_/.test(name)
           ? { readOnlyHint: true, openWorldHint: false }
           : {
               readOnlyHint: false,
@@ -956,6 +1099,10 @@ describe("MCP endpoint over real migrations and RLS", () => {
       "create_task_workflow_item",
       "create_saved_view",
       "mark_notifications_read",
+      "upload_cv",
+      "create_cv_upload_link",
+      "complete_cv_upload",
+      "add_bulk_import_item",
     ])
       expect(annotations[name].destructiveHint, name).toBe(false);
     for (const definition of TOOLS) {
@@ -1207,6 +1354,9 @@ describe("MCP endpoint over real migrations and RLS", () => {
     const valid = await apiToken(owner.userId, [
       "candidates:read",
       "recruitment:read",
+      "cvs:read",
+      "cvs:write",
+      "candidates:write",
     ]);
     expect(
       toolError(await call(valid.token, "search_candidates", { pageSize: 26 })),
@@ -1756,7 +1906,7 @@ describe("MCP audit rows under the split data role", () => {
     ]);
   });
 
-  it("accepts exactly the names in TOOLS (migration 0025)", async () => {
+  it("accepts exactly the names in TOOLS (migration 0026)", async () => {
     for (const { name } of TOOLS)
       await withTeam(token, (tx) => tx.execute(audit(name)));
     for (const name of ["delete_record", "list_members", "create_api_token"])

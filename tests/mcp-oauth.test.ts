@@ -80,6 +80,7 @@ const SCOPES = [
   "cvs:read",
   "candidates:write",
   "recruitment:write",
+  "cvs:write",
 ];
 type Flow = {
   clientId: string;
@@ -389,6 +390,8 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect(metadata).not.toHaveProperty(
       "client_id_metadata_document_supported",
     );
+    expect(metadata.scopes_supported).toContain("cvs:write");
+    expect(metadata.scopes_supported).not.toContain("imports:write");
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
     expect(metadata.token_endpoint_auth_methods_supported).toEqual(["none"]);
     for (const route of [resourceRoot, resourceMcp]) {
@@ -606,15 +609,23 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     for (const text of [
       "Search candidates, read their stated facts and evidence summaries, check possible duplicates, and read your own shortlist, follow-up status and private notes",
       "Read job roles, vacancies, applications, interviews, offers, onboarding, tasks, comments, record history, dashboard numbers, and your own reminders and saved views",
-      "See CV file names, types and sizes, but not CV contents",
+      "Read the text of your team's CVs, which shares CV contents with this app, and see CV file names, types and sizes (also needs candidate access)",
       "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
       "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
+      "Upload CVs and start bulk imports",
     ]) {
       expect(Object.values(mcpScopeDescriptions)).toContain(text);
       expect(page.html, text).toContain(text.replaceAll("'", "&#x27;"));
     }
     expect(page.html).not.toContain("private download links");
     expect(page.html).not.toContain("Create and edit");
+    expect(mcpScopeDescriptions["cvs:write"]).toBe(
+      "Upload CVs and start bulk imports",
+    );
+    expect(mcpScopeDescriptions["cvs:read"]).toContain(
+      "shares CV contents with this app",
+    );
+    expect(page.html).not.toContain("but not CV contents");
   });
 
   it("requires a verified member's session consent before any code exists", async () => {
@@ -842,6 +853,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       [{ code_challenge: null }, "invalid_request"],
       [{ code_challenge_method: "plain" }, "invalid_request"],
       [{ scope: "candidates:read fictional:scope" }, "invalid_scope"],
+      [{ scope: "candidates:read imports:write" }, "invalid_scope"],
       [{ resource: `${ORIGIN}/api/v1` }, "invalid_target"],
       [{ state: "s".repeat(1001) }, "invalid_request"],
     ];

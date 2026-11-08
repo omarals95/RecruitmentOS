@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   count,
   desc,
   DrizzleQueryError,
   eq,
   gt,
+  inArray,
   isNull,
   lte,
   or,
@@ -892,7 +894,7 @@ export async function completeCvUpload(
 }
 
 /** Reauthorizes every download request; archived candidates' CVs stay readable. */
-async function readyCv(p: Principal, id: string) {
+export async function readyCv(p: Principal, id: string) {
   requireCandidateRead(p);
   validId(id);
   return withTeam(p, async (tx) => {
@@ -1012,4 +1014,136 @@ export async function getCvChunk(
   }
   if (!bytes) throw integrityFailure();
   return { ...manifest, index, offset, bytes };
+}
+
+/**
+ * Each listed candidate of the team (archived ones included) with its ready CVs, oldest completed
+ * first. A candidate the team does not have is left out.
+ */
+export async function readyCvsOf(p: Principal, candidateIds: string[]) {
+  requireCandidateRead(p);
+  for (const id of candidateIds) validId(id);
+  return withTeam(p, async (tx) => {
+    const found = await tx
+      .select({ id: records.id })
+      .from(records)
+      .where(
+        and(
+          eq(records.teamId, p.teamId),
+          eq(records.kind, "candidate"),
+          inArray(records.id, candidateIds),
+        ),
+      );
+    const rows = await tx
+      .select({
+        id: uploads.id,
+        candidateId: uploads.candidateId,
+        originalName: uploads.originalName,
+        mimeType: uploads.mimeType,
+        completedAt: uploads.completedAt,
+      })
+      .from(uploads)
+      .where(
+        and(
+          eq(uploads.teamId, p.teamId),
+          inArray(uploads.candidateId, candidateIds),
+          eq(uploads.status, "ready"),
+          isNull(uploads.erasureId),
+        ),
+      )
+      .orderBy(asc(uploads.completedAt), asc(uploads.id));
+    return new Map(
+      found.map(({ id }) => [
+        id,
+        rows
+          .filter((row) => row.candidateId === id)
+          .map((row) => ({
+            id: row.id,
+            candidateId: id,
+            originalName: row.originalName!,
+            mimeType: row.mimeType,
+            completedAt: row.completedAt!.toISOString(),
+          })),
+      ]),
+    );
+  });
+}
+
+/**
+ * The whole verified object of a CV readyCv authorized, for server-side text extraction only; it is
+ * never returned to a client. Read under the Blob read lease and released only when it matches the
+ * validated digest. Null for a legacy S3 reference, which is not read this way.
+ */
+export async function readVerifiedCv(
+  p: Principal,
+  row: UploadRow,
+  timeoutMs: number,
+  storage?: CvStorage,
+): Promise<Buffer | null> {
+  if (row.storageProvider !== "blob") return null;
+  const binding = storageBinding(storage);
+  assertBinding(row, binding);
+  if (!row.blobSha256 || row.blobSizeBytes !== row.sizeBytes)
+    throw integrityFailure();
+  let bytes: Buffer | null;
+  try {
+    const gateway = blobGateway(storage ?? (await storageClient()));
+    bytes = await withBlobReadLease(p, binding.store, () =>
+      gateway.readVerifiedObject(
+        {
+          teamId: row.teamId,
+          objectKey: row.objectKey,
+          mimeType: row.mimeType,
+          sizeBytes: row.sizeBytes,
+          sha256: row.blobSha256!,
+        },
+        timeoutMs,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof CvValidationError) throw integrityFailure();
+    return storageFailure(error);
+  }
+  if (!bytes) throw integrityFailure();
+  return bytes;
+}
+
+/**
+ * Writes the exact bytes of a pending Blob reservation from the server, for uploads sent inside an
+ * MCP request. completeCvUpload then verifies them as for any upload; an object already at the path,
+ * for example after a lost response, is left for completion to judge. Anything not pending is left
+ * to completion as well.
+ */
+export async function putCvBytes(
+  p: Principal,
+  id: string,
+  bytes: Buffer,
+  storage?: CvStorage,
+): Promise<void> {
+  validId(id);
+  const row = await withTeam(p, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(uploads)
+      .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
+      .limit(1);
+    if (!live(row))
+      throw new ApiError(
+        404,
+        "CV_NOT_FOUND",
+        "This CV is not available in the selected team.",
+      );
+    await assertCandidate(tx, p, row.candidateId);
+    return row;
+  });
+  if (row.status !== "pending") return;
+  assertBinding(row, storageBinding(storage));
+  try {
+    await blobGateway(storage ?? (await storageClient())).putReservedObject(
+      row,
+      bytes,
+    );
+  } catch (error) {
+    return storageFailure(error);
+  }
 }

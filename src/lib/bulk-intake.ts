@@ -431,6 +431,7 @@ async function batchEntries(tx: TeamTx, p: Principal, batches: BatchRow[]) {
           originalName: bulkIntakeItems.originalName,
           sizeBytes: bulkIntakeItems.sizeBytes,
           candidateId: bulkIntakeItems.candidateId,
+          possibleDuplicates: bulkIntakeItems.possibleDuplicates,
           status: uploads.status,
         })
         .from(bulkIntakeItems)
@@ -465,6 +466,7 @@ async function batchEntries(tx: TeamTx, p: Principal, batches: BatchRow[]) {
         originalName: item.originalName,
         sizeBytes: item.sizeBytes,
         candidateId: item.candidateId,
+        possibleDuplicates: item.possibleDuplicates,
         outcome: outcome(item.candidateId, item.status),
       })),
   }));

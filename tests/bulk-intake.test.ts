@@ -629,6 +629,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
       "id",
       "originalName",
       "outcome",
+      "possibleDuplicates",
       "sizeBytes",
     ]);
     expect(
@@ -853,6 +854,7 @@ describe("bulk CV intake recovery and server review evidence", () => {
         originalName: file.originalName,
         sizeBytes: file.sizeBytes,
         candidateId: expect.any(String),
+        possibleDuplicates: 0,
         outcome: "cv-pending",
       },
     ]);
