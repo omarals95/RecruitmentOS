@@ -766,6 +766,44 @@ textarea::placeholder {
   color: var(--muted);
   opacity: 0.85;
 }
+/* Native popups take these colours, not the select's own (the team switcher's is transparent). */
+option,
+optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+option:disabled {
+  color: var(--muted);
+}
+/* Dark native popups, date and time pickers, picker icons and datalist lists. */
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] option,
+:root[data-theme="dark"] optgroup,
+:root[data-theme="dark"] datalist {
+  color-scheme: dark;
+}
+:root[data-theme="dark"] input[type="file"] {
+  color: var(--text);
+}
+:root[data-theme="dark"] input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+:root[data-theme="dark"],
+:root[data-theme="dark"] .kanban,
+:root[data-theme="dark"] .table-wrap,
+:root[data-theme="dark"] .calendar-scroll,
+:root[data-theme="dark"] .dialog {
+  scrollbar-color: var(--border-strong) transparent;
+}
 input[type="checkbox"] {
   width: 16px;
   height: 16px;

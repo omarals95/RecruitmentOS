@@ -386,6 +386,10 @@ export interface RecordDto<
   privateOwnerId: string | null;
   importMeta?: Record<string, unknown>;
   label?: string;
+  /** Applications only: the candidate's name, left out without candidates:read. */
+  candidateLabel?: string;
+  /** Applications only: the vacancy's title. */
+  vacancyLabel?: string;
   authorName?: string | null;
 }
 export const referencesByKind: Record<

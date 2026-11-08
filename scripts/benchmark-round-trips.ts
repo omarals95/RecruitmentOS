@@ -1,5 +1,6 @@
 import "./load-env";
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { seedTotpCode } from "./totp";
 
 /**
@@ -7,10 +8,45 @@ import { seedTotpCode } from "./totp";
  * from the Server-Timing header of the real route handlers. It signs in the fictional seed account
  * in process, creates fictional "Benchmark" records in the local PGlite database and opens no
  * network connection.
+ *
+ * With --fixture it first adds a fictional fixture (2,000 candidates, 20 vacancies, 1,200
+ * applications) to the seed team through the route handlers, once, and runs every request under a
+ * non-superuser, non-BYPASSRLS role, so the row-level security policies run as they do hosted.
  */
 const RUNS = 5;
+const FIXTURE = process.argv.includes("--fixture");
+const FIXTURE_CANDIDATES = 2000;
+const FIXTURE_VACANCIES = 20;
+const FIXTURE_APPLICATIONS = 1200;
+/** The first fixture vacancy holds this many applications; the rest are spread over the others. */
+const FIXTURE_BOARD_SIZE = 150;
+const FIXTURE_SKILLS = [
+  "React",
+  "react",
+  "TypeScript",
+  "Go",
+  "SQL",
+  "Figma",
+  "Recruiting",
+  "Excel",
+];
+const FIXTURE_CERTIFICATIONS = [
+  "PMP",
+  "pmp",
+  "AWS Certified",
+  "CIPD Level 5",
+  "SHRM-CP",
+];
+const BENCH_ROLE = "recruitment_bench_runtime";
 type Handler = (request: Request, context: never) => Promise<Response>;
-type Row = { id: string; version: number; bucketId?: string | null };
+type Row = {
+  id: string;
+  version: number;
+  bucketId?: string | null;
+  candidateId?: string | null;
+  vacancyId?: string | null;
+  data?: Record<string, unknown>;
+};
 
 function refuse(message: string): never {
   console.error(message);
@@ -37,10 +73,17 @@ async function main() {
     );
   const origin = new URL(process.env.BETTER_AUTH_URL || "http://localhost:3000")
     .origin;
-  const { closeDb } = await import("../src/db");
+  const { closeDb, getDb } = await import("../src/db");
+  const { dataRoleHelpers, identityRoleHelpers } =
+    await import("../src/db/connection-boundary");
   const { getAuth } = await import("../src/lib/auth");
-  const { tabRequests, candidateProfileRequests } =
-    await import("../src/components/workspace/tab-requests");
+  const {
+    tabRequests,
+    candidateProfileRequests,
+    defaultListQuery,
+    listSearchParams,
+  } = await import("../src/components/workspace/tab-requests");
+  const { APPLICATION_STAGES } = await import("../src/domain/records");
   const routes = {
     list: await import("../src/app/api/v1/[resource]/route"),
     item: await import("../src/app/api/v1/[resource]/[id]/route"),
@@ -51,6 +94,29 @@ async function main() {
     notifications: await import("../src/app/api/v1/notifications/route"),
   };
   try {
+    if (FIXTURE) {
+      // The grants of enforceTestRls() in tests/helpers/db.ts. The local PGlite owner is a
+      // superuser and skips row-level security; this session-level role does not.
+      const db = await getDb();
+      for (const statement of [
+        `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${BENCH_ROLE}') THEN CREATE ROLE ${BENCH_ROLE} NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$`,
+        `GRANT USAGE ON SCHEMA app,auth,tenant_context,db_boundary TO ${BENCH_ROLE}`,
+        `GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA app,auth TO ${BENCH_ROLE}`,
+        `REVOKE INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON auth.initial_admin_claim FROM ${BENCH_ROLE}`,
+        `GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA app,auth TO ${BENCH_ROLE}`,
+        `GRANT SELECT ON db_boundary.connection_marker,db_boundary.storage_schema TO ${BENCH_ROLE}`,
+        `GRANT EXECUTE ON FUNCTION ${[...new Set([...dataRoleHelpers, ...identityRoleHelpers])].join(",")} TO ${BENCH_ROLE}`,
+        `SET ROLE ${BENCH_ROLE}`,
+      ])
+        await db.execute(sql.raw(statement));
+      const [check] = (
+        await db.execute<{ bypass: boolean }>(
+          sql`select rolsuper or rolbypassrls as bypass from pg_roles where rolname = current_user`,
+        )
+      ).rows;
+      if (check?.bypass !== false)
+        refuse("The benchmark role must not bypass row-level security.");
+    }
     const auth = await getAuth();
     const signIn = await auth.handler(
       new Request(`${origin}/api/auth/sign-in/email`, {
@@ -158,7 +224,10 @@ async function main() {
         );
       if (!timing) throw new Error(`${method} ${path} has no Server-Timing.`);
       return {
-        body: (await response.json()) as { data: Row & Row[] },
+        body: (await response.json()) as {
+          data: Row & Row[];
+          pagination?: { total: number; totalPages: number };
+        },
         total: Number(timing[1]),
         db: Number(timing[2]),
         roundTrips: Number(timing[3]),
@@ -193,6 +262,119 @@ async function main() {
         data: { stage: "Sourced", source: "Benchmark" },
       })
     ).body.data;
+
+    /** Every page of a list path, 100 records at a time. */
+    async function listAll(path: string) {
+      const all: Row[] = [];
+      for (let page = 1; ; page++) {
+        const { body } = await call("GET", `${path}&page=${page}&pageSize=100`);
+        all.push(...body.data);
+        if (page >= (body.pagination?.totalPages ?? 1)) return all;
+      }
+    }
+    const padded = (value: number, width: number) =>
+      String(value).padStart(width, "0");
+    /** Adds whatever part of the fictional fixture is missing; a complete fixture adds nothing. */
+    async function ensureFixture() {
+      const created = { candidates: 0, vacancies: 0, applications: 0 };
+      const vacancies = new Map(
+        (
+          await listAll(
+            `/api/v1/vacancies?search=${encodeURIComponent('"Fixture vacancy"')}&sort=title`,
+          )
+        ).map((row) => [String(row.data?.title), row.id]),
+      );
+      for (let index = 1; index <= FIXTURE_VACANCIES; index++) {
+        const title = `Fixture vacancy ${padded(index, 2)}`;
+        if (vacancies.has(title)) continue;
+        const row = (
+          await call("POST", "/api/v1/vacancies", {
+            data: {
+              title,
+              status: "Open",
+              department: ["Engineering", "Design", "Operations", "People"][
+                index % 4
+              ],
+            },
+          })
+        ).body.data;
+        vacancies.set(title, row.id);
+        created.vacancies++;
+      }
+      const candidates = new Map(
+        (
+          await listAll(
+            `/api/v1/candidates?search=${encodeURIComponent('"Fixture Candidate"')}&sort=name`,
+          )
+        ).map((row) => [String(row.data?.name), row.id]),
+      );
+      for (let index = 1; index <= FIXTURE_CANDIDATES; index++) {
+        const name = `Fixture Candidate ${padded(index, 4)}`;
+        if (candidates.has(name)) continue;
+        const row = (
+          await call("POST", "/api/v1/candidates", {
+            data: {
+              name,
+              email: `fixture-${padded(index, 4)}@example.test`,
+              jobTitle: index % 2 ? "Product Designer" : "Software Engineer",
+              yearsExperience: index % 15,
+              folderCategories: [index % 2 ? "Design" : "Engineering"],
+              skills: [
+                FIXTURE_SKILLS[index % FIXTURE_SKILLS.length],
+                FIXTURE_SKILLS[(index * 3 + 1) % FIXTURE_SKILLS.length],
+              ],
+              certifications:
+                index % 3
+                  ? []
+                  : [
+                      FIXTURE_CERTIFICATIONS[
+                        index % FIXTURE_CERTIFICATIONS.length
+                      ],
+                    ],
+              reviewStatus: index % 4 ? "Reviewed" : "Needs review",
+            },
+          })
+        ).body.data;
+        candidates.set(name, row.id);
+        created.candidates++;
+      }
+      const applications = new Set(
+        (
+          await listAll(
+            `/api/v1/applications?search=${encodeURIComponent('"Fixture Candidate"')}&sort=createdAt`,
+          )
+        ).map((row) => `${row.candidateId}:${row.vacancyId}`),
+      );
+      for (let index = 1; index <= FIXTURE_APPLICATIONS; index++) {
+        const candidateId = candidates.get(
+          `Fixture Candidate ${padded(index, 4)}`,
+        )!;
+        const vacancyId = vacancies.get(
+          `Fixture vacancy ${padded(index <= FIXTURE_BOARD_SIZE ? 1 : 2 + ((index - FIXTURE_BOARD_SIZE - 1) % (FIXTURE_VACANCIES - 1)), 2)}`,
+        )!;
+        if (applications.has(`${candidateId}:${vacancyId}`)) continue;
+        await call("POST", "/api/v1/applications", {
+          candidateId,
+          vacancyId,
+          data: {
+            stage: APPLICATION_STAGES[index % APPLICATION_STAGES.length],
+            source: "Fictional fixture",
+          },
+        });
+        created.applications++;
+      }
+      const total = (
+        await call(
+          "GET",
+          `/api/v1/candidates?search=${encodeURIComponent('"Fixture Candidate"')}&pageSize=1`,
+        )
+      ).body.pagination?.total;
+      console.log(
+        `Fixture: ${created.candidates} candidates, ${created.vacancies} vacancies and ${created.applications} applications added; ${total} fixture candidates in the team. Requests run as ${BENCH_ROLE} with row-level security enforced.\n`,
+      );
+      return vacancies.get("Fixture vacancy 01")!;
+    }
+    const boardVacancyId = FIXTURE ? await ensureFixture() : vacancy.id;
 
     const rows: {
       action: string;
@@ -256,6 +438,24 @@ async function main() {
         `GET ${path.replace(candidate.id, ":id")}`,
         () => call("GET", path),
       );
+    await measure("open vacancy", "GET /api/v1/vacancies/:id", () =>
+      call("GET", `/api/v1/vacancies/${boardVacancyId}`),
+    );
+    // The first page the whole-vacancy board loads, built as the Applications screen builds it.
+    const board = listSearchParams("pipeline", {
+      ...defaultListQuery("pipeline"),
+      vacancy: boardVacancyId,
+    });
+    board.delete("page");
+    board.delete("pageSize");
+    board.set("sort", "createdAt");
+    board.set("direction", "asc");
+    const boardPath = `/api/v1/applications?${board}&page=1&pageSize=100`;
+    await measure(
+      "open vacancy board",
+      `GET ${boardPath.replace(boardVacancyId, ":id")}`,
+      () => call("GET", boardPath),
+    );
     await measure(
       "save candidate",
       "PATCH /api/v1/candidates/:id",
@@ -285,7 +485,7 @@ async function main() {
     );
 
     console.log(
-      `Round trips per request (session lookup included), median of ${RUNS} runs after one warm-up. Local PGlite; not representative of hosted timings.\n`,
+      `Round trips per request (session lookup included), median of ${RUNS} runs after one warm-up. Local PGlite${FIXTURE ? " with the fixture and row-level security enforced" : ""}; not representative of hosted timings.\n`,
     );
     console.log("| Action | Request | Round trips | db ms | total ms |");
     console.log("| --- | --- | ---: | ---: | ---: |");

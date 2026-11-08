@@ -144,6 +144,8 @@ export const listPath = (resource: ResourceName, params: URLSearchParams) =>
   `/api/v1/${resource}?${params}`;
 export const BUCKETS_PATH =
   "/api/v1/buckets?pageSize=100&sort=position&direction=asc";
+/** Loaded on first use of the skill or certification filter, never with the tab. */
+export const CANDIDATE_SUGGESTIONS_PATH = "/api/v1/candidates/suggestions";
 export const viewsPath = (resource: ResourceName) =>
   `/api/v1/views?pageSize=100&area=${resource === "candidates" ? "directory" : "applications"}`;
 /** The records screen's own GETs: its list, plus buckets for tasks and saved views where they exist. */

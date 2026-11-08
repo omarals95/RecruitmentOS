@@ -5,7 +5,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -20,10 +20,14 @@ import { WorkspaceProvider } from "../src/components/workspace/client";
 import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
+  ApplicationReference,
+  FilterTags,
+  Kanban,
   Loading,
   RecordsScreen,
   withoutImportLink,
 } from "../src/components/workspace/records-screen";
+import { addFilterTag } from "../src/components/workspace/helpers";
 import WorkspaceLoading from "../src/app/app/loading";
 import {
   BulkCvImport,
@@ -36,6 +40,7 @@ import {
 import {
   BULK_INTAKE_MAX_FILES,
   BULK_INTAKE_RECOVERY_HOURS,
+  type RecordDto,
 } from "../src/domain/records";
 import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
 import {
@@ -236,6 +241,249 @@ describe("workspace accessibility styles", () => {
           /visibility/.test(item.body),
       ),
     ).toBe(false);
+  });
+});
+
+describe("dark theme controls", () => {
+  const css = rules("src/app/globals.css");
+  const selectors = (rule: { selector: string }) =>
+    rule.selector.split(",").map((part) => part.trim());
+  const literal = /#[0-9a-f]{3,8}\b|rgb\(|hsl\(/i;
+  // The theme variables block also sets color-scheme; this is the rule that names the controls.
+  const controlScheme = () =>
+    css.find(
+      (rule) =>
+        /color-scheme:\s*dark/.test(rule.body) &&
+        selectors(rule).includes(':root[data-theme="dark"] input'),
+    );
+  it("gives options and option groups the theme's surface and text colours", () => {
+    const list = css.filter(
+      (rule) =>
+        rule.media === "" &&
+        selectors(rule).includes("option") &&
+        selectors(rule).includes("optgroup"),
+    );
+    expect(list).toHaveLength(1);
+    expect(list[0].body).toMatch(/background-color:\s*var\(--surface\)/);
+    expect(list[0].body).toMatch(/(^|;)\s*color:\s*var\(--text\)/);
+    // Nothing overrides them inside the transparent team switcher or theme picker.
+    expect(
+      css.some((rule) =>
+        selectors(rule).some((part) =>
+          /\.(team-switcher|theme-picker)\b.*\b(option|optgroup)\b/.test(part),
+        ),
+      ),
+    ).toBe(false);
+    const disabled = css.find((rule) =>
+      selectors(rule).includes("option:disabled"),
+    );
+    expect(disabled?.body).toMatch(/color:\s*var\(--muted\)/);
+  });
+  it("sets a dark color-scheme on every native control in the dark theme", () => {
+    const scheme = controlScheme();
+    expect(scheme).toBeDefined();
+    for (const control of [
+      "input",
+      "select",
+      "textarea",
+      "option",
+      "optgroup",
+      "datalist",
+    ])
+      expect(selectors(scheme!), control).toContain(
+        `:root[data-theme="dark"] ${control}`,
+      );
+  });
+  it("draws file buttons and scrollbars with theme variables only", () => {
+    const button = css.filter((rule) =>
+      rule.selector.includes("::file-selector-button"),
+    );
+    expect(button).toHaveLength(1);
+    expect(button[0].body).toMatch(/background:\s*var\(--surface-subtle\)/);
+    expect(button[0].body).toMatch(/(^|;)\s*color:\s*var\(--text\)/);
+    expect(button[0].body).toMatch(
+      /border:\s*1px solid var\(--border-strong\)/,
+    );
+    const scrollbars = css.filter((rule) => /scrollbar-color/.test(rule.body));
+    for (const rule of scrollbars)
+      expect(rule.body, rule.selector).toMatch(
+        /scrollbar-color:\s*var\(--[\w-]+\)\s+(var\(--[\w-]+\)|transparent)\s*;/,
+      );
+    const dark = scrollbars.find((rule) =>
+      selectors(rule).includes(':root[data-theme="dark"]'),
+    );
+    for (const scroller of [
+      ".kanban",
+      ".table-wrap",
+      ".calendar-scroll",
+      ".dialog",
+    ])
+      expect(selectors(dark!), scroller).toContain(
+        `:root[data-theme="dark"] ${scroller}`,
+      );
+    for (const rule of [
+      ...css.filter((item) =>
+        selectors(item).some((part) => /\b(option|optgroup)\b/.test(part)),
+      ),
+      controlScheme()!,
+      ...css.filter((item) => item.selector.includes('input[type="file"]')),
+      ...scrollbars,
+    ])
+      expect(rule.body, rule.selector).not.toMatch(literal);
+  });
+});
+
+describe("skill and certification filters", () => {
+  it("ignores a case or spacing variant of a chosen tag and keeps the first spelling", () => {
+    expect(addFilterTag(["React"], "react")).toEqual(["React"]);
+    expect(addFilterTag(["React"], "  REACT ")).toEqual(["React"]);
+    expect(addFilterTag(["React"], "   ")).toEqual(["React"]);
+    expect(addFilterTag(["React"], " Go ")).toEqual(["React", "Go"]);
+  });
+  it("offers suggestions in a linked datalist without the chosen tags", () => {
+    const markup = renderToStaticMarkup(
+      <FilterTags
+        label="All of these skills"
+        values={["react"]}
+        onChange={() => {}}
+        suggestions={["React", "TypeScript", "Go"]}
+        onFocus={() => {}}
+      />,
+    );
+    const list = /<input[^>]*list="([^"]+)"/.exec(markup)?.[1];
+    expect(list).toBeDefined();
+    const datalist = new RegExp(
+      `<datalist id="${list}">([\\s\\S]*?)</datalist>`,
+    ).exec(markup)?.[1];
+    expect(
+      [...(datalist ?? "").matchAll(/<option value="([^"]+)"/g)].map(
+        (match) => match[1],
+      ),
+    ).toEqual(["TypeScript", "Go"]);
+    // Without suggestions (folder categories) there is no list at all.
+    const plain = renderToStaticMarkup(
+      <FilterTags
+        label="Any of these folder categories"
+        values={[]}
+        onChange={() => {}}
+      />,
+    );
+    expect(plain).not.toContain("list=");
+    expect(plain).not.toContain("<datalist");
+  });
+});
+
+describe("application names on the board and table", () => {
+  const application = (
+    index: number,
+    labels: Partial<RecordDto>,
+    stage = "Sourced",
+  ): RecordDto =>
+    ({
+      id: `00000000-0000-4000-8000-00000000010${index}`,
+      kind: "application",
+      data: { stage },
+      version: 1,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-08T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: `00000000-0000-4000-8000-00000000020${index}`,
+      vacancyId: "00000000-0000-4000-8000-000000000301",
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+      ...labels,
+    }) as RecordDto;
+  const records = [
+    application(1, {
+      candidateLabel: "Alex Example",
+      vacancyLabel: "Fictional Engineer",
+    }),
+    application(
+      2,
+      {
+        candidateLabel: "Sam Sample (archived)",
+        vacancyLabel: "Fictional Engineer",
+      },
+      "Screening",
+    ),
+    application(3, { vacancyLabel: "Fictional Engineer" }, "Interview"),
+  ];
+  it("shows the names from the list and requests no candidate or vacancy", () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    try {
+      const board = renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <Kanban
+            resource="applications"
+            records={records}
+            buckets={[]}
+            onOpen={() => {}}
+            onMove={() => {}}
+            canWrite
+          />
+        </WorkspaceProvider>,
+      );
+      const cards = [
+        ...board.matchAll(/<article class="kanban-card"[\s\S]*?<\/article>/g),
+      ].map((match) => match[0]);
+      expect(cards).toHaveLength(3);
+      expect(cards[0]).toContain("<span>Alex Example</span>");
+      expect(cards[1]).toContain("<span>Sam Sample (archived)</span>");
+      // Without candidates:read the name is left out, as a refused read showed it.
+      expect(cards[2]).toContain("<span>Unavailable record</span>");
+      for (const card of cards)
+        expect(card).toContain("<span>Fictional Engineer</span>");
+      const table = renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <table>
+            <tbody>
+              {records.map((record) => (
+                <tr key={record.id}>
+                  <td>
+                    <ApplicationReference record={record} field="candidate" />
+                  </td>
+                  <td>
+                    <ApplicationReference record={record} field="vacancy" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </WorkspaceProvider>,
+      );
+      expect(table).toContain(
+        `<a href="/app/candidates/${records[0].candidateId}">Alex Example</a>`,
+      );
+      expect(table).toContain("<span>Unavailable record</span>");
+      expect(table).not.toContain(
+        `href="/app/candidates/${records[2].candidateId}"`,
+      );
+      for (const markup of [board, table]) {
+        expect(markup).not.toContain("Loading…");
+        expect(markup).not.toContain("Could not load record");
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+    // The Applications screen's table cells and cards use the list's names, not a GET each.
+    const source = readFileSync(
+      new URL(
+        "../src/components/workspace/records-screen.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).not.toMatch(
+      /<ReferenceLabel\s+resource="(candidates|vacancies)"/,
+    );
+    expect(source.match(/<ApplicationReference\b/g)).toHaveLength(4);
   });
 });
 

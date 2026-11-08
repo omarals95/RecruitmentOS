@@ -8,7 +8,7 @@ import {
 } from "@/domain/records";
 import { EXPORT_RESOURCES } from "@/domain/export";
 import { MCP_SCOPES, type Scope } from "@/lib/permissions";
-import { EXPORT_FILTER_KEYS } from "@/lib/records";
+import { CANDIDATE_SUGGESTION_LIMIT, EXPORT_FILTER_KEYS } from "@/lib/records";
 import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 export const runtime = "nodejs";
 
@@ -124,6 +124,16 @@ const recordDto = {
     data: { type: "object" },
     version: { type: "integer", minimum: 1 },
     label: { type: "string" },
+    candidateLabel: {
+      type: "string",
+      description:
+        'Applications only: the candidate\'s name, or "Untitled candidate", with " (archived)" for an archived candidate. Left out without candidates:read.',
+    },
+    vacancyLabel: {
+      type: "string",
+      description:
+        'Applications only: the vacancy\'s title, or "Untitled vacancy", with " (archived)" for an archived vacancy.',
+    },
     authorName: { type: ["string", "null"] },
     archivedAt: { type: ["string", "null"], format: "date-time" },
   },
@@ -203,7 +213,7 @@ export function GET() {
         [`${scope}:read`],
         {
           summary: `List ${resource}`,
-          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.${candidateCommentRead}`,
+          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.${resource === "candidates" ? " skills and certifications take a JSON array of up to 100 values and match candidates holding all of them, ignoring case and surrounding spaces." : ""}${candidateCommentRead}`,
         },
         {
           "200": {
@@ -226,6 +236,7 @@ export function GET() {
             "stage",
             "sort",
             "direction",
+            "skills",
             "certifications",
             "education",
             "minYearsExperience",
@@ -432,6 +443,20 @@ export function GET() {
         "200": {
           description:
             "{data: [{id,name,email,phone,matches}], limited}; at most 20 in data, limited is true when more matches exist.",
+        },
+      },
+    ),
+  };
+  paths["/api/v1/candidates/suggestions"] = {
+    get: operation(
+      ["candidates:read"],
+      {
+        summary: "Skill and certification suggestions",
+        description: `Requires candidates:read. Takes no query parameters; any parameter returns 400 invalid_query. The values of the selected team's active candidates, aggregated in the database: values that differ only in case or surrounding spaces are one entry, shown in their most common spelling (ties: the alphabetically first), ordered by how many candidates hold them, then alphabetically, at most ${CANDIDATE_SUGGESTION_LIMIT} per field.`,
+      },
+      {
+        "200": {
+          description: `{data: {skills: string[], certifications: string[]}}; at most ${CANDIDATE_SUGGESTION_LIMIT} entries each.`,
         },
       },
     ),

@@ -200,6 +200,9 @@ async function decorate(
     ),
   ];
   const labels = new Map<string, string>();
+  // The candidate and vacancy names an application card shows, as referenceText() in the client
+  // words them; a candidate is only present with candidates:read.
+  const references = new Map<string, string>();
   if (parentRefs.length) {
     const parents = await tx
       .select({
@@ -207,6 +210,7 @@ async function decorate(
         kind: records.kind,
         name: sql<string>`${records.data}->>'name'`,
         title: sql<string>`${records.data}->>'title'`,
+        archivedAt: records.archivedAt,
       })
       .from(records)
       .where(
@@ -221,12 +225,23 @@ async function decorate(
           ),
         ),
       );
-    for (const parent of parents)
-      labels.set(
+    for (const parent of parents) {
+      const name = parent.kind === "candidate" ? parent.name : parent.title;
+      labels.set(parent.id, name);
+      references.set(
         parent.id,
-        parent.kind === "candidate" ? parent.name : parent.title,
+        `${name || `Untitled ${parent.kind}`}${parent.archivedAt ? " (archived)" : ""}`,
       );
+    }
   }
+  const referenceLabels = (row: RecordDto) => {
+    const candidateLabel = row.candidateId && references.get(row.candidateId);
+    const vacancyLabel = row.vacancyId && references.get(row.vacancyId);
+    return {
+      ...(candidateLabel ? { candidateLabel } : {}),
+      ...(vacancyLabel ? { vacancyLabel } : {}),
+    };
+  };
   const applicationLabel = (recordId: string) => {
     const application = applications.get(recordId);
     if (!application) return `Application ${recordId.slice(-8)}`;
@@ -241,7 +256,7 @@ async function decorate(
   };
   return rows.map((row) =>
     row.kind === "application"
-      ? { ...row, label: applicationLabel(row.id) }
+      ? { ...row, label: applicationLabel(row.id), ...referenceLabels(row) }
       : row.kind === "onboarding" && row.applicationId
         ? {
             ...row,
@@ -739,6 +754,46 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
   return withTeam(p, (tx) => matchCandidateContacts(tx, p, query));
 }
 
+/** Most suggestions per field. */
+export const CANDIDATE_SUGGESTION_LIMIT = 200;
+/**
+ * The team's skill and certification values on active candidates, for the filter inputs. Values
+ * that differ only in case or surrounding spaces are one entry shown in their most common spelling
+ * (ties: the alphabetically first), ordered by how many candidates hold them. Aggregated in
+ * PostgreSQL; no other candidate field is read.
+ */
+export async function candidateSuggestions(
+  p: Principal,
+  query: URLSearchParams,
+): Promise<{ skills: string[]; certifications: string[] }> {
+  permission(p, "candidates");
+  if ([...query.keys()].length)
+    throw new ApiError(
+      400,
+      "invalid_query",
+      "Suggestions take no query parameters.",
+    );
+  return withTeam(p, async (tx) => {
+    const result = await tx.execute<{ field: string; label: string }>(
+      sql`with tags as(select distinct f.field, r.id, btrim(tag.value) as spelling from ${records} r
+        cross join (values ('skills'), ('certifications')) f(field)
+        cross join lateral jsonb_array_elements_text(case when jsonb_typeof(r.data->f.field)='array' then r.data->f.field else '[]'::jsonb end) tag(value)
+        where r.team_id=${p.teamId} and r.kind='candidate' and r.archived_at is null and btrim(tag.value)<>''),
+      spellings as(select field, lower(spelling) as value, spelling, count(*) as holders from tags group by field, lower(spelling), spelling),
+      labels as(select distinct on (field, value) field, value, spelling as label from spellings order by field, value, holders desc, spelling collate "C"),
+      totals as(select field, lower(spelling) as value, count(distinct id) as holders from tags group by field, lower(spelling)),
+      ranked as(select l.field, l.label, row_number() over(partition by l.field order by t.holders desc, lower(l.label), l.label collate "C") as position from labels l join totals t on t.field=l.field and t.value=l.value)
+      select field, label from ranked where position<=${CANDIDATE_SUGGESTION_LIMIT} order by field, position`,
+    );
+    const values = (field: string) =>
+      result.rows.filter((row) => row.field === field).map((row) => row.label);
+    return {
+      skills: values("skills"),
+      certifications: values("certifications"),
+    };
+  });
+}
+
 /**
  * The contact match behind findCandidateDuplicates, inside the caller's transaction: lower-cased
  * email or digits-only phone of at least seven digits. Without either it matches nothing.
@@ -1067,9 +1122,11 @@ function recordQuery(
         z.array(z.string().trim().min(1).max(200)).max(100),
         value,
       );
+      // All of these values, each equal to a stored value after trimming and ignoring case. A
+      // missing or non-array field reads as an empty list, so it never matches and never errors.
       if (values.length && (key === "skills" || key === "certifications"))
         where.push(
-          sql`(${records.data}->${key}) @> ${JSON.stringify(values)}::jsonb`,
+          sql`not exists(select 1 from jsonb_array_elements_text(${JSON.stringify(values)}::jsonb) wanted(value) where not exists(select 1 from jsonb_array_elements_text(case when jsonb_typeof(${records.data}->${key})='array' then ${records.data}->${key} else '[]'::jsonb end) stored(value) where lower(btrim(stored.value))=lower(wanted.value)))`,
         );
       if (values.length && key === "categories")
         where.push(
