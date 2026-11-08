@@ -7,22 +7,36 @@ import type {
 import { listCandidateCvsPage } from "@/lib/cvs";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
-import { overview } from "@/lib/insights";
+import {
+  analytics,
+  listActivity,
+  markNotifications,
+  notifications,
+  overview,
+  searchWorkspace,
+} from "@/lib/insights";
 import { requireScope, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import {
   bulkApplications,
+  candidateDuplicateQuerySchema,
   createRecord,
+  findCandidateDuplicates,
+  getCandidateState,
   getRecord,
   listRecords,
   recordKindOf,
+  updateCandidateState,
   updateRecord,
 } from "@/lib/records";
 import {
   APPLICATION_STAGES,
+  CANDIDATE_DUPLICATE_LIMIT,
+  CANDIDATE_STATUSES,
   REVIEW_STATUSES,
   SENSITIVE_CANDIDATE_FIELDS,
   bulkApplicationsSchema,
+  candidateStateSchema,
   recordDataSchemas,
   referenceFields,
   referencesByKind,
@@ -125,6 +139,15 @@ function withoutDefault(field: z.ZodType): z.ZodType {
     return z.pipe(field.in.unwrap() as z.ZodType, field.out);
   return field;
 }
+/** Every field optional and without its default. */
+function optionalFields(shape: Record<string, z.ZodType>) {
+  return Object.fromEntries(
+    Object.entries(shape).map(([key, field]) => [
+      key,
+      withoutDefault(field).optional(),
+    ]),
+  );
+}
 /** Update input: id, version and at least one of the fields, none of them defaulted. */
 function changeInput(
   shape: Record<string, z.ZodType>,
@@ -134,12 +157,7 @@ function changeInput(
     .object({
       id: z.uuid(),
       version,
-      ...Object.fromEntries(
-        Object.entries(shape).map(([key, field]) => [
-          key,
-          withoutDefault(field).optional(),
-        ]),
-      ),
+      ...optionalFields(shape),
       ...extra,
     })
     .strict()
@@ -169,6 +187,7 @@ const changes =
     );
 /** The record types archive_record and restore_record take, with their services' resources. */
 const RECORD_TYPES = [
+  "candidate",
   "job_role",
   "vacancy",
   "application",
@@ -176,8 +195,10 @@ const RECORD_TYPES = [
   "offer",
   "onboarding",
   "checklist_item",
+  "task",
 ] as const;
 const ARCHIVABLE: Record<(typeof RECORD_TYPES)[number], ResourceName> = {
+  candidate: "candidates",
   job_role: "job-roles",
   vacancy: "vacancies",
   application: "applications",
@@ -185,14 +206,16 @@ const ARCHIVABLE: Record<(typeof RECORD_TYPES)[number], ResourceName> = {
   offer: "offers",
   onboarding: "onboarding",
   checklist_item: "checklist",
+  task: "tasks",
 };
 const archiveInput = z
   .object({ recordType: z.enum(RECORD_TYPES), id: z.uuid(), version })
   .strict();
 const archives =
   (archived: boolean) =>
-  async (p: Principal, input: z.output<typeof archiveInput>) =>
-    success(
+  async (p: Principal, input: z.output<typeof archiveInput>) => {
+    if (input.recordType === "candidate") requireScope(p, "candidates:write");
+    return success(
       written(
         await updateRecord(p, ARCHIVABLE[input.recordType], input.id, {
           version: input.version,
@@ -200,10 +223,20 @@ const archives =
         }),
       ),
     );
+  };
 function taskItem(row: RecordDto): Data {
   return {
     id: row.id,
-    ...fields(row, ["title", "context", "owner", "dueDate", "priority"]),
+    ...state(row),
+    ...fields(row, [
+      "title",
+      "context",
+      "owner",
+      "dueDate",
+      "priority",
+      "description",
+      "customValues",
+    ]),
     bucketId: row.bucketId,
     candidateId: row.candidateId,
     vacancyId: row.vacancyId,
@@ -299,17 +332,79 @@ const candidateInput = recordDataSchemas.candidate.pick({
   languages: true,
   sourceNotes: true,
 }).shape;
+const DUPLICATE_NOTE =
+  "A match is a possible duplicate for a person to review. No match does not prove the candidate is new.";
+
+/** Task buckets and task fields share three tools; each item type has its own keys. */
+const WORKFLOW_ITEMS = {
+  bucket: { resource: "buckets", label: "buckets" },
+  field: { resource: "task-fields", label: "fields" },
+} as const;
+const WORKFLOW_SHAPES = {
+  bucket: recordDataSchemas.bucket.shape,
+  field: recordDataSchemas["task-field"].shape,
+};
+const itemType = z.enum(["bucket", "field"]);
+type ItemType = z.output<typeof itemType>;
+/** Refuses a key that belongs only to the other item type. */
+function ownKeys(
+  value: Data & { itemType: ItemType },
+  context: z.RefinementCtx,
+) {
+  const own = Object.keys(WORKFLOW_SHAPES[value.itemType]);
+  for (const [type, shape] of Object.entries(WORKFLOW_SHAPES))
+    for (const key of Object.keys(shape))
+      if (type !== value.itemType && !own.includes(key) && key in value)
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: `${key} applies only to ${WORKFLOW_ITEMS[type as ItemType].label}`,
+        });
+}
+const workflowFields = optionalFields({
+  ...WORKFLOW_SHAPES.bucket,
+  ...WORKFLOW_SHAPES.field,
+});
+function workflowItem(row: RecordDto, type: ItemType): Data {
+  return {
+    id: row.id,
+    ...state(row),
+    ...fields(row, Object.keys(WORKFLOW_SHAPES[type])),
+  };
+}
+
+const OTHER_GROUP = "Other recorded values";
+const GROUP_LISTS = [
+  "departments",
+  "categories",
+  "offers",
+  "declineReasons",
+  "sources",
+  "emirates",
+] as const;
+/** The first 25 groups with clipped names, and every other count summed into one trailing group. */
+function foldGroups(groups: { name: string; count: number }[]) {
+  const named = groups.filter((group) => group.name !== OTHER_GROUP);
+  const kept = named
+    .slice(0, 25)
+    .map((group) => ({ name: clip(group.name, 200), count: group.count }));
+  const rest = groups.filter((group) => !named.slice(0, 25).includes(group));
+  if (!rest.length) return { groups: kept, folded: false };
+  const count = rest.reduce((sum, group) => sum + group.count, 0);
+  return { groups: [...kept, { name: OTHER_GROUP, count }], folded: true };
+}
 
 /**
  * Grouped by area. Keep the names in step with the allowlist in tenant_context.audit_mcp_call
- * (drizzle/0024_mcp_pipeline_tools.sql): a tool whose name is not on it is refused before it runs.
+ * (drizzle/0025_mcp_candidate_task_tools.sql): a tool whose name is not on it is refused before it
+ * runs.
  */
 export const TOOLS: McpTool[] = [
   tool({
     name: "search_candidates",
     title: "Search candidates",
     description:
-      "Search active candidates by stated facts: words, quoted phrases and -exclusions, plus skill, certification, folder category, emirate, degree, education and review filters, and a range of stated years of experience (unstated never matches). Returns factual fields only; nothing is ranked or scored.",
+      "Search candidates by stated facts: words, quoted phrases and -exclusions, skill, certification, category, emirate, degree, education, review and stated-experience filters, and your own shortlist or follow-up status. Pass archived: true for archived ones. Nothing is ranked or scored.",
     scopes: ["candidates:read"],
     effect: "read",
     input: z
@@ -325,6 +420,9 @@ export const TOOLS: McpTool[] = [
         maxYearsExperience: z.number().min(0).max(100).optional(),
         reviewStatus: z.enum(REVIEW_STATUSES).optional(),
         needsReview: z.boolean().optional(),
+        shortlisted: z.boolean().optional(),
+        followUpStatus: z.enum(CANDIDATE_STATUSES).optional(),
+        archived,
         sort: z.enum(["name", "updatedAt", "yearsExperience"]).optional(),
         direction: z.enum(["asc", "desc"]).optional(),
         page,
@@ -332,17 +430,19 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input) => {
-      const { query: search, ...rest } = input;
+      const { query: search, followUpStatus, ...rest } = input;
+      // On candidates, status is the caller's own follow-up status.
       const result = await listRecords(
         p,
         "candidates",
-        listQuery({ search, ...rest }),
+        listQuery({ search, ...rest, status: followUpStatus }),
         { omitFromSearch: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS] },
       );
       return success(
         listed(
           result.data.map((row) => ({
             id: row.id,
+            ...state(row),
             ...fields(row, [
               "name",
               "jobTitle",
@@ -399,6 +499,24 @@ export const TOOLS: McpTool[] = [
     },
   }),
   tool({
+    name: "find_duplicate_candidates",
+    title: "Find duplicate candidates",
+    description:
+      "Find possible duplicates by email or by a phone number of at least seven digits. Call it before create_candidate. A match is only possible and needs a person to review; no match does not prove the candidate is new. Changes nothing.",
+    scopes: ["candidates:read"],
+    effect: "read",
+    input: candidateDuplicateQuerySchema,
+    run: async (p, input) => {
+      const result = await findCandidateDuplicates(p, input);
+      return success({
+        matches: listed(result.data),
+        limited: result.limited,
+        limit: CANDIDATE_DUPLICATE_LIMIT,
+        note: DUPLICATE_NOTE,
+      });
+    },
+  }),
+  tool({
     name: "create_candidate",
     title: "Create candidate",
     description:
@@ -419,6 +537,72 @@ export const TOOLS: McpTool[] = [
         id: row.id,
         name: (row.data as Data).name,
         createdAt: row.createdAt,
+      });
+    },
+  }),
+  tool({
+    name: "update_candidate",
+    title: "Update candidate",
+    description:
+      "Change the stated facts you send on one candidate, such as name, contact details, education, experience or skills; other fields stay as they are. Requires the version from search_candidates or get_candidate; if the record changed since, the tool returns version_conflict.",
+    scopes: ["candidates:write"],
+    effect: "change",
+    input: changeInput({
+      name: recordDataSchemas.candidate.shape.name,
+      ...candidateInput,
+    }),
+    run: changes("candidates"),
+  }),
+  tool({
+    name: "get_my_candidate_state",
+    title: "Get my candidate state",
+    description:
+      "Read your own shortlist flag, follow-up status and private note for one candidate, with the version update_my_candidate_state needs. Only you can see this state; version 0 means you have not saved any yet.",
+    scopes: ["candidates:read"],
+    effect: "read",
+    input: z.object({ candidateId: z.uuid() }).strict(),
+    run: async (p, input) => {
+      const state = await getCandidateState(p, input.candidateId);
+      // The note is returned whole, because an update replaces it whole.
+      return success({
+        candidateId: state.candidateId,
+        shortlisted: state.shortlisted,
+        status: state.status,
+        note: state.note,
+        version: state.version,
+        updatedAt: state.updatedAt,
+      });
+    },
+  }),
+  tool({
+    name: "update_my_candidate_state",
+    title: "Update my candidate state",
+    description:
+      "Set your own shortlist flag, follow-up status or private note on one candidate; only you can see them, and note replaces your whole note. Requires the version from get_my_candidate_state (0 if none saved yet); a changed state returns version_conflict.",
+    scopes: ["candidates:write"],
+    effect: "change",
+    input: z
+      .object({
+        candidateId: z.uuid(),
+        version: candidateStateSchema.shape.version,
+        shortlisted: candidateStateSchema.shape.shortlisted,
+        status: candidateStateSchema.shape.status,
+        note: candidateStateSchema.shape.note,
+      })
+      .strict()
+      .refine(
+        (value) => Object.keys(value).length > 2,
+        "Send at least one of shortlisted, status or note.",
+      ),
+    run: async (p, input) => {
+      const { candidateId, ...change } = input;
+      const state = await updateCandidateState(p, candidateId, change);
+      return success({
+        candidateId,
+        version: state.version,
+        shortlisted: state.shortlisted,
+        status: state.status,
+        updatedAt: state.updatedAt,
       });
     },
   }),
@@ -995,7 +1179,7 @@ export const TOOLS: McpTool[] = [
     name: "list_tasks",
     title: "List tasks",
     description:
-      "Active recruitment tasks, optionally by bucket, candidate, vacancy or priority.",
+      "List recruitment tasks with their custom field values, optionally by bucket, candidate, vacancy or priority. Pass archived: true to list only archived tasks. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
     effect: "read",
     input: z
@@ -1004,6 +1188,7 @@ export const TOOLS: McpTool[] = [
         candidateId: z.uuid().optional(),
         vacancyId: z.uuid().optional(),
         priority: recordDataSchemas.task.shape.priority.unwrap().optional(),
+        archived,
         page,
         pageSize,
       })
@@ -1012,6 +1197,326 @@ export const TOOLS: McpTool[] = [
       const result = await listRecords(p, "tasks", listQuery(input));
       return success(listed(result.data.map(taskItem)), result.pagination);
     },
+  }),
+  tool({
+    name: "create_task",
+    title: "Create task",
+    description:
+      "Create one task in a bucket, optionally linked to a candidate or vacancy, with custom field values keyed by field ID (required fields need a value). Requires an idempotencyKey: retrying with the same key and input returns the same task; the same key with different input is refused.",
+    scopes: ["recruitment:write"],
+    effect: "create",
+    input: z
+      .object({
+        idempotencyKey,
+        bucketId: z.uuid(),
+        candidateId: z.uuid().optional(),
+        vacancyId: z.uuid().optional(),
+        ...recordDataSchemas.task.shape,
+      })
+      .strict(),
+    run: creates("tasks"),
+  }),
+  tool({
+    name: "update_task",
+    title: "Update task",
+    description:
+      "Change the fields you send on one task. Move it with bucketId; complete it by moving it to a completed bucket. customValues sets only the fields you send (null empties one) and also needs recruitment:read. Requires the version from list_tasks; a changed task returns version_conflict.",
+    scopes: ["recruitment:write"],
+    effect: "change",
+    input: changeInput(recordDataSchemas.task.shape, {
+      bucketId: z.uuid().optional(),
+      candidateId: z.uuid().nullable().optional(),
+      vacancyId: z.uuid().nullable().optional(),
+    }),
+    run: async (p, input) => {
+      const { customValues, ...rest } = input as Data;
+      if (customValues === undefined) return changes("tasks")(p, rest);
+      // A partial map: read the stored values at this version and keep the ones not sent.
+      requireScope(p, "recruitment:read");
+      const current = await getRecord(p, "tasks", rest.id as string);
+      if (current.version !== rest.version)
+        throw new ApiError(409, "version_conflict", REREAD);
+      return changes("tasks")(p, {
+        ...rest,
+        customValues: {
+          ...((current.data as Data).customValues as Data),
+          ...(customValues as Data),
+        },
+      });
+    },
+  }),
+  tool({
+    name: "list_task_workflow_items",
+    title: "List task workflow items",
+    description:
+      'List task buckets (itemType "bucket") or custom task fields (itemType "field") in position order. A bucket with completed: true counts its tasks as done. Pass archived: true for archived ones. Each item has the version an update needs.',
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z.object({ itemType, archived, page, pageSize }).strict(),
+    run: async (p, input) => {
+      const result = await listRecords(
+        p,
+        WORKFLOW_ITEMS[input.itemType].resource,
+        listQuery({
+          archived: input.archived,
+          sort: "position",
+          page: input.page,
+          pageSize: input.pageSize,
+        }),
+      );
+      return success(
+        listed(result.data.map((row) => workflowItem(row, input.itemType))),
+        result.pagination,
+      );
+    },
+  }),
+  tool({
+    name: "create_task_workflow_item",
+    title: "Create task workflow item",
+    description:
+      'Add a task bucket (itemType "bucket": name, color, position, completed) or a custom task field (itemType "field": name, type, options, required, position). Requires an idempotencyKey: retrying with the same key and input returns the same item.',
+    scopes: ["recruitment:write"],
+    effect: "create",
+    input: z
+      .object({
+        idempotencyKey,
+        itemType,
+        ...workflowFields,
+        name: recordDataSchemas.bucket.shape.name,
+      })
+      .strict()
+      .superRefine(ownKeys),
+    run: async (p, input) => {
+      const { idempotencyKey: key, itemType: type, ...data } = input;
+      return success(
+        written(
+          await createRecord(p, WORKFLOW_ITEMS[type].resource, { data }, key),
+        ),
+      );
+    },
+  }),
+  tool({
+    name: "update_task_workflow_item",
+    title: "Update task workflow item",
+    description:
+      "Rename or change the fields you send on one task bucket or custom task field; itemType must match the item. Requires the version from list_task_workflow_items; if the item changed since, the tool returns version_conflict.",
+    scopes: ["recruitment:write"],
+    effect: "change",
+    input: z
+      .object({ itemType, id: z.uuid(), version, ...workflowFields })
+      .strict()
+      .refine(
+        (value) => Object.keys(value).length > 3,
+        "Send at least one field to change.",
+      )
+      .superRefine(ownKeys),
+    run: async (p, input) => {
+      const { itemType: type, id, version: current, ...data } = input;
+      return success(
+        written(
+          await updateRecord(p, WORKFLOW_ITEMS[type].resource, id, {
+            version: current,
+            data,
+          }),
+        ),
+      );
+    },
+  }),
+  tool({
+    name: "list_saved_views",
+    title: "List saved views",
+    description:
+      'List your own saved views, optionally by area ("directory" for candidates or "applications"), with their saved filters. Only you can see your saved views.',
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z
+      .object({
+        area: recordDataSchemas["saved-view"].shape.area.optional(),
+        page,
+        pageSize,
+      })
+      .strict(),
+    run: async (p, input) => {
+      const result = await listRecords(p, "views", listQuery(input));
+      return success(
+        listed(
+          result.data.map((row) => ({
+            id: row.id,
+            version: row.version,
+            ...fields(row, ["name", "area", "query"]),
+            updatedAt: row.updatedAt,
+          })),
+        ),
+        result.pagination,
+      );
+    },
+  }),
+  tool({
+    name: "create_saved_view",
+    title: "Create saved view",
+    description:
+      'Save a named view of filters for the candidate directory (area "directory") or applications; only you can see it. Requires an idempotencyKey: retrying with the same key and input returns the same view; the same key with different input is refused.',
+    scopes: ["recruitment:write"],
+    effect: "create",
+    input: z
+      .object({ idempotencyKey, ...recordDataSchemas["saved-view"].shape })
+      .strict(),
+    run: creates("views"),
+  }),
+  tool({
+    name: "list_comments",
+    title: "List comments",
+    description:
+      "List the comments on one record, oldest first, with each author's name. Comments on a candidate also need candidates:read.",
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z.object({ parentRecordId: z.uuid(), page, pageSize }).strict(),
+    run: async (p, input) => {
+      // A parent the caller cannot see is answered as a missing record.
+      await recordKindOf(p, input.parentRecordId);
+      const result = await listRecords(
+        p,
+        "comments",
+        listQuery({ ...input, sort: "createdAt", direction: "asc" }),
+      );
+      return success(
+        listed(
+          result.data.map((row) => {
+            const data = row.data as Data;
+            return {
+              id: row.id,
+              parentRecordId: row.parentRecordId,
+              body: data.body,
+              authorName: row.authorName ?? null,
+              legacyAuthorLabel: data.legacyAuthorLabel ?? null,
+              createdAt: row.createdAt,
+            };
+          }),
+        ),
+        result.pagination,
+      );
+    },
+  }),
+  tool({
+    name: "add_comment",
+    title: "Add comment",
+    description:
+      "Append a comment to any active record except a comment or saved view. Comments on a candidate also require candidates:read and candidates:write. Requires an idempotencyKey; comments cannot be edited or deleted.",
+    scopes: ["recruitment:write"],
+    effect: "create",
+    input: z
+      .object({
+        idempotencyKey,
+        parentRecordId: z.uuid(),
+        body: recordDataSchemas.comment.shape.body,
+      })
+      .strict(),
+    run: async (p, input) => {
+      // Without candidates:read, a candidate parent is answered as a missing record.
+      const parent = await recordKindOf(p, input.parentRecordId);
+      if (parent.kind === "candidate") requireScope(p, "candidates:write");
+      // Saved views are private and comments are team-visible, so a view takes no comments.
+      if (parent.archived || ["comment", "saved-view"].includes(parent.kind))
+        throw new ApiError(
+          400,
+          "invalid_reference",
+          "Comment on an active record other than a comment or saved view.",
+        );
+      const row = await createRecord(
+        p,
+        "comments",
+        { parentRecordId: input.parentRecordId, data: { body: input.body } },
+        input.idempotencyKey,
+      );
+      return success({
+        id: row.id,
+        parentRecordId: row.parentRecordId,
+        createdAt: row.createdAt,
+      });
+    },
+  }),
+  tool({
+    name: "list_activity",
+    title: "List activity",
+    description:
+      "List the history of one record, newest first: who created, changed, archived or restored it and when. Activity on a candidate also needs candidates:read.",
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z.object({ recordId: z.uuid(), page, pageSize }).strict(),
+    run: async (p, input) => {
+      // A record the caller cannot see is answered as a missing record.
+      await recordKindOf(p, input.recordId);
+      const result = await listActivity(p, listQuery(input));
+      return success(
+        listed(
+          result.data.map((row) => ({
+            id: row.id,
+            action: row.action,
+            kind: row.kind,
+            summary: row.summary,
+            actorName: row.actorName,
+            actorType: row.actorType,
+            metadata: row.metadata,
+            createdAt: row.createdAt,
+          })),
+        ),
+        result.pagination,
+      );
+    },
+  }),
+  tool({
+    name: "list_notifications",
+    title: "List notifications",
+    description:
+      "List your reminders for tasks, interviews, offers, onboarding and vacancy dates that are overdue or due within 7 days, unread first, with unread and total counts. Read markers are your own.",
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z.object({ page, pageSize }).strict(),
+    run: async (p, input) => {
+      const result = await notifications(p);
+      const start = (input.page - 1) * input.pageSize;
+      return success(
+        {
+          reminders: listed(
+            result.data
+              .slice(start, start + input.pageSize)
+              .map((reminder) => ({
+                key: reminder.key,
+                title: reminder.title,
+                description: reminder.description,
+                date: reminder.date,
+                severity: reminder.severity,
+                read: reminder.read,
+                href: reminder.href,
+              })),
+          ),
+          unread: result.unread,
+          total: result.total,
+          limited: result.limited,
+        },
+        {
+          page: input.page,
+          pageSize: input.pageSize,
+          total: result.data.length,
+          totalPages: Math.ceil(result.data.length / input.pageSize),
+        },
+      );
+    },
+  }),
+  tool({
+    name: "mark_notifications_read",
+    title: "Mark notifications read",
+    description:
+      "Mark reminders read for you only, by their keys from list_notifications; teammates' reminders do not change. A key already read or no longer due changes nothing, so a retry is safe.",
+    scopes: ["recruitment:read", "recruitment:write"],
+    effect: "create",
+    input: z
+      .object({
+        keys: z.array(z.string().min(1).max(300)).min(1).max(500),
+      })
+      .strict(),
+    run: async (p, input) =>
+      success({ updated: (await markNotifications(p, input.keys)).updated }),
   }),
   tool({
     name: "get_overview",
@@ -1040,42 +1545,54 @@ export const TOOLS: McpTool[] = [
     },
   }),
   tool({
-    name: "add_comment",
-    title: "Add comment",
+    name: "get_analytics",
+    title: "Get analytics",
     description:
-      "Append a comment to an active candidate, vacancy or application. Comments on a candidate also require candidates:read and candidates:write. Requires an idempotencyKey; comments cannot be edited or deleted.",
-    scopes: ["recruitment:write"],
-    effect: "create",
+      "The dashboard's analytics for a date range (from and to as YYYY-MM-DD, Asia/Dubai, at most 367 days; the last 30 days by default): inventory, stages, daily series, hires, time to hire, stage durations, conversions and grouped totals. Groups after the first 25 are summed.",
+    scopes: ["candidates:read", "recruitment:read"],
+    effect: "read",
     input: z
       .object({
-        idempotencyKey,
-        parentRecordId: z.uuid(),
-        body: recordDataSchemas.comment.shape.body,
+        from: z.string().max(10).optional(),
+        to: z.string().max(10).optional(),
       })
       .strict(),
     run: async (p, input) => {
-      // Without candidates:read, a candidate parent is answered as a missing record.
-      const parent = await recordKindOf(p, input.parentRecordId);
-      if (parent.kind === "candidate") requireScope(p, "candidates:write");
-      if (
-        parent.archived ||
-        !["candidate", "vacancy", "application"].includes(parent.kind)
-      )
-        throw new ApiError(
-          400,
-          "invalid_reference",
-          "Comment on an active candidate, vacancy or application.",
-        );
-      const row = await createRecord(
-        p,
-        "comments",
-        { parentRecordId: input.parentRecordId, data: { body: input.body } },
-        input.idempotencyKey,
-      );
+      const result = await analytics(p, listQuery(input));
+      // Folded so a team with many long group names stays under the result limit.
+      const folded = GROUP_LISTS.map((name) => ({
+        name,
+        ...foldGroups(result[name]),
+      }));
       return success({
-        id: row.id,
-        parentRecordId: row.parentRecordId,
-        createdAt: row.createdAt,
+        ...result,
+        ...Object.fromEntries(folded.map((item) => [item.name, item.groups])),
+        foldedGroups: folded
+          .filter((item) => item.folded)
+          .map((item) => item.name),
+      });
+    },
+  }),
+  tool({
+    name: "search_workspace",
+    title: "Search workspace",
+    description:
+      "Search candidates, vacancies, job roles, tasks and applications at once, up to 8 results each, as the app's global search does. Candidates appear only with candidates:read. Sensitive and source fields are never matched.",
+    scopes: ["recruitment:read"],
+    effect: "read",
+    input: z.object({ query: query.min(1) }).strict(),
+    run: async (p, input) => {
+      const result = await searchWorkspace(p, input.query, {
+        omitCandidateFields: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS],
+      });
+      return success({
+        groups: result.groups.map((group) => ({
+          type: group.type,
+          label: group.label,
+          results: listed(group.results),
+        })),
+        total: result.total,
+        limited: result.limited,
       });
     },
   }),
@@ -1083,7 +1600,7 @@ export const TOOLS: McpTool[] = [
     name: "archive_record",
     title: "Archive record",
     description:
-      "Archive one job role, vacancy, application, interview, offer, onboarding record or checklist item. It leaves active lists but is kept and can be restored with restore_record; nothing is deleted. Requires the current version; if the record changed since, the tool returns version_conflict.",
+      "Archive one candidate, task, job role, vacancy, application, interview, offer, onboarding record or checklist item; a candidate also needs candidates:write. It can be restored with restore_record; nothing is deleted. Requires the current version; a changed record returns version_conflict.",
     scopes: ["recruitment:write"],
     effect: "change",
     input: archiveInput,
@@ -1093,7 +1610,7 @@ export const TOOLS: McpTool[] = [
     name: "restore_record",
     title: "Restore record",
     description:
-      "Restore one archived job role, vacancy, application, interview, offer, onboarding record or checklist item; find it with a list tool and archived: true. Refused if it would duplicate an active record. Requires the current version; a changed record returns version_conflict.",
+      "Restore one archived record that archive_record takes; a candidate also needs candidates:write. Find it with a list or search tool and archived: true. Refused if it would duplicate an active record. Requires the current version; a changed record returns version_conflict.",
     scopes: ["recruitment:write"],
     effect: "change",
     input: archiveInput,
