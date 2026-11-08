@@ -649,7 +649,7 @@ Ordered per SRS §14 sequencing. Each package is independently testable. "Local"
 ### R2-00 Release 2 design (job 041)
 
 - **Requirements covered:** the design of Release 2 epics R2-01 to R2-12 ([ROADMAP.md](../ROADMAP.md#release-2--configurable-platform)), the merged R1.6 items R16-01 to R16-10 and R12-01, R12-02, R12-03 and R12-07, against BRD FR-ACC-03, FR-ADM-01, FR-TASK-02, FR-TASK-03 and SRS-SEC-03, SRS-DATA-01, SRS-DATA-02 and SRS-NFR-01. No row status changes.
-- **Files touched:** `docs/release-2/architecture.md` (tenancy decision, 13 design sections, threat model additions, open decisions D1 to D15, traceability), `docs/release-2/build-plan.md` (66 items in R2a to R2d, each with dependencies, migrations, acceptance criteria and tests, and a Preview check per milestone), `docs/ROADMAP.md` (link), this entry.
+- **Files touched:** `docs/release-2/architecture.md` (tenancy decision with explicit company authority, 13 design sections, threat model additions T-R2-1 to T-R2-16, open decisions D1 to D17, traceability), `docs/release-2/build-plan.md` (66 items in R2a to R2d, each with dependencies, migrations, acceptance criteria and tests, and a Preview check per milestone), `docs/ROADMAP.md` (link), this entry.
 - **Local:** design only, no code. No application code, migration, test or dependency changed.
 - **Owner steps:** review the design and decide the open decisions before R2 jobs are queued.
 

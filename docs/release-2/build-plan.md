@@ -18,18 +18,26 @@ Each milestone ends with a checkpoint on Preview that the owner runs.
 
 Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 organisation model, R2-12 general team tasks.
 
-### R2a-01 Workspace and team mapping
+### R2a-01 Workspace, team mapping and company authority
 
 - **Epics:** R2-01, R2-06 (tenancy decision).
-- **Size:** 2 h.
+- **Size:** 3 h.
 - **Depends on:** none.
-- **Migration:** adds `app.workspaces` and `app.workspace_teams` (new), inserts one workspace with a fixed id and maps every team to it (`ON CONFLICT DO NOTHING`), and adds the owner-owned trigger function `app.map_new_team()` (new) on `auth.organization` insert, which refuses when more than one workspace exists. FORCE row-level security on both tables. Role template: `SELECT` on both tables for `recruitmentos_data`, no write grant for either runtime role. Marker: +1.
+- **Migration:** adds `app.workspaces`, `app.workspace_teams` and `app.workspace_admins` (new). It inserts one workspace with a fixed id, maps every team to it (`ON CONFLICT DO NOTHING`) and makes the initial administrator (`auth."user".initial_admin`) the first company owner. It also adds:
+  - the owner-owned trigger function `app.map_new_team()` (new) on `auth.organization` insert, which refuses when more than one workspace exists;
+  - the owner-run helper `tenant_context.set_workspace_authority(text, text, text[], boolean)` (new), callable only from a session context whose actor is a company owner, which refuses to remove or demote the last company owner;
+  - an owner-only `workspace-authority` branch in the `app.activity` insert policy.
+
+  FORCE row-level security on the three tables. Role template: `SELECT` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`, no write grant on any of them for either runtime role. Marker: +1.
+
 - **Acceptance criteria:**
-  1. After `npm run db:migrate` on a fictional `0027` baseline with two teams, both teams map to the one workspace, and running the migration twice changes nothing.
+  1. After `npm run db:migrate` on a fictional `0027` baseline with two teams, both teams map to the one workspace, the initial administrator is the only company owner, and running the migration twice changes nothing.
   2. Creating a team through Better Auth maps it to the workspace in the same transaction; with a second workspace inserted by the owner, team creation fails.
-  3. Neither runtime role can insert, update or delete in either table.
-  4. No existing test changes.
-- **Test approach:** `tests/workspace-tenancy.test.ts` (new, PGlite); `tests/migration-upgrade.test.ts` and `tests/runtime-role-grants.test.ts` extended; `scripts/live-role-tests.ts` gains the write-denied cases.
+  3. Neither runtime role can insert, update or delete in any of the three tables.
+  4. The owner of a team created later is not a company owner; their call of the helper is refused, and so is a company admin's.
+  5. A company owner grants a fictional member the `fields` area and plan access, and each change writes one audit row; removing the last company owner is refused.
+  6. No existing test changes.
+- **Test approach:** `tests/workspace-tenancy.test.ts` (new, PGlite); `tests/migration-upgrade.test.ts` and `tests/runtime-role-grants.test.ts` extended; `scripts/live-role-tests.ts` gains the write-denied cases and a team-B owner calling the helper.
 - **Docs:** `docs/identity-boundary-plan.md` (new "Company workspace" part), `docs/deployment.md`.
 
 ### R2a-02 Signed context derives the workspace and returns the access state
@@ -37,13 +45,14 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-06.
 - **Size:** 3 h.
 - **Depends on:** R2a-01.
-- **Migration:** adds `workspace_id` and `member_role` columns to `tenant_context.contexts`; replaces `tenant_context.install(text, text)` by `tenant_context.install(text, text, text[])` (new signature) returning `jsonb` with `{scopes, workspaceId, memberRole}`. Every existing check runs first and unchanged; the payload format and audience stay. Role template: the `EXECUTE` grants move to the new signature for every role that held the old one. Marker: +1.
+- **Migration:** adds `workspace_id`, `member_role`, `company_level`, `company_areas` and `plan_access` columns to `tenant_context.contexts`; replaces `tenant_context.install(text, text)` by `tenant_context.install(text, text, text[])` (new signature) returning `jsonb` with `{scopes, workspaceId, memberRole, companyLevel, companyAreas}`. The company columns come from `app.workspace_admins` only, never from `member.role`. Every existing check runs first and unchanged; the payload format and audience stay. Role template: the `EXECUTE` grants move to the new signature for every role that held the old one. Marker: +1.
 - **Acceptance criteria:**
   1. `src/lib/tenant-context.ts` passes the third argument (an empty array for now) and `withTeam` makes the returned access state available to the work function.
   2. A context for a team with no workspace mapping is rejected with `42501`.
-  3. Every existing rejection case in `tests/tenant-context.test.ts` still fails the same way.
-  4. `tests/round-trip-budget.test.ts` still counts 6, 11 and 15.
-- **Test approach:** `tests/tenant-context.test.ts`, `tests/round-trip-budget.test.ts`, `tests/runtime-role-grants.test.ts`, `tests/connection-boundary.test.ts`; `scripts/live-role-tests.ts` gains forged-workspace and missing-mapping cases, run directly and through a throwaway PgBouncer in transaction mode.
+  3. A team owner without a `app.workspace_admins` row gets a context with no company level, areas or plan access.
+  4. Every existing rejection case in `tests/tenant-context.test.ts` still fails the same way.
+  5. `tests/round-trip-budget.test.ts` still counts 6, 11 and 15.
+- **Test approach:** `tests/tenant-context.test.ts`, `tests/round-trip-budget.test.ts`, `tests/runtime-role-grants.test.ts`, `tests/connection-boundary.test.ts`; `scripts/live-role-tests.ts` gains forged-workspace, missing-mapping and team-owner-without-company-authority cases, run directly and through a throwaway PgBouncer in transaction mode.
 - **Docs:** `docs/identity-boundary-plan.md` ("Signed tenant context"), `docs/validation.md`.
 
 ### R2a-03 New scopes and explicit role ceilings
@@ -65,13 +74,15 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-01, R16-09.
 - **Size:** 3 h.
 - **Depends on:** R2a-01.
-- **Migration:** adds `app.config_objects`, `app.config_versions` and `app.config_layouts` (new), the trigger function `app.guard_config_version()` (new), the policy helper `tenant_context.allows_workspace(uuid, text, text)` (new), the audit helper `tenant_context.audit_config(uuid, text)` (new) and the read helper `tenant_context.config_history(uuid, timestamptz, int)` (new); recreates the `app.activity` insert policy with one owner-only `config` branch. Role template: `SELECT, INSERT, UPDATE, DELETE` on the three tables and `EXECUTE` on the three helpers for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.config_objects` (with the nullable `team_id` for team task boards), `app.config_versions` and `app.config_layouts` (new), the trigger function `app.guard_config_version()` (new), the policy helper `tenant_context.allows_workspace(uuid, text, text)` (new; writes need the context's company authority for the area, or, for a `task-board` object of the context's own team, team owner or admin), the audit helper `tenant_context.audit_config(uuid, text)` (new) and the read helper `tenant_context.config_history(uuid, timestamptz, int)` (new); recreates the `app.activity` insert policy with one owner-only `config` branch. Role template: `SELECT, INSERT, UPDATE, DELETE` on the three tables and `EXECUTE` on the three helpers for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. A new service `src/lib/config-store.ts` (new) creates a draft, edits it, publishes it and retires a version; a published body cannot be changed or deleted by any runtime role.
   2. Each change writes exactly one `config` activity row whose metadata has no body.
   3. A runtime role cannot insert a `config` activity row directly.
   4. A context of a team in another workspace reads no configuration row (two workspaces inserted by the owner in the test).
-- **Test approach:** `tests/config-store.test.ts` (new, PGlite); `tests/runtime-role-grants.test.ts`; `scripts/live-role-tests.ts` cross-workspace and forged-audit cases.
+  5. A team owner or admin without company authority cannot write any company configuration row, by the service or by direct SQL; a company admin can write only the areas granted.
+  6. `tenant_context.config_history` returns rows only to company owners and admins, and returns only time, action, object type and key, version numbers and the actor's display name: no team id, user id, record id or body.
+- **Test approach:** `tests/config-store.test.ts` (new, PGlite); `tests/runtime-role-grants.test.ts`; `scripts/live-role-tests.ts` cross-workspace, forged-audit and team-B-owner-writes-company-configuration cases.
 - **Docs:** `docs/identity-boundary-plan.md` ("Configuration audit"), `docs/security.md`.
 
 ### R2a-05 Configuration versions through install, with the instance cache
@@ -146,14 +157,14 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-06.
 - **Size:** 3 h.
 - **Depends on:** R2a-05, R2a-06.
-- **Migration:** adds `app.member_roles` (new) under FORCE row-level security (read for the team, write only for a session context whose `member_role` is owner); adds `role_version_id` and `admin_areas` to `tenant_context.contexts`; a new `install` body narrows the stored scopes to the role's scopes and returns the role version. Role template: `SELECT, INSERT, UPDATE, DELETE` on `app.member_roles` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.member_roles` (new) under FORCE row-level security (read for the team, write only for a session context whose `company_level` is owner); adds `role_version_id` to `tenant_context.contexts`; a new `install` body narrows the stored scopes to the role's scopes and returns the role version. Role template: `SELECT, INSERT, UPDATE, DELETE` on `app.member_roles` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. A member without a row holds the template matching `member.role`.
   2. Assigning the hiring manager template sets `member.role` to `recruiter` through Better Auth and writes the row; a mismatch uses the narrower scopes.
   3. A context asserting a scope the role lacks is stored without it, never widened.
-  4. Only owners assign roles; an admin's attempt is refused by the service and by the policy.
-  5. Every assignment is audited.
-- **Test approach:** `tests/member-roles.test.ts` (new), `tests/tenant-context.test.ts`, `tests/auth-flows.test.ts`, `tests/round-trip-budget.test.ts` (custom role case); `scripts/live-role-tests.ts` narrowing and admin-denied cases.
+  4. Only company owners assign roles and publish role versions; an attempt by a team owner without company authority (including the owner of a newly created team) or by a company admin is refused by the service and by the policy.
+  5. Every assignment is audited and listed on the company owners' home screen.
+- **Test approach:** `tests/member-roles.test.ts` (new), `tests/tenant-context.test.ts`, `tests/auth-flows.test.ts`, `tests/round-trip-budget.test.ts` (custom role case); `scripts/live-role-tests.ts` narrowing, admin-denied and team-B-owner-denied cases.
 - **Docs:** `docs/identity-boundary-plan.md`, `docs/authentication.md`, `docs/user-guide.md`.
 
 ### R2a-11 Admin portal shell and configuration history
@@ -164,8 +175,8 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Migration:** none.
 - **Acceptance criteria:**
   1. A new route `src/app/app/admin/[tab]/page.tsx` (new) shows the R2-01 tabs that exist at this point (Roles & permissions placeholder hidden until R2a-12, members, CV storage, speed and tokens linking to the existing settings pages) and a History tab.
-  2. The portal is visible to owners, admins and roles granted an admin area; the route returns 403 otherwise.
-  3. History lists `config` events of every team in the workspace through `tenant_context.config_history`.
+  2. Company owners and admins see the company tabs they hold areas for; team owners and admins see only the team tabs (members, CV storage, speed, tokens, task boards). Other routes return 403 with a plain "You do not have access to this page" state.
+  3. History lists `config` events of every team in the workspace through `tenant_context.config_history`, for company owners and admins only.
   4. A new route `GET /api/v1/me/access` (new) returns the caller's pages, actions and field rules.
   5. No tab is shown for a feature that does not exist yet.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new), `tests/settings-ui.test.tsx`, `tests/openapi-contract.test.ts`; keyboard and dark-theme checks recorded in `docs/accessibility-checklist.md`.
@@ -178,11 +189,12 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Depends on:** R2a-10, R2a-11.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Owners copy a template into a draft role, edit pages, actions per resource, field rules (system fields of today's kinds), record scope and admin areas in standard form controls, and publish it.
+  1. Company owners copy a template into a draft role, edit pages, actions per resource, field rules (system fields of today's kinds) and record scope in standard form controls, and publish it.
   2. A grant outside the role's membership ceiling cannot be saved.
   3. The Owner template is read-only.
-  4. Members get their role from Team settings.
-  5. Every change appears in History.
+  4. Members get their role from Team settings, set by a company owner.
+  5. A "Company authority" panel lets company owners grant and remove company owner and admin levels, areas and plan access through `tenant_context.set_workspace_authority`.
+  6. Every change appears in History.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11), `tests/authz.test.ts` (new in R2a-06; escalation cases through the API), `tests/member-roles.test.ts` (new in R2a-10).
 - **Docs:** `docs/user-guide.md`, `docs/security.md`.
 
@@ -191,13 +203,14 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-07.
 - **Size:** 3 h.
 - **Depends on:** R2a-04.
-- **Migration:** adds `app.org_levels`, `app.org_units` and `app.org_unit_closure` (new) with the trigger function `app.maintain_org_closure()` (new); read policies for the workspace and write policies for the `organisation` admin area through `allows_workspace`. Role template: `SELECT, INSERT, UPDATE` on the three tables for `recruitmentos_data` (closure rows written only by the trigger). Marker: +1.
+- **Migration:** adds `app.org_levels`, `app.org_units` and `app.org_unit_closure` (new) with the trigger function `app.maintain_org_closure()` (new); read policies for the workspace and write policies for the company `organisation` area through `allows_workspace`; and the owner-owned trigger function `app.guard_scope_sources()` (new) on `app.org_units`, which refuses a `parent_id` change or an archive unless the context's `company_level` is owner. Role template: `SELECT, INSERT, UPDATE` on the three tables for `recruitmentos_data` (closure rows written only by the trigger). Marker: +1.
 - **Acceptance criteria:**
   1. A new service `src/lib/org.ts` (new) and routes under `/api/v1/org-units` (new) create, rename, move and archive units and levels.
   2. A move under the unit's own subtree is refused.
   3. The closure table is correct after every operation for a fictional 500-unit, 6-level tree.
-  4. Every change is audited.
-- **Test approach:** `tests/org-units.test.ts` (new, PGlite); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` cross-workspace and runtime-closure-write cases.
+  4. A company admin with the `organisation` area creates and renames units, but cannot move or archive one; a company owner can, and each move writes a `scope.home_units_changed` row.
+  5. Every change is audited.
+- **Test approach:** `tests/org-units.test.ts` (new, PGlite); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` cross-workspace, runtime-closure-write and admin-moves-unit-denied cases.
 - **Docs:** `docs/api-examples.md`, `docs/user-guide.md`.
 
 ### R2a-14 Positions and employees
@@ -205,13 +218,15 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-07.
 - **Size:** 3 h.
 - **Depends on:** R2a-03, R2a-13.
-- **Migration:** adds `app.positions`, `app.employees` and `app.employee_positions` (new). Employee reads need `directory:read` and write `directory:write` in the context, through a new helper `tenant_context.allows_directory(uuid, text)` (new). Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.positions`, `app.employees` and `app.employee_positions` (new). Employee reads need `directory:read` and write `directory:write` in the context, through a new helper `tenant_context.allows_directory(uuid, text)` (new). `app.guard_scope_sources()` is extended to `app.employees` (any `user_id` change), `app.employee_positions` (any change for an employee with a user link) and `app.positions` (an `org_unit_id` change for a position held by a linked employee): each needs a company owner context and writes a `scope.home_units_changed` row. Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. Routes under `/api/v1/positions` and `/api/v1/employees` (new) create, update, archive and page through them, with the directory filters of §6.3 (unit including descendants, level, position, status).
   2. An employee links to at most one user per workspace.
-  3. A role with directory rule `basic` gets no work email or phone.
-  4. A context without `directory:read` reads no employee row.
-- **Test approach:** `tests/directory.test.ts` (new); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` directory-scope cases.
+  3. Only a company owner links or unlinks a user, or changes a linked employee's positions; a member with `directory:write`, a company admin and a team owner are refused by the service and by direct SQL, including for their own employee row.
+  4. Each such change is listed on the company owners' home screen with role assignments.
+  5. A role with directory rule `basic` gets no work email or phone (service-layer rule, D16).
+  6. A context without `directory:read` reads no employee row.
+- **Test approach:** `tests/directory.test.ts` (new); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` directory-scope and self-link-denied cases.
 - **Docs:** `docs/api-examples.md`, `docs/security.md` (employee data).
 
 ### R2a-15 Employee erasure and retention hook
@@ -250,9 +265,10 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Acceptance criteria:**
   1. A fictional workbook with Units, Positions and Employees sheets gives a dry run with create, update, unchanged and reject counts and a reason per rejected row, writing nothing.
   2. Apply is idempotent by code and employee number.
-  3. Files over 5 MiB or 20,000 rows are refused.
+  3. Files over 5 MiB or 20,000 rows, and workbooks over 2,000 zip entries or 50 MiB uncompressed, are refused before parsing.
   4. Formula-like cells are stored as text and flagged.
-  5. It uses `read-excel-file`, already a dependency, and adds none.
+  5. Rows that would change a user link, a linked employee's positions or a unit's parent are never applied by a normal apply. They are listed in a "Needs a company owner" group, and a company owner applies them in a separate step that writes the home-unit audit rows.
+  6. It uses `read-excel-file`, already a dependency, and adds none.
 - **Test approach:** `tests/org-import.test.ts` (new) with fictional workbooks built in the test; `npm audit` unchanged.
 - **Docs:** `docs/user-guide.md`.
 
@@ -261,13 +277,14 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-06, R2-07, R2-11.
 - **Size:** 3 h.
 - **Depends on:** R2a-07, R2a-10, R2a-14.
-- **Migration:** adds `org_unit_id`, `scope_vacancy_id` and `scope_application_id` to `app.records` with the trigger function `app.maintain_record_scope()` (new) and a partial index `(team_id, candidate_id) WHERE kind = 'application'`; adds `app.record_assignments` (new); adds `record_scope` and `home_units` to `tenant_context.contexts`, filled by a new `install` body. Existing rows keep `null` scope columns until a vacancy gets a unit. Role template: `SELECT, INSERT, DELETE` on `app.record_assignments` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `org_unit_id`, `scope_vacancy_id` and `scope_application_id` to `app.records` with the trigger function `app.maintain_record_scope()` (new) and a partial index `(team_id, candidate_id) WHERE kind = 'application'`; adds `app.record_assignments` (new) with the owner-run helpers `tenant_context.add_assignment(uuid, text, text)` and `tenant_context.remove_assignment(uuid, text, text)` (new); adds `record_scope` and `home_units` to `tenant_context.contexts`, filled by a new `install` body; extends `tenant_context.erase_employee` to remove the assignments of a linked user who is no longer a team member. Existing rows keep `null` scope columns until a vacancy gets a unit. Role template: `SELECT` only on `app.record_assignments` and `EXECUTE` on the two helpers for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. Vacancies take an org unit; their applications, interviews, offers, onboarding, checklist items and comments get it from the trigger, including after the vacancy's unit changes.
   2. `scopeFilter` applies the §3.5 table for `unit` and `assigned` roles in list, get, export, search, notifications, overview and analytics.
   3. A record outside scope is answered as 404, and as a missing parent in references.
-  4. Round-trip counts unchanged for scope `all` and for a scoped principal.
-- **Test approach:** `tests/org-scope.test.ts` (new) with the 500-unit fixture; `tests/round-trip-budget.test.ts` (hiring-manager case); `tests/records-postgres.test.ts` unchanged.
+  4. Neither runtime role can insert, update or delete `app.record_assignments` directly. The helpers refuse a record outside the caller's scope, a target user outside the team, self-assignment by a caller whose scope for that kind is not `all`, and the `approver` relation from anything but the engine.
+  5. Round-trip counts unchanged for scope `all` and for a scoped principal.
+- **Test approach:** `tests/org-scope.test.ts` (new) with the 500-unit fixture; `tests/round-trip-budget.test.ts` (hiring-manager case); `tests/records-postgres.test.ts` unchanged; `scripts/live-role-tests.ts` direct-insert-denied and scoped-self-assignment-denied cases.
 - **Docs:** `docs/security.md`, `docs/user-guide.md`.
 
 ### R2a-19 Record scope in row-level security
@@ -275,13 +292,20 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Epics:** R2-06, R2-11.
 - **Size:** 3 h.
 - **Depends on:** R2a-18.
-- **Migration:** adds `tenant_context.scope_is_all()` and `tenant_context.in_scope(…)` (new) and one restrictive policy on `app.records` for all commands (§3.5), which is true for the migration owner. Role template: `EXECUTE` on both helpers for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `tenant_context.scope_is_all()`, `tenant_context.in_scope(…)`, `tenant_context.record_in_scope(text, uuid)` and `tenant_context.candidate_in_scope(text, uuid)` (new). All four are owner-owned `SECURITY DEFINER` functions with `SET search_path = pg_catalog, pg_temp`, so their probes of `app.records` run as the owner and never re-enter the policy. It also adds the restrictive scope policies of §3.5, all true for the migration owner:
+  - on `app.records` for all commands;
+  - on `app.activity` (by `record_id`);
+  - on `app.uploads` (by `candidate_id`);
+  - on `app.record_assignments` (by `record_id`).
+
+  Tables added later get theirs in their own items. Role template: `EXECUTE` on the four helpers for `recruitmentos_data`. Marker: +1.
+
 - **Acceptance criteria:**
-  1. Under a scoped context, a direct `SELECT` on `app.records` as the data role returns only in-scope rows, and an `UPDATE` or `INSERT` out of scope is refused.
+  1. Under a scoped context, a direct `SELECT` as the data role returns only in-scope rows. This holds for `app.records`, `app.activity`, `app.uploads` and `app.record_assignments`, and an `UPDATE` or `INSERT` of an out-of-scope record is refused.
   2. Scope `all` contexts see exactly what they saw before.
-  3. Candidate erasure and every owner-run helper still work.
+  3. Candidate erasure and every owner-run helper still work, and no policy recurses.
   4. With the 2,000-candidate fixture, the overview and list database times are within 10% of the previous release locally.
-- **Test approach:** `tests/record-scope-rls.test.ts` (new); `tests/candidate-erasure.test.ts`; `npm run bench:round-trips -- --fixture`; `scripts/live-role-tests.ts` direct-SQL scope cases through the pooler.
+- **Test approach:** `tests/record-scope-rls.test.ts` (new); `tests/candidate-erasure.test.ts`; `npm run bench:round-trips -- --fixture`; `scripts/live-role-tests.ts` direct-SQL scope cases per table through the pooler.
 - **Docs:** `docs/identity-boundary-plan.md` ("Record scope"), `docs/validation.md`.
 
 ### R2a-20 Team tasks: label, assignees and links
@@ -305,7 +329,7 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Depends on:** R2a-04, R2a-20.
 - **Migration:** none (task boards are `task-board` configuration objects in the store of R2a-04).
 - **Acceptance criteria:**
-  1. Admins define task boards with a subset of buckets and an optional filter.
+  1. Team owners and admins define task boards for their own team (team-scoped `task-board` objects) with a subset of buckets and an optional filter; another team neither sees nor edits them.
   2. Every team keeps a default board of all buckets.
   3. The Tasks screen switches boards.
   4. "Counts as completed" keeps its effect on overdue lists and reminders.
@@ -318,9 +342,10 @@ Contents: R2-01 Admin portal shell, R2-06 roles and permissions engine, R2-07 or
 - **Version:** `1.1.0` under the `docs/deployment.md` version rule (the minor number per Preview feature drop; decision D3).
 - **What the owner tests on Preview:**
   - every existing screen, API call and MCP tool behaves as in `1.0.0`;
-  - the Admin portal shows History and Roles & permissions;
-  - a fictional hiring manager linked to a fictional employee sees only their unit's vacancies and candidates;
-  - org chart, directory and the fictional Excel import;
+  - the Admin portal shows History and Roles & permissions, and the owner is listed as the only company owner;
+  - the owner of a second fictional team cannot change roles or company configuration and does not see the company tabs;
+  - a fictional hiring manager linked to a fictional employee sees only their unit's vacancies and candidates, and cannot widen that by editing the directory;
+  - org chart, directory and the fictional Excel import, including the "Needs a company owner" group;
   - employee erasure;
   - team tasks with assignees;
   - the Speed panel still shows today's timings.
@@ -403,12 +428,13 @@ Contents: R2-02 screen and field builder, R2-03 categories and types.
 - **Epics:** R2-02.
 - **Size:** 3 h.
 - **Depends on:** R2b-04.
-- **Migration:** adds `app.record_files` (new) with the reference fields of `app.uploads` (provider, store, environment, object key, digest, size, status, `erasure_id`) keyed by team and record; extends `storage_ledger.guard_upload`-style guards and the erasure helper to it. Role template: `SELECT, INSERT, UPDATE` on the table for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.record_files` (new) with the reference fields of `app.uploads` (provider, store, environment, object key, digest, size, status, `erasure_id`) keyed by team and record; extends `storage_ledger.guard_upload`-style guards and the erasure helper to it; adds the restrictive scope policy of §3.5 keyed by `record_id`. Role template: `SELECT, INSERT, UPDATE` on the table for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. A file field accepts PDF, DOCX and image files through the same tickets, size cap, magic-byte checks, digest and ledger as CVs.
   2. Downloads are attachments only (DEC-07).
   3. Erasing a candidate removes their record files with the Blob cleanup.
-- **Test approach:** `npm run test:storage` (new native cases), `tests/cv-blob-transfer.test.ts`, `tests/candidate-erasure.test.ts`, `tests/cv-inline-content.test.ts`; `scripts/live-role-tests.ts` table cases.
+  4. A scoped context reads no record file of an out-of-scope record by direct SQL.
+- **Test approach:** `npm run test:storage` (new native cases), `tests/cv-blob-transfer.test.ts`, `tests/candidate-erasure.test.ts`, `tests/cv-inline-content.test.ts`; `scripts/live-role-tests.ts` table and scope cases.
 - **Docs:** `docs/blob-security-design.md`, `docs/blob-quota-design.md`, `docs/erasure-runbook.md`.
 
 ### R2b-07 Screens per kind, type and action
@@ -446,9 +472,9 @@ Contents: R2-02 screen and field builder, R2-03 categories and types.
 - **Depends on:** R2a-11, R2b-07.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Admins with the `fields` area add, rename, reorder, group, archive and mark custom fields per kind, choosing one of the 19 types with defaults, help text and validation.
+  1. Company admins with the `fields` area (and company owners) add, rename, reorder, group, archive and mark custom fields per kind, choosing one of the 19 types with defaults, help text and validation.
   2. System fields can be relabelled, given help text, grouped and made mandatory, never removed or retyped.
-  3. Owners can mark fields sensitive.
+  3. Company owners can mark fields sensitive.
   4. Publishing shows the change summary.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11; fields cases), `tests/config-store.test.ts` (new in R2a-04).
 - **Docs:** `docs/user-guide.md`, `docs/accessibility-checklist.md`.
@@ -547,12 +573,13 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Epics:** R2-04.
 - **Size:** 3 h.
 - **Depends on:** R2c-02.
-- **Migration:** adds `app.outbox` (new, team-keyed, FORCE row-level security, rows written in the record's transaction and claimed with `FOR UPDATE SKIP LOCKED`). Role template: `SELECT, INSERT, UPDATE` on `app.outbox` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.outbox` (new, team-keyed, FORCE row-level security, rows written in the record's transaction and claimed with `FOR UPDATE SKIP LOCKED`), with the restrictive scope policy of §3.5 keyed by `record_id`. Role template: `SELECT, INSERT, UPDATE` on `app.outbox` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
-  1. Post-actions assign, create a task, require an approval group and notify run in the transition's transaction; a failure rolls the transition back.
+  1. Post-actions assign (through `tenant_context.add_assignment`), create a task, require an approval group and notify run in the transition's transaction; a failure rolls the transition back.
   2. Outside effects go to the outbox and are delivered after commit with retries; failures are visible in the record's history.
-  3. No post-action type can change a status or a role.
-- **Test approach:** `tests/workflow-engine.test.ts` (post-action cases), `tests/outbox.test.ts` (new); `scripts/live-role-tests.ts` outbox cross-team cases.
+  3. No post-action type can change a status, a role, company authority or an approver assignment.
+  4. A scoped context reads no outbox row of an out-of-scope record by direct SQL.
+- **Test approach:** `tests/workflow-engine.test.ts` (post-action cases), `tests/outbox.test.ts` (new); `scripts/live-role-tests.ts` outbox cross-team and scope cases.
 - **Docs:** `docs/security.md`.
 
 ### R2c-04 Approval groups and approval requests
@@ -560,14 +587,15 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Epics:** R2-04, R16-05.
 - **Size:** 3 h.
 - **Depends on:** R2c-03.
-- **Migration:** adds `app.approval_requests` and `app.approval_decisions` (new), team-keyed under FORCE row-level security. Role template: `SELECT, INSERT, UPDATE` on both for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.approval_requests` and `app.approval_decisions` (new; decisions also store `record_id`), team-keyed under FORCE row-level security, each with the restrictive scope policy of §3.5 keyed by `record_id`. Role template: `SELECT, INSERT, UPDATE` on both for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. Any-one, all, majority and sequential rules close requests as §4.5 describes; one rejection closes any rule.
   2. Requesters cannot approve their own requests.
-  3. Approvers can read the fields their group names for that record only.
+  3. Approvers can read the fields their group names for that record only; the engine adds their `approver` assignment through the helper.
   4. Approval outcomes cannot target the Hired or Rejected categories.
   5. Every decision is audited with the rule applied.
-- **Test approach:** `tests/approvals.test.ts` (new); `scripts/live-role-tests.ts` approval cases.
+  6. A scoped context reads no request or decision of an out-of-scope record by direct SQL.
+- **Test approach:** `tests/approvals.test.ts` (new); `scripts/live-role-tests.ts` approval and scope cases.
 - **Docs:** `docs/user-guide.md`, `docs/security.md`.
 
 ### R2c-05 Delegates, out-of-office cover and SLA reminders
@@ -575,11 +603,12 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Epics:** R16-05.
 - **Size:** 2 h.
 - **Depends on:** R2c-04.
-- **Migration:** adds `app.approval_delegates` (new). Role template: `SELECT, INSERT, UPDATE, DELETE` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.approval_delegates` (new), each member writing only their own rows; extends `tenant_context.erase_employee` to remove the delegate rows of a linked user who is no longer a team member. Role template: `SELECT, INSERT, UPDATE, DELETE` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. A member sets a delegate for a date range; the delegate's decisions record `on_behalf_of`.
   2. Overdue requests appear in reminders with stable keys and escalate after a second period.
   3. Reading reminders changes no request.
+  4. Erasing the employee of a former member removes their delegate rows.
 - **Test approach:** `tests/approvals.test.ts` (new in R2c-04), `tests/insights-postgres.test.ts` (reminder cases).
 - **Docs:** `docs/user-guide.md`.
 
@@ -591,8 +620,10 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Migration:** none.
 - **Acceptance criteria:**
   1. Publishing a workflow refuses, with a list, unreachable statuses, inescapable loops, groups without members or outcomes, conditions on deleted or archived fields, sensitive-field conditions and rule paths into Hired or Rejected.
-  2. Published versions are immutable.
-  3. Each publish is audited with its version number.
+  2. Saving or publishing a condition on a field hidden from the author's role is refused.
+  3. Publishing warns when an offered transition depends on a field the receiving role cannot see.
+  4. Published versions are immutable.
+  5. Each publish is audited with its version number.
 - **Test approach:** `tests/workflow-publish.test.ts` (new).
 - **Docs:** `docs/user-guide.md`.
 
@@ -619,8 +650,9 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Migration:** none.
 - **Acceptance criteria:**
   1. `POST /api/v1/admin/workflows/[id]/test` (new) runs a draft on sample values or a readable application in a read-only transaction.
-  2. It returns the path, matched conditions, failing validators, approval groups and post-actions without running any.
-  3. A test confirms no row in any table changes.
+  2. A real application is refused when the tester cannot see every field the draft's conditions and validators reference.
+  3. It returns the path, matched conditions, failing validators, approval groups and post-actions without running any.
+  4. A test confirms no row in any table changes.
 - **Test approach:** `tests/workflow-engine.test.ts` (new in R2c-01; test-mode cases), `tests/openapi-contract.test.ts`.
 - **Docs:** `docs/user-guide.md`.
 
@@ -631,7 +663,7 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Depends on:** R2a-11, R2c-06.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Admins with the `workflows` area edit statuses, transitions, conditions, validators, post-actions and approval groups in lists, tables and dialogs.
+  1. Company admins with the `workflows` area (and company owners) edit statuses, transitions, conditions, validators, post-actions and approval groups in lists, tables and dialogs.
   2. The editor shows publish problems inline and the in-flight mapping step.
   3. Everything works by keyboard, with announced changes, at 360 px and 200% zoom.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11; workflow cases); manual screen-reader and keyboard checks recorded in `docs/accessibility-checklist.md`.
@@ -722,7 +754,7 @@ Contents: R2-04 workflow builder, R2-05 boards and views, R2-11 stakeholder view
 - **Depends on:** R2a-11, R2c-15.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Admins with the `boards` area create and publish boards.
+  1. Company admins with the `boards` area (and company owners) create and publish boards.
   2. The Applications screen offers the team's boards with swimlanes, quick filters, chosen card fields, WIP warnings and list and board modes.
   3. The default board looks as today's.
   4. Moving a card runs a transition, with the existing optimistic update and rollback.
@@ -796,15 +828,16 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Epics:** R2-08, R12-07.
 - **Size:** 3 h.
 - **Depends on:** R2c-03, R2d-01.
-- **Migration:** adds `app.outbound_messages` (new, team-keyed under FORCE row-level security) and extends `tenant_context.erase_candidate` to it. Role template: `SELECT, INSERT, UPDATE` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.outbound_messages` (new, team-keyed under FORCE row-level security, with `merge_field_ids` and the restrictive scope policy of §3.5 keyed by `record_id`). It extends `tenant_context.erase_candidate` to the new table, and extends `tenant_context.erase_employee` to redact recipient addresses equal to the erased employee's work email. Role template: `SELECT, INSERT, UPDATE` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. `sendRecordMail` (new, in `src/lib/mail.ts`) sends rendered plain-text and escaped-HTML email through the existing Resend settings, or prints metadata only in local console mode.
   2. It uses the outbox row id as Resend's idempotency key and a reply-to of the sending member.
-  3. Recipients come only from the record; subjects have no CR or LF.
+  3. Recipients come only from the record; subjects have no CR or LF; URL, email and phone values appear as plain text, never as links.
   4. Each team is limited to 200 sends per hour.
-  5. Every message is logged and shown on the candidate's timeline.
-  6. Tests never contact Resend.
-- **Test approach:** `tests/template-mail.test.ts` (new) with a fake delivery, `tests/mail-hosted.test.ts`, `tests/candidate-erasure.test.ts`; `scripts/live-role-tests.ts` table cases.
+  5. Every message is logged with the merge field ids it used and appears on the candidate's timeline. Its subject, body and attachments are shown only to readers who can see every one of those fields. Other readers see the template name, state and time, and the recipient only if they can see the candidate's email. This holds in the UI, REST, MCP, search and exports.
+  6. A scoped context reads no message of an out-of-scope record by direct SQL.
+  7. Tests never contact Resend.
+- **Test approach:** `tests/template-mail.test.ts` (new) with a fake delivery, `tests/field-redaction.test.ts` (new in R2b-08; a hiring manager who cannot see `offer.amount` reads a logged offer email), `tests/mail-hosted.test.ts`, `tests/candidate-erasure.test.ts`, `tests/employee-erasure.test.ts` (new in R2a-15); `scripts/live-role-tests.ts` table and scope cases.
 - **Docs:** `docs/security.md` ("Intended connections"), `docs/erasure-runbook.md`, `docs/deployment.md`.
 
 ### R2d-03 Template file upload through the CV storage path
@@ -827,8 +860,8 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Depends on:** R2d-03.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. After the owner approves the escalation, `docxtemplater` and `pizzip` are added at exact versions with `npm audit --audit-level=moderate` passing.
-  2. A Word template with `{{…}}` placeholders and `{{#if}}` blocks renders to DOCX from the merge context.
+  1. After the owner approves the escalation, `docxtemplater` and `pizzip` are added at exact versions with `npm audit --audit-level=moderate` passing; `angular-expressions` is not in `package-lock.json`.
+  2. A small custom parser (delimiters `{{ }}`) resolves only allowlisted dotted paths and maps `{{#if}}` and `{{#unless}}` to sections; a Word template using them renders to DOCX from the merge context, and an unknown path is refused at publish.
   3. A value containing Word XML or a field code appears as literal text.
   4. Rendering runs with network access blocked in the test.
 - **Test approach:** `tests/template-render.test.ts` (new) with a fictional template built in the test.
@@ -855,7 +888,7 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Depends on:** R2d-05.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. After the owner approves the escalation, `pdfjs-dist` draws template pages in the admin editor with scripting, forms and eval disabled.
+  1. After the owner approves the escalation, `pdfjs-dist` is pinned at or above the release that fixed CVE-2024-4367 and draws template pages in the admin editor with scripting and forms disabled and `isEvalSupported: false` set explicitly.
   2. Admins draw a box per merge field or enter page, x, y, width and height in a form (the keyboard alternative).
   3. Placements are saved to the draft.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11; placement form cases).
@@ -878,13 +911,15 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Epics:** R2-08, R12-07.
 - **Size:** 3 h.
 - **Depends on:** R2c-04, R2d-02, R2d-04, R2d-05.
-- **Migration:** adds `app.generated_documents` (new, team-keyed, upload reference fields) and extends `tenant_context.erase_candidate` to it. Role template: `SELECT, INSERT, UPDATE` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.generated_documents` (new, team-keyed, upload reference fields, `merge_field_ids`, with the restrictive scope policy of §3.5 keyed by `record_id`) and extends `tenant_context.erase_candidate` to it. Role template: `SELECT, INSERT, UPDATE` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. Preview renders for one readable record as an attachment marked "Preview".
-  2. Generate stores the document pinned to the template version.
-  3. A template with an approval group creates an approval request, sends on approval and cancels on rejection.
-  4. Erasing a candidate removes their generated documents.
-- **Test approach:** `tests/templates.test.ts` (new in R2d-01), `tests/approvals.test.ts` (new in R2c-04), `tests/candidate-erasure.test.ts`; `scripts/live-role-tests.ts` table cases.
+  2. Generate stores the document pinned to the template version, with the merge field ids it used.
+  3. A document is downloadable only by readers who can see the record and every one of its merge fields; others see only template name, format and times, in the UI, REST, MCP, search and exports.
+  4. A template with an approval group creates an approval request, sends on approval and cancels on rejection.
+  5. Erasing a candidate removes their generated documents.
+  6. A scoped context reads no document row of an out-of-scope record by direct SQL.
+- **Test approach:** `tests/templates.test.ts` (new in R2d-01), `tests/field-redaction.test.ts` (new in R2b-08; a hiring manager without `offer.amount` cannot download a generated offer letter), `tests/approvals.test.ts` (new in R2c-04), `tests/candidate-erasure.test.ts`; `scripts/live-role-tests.ts` table and scope cases.
 - **Docs:** `docs/erasure-runbook.md`, `docs/user-guide.md`.
 
 ### R2d-09 Templates tab
@@ -894,7 +929,7 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Depends on:** R2a-11, R2d-07, R2d-08.
 - **Migration:** none.
 - **Acceptance criteria:**
-  1. Admins with the `templates` area list, create (upload Word, upload PDF, builder), version, preview and publish templates.
+  1. Company admins with the `templates` area (and company owners) list, create (upload Word, upload PDF, builder), version, preview and publish templates.
   2. They see each template's merge fields and approval group.
   3. Every publish appears in History.
 - **Test approach:** `tests/admin-portal-ui.test.tsx` (new in R2a-11; templates cases).
@@ -925,8 +960,10 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
   2. A `noCvText` connection cannot read CV text even with the team setting on.
   3. AI connections off refuses OAuth access tokens and MCP calls.
   4. AI writes off removes write scopes for AI connections.
-  5. Limit changes are audited.
-- **Test approach:** `tests/mcp-endpoint.test.ts`, `tests/mcp-cv-tools.test.ts`, `tests/mcp-oauth.test.ts`, `tests/tenant-context.test.ts`; `scripts/live-role-tests.ts` limit cases.
+  5. Only a company owner changes the two switches; a team owner without company authority is refused by the service and by the policy.
+  6. Limits record who set them; anyone may tighten a limit, only the setter's level or higher may relax it, so a holder cannot clear a `readOnly` that an owner set.
+  7. Limit changes are audited.
+- **Test approach:** `tests/mcp-endpoint.test.ts`, `tests/mcp-cv-tools.test.ts`, `tests/mcp-oauth.test.ts`, `tests/tenant-context.test.ts`; `scripts/live-role-tests.ts` limit and team-B-owner-switch cases.
 - **Docs:** `docs/mcp.md`, `docs/identity-boundary-plan.md`.
 
 ### R2d-12 Recruitment plan model
@@ -934,13 +971,13 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Epics:** R2-10.
 - **Size:** 3 h.
 - **Depends on:** R2a-10, R2a-13.
-- **Migration:** adds `app.plans`, `app.plan_versions` and `app.plan_lines` (new), the helper `tenant_context.allows_plan(uuid, text)` (new), and `plan_access` on `tenant_context.contexts` filled by a new `install` body. Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds `app.plans`, `app.plan_versions` and `app.plan_lines` (new) and the helper `tenant_context.allows_plan(uuid, text)` (new), which reads `plan_access` (derived from `app.workspace_admins` since R2a-02) and the scopes from the context. Role template: `SELECT, INSERT, UPDATE` on the three tables and `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. `src/lib/plans.ts` (new) and routes under `/api/v1/plans` (new) hold multi-year plans by org unit with yearly or quarterly lines, headcount and cost in AED fils.
   2. Approved versions are immutable.
-  3. A context without `plans:read` and plan access reads no plan row, even as an owner who was not granted access.
+  3. A context without `plans:read` and a plan-access grant reads no plan row. This holds for a team owner, a company admin and a company owner who has not granted themselves access, by the service and by direct SQL.
   4. Plan figures appear in no search, notification, activity metadata or MCP result.
-- **Test approach:** `tests/plans.test.ts` (new); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` plan-confidentiality cases.
+- **Test approach:** `tests/plans.test.ts` (new); `tests/openapi-contract.test.ts`; `scripts/live-role-tests.ts` plan-confidentiality cases, including a team-B owner.
 - **Docs:** `docs/security.md`, `docs/api-examples.md`, `docs/identity-boundary-plan.md`.
 
 ### R2d-13 Plan editor, versions and approval
@@ -962,13 +999,15 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Epics:** R2-10, R2-11.
 - **Size:** 3 h.
 - **Depends on:** R2c-01, R2c-18, R2d-12.
-- **Migration:** none.
+- **Migration:** adds `offer_amount_visible` to `tenant_context.contexts`, filled by a new `install` body from the caller's role field rule for `offer.amount`. It also adds the owner-owned `SECURITY DEFINER` aggregate helper `tenant_context.plan_actuals(uuid, uuid, int, int)` (new, `SET search_path = pg_catalog, pg_temp`, PUBLIC `EXECUTE` revoked), the only path that reads team records across the workspace's teams. Role template: `EXECUTE` on the helper for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
-  1. For a unit and below, a year or quarter and the approved version, the plan screen shows planned headcount and cost against open vacancies, offers, observed hires and accepted-offer spend in AED (§9.3).
-  2. Offers in other currencies or hourly pay are left out and counted.
-  3. Imported hires without an observed event are not counted.
-  4. The stakeholder home shows the member's part of the plan only with plan access.
-- **Test approach:** `tests/plans.test.ts` (new in R2d-12; actuals on the fictional fixture), `tests/stakeholder-home.test.tsx` (new in R2c-18).
+  1. For a unit and below, a year or quarter and the approved version, the plan screen shows planned headcount and cost against open vacancies, offers, observed hires and accepted-offer spend in AED (§9.3), all from `tenant_context.plan_actuals`.
+  2. The helper refuses a context without plan access and `plans:read`, returns only aggregates (no record id, name, single-record date or per-team breakdown), and works for units of the context's workspace only.
+  3. Spend is left out when the caller's role hides `offer.amount`, and is suppressed with "fewer than 5 offers" for a cell built from fewer than 5 accepted offers.
+  4. Offers in other currencies or hourly pay are left out and counted.
+  5. Imported hires without an observed event are not counted.
+  6. The stakeholder home shows the member's part of the plan only with plan access.
+- **Test approach:** `tests/plans.test.ts` (new in R2d-12; actuals on the fictional fixture, a one-offer cell, a hidden-amount role), `tests/stakeholder-home.test.tsx` (new in R2c-18); `scripts/live-role-tests.ts` cases: helper denied without plan access; no team's rows readable directly across teams.
 - **Docs:** `docs/user-guide.md`.
 
 ### R2d-15 Release 2 security review and version 2.0.0
@@ -979,7 +1018,7 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **Migration:** none.
 - **Acceptance criteria:**
   1. `docs/security.md` and `docs/identity-boundary-plan.md` describe the final Release 2 boundary.
-  2. The proposed SRS §10.1 additions (threats T-R2-1 to T-R2-14 of architecture §11.7) are written into `docs/requirements/register.md` for owner review.
+  2. The proposed SRS §10.1 additions (threats T-R2-1 to T-R2-16 of architecture §11.7) are written into `docs/requirements/register.md` for owner review.
   3. `package.json` and `package-lock.json` say `2.0.0`.
   4. The full validation set and `npm audit --audit-level=moderate` pass.
   5. `npm run bench:round-trips -- --fixture` results are recorded in `docs/validation.md` with the counts of architecture §12.
@@ -993,8 +1032,9 @@ Contents: R2-08 templates, R2-09 AI connections tab, R2-10 recruitment plan, wit
 - **What the owner tests on Preview:**
   - upload a fictional Word offer letter and a fictional PDF form, place fields and build an email template;
   - preview, generate and send to the owner's own test inbox only, with approval before an offer letter goes out;
-  - check that the hidden amount never appears for the hiring manager;
+  - check that the hidden amount never appears for the hiring manager, including in the logged offer email and the generated letter;
   - use the AI connections tab: limits, read-only, no CV text, the switches and revoke, with Claude or ChatGPT on Preview;
   - build a fictional ten-year plan by division in AED, approve a version and compare plan with actual;
-  - confirm plan figures are hidden from a role without access.
+  - confirm plan figures are hidden from anyone without a plan-access grant, including the owner of a second fictional team;
+  - confirm a plan cell with fewer than 5 accepted offers shows no spend.
 - **Data:** real candidate, employee and plan data stays out of Preview.
