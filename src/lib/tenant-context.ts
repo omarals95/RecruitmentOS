@@ -3,7 +3,7 @@ import { DrizzleQueryError, sql } from "drizzle-orm";
 import type { TeamTx } from "@/db";
 import type { TransactionSnapshot } from "@/db/deadlines";
 import { ApiError } from "./errors";
-import { SCOPES } from "./permissions";
+import { SCOPES, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
 
 const AUDIENCE = "recruitmentos-tenant-context-v1";
@@ -51,16 +51,29 @@ export async function installTenantContextKey(client: {
 }
 
 /**
+ * The access state tenant_context.install stored for this transaction: the verified scopes, and the
+ * workspace, team role and company authority it derived from database rows, never from the payload.
+ */
+export type TenantAccess = {
+  scopes: Scope[];
+  workspaceId: string;
+  memberRole: Role;
+  companyLevel: "owner" | "admin" | null;
+  companyAreas: string[];
+};
+
+/**
  * Signs exactly one assertion for this transaction and installs it. Only withTeam and the
  * identity-side token transactions call this, with the snapshot their first statement read
  * (withDeadlinesAndSnapshot: deadlines, pid, xid, marker and clock). withTeam calls it as the next
  * statement, before any other statement or savepoint; tenant_context.install rechecks pid and xid.
+ * The third argument, an unsigned cache hint, is empty until configuration versions are cached.
  */
 export async function installTenantContext(
   tx: TeamTx,
   principal: Principal,
   snapshot: TransactionSnapshot,
-): Promise<void> {
+): Promise<TenantAccess> {
   const { key, id } = signingKey();
   const payload = JSON.stringify({
     aud: AUDIENCE,
@@ -77,9 +90,10 @@ export async function installTenantContext(
   });
   const signature = createHmac("sha256", key).update(payload).digest("hex");
   try {
-    await tx.execute(
-      sql`select tenant_context.install(${payload}, ${signature})`,
+    const { rows } = await tx.execute<{ access: TenantAccess }>(
+      sql`select tenant_context.install(${payload}, ${signature}, '{}'::text[]) as access`,
     );
+    return rows[0].access;
   } catch (error) {
     // The query wrapper carries the bound assertion; surface only the database error.
     const cause = error instanceof DrizzleQueryError ? error.cause : error;

@@ -389,7 +389,7 @@ describe("database runtime role safety", () => {
         GRANT SELECT ON app.records TO grant_option_plain;
         GRANT SELECT (id) ON app.activity TO grant_option_plain;
         GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_plain;
-        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_plain;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text,text[]) TO grant_option_plain;
         GRANT USAGE ON SCHEMA app TO grant_option_plain;
         GRANT CONNECT ON DATABASE ${database} TO grant_option_plain;
         CREATE ROLE grant_option_table NOLOGIN;
@@ -399,7 +399,7 @@ describe("database runtime role safety", () => {
         CREATE ROLE grant_option_sequence NOLOGIN;
         GRANT USAGE ON SEQUENCE app.grant_option_probe TO grant_option_sequence WITH GRANT OPTION;
         CREATE ROLE grant_option_function NOLOGIN;
-        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO grant_option_function WITH GRANT OPTION;
+        GRANT EXECUTE ON FUNCTION tenant_context.install(text,text,text[]) TO grant_option_function WITH GRANT OPTION;
         CREATE ROLE grant_option_schema NOLOGIN;
         GRANT USAGE ON SCHEMA app TO grant_option_schema WITH GRANT OPTION;
         CREATE ROLE grant_option_database NOLOGIN;

@@ -1,5 +1,21 @@
 # Validation before deployment
 
+## Update: signed context derives the workspace (R2a-02)
+
+**Local validation.** On 8 November 2026, with Node v24.20.0, job 043 passed `npm run typecheck`, `npm run lint`, `npm test` (1184 Vitest tests in 89 files, none skipped), `npm run test:storage` (58 native storage tests), `npm run build` (Next.js 16.4.5) and Prettier on every changed file. No dependency was added, so `npm audit` was not rerun (it contacts the npm registry). Migration `0029_signed_context_workspace.sql` makes `tenant_context.install(text, text, text[])` return the access state and raises the storage schema marker to 8 ([identity-boundary-plan.md](identity-boundary-plan.md#payload-fields)).
+
+New and changed tests:
+
+- `tests/tenant-context.test.ts`: the direct install passes `'{}'::text[]` as the third argument; every earlier rejection case keeps its assertion; the app-signed install resolves to the company owner's access state instead of `undefined`; `withTeam` hands its work function the access state for a company owner and a recruiter; with the team's `app.workspace_teams` row deleted by the owner, a direct install fails with `42501` `Tenant context rejected` and `withTeam` with `403 tenant_context_denied`, and the restored row works again; validly signed payloads with an extra `workspace`, `workspaceId`, `companyLevel` or `companyAreas` field are refused; `cached` `NULL`, `'{}'` and a two-element array give the same result and stored context row, and an expired claim is refused under each.
+- `tests/workspace-tenancy.test.ts`: a new block reads the access state and the committed context row for the company owner (`owner`, `[]`, stored plan access true), a company admin by session and by token (`admin`, exactly the stored `{workflows,fields}` and plan access), a team owner without a row and a suspended admin and owner (null level, `[]`, plan access false); every object has exactly `scopes`, `workspaceId`, `memberRole`, `companyLevel` and `companyAreas`.
+- `tests/migration-upgrade.test.ts`: "upgrade from 0028" seeds two fictional members, a company admin row and a leftover context row, applies `0029`, and checks the five columns (nulls and defaults on the leftover row), one `install` overload `text, text, text[]` returning `jsonb`, marker 8 and an install that returns the derived workspace and company authority.
+- `tests/runtime-role-grants.test.ts`, `tests/connection-boundary.test.ts`, `tests/runtime-role-safety.test.ts`: the template grants `install(text, text, text[])` to exactly the two runtime roles, both allowlists hold only that signature, and the catalog holds one overload.
+- `tests/round-trip-budget.test.ts` is unchanged and still counts 6, 6, 11, 11, 6 and 15.
+
+**Live harness.** `scripts/live-role-tests.ts` passes the third argument and adds `forged-workspace`, `workspace-mapping-missing`, `workspace-authority-none` and `workspace-authority-race`. It passed 36/36 directly against a throwaway local PostgreSQL 18 cluster in the worktree `.data` folder on a loopback port, migrated and then given the role template (`scripts/db-role-evidence.ts`: zero drift for both roles), in the open and the closed bootstrap variant, with every fixture removed. With the `0028` `set_workspace_authority` restored on that cluster, `workspace-authority-race` failed at `lock-overlap`: neither order waited. The pooled run was not done, because no PgBouncer binary was available and none may be downloaded. The cluster was stopped and deleted afterwards.
+
+No remote service was contacted: tests use PGlite and the local cluster with fictional data only. Owner steps: apply `0029` after `0028` on Preview, rerun the role template, then `scripts/db-role-evidence.ts` and `npm run test:live-roles`, direct and through the pooler.
+
 ## Update: owner Preview fixes (P1-25)
 
 **Local validation.** On 8 November 2026, with Node v24.20.0, job 040 passed `npm run typecheck`, `npm run lint`, `npm test` (1151 Vitest tests in 88 files, none skipped), `npm run test:storage` (58 native storage tests), `npm run build` (Next.js 16.4.5; `/api/v1/candidates/suggestions` is listed), Prettier on every changed file and `npm audit --audit-level=moderate` (`found 0 vulnerabilities`). No dependency and no migration was added.
@@ -156,7 +172,7 @@ Each page load also requests the shell's notification count (`GET /api/v1/notifi
 1. Membership select on the identity pool: the caller's current team role, read on every request (no cached role).
 2. `BEGIN`: one transaction holds the signed context and the deadlines.
 3. Deadlines and snapshot in one statement: `statement_timeout` and `transaction_timeout` (SRS-NFR-05), plus the pid, xid, environment marker and clock the context is signed for.
-4. `select tenant_context.install(payload, signature)`: checks the HMAC, pid, xid, expiry, membership and token state before any row policy allows access.
+4. `select tenant_context.install(payload, signature, '{}'::text[])`: checks the HMAC, pid, xid, expiry, membership and token state before any row policy allows access, and returns the access state (scopes, workspace, team role, company level and areas) in the same round trip (R2a-02).
 5. The page with its total (`count(*) over ()`) under FORCE row-level security.
 6. `COMMIT`: the context and deadlines end with the transaction.
 

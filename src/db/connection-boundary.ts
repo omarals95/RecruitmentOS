@@ -9,7 +9,7 @@ export function isLoopbackHost(hostname: string): boolean {
 
 /** Reviewed tenant-context helpers each runtime role may execute, by exact signature. */
 export const dataRoleHelpers = [
-  "tenant_context.install(text,text)",
+  "tenant_context.install(text,text,text[])",
   "tenant_context.allows(text,text,text)",
   "tenant_context.allows_activity(text,text,text,text)",
   "tenant_context.allows_event(text,text,text,uuid)",
@@ -30,7 +30,7 @@ export const dataRoleHelpers = [
   "tenant_context.allows_workspace_admin(uuid,text)",
 ];
 export const identityRoleHelpers = [
-  "tenant_context.install(text,text)",
+  "tenant_context.install(text,text,text[])",
   "tenant_context.audit_token(text,text)",
   "tenant_context.audit_grant_reuse(text,text)",
   "tenant_context.reset_two_step(text)",

@@ -673,3 +673,139 @@ describe("team creation through Better Auth maps the team in the same transactio
     ]);
   });
 });
+
+describe("the signed context derives the workspace and company authority (R2a-02, 0029)", () => {
+  let harness: Harness;
+  let look: ReturnType<typeof inspector>;
+  let owner: Principal, admin: Principal, teamOwner: Principal;
+  let suspended: Principal, suspendedOwner: Principal;
+
+  /** Installs the principal's context, then reads its committed row as the superuser. */
+  async function derive(principal: Principal) {
+    const { access, pid, xid } = await withDeadlinesAndSnapshot(
+      await harness.dataDb(),
+      async (tx, snapshot) => ({
+        access: await installTenantContext(tx, principal, snapshot),
+        pid: Number(snapshot.pid),
+        xid: snapshot.xid,
+      }),
+    );
+    const stored = await look.query(
+      "SELECT workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE pid = $1 AND xid = $2::xid8",
+      [pid, xid],
+    );
+    return { access, stored };
+  }
+  const access = (
+    principal: Principal,
+    companyLevel: "owner" | "admin" | null,
+    companyAreas: string[],
+  ) => ({
+    scopes: [...principal.scopes],
+    workspaceId: COMPANY,
+    memberRole: principal.role,
+    companyLevel,
+    companyAreas,
+  });
+  const stored = (
+    principal: Principal,
+    company_level: "owner" | "admin" | null,
+    company_areas: string[],
+    plan_access: boolean,
+  ) => [
+    {
+      workspace_id: COMPANY,
+      member_role: principal.role,
+      company_level,
+      company_areas,
+      plan_access,
+    },
+  ];
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    look = inspector(harness);
+    const db: AppDb = await harness.asOwner();
+    owner = await seedIdentity(db, { userId: "wsc-owner", teamId: "wsc-a" });
+    admin = await seedIdentity(db, {
+      userId: "wsc-admin",
+      teamId: "wsc-a",
+      role: "recruiter",
+    });
+    suspended = await seedIdentity(db, {
+      userId: "wsc-suspended",
+      teamId: "wsc-a",
+      role: "admin",
+    });
+    suspendedOwner = await seedIdentity(db, {
+      userId: "wsc-suspended-owner",
+      teamId: "wsc-a",
+      role: "viewer",
+    });
+    teamOwner = await seedIdentity(db, {
+      userId: "wsc-team-owner",
+      teamId: "wsc-b",
+    });
+    // Owner-written rows only; the company owner's stored plan access is on to show it is read.
+    await db.execute(
+      sql`update app.workspace_admins set plan_access = true where user_id = 'wsc-owner'`,
+    );
+    await db.execute(
+      sql`insert into app.workspace_admins(workspace_id,user_id,level,areas,plan_access) values
+        (${COMPANY}, 'wsc-admin', 'admin', '{workflows,fields}', true),
+        (${COMPANY}, 'wsc-suspended', 'admin', '{boards}', true),
+        (${COMPANY}, 'wsc-suspended-owner', 'owner', '{}', true)`,
+    );
+    await db.execute(
+      sql`update app.workspace_admins set suspended_at = now() where user_id in ('wsc-suspended', 'wsc-suspended-owner')`,
+    );
+  });
+  afterAll(async () => harness?.close());
+
+  it("gives the company owner their level, stored areas and stored plan access", async () => {
+    expect(await derive(owner)).toEqual({
+      access: access(owner, "owner", []),
+      stored: stored(owner, "owner", [], true),
+    });
+  });
+
+  it("gives a company admin exactly their stored areas and plan access, for sessions and tokens", async () => {
+    const token = await seedApiToken(await harness.asOwner(), admin, [
+      "candidates:read",
+    ]);
+    for (const principal of [admin, token])
+      expect(await derive(principal), principal.authType).toEqual({
+        access: access(principal, "admin", ["workflows", "fields"]),
+        stored: stored(principal, "admin", ["workflows", "fields"], true),
+      });
+  });
+
+  it("gives a team owner without a company authority row no company level, areas or plan access", async () => {
+    expect((await look.admins()).map((row) => row.user_id)).not.toContain(
+      teamOwner.userId,
+    );
+    expect(await derive(teamOwner)).toEqual({
+      access: access(teamOwner, null, []),
+      stored: stored(teamOwner, null, [], false),
+    });
+  });
+
+  it("ignores a suspended company admin or owner row", async () => {
+    for (const principal of [suspended, suspendedOwner])
+      expect(await derive(principal), principal.userId).toEqual({
+        access: access(principal, null, []),
+        stored: stored(principal, null, [], false),
+      });
+  });
+
+  it("returns exactly the five access keys", async () => {
+    for (const principal of [owner, admin, teamOwner, suspended])
+      expect(Object.keys((await derive(principal)).access).sort()).toEqual([
+        "companyAreas",
+        "companyLevel",
+        "memberRole",
+        "scopes",
+        "workspaceId",
+      ]);
+  });
+});

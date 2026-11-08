@@ -305,10 +305,17 @@ describe("split runtime role template", () => {
   it("declares exactly the reviewed matrix in its GRANT statements, which the evidence script reads", async () => {
     const template = await readRuntimeRoleTemplate();
     expect(templateGrantMatrix(template)).toEqual(reviewedMatrix);
+    // Both runtime roles run only the three-argument install (0029).
+    expect(
+      template.match(/^GRANT [^\r\n]*tenant_context\.install\b[^\r\n]*/gm),
+    ).toEqual([
+      "GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;",
+      "GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_identity;",
+    ]);
     for (const unreadable of [
       "GRANT SELECT ON ALL TABLES IN SCHEMA app TO recruitmentos_data;",
       "GRANT SELECT ON TABLE app.records TO fictional_other_role;",
-      "GRANT USAGE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_data;",
+      "GRANT USAGE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;",
       "GRANT recruitmentos_identity TO recruitmentos_data;",
       "GRANT SELECT ON TABLE app.records TO recruitmentos_data WITH GRANT OPTION;",
       "GRANT SET ON PARAMETER session_replication_role TO recruitmentos_data;",
@@ -356,6 +363,12 @@ describe("split runtime role template", () => {
       expect([...evidence.execute].sort(), kind).toEqual(
         [...expected.helpers].sort(),
       );
+      expect(
+        evidence.execute.filter((helper) =>
+          helper.startsWith("tenant_context.install("),
+        ),
+        kind,
+      ).toEqual(["tenant_context.install(text,text,text[])"]);
       // Only the data role may run the cross-team bulk intake purge, the erasure helper, the
       // two MCP CV helpers (0026) and the two company workspace helpers (0028).
       for (const helper of [
@@ -1038,9 +1051,9 @@ describe("db-role-evidence template drift", () => {
       name: "a function privilege WITH GRANT OPTION",
       as: "owner",
       setup:
-        "GRANT EXECUTE ON FUNCTION tenant_context.install(text,text) TO recruitmentos_identity WITH GRANT OPTION",
+        "GRANT EXECUTE ON FUNCTION tenant_context.install(text,text,text[]) TO recruitmentos_identity WITH GRANT OPTION",
       identity: [
-        "extra EXECUTE WITH GRANT OPTION on function tenant_context.install(text,text)",
+        "extra EXECUTE WITH GRANT OPTION on function tenant_context.install(text,text,text[])",
       ],
     },
     {

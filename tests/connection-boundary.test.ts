@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { applyMigrations } from "../src/db";
 import {
   dataRoleBoundaryQuery,
+  dataRoleHelpers,
   identityRoleBoundaryQuery,
+  identityRoleHelpers,
   markerRoleBoundaryQuery,
   isLoopbackHost,
   prepareConnectionTargets,
@@ -145,6 +147,21 @@ describe("database identity separation", () => {
       }
       expect(await unsafe("data")).toBe(false);
       expect(await unsafe("identity")).toBe(false);
+      // One install overload, three arguments, allowlisted for both roles (0029).
+      for (const helpers of [dataRoleHelpers, identityRoleHelpers])
+        expect(
+          helpers.filter((helper) =>
+            helper.startsWith("tenant_context.install("),
+          ),
+        ).toEqual(["tenant_context.install(text,text,text[])"]);
+      await harness.asSuperuser();
+      expect(
+        (
+          await harness.client.query<{ args: string }>(
+            "SELECT pg_get_function_identity_arguments(p.oid) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'install'",
+          )
+        ).rows,
+      ).toEqual([{ args: "payload text, signature text, cached text[]" }]);
       await harness.asOwner();
       await harness.client.exec(`
         CREATE FUNCTION tenant_context.extra_helper() RETURNS text LANGUAGE sql
