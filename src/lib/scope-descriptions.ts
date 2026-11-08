@@ -15,11 +15,12 @@ export const scopeDescriptions: Record<Scope, string> = {
 /** What each scope lets an MCP client do through the MCP tools, shown on the consent page. */
 export const mcpScopeDescriptions: Record<McpScope, string> = {
   "candidates:read":
-    "Search candidates and read their stated facts and evidence summaries",
+    "Search candidates, read their stated facts and evidence summaries, check possible duplicates, and read your own shortlist, follow-up status and private notes",
   "recruitment:read":
-    "Read job roles, vacancies, applications, tasks, interviews, offers and onboarding",
+    "Read job roles, vacancies, applications, interviews, offers, onboarding, tasks, comments, record history, dashboard numbers, and your own reminders and saved views",
   "cvs:read": "See CV file names, types and sizes, but not CV contents",
-  "candidates:write": "Add new candidates",
+  "candidates:write":
+    "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
   "recruitment:write":
-    "Create, update, archive and restore job roles, vacancies, applications, interviews, offers and onboarding, move application stages and add comments; comments on candidates also need candidates:read and candidates:write",
+    "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
 };

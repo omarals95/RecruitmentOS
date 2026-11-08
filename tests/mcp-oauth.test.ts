@@ -594,7 +594,7 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
 
   it("describes each scope by what the MCP tools actually do", async () => {
     for (const text of Object.values(mcpScopeDescriptions))
-      expect(text).not.toMatch(/download|edit/i);
+      expect(text).not.toMatch(/download/i);
     expect(scopeDescriptions["cvs:read"]).toBe(
       "Read CVs and private download links (also needs candidates:read)",
     );
@@ -604,13 +604,15 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
       signIn("oauth-owner"),
     );
     for (const text of [
-      "Search candidates and read their stated facts and evidence summaries",
-      "Read job roles, vacancies, applications, tasks, interviews, offers and onboarding",
+      "Search candidates, read their stated facts and evidence summaries, check possible duplicates, and read your own shortlist, follow-up status and private notes",
+      "Read job roles, vacancies, applications, interviews, offers, onboarding, tasks, comments, record history, dashboard numbers, and your own reminders and saved views",
       "See CV file names, types and sizes, but not CV contents",
-      "Add new candidates",
-      "Create, update, archive and restore job roles, vacancies, applications, interviews, offers and onboarding, move application stages and add comments; comments on candidates also need candidates:read and candidates:write",
-    ])
-      expect(page.html, text).toContain(text);
+      "Add and edit candidates' stated facts, archive and restore candidates, and set your own shortlist, follow-up status and private notes",
+      "Create, update, archive and restore recruitment records and tasks, move application stages and tasks, add comments, add and rename task buckets and fields, save views and mark reminders read; candidate comments and archives also need candidate permissions",
+    ]) {
+      expect(Object.values(mcpScopeDescriptions)).toContain(text);
+      expect(page.html, text).toContain(text.replaceAll("'", "&#x27;"));
+    }
     expect(page.html).not.toContain("private download links");
     expect(page.html).not.toContain("Create and edit");
   });
@@ -1309,6 +1311,8 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
     expect(listed.result.tools.map((t: { name: string }) => t.name)).toEqual([
       "search_candidates",
       "get_candidate",
+      "find_duplicate_candidates",
+      "get_my_candidate_state",
     ]);
     const called = await mcp(issued.access_token, "tools/call", {
       name: "search_candidates",

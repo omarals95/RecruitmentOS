@@ -67,7 +67,11 @@ const INJECTION =
 const TOOL_NAMES = [
   "search_candidates",
   "get_candidate",
+  "find_duplicate_candidates",
   "create_candidate",
+  "update_candidate",
+  "get_my_candidate_state",
+  "update_my_candidate_state",
   "list_job_roles",
   "create_job_role",
   "update_job_role",
@@ -94,8 +98,21 @@ const TOOL_NAMES = [
   "create_checklist_item",
   "update_checklist_item",
   "list_tasks",
-  "get_overview",
+  "create_task",
+  "update_task",
+  "list_task_workflow_items",
+  "create_task_workflow_item",
+  "update_task_workflow_item",
+  "list_saved_views",
+  "create_saved_view",
+  "list_comments",
   "add_comment",
+  "list_activity",
+  "list_notifications",
+  "mark_notifications_read",
+  "get_overview",
+  "get_analytics",
+  "search_workspace",
   "archive_record",
   "restore_record",
 ];
@@ -122,6 +139,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
     | "longVacancy"
     | "application"
     | "task"
+    | "bucket"
+    | "scopeTask"
     | "interview"
     | "view"
     | "foreignCandidate"
@@ -158,15 +177,37 @@ describe("MCP endpoint over real migrations and RLS", () => {
         [id],
       )
     )[0].version;
+  /** The owner's own candidate state version; 0 when none is saved yet. */
+  const stateVersion = async (candidateId: string) =>
+    (
+      await query<{ version: number }>(
+        "SELECT coalesce(max(version), 0)::int AS version FROM app.candidate_states WHERE user_id=$1 AND candidate_id=$2",
+        [owner.userId, candidateId],
+      )
+    )[0].version;
   const key = () => `scope-${randomUUID()}`;
   /** Valid arguments for one tool; updates read the record's current version first. */
   const validArgs = async (name: string): Promise<Record<string, unknown>> => {
     const args: Record<string, () => Promise<Record<string, unknown>>> = {
       search_candidates: async () => ({}),
       get_candidate: async () => ({ id: ids.candidate }),
+      find_duplicate_candidates: async () => ({
+        email: "layla.fictional@example.test",
+      }),
       create_candidate: async () => ({
         idempotencyKey: key(),
         name: "Scope Check Fictional",
+      }),
+      update_candidate: async () => ({
+        id: ids.scopeApplicant,
+        version: await version(ids.scopeApplicant),
+        jobTitle: "Fictional Scope Title",
+      }),
+      get_my_candidate_state: async () => ({ candidateId: ids.candidate }),
+      update_my_candidate_state: async () => ({
+        candidateId: ids.scopeApplicant,
+        version: await stateVersion(ids.scopeApplicant),
+        status: "Contacted",
       }),
       list_job_roles: async () => ({}),
       create_job_role: async () => ({
@@ -256,12 +297,50 @@ describe("MCP endpoint over real migrations and RLS", () => {
         status: "In progress",
       }),
       list_tasks: async () => ({}),
-      get_overview: async () => ({}),
+      create_task: async () => ({
+        idempotencyKey: key(),
+        bucketId: ids.bucket,
+        title: "Fictional scope task",
+      }),
+      update_task: async () => ({
+        id: ids.scopeTask,
+        version: await version(ids.scopeTask),
+        priority: "High",
+      }),
+      list_task_workflow_items: async () => ({ itemType: "bucket" }),
+      create_task_workflow_item: async () => ({
+        idempotencyKey: key(),
+        itemType: "field",
+        name: `Fictional scope field ${randomUUID().slice(0, 8)}`,
+      }),
+      update_task_workflow_item: async () => ({
+        itemType: "bucket",
+        id: ids.bucket,
+        version: await version(ids.bucket),
+        color: "#059669",
+      }),
+      list_saved_views: async () => ({}),
+      create_saved_view: async () => ({
+        idempotencyKey: key(),
+        name: "Fictional scope view",
+        area: "applications",
+        query: {},
+      }),
+      list_comments: async () => ({ parentRecordId: ids.vacancy }),
       add_comment: async () => ({
         idempotencyKey: key(),
         parentRecordId: ids.vacancy,
         body: "Fictional scope check comment.",
       }),
+      list_activity: async () => ({ recordId: ids.vacancy }),
+      list_notifications: async () => ({}),
+      // A key that is not a current reminder adds no read marker.
+      mark_notifications_read: async () => ({
+        keys: [`task:${randomUUID()}:2026-01-01`],
+      }),
+      get_overview: async () => ({}),
+      get_analytics: async () => ({}),
+      search_workspace: async () => ({ query: "Fictional" }),
       // archive_record runs first, so restore_record finds the role archived.
       archive_record: async () => ({
         recordType: "job_role",
@@ -400,6 +479,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
     const bucket = await createRecord(owner, "buckets", {
       data: { name: "Fictional bucket" },
     });
+    ids.bucket = bucket.id;
     ids.task = (
       await createRecord(owner, "tasks", {
         bucketId: bucket.id,
@@ -482,6 +562,12 @@ describe("MCP endpoint over real migrations and RLS", () => {
       await createRecord(owner, "onboarding", {
         applicationId: ids.scopeApplication,
         data: {},
+      })
+    ).id;
+    ids.scopeTask = (
+      await createRecord(owner, "tasks", {
+        bucketId: bucket.id,
+        data: { title: "Fictional scope task" },
       })
     ).id;
     ids.scopeChecklist = (
@@ -762,6 +848,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(await listNames(access.token)).toEqual([
       "search_candidates",
       "get_candidate",
+      "find_duplicate_candidates",
+      "get_my_candidate_state",
     ]);
   });
 
@@ -826,12 +914,13 @@ describe("MCP endpoint over real migrations and RLS", () => {
         definition.name,
       ).toBeLessThanOrEqual(300);
     }
-    // Annotations by name, for a token with all four read and write scopes.
+    // Annotations by name, for a token with all five MCP scopes.
     const writer = await apiToken(owner.userId, [
       "candidates:read",
       "candidates:write",
       "recruitment:read",
       "recruitment:write",
+      "cvs:read",
     ]);
     const annotations = Object.fromEntries(
       (
@@ -844,7 +933,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(Object.keys(annotations).sort()).toEqual([...TOOL_NAMES].sort());
     for (const [name, hints] of Object.entries(annotations))
       expect(hints, name).toEqual(
-        /^(list|get|search)_/.test(name)
+        /^(list|get|search|find)_/.test(name)
           ? { readOnlyHint: true, openWorldHint: false }
           : {
               readOnlyHint: false,
@@ -863,6 +952,10 @@ describe("MCP endpoint over real migrations and RLS", () => {
       "add_comment",
       "bulk_create_applications",
       "schedule_interview",
+      "create_task",
+      "create_task_workflow_item",
+      "create_saved_view",
+      "mark_notifications_read",
     ])
       expect(annotations[name].destructiveHint, name).toBe(false);
     for (const definition of TOOLS) {
@@ -919,7 +1012,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
     }
     const any = await apiToken(owner.userId, ["candidates:read"]);
     const unknown = await rpcResult(any.token, "tools/list");
-    expect(unknown.tools).toHaveLength(2);
+    expect(unknown.tools).toHaveLength(4);
     const response = await post(
       any.token,
       message("tools/call", { name: "delete_everything", arguments: {} }),
@@ -1129,13 +1222,18 @@ describe("MCP endpoint over real migrations and RLS", () => {
     });
     expect(search.structuredContent.pagination!.total).toBeGreaterThan(10);
     const tasks = data<
-      { id: string; context: string; truncatedFields: string[] }[]
+      {
+        id: string;
+        context: string;
+        description: string;
+        truncatedFields: string[];
+      }[]
     >(await call(valid.token, "list_tasks", {}));
     const task = tasks.find((item) => item.id === ids.task)!;
     expect(Array.from(task.context)).toHaveLength(500);
     expect(task.context.endsWith("…")).toBe(true);
     expect(task.truncatedFields).toEqual(["context"]);
-    expect(JSON.stringify(tasks)).not.toContain("TASK-DESCRIPTION-FICTIONAL");
+    expect(task.description).toBe("TASK-DESCRIPTION-FICTIONAL");
     const vacancy = data<{
       facts: { description: string };
       truncatedFields?: string[];
@@ -1388,7 +1486,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(await candidates()).toBe(before + 1);
   });
 
-  it("appends comments only to active candidates, vacancies and applications", async () => {
+  it("appends comments to active records but never to a comment or a saved view", async () => {
     const writer = await apiToken(owner.userId, ["recruitment:write"]);
     const comments = () =>
       count(
@@ -1409,7 +1507,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
       data<{ id: string }>(await call(writer.token, "add_comment", input)).id,
     ).toBe(first.id);
     expect(await comments()).toBe(before + 1);
-    for (const parent of [ids.task, ids.view])
+    for (const parent of [first.id, ids.view])
       expect(
         toolError(
           await call(writer.token, "add_comment", {
@@ -1658,7 +1756,7 @@ describe("MCP audit rows under the split data role", () => {
     ]);
   });
 
-  it("accepts exactly the names in TOOLS (migration 0024)", async () => {
+  it("accepts exactly the names in TOOLS (migration 0025)", async () => {
     for (const { name } of TOOLS)
       await withTeam(token, (tx) => tx.execute(audit(name)));
     for (const name of ["delete_record", "list_members", "create_api_token"])

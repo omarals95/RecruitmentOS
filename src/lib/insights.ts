@@ -349,6 +349,15 @@ export async function analytics(p: Principal, params: URLSearchParams) {
   });
 }
 
+/** MCP tools about the caller's own private state; their audit rows are shown only to their actor. */
+export const PERSONAL_MCP_TOOLS = [
+  "get_my_candidate_state",
+  "update_my_candidate_state",
+  "list_saved_views",
+  "create_saved_view",
+  "mark_notifications_read",
+] as const;
+
 export async function listActivity(
   p: Principal,
   params: URLSearchParams,
@@ -408,6 +417,7 @@ export async function listActivity(
       ...(recordId ? [eq(activity.recordId, recordId)] : []),
       sql`(${activity.action}<>'personal_state_updated' or ${activity.actorId}=${p.userId})`,
       sql`(${activity.kind}<>'saved-view' or ${activity.actorId}=${p.userId})`,
+      sql`(${activity.kind}<>'mcp-tool' or not ${inArray(sql`coalesce(${activity.metadata}->>'tool','')`, [...PERSONAL_MCP_TOOLS])} or ${activity.actorId}=${p.userId})`,
       ...(!p.scopes.includes("candidates:read")
         ? [sql`${activity.kind}<>'candidate'`]
         : []),
@@ -454,7 +464,12 @@ export async function listActivity(
   });
 }
 
-export async function searchWorkspace(p: Principal, query: string) {
+/** `options.omitCandidateFields` leaves those candidate fields out of the candidate search only. */
+export async function searchWorkspace(
+  p: Principal,
+  query: string,
+  options: { omitCandidateFields?: readonly string[] } = {},
+) {
   if (query.length > 500) invalid("Search is limited to 500 characters.");
   if (!query.trim()) return { groups: [], total: 0, limited: false, data: [] };
   const groups = [];
@@ -476,6 +491,9 @@ export async function searchWorkspace(p: Principal, query: string) {
       p,
       resource,
       new URLSearchParams({ search: query, pageSize: "8" }),
+      resource === "candidates"
+        ? { omitFromSearch: options.omitCandidateFields }
+        : {},
     );
     limited ||= result.pagination.total > result.data.length;
     const results = result.data.map((row) => {
