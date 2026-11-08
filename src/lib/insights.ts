@@ -127,6 +127,11 @@ export async function overview(p: Principal) {
   requireScope(p, "recruitment:read");
   const now = new Date(),
     today = dubaiToday(now);
+  const recentActivity = activityQuery(
+    p,
+    new URLSearchParams({ pageSize: "8" }),
+    { excludeKinds: ["mcp-tool"] },
+  );
   const result = await withTeam(p, async (tx) => {
     const counts = await inventory(tx, p);
     const [shortlisted] = await tx
@@ -222,16 +227,13 @@ export async function overview(p: Principal) {
       categories: await grouped(tx, p, "candidate", "folderCategories", true),
       upcomingInterviews: upcoming.map(asDto),
       overdueTasks: overdue.map(asDto),
+      // In the same transaction, so the signed context is installed once; the page needs no total.
+      // MCP tool audit rows stay on the Activity screen; they would flood the dashboard.
+      recentActivity: await activityPage(tx, recentActivity),
     };
   });
   return {
     ...result,
-    // MCP tool audit rows stay on the Activity screen; they would flood the dashboard.
-    recentActivity: (
-      await listActivity(p, new URLSearchParams({ pageSize: "8" }), {
-        excludeKinds: ["mcp-tool"],
-      })
-    ).data,
     asOf: now.toISOString(),
     timezone: "Asia/Dubai",
   };
@@ -358,12 +360,12 @@ export const PERSONAL_MCP_TOOLS = [
   "mark_notifications_read",
 ] as const;
 
-export async function listActivity(
+/** Validates an activity query and builds its filter; the statements run in the caller's transaction. */
+function activityQuery(
   p: Principal,
   params: URLSearchParams,
   options: { excludeKinds?: string[] } = {},
 ) {
-  requireScope(p, "recruitment:read");
   validateParams(params, ["page", "pageSize", "recordId", "search", "kind"]);
   const pageResult = z.coerce
       .number()
@@ -401,59 +403,76 @@ export async function listActivity(
       .safeParse(kind).success
   )
     invalid("Unsupported activity record type.");
-  return withTeam(p, async (tx) => {
-    // The accessor resolves names only for events the signed context may read.
-    const actorName = sql<
-      string | null
-    >`tenant_context.activity_actor_name(${activity.id})`;
-    const searchFilter: SQL[] = [];
-    if (search) {
-      searchFilter.push(
-        sql`strpos(lower(concat_ws(' ',${activity.summary},${activity.action},${actorName})),lower(${search}))>0`,
-      );
-    }
-    const filter = and(
-      eq(activity.teamId, p.teamId),
-      ...(recordId ? [eq(activity.recordId, recordId)] : []),
-      sql`(${activity.action}<>'personal_state_updated' or ${activity.actorId}=${p.userId})`,
-      sql`(${activity.kind}<>'saved-view' or ${activity.actorId}=${p.userId})`,
-      sql`(${activity.kind}<>'mcp-tool' or not ${inArray(sql`coalesce(${activity.metadata}->>'tool','')`, [...PERSONAL_MCP_TOOLS])} or ${activity.actorId}=${p.userId})`,
-      ...(!p.scopes.includes("candidates:read")
-        ? [sql`${activity.kind}<>'candidate'`]
-        : []),
-      ...(kind ? [eq(activity.kind, kind)] : []),
-      ...(options.excludeKinds?.length
-        ? [notInArray(activity.kind, options.excludeKinds)]
-        : []),
-      ...searchFilter,
+  // The accessor resolves names only for events the signed context may read.
+  const actorName = sql<
+    string | null
+  >`tenant_context.activity_actor_name(${activity.id})`;
+  const searchFilter: SQL[] = [];
+  if (search) {
+    searchFilter.push(
+      sql`strpos(lower(concat_ws(' ',${activity.summary},${activity.action},${actorName})),lower(${search}))>0`,
     );
+  }
+  const filter = and(
+    eq(activity.teamId, p.teamId),
+    ...(recordId ? [eq(activity.recordId, recordId)] : []),
+    sql`(${activity.action}<>'personal_state_updated' or ${activity.actorId}=${p.userId})`,
+    sql`(${activity.kind}<>'saved-view' or ${activity.actorId}=${p.userId})`,
+    sql`(${activity.kind}<>'mcp-tool' or not ${inArray(sql`coalesce(${activity.metadata}->>'tool','')`, [...PERSONAL_MCP_TOOLS])} or ${activity.actorId}=${p.userId})`,
+    ...(!p.scopes.includes("candidates:read")
+      ? [sql`${activity.kind}<>'candidate'`]
+      : []),
+    ...(kind ? [eq(activity.kind, kind)] : []),
+    ...(options.excludeKinds?.length
+      ? [notInArray(activity.kind, options.excludeKinds)]
+      : []),
+    ...searchFilter,
+  );
+  return { page, pageSize, filter, actorName };
+}
+async function activityPage(
+  tx: TeamTx,
+  { page, pageSize, filter, actorName }: ReturnType<typeof activityQuery>,
+) {
+  const data = await tx
+    .select({
+      id: activity.id,
+      recordId: activity.recordId,
+      actorId: activity.actorId,
+      actorName,
+      actorType: activity.actorType,
+      action: activity.action,
+      kind: activity.kind,
+      summary: activity.summary,
+      metadata: activity.metadata,
+      createdAt: activity.createdAt,
+    })
+    .from(activity)
+    .where(filter)
+    .orderBy(desc(activity.createdAt), desc(activity.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+  return data.map((row) => ({
+    ...row,
+    createdAt: row.createdAt.toISOString(),
+  }));
+}
+export async function listActivity(
+  p: Principal,
+  params: URLSearchParams,
+  options: { excludeKinds?: string[] } = {},
+) {
+  requireScope(p, "recruitment:read");
+  const query = activityQuery(p, params, options);
+  const { page, pageSize } = query;
+  return withTeam(p, async (tx) => {
     const [total] = await tx
       .select({ count: count() })
       .from(activity)
-      .where(filter);
-    const data = await tx
-      .select({
-        id: activity.id,
-        recordId: activity.recordId,
-        actorId: activity.actorId,
-        actorName,
-        actorType: activity.actorType,
-        action: activity.action,
-        kind: activity.kind,
-        summary: activity.summary,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-      })
-      .from(activity)
-      .where(filter)
-      .orderBy(desc(activity.createdAt), desc(activity.id))
-      .limit(pageSize)
-      .offset((page - 1) * pageSize);
+      .where(query.filter);
+    const data = await activityPage(tx, query);
     return {
-      data: data.map((row) => ({
-        ...row,
-        createdAt: row.createdAt.toISOString(),
-      })),
+      data,
       pagination: {
         page,
         pageSize,

@@ -9,6 +9,7 @@ import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
 import { GET as listRoute } from "@/app/api/v1/[resource]/route";
 import { GET as getRoute, PATCH } from "@/app/api/v1/[resource]/[id]/route";
+import { GET as overviewRoute } from "@/app/api/v1/overview/route";
 import { createTestDb, seedIdentity } from "./helpers/db";
 
 // Fictional team and records only; the session lookup is mocked, so it is not counted.
@@ -18,7 +19,10 @@ const TIMING = /^total;dur=\d+\.\d, db;dur=\d+\.\d, dbrt;desc="(\d+)"$/;
 describe("database round trips per request", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
   let owner: Principal;
-  let task: RecordDto, candidate: RecordDto, application: RecordDto;
+  let task: RecordDto,
+    candidate: RecordDto,
+    vacancy: RecordDto,
+    application: RecordDto;
   let buckets: RecordDto[];
 
   async function call(
@@ -77,7 +81,7 @@ describe("database round trips per request", () => {
     candidate = await createRecord(owner, "candidates", {
       data: { name: "Fictional Budget Candidate" },
     });
-    const vacancy = await createRecord(owner, "vacancies", {
+    vacancy = await createRecord(owner, "vacancies", {
       data: { title: "Fictional budget vacancy" },
     });
     application = await createRecord(owner, "applications", {
@@ -127,6 +131,41 @@ describe("database round trips per request", () => {
     );
     expect(stage.status).toBe(200);
     expect(stage.roundTrips).toBe(11);
+  });
+
+  it("opens a vacancy in 6 round trips and the overview in one transaction", async () => {
+    const open = await call("GET", `/api/v1/vacancies/${vacancy.id}`, {
+      resource: "vacancies",
+      id: vacancy.id,
+    });
+    expect(open.status).toBe(200);
+    expect(open.roundTrips).toBe(6);
+
+    const response = await overviewRoute(
+      new Request(`${ORIGIN}/api/v1/overview`, {
+        headers: { origin: ORIGIN, "x-team-id": owner.teamId },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual([
+      "counts",
+      "coverage",
+      "stages",
+      "departments",
+      "categories",
+      "upcomingInterviews",
+      "overdueTasks",
+      "recentActivity",
+      "asOf",
+      "timezone",
+    ]);
+    expect((body.recentActivity as unknown[]).length).toBeGreaterThan(0);
+    // 20 before P1-25: recent activity opened a second transaction (BEGIN, deadlines, signed
+    // context, COMMIT) and counted its total, which the overview never shows.
+    const timing = response.headers.get("server-timing") ?? "";
+    expect(timing).toMatch(TIMING);
+    expect(Number(TIMING.exec(timing)![1])).toBe(15);
   });
 
   it("reports the real total on the first page, a middle page and a page past the end", async () => {
