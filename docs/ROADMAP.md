@@ -124,17 +124,18 @@ Each milestone ends with a Preview release the owner tests. Existing data is mig
 
 Closes top gaps 1, 2, 7 and 8 from the analysis.
 
-| ID     | Item                                                                                                                                          | Gap |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| R11-01 | Owners, recruiters, hiring managers and interviewers become real user references (imported free-text names kept as labels)                    | #2  |
-| R11-02 | Competency library and scorecard templates per job role, copied to vacancies                                                                  | #1  |
-| R11-03 | Scorecards per interviewer: rating per competency, evidence, overall recommendation including "no decision"; hidden until you submit your own | #1  |
-| R11-04 | Feedback-due reminders (in-app 1 hour after the interview, then next UAE business day)                                                        | #1  |
-| R11-05 | Rejected and Withdrawn become an outcome with a mandatory reason; the stage reached is kept                                                   | #7  |
-| R11-06 | Bulk move, reject (with reason) and assign, with a result summary                                                                             | #7  |
-| R11-07 | Days-in-stage badges and stage SLA thresholds                                                                                                 | #7  |
-| R11-08 | Compare-and-merge duplicates with explicit rules and audit; "not a duplicate"                                                                 | #8  |
-| R11-09 | Fix metric definitions flagged in the analysis (open vacancies, department chart)                                                             | #10 |
+| ID     | Item                                                                                                                                                                                                                                                           | Gap |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| R11-01 | Owners, recruiters, hiring managers and interviewers become real user references (imported free-text names kept as labels)                                                                                                                                     | #2  |
+| R11-02 | Competency library and scorecard templates per job role, copied to vacancies                                                                                                                                                                                   | #1  |
+| R11-03 | Scorecards per interviewer: rating per competency, evidence, overall recommendation including "no decision"; hidden until you submit your own                                                                                                                  | #1  |
+| R11-04 | Feedback-due reminders (in-app 1 hour after the interview, then next UAE business day)                                                                                                                                                                         | #1  |
+| R11-05 | Rejected and Withdrawn become an outcome with a mandatory reason; the stage reached is kept                                                                                                                                                                    | #7  |
+| R11-06 | Bulk move, reject (with reason) and assign, with a result summary                                                                                                                                                                                              | #7  |
+| R11-07 | Days-in-stage badges and stage SLA thresholds                                                                                                                                                                                                                  | #7  |
+| R11-08 | Compare-and-merge duplicates with explicit rules and audit; "not a duplicate"                                                                                                                                                                                  | #8  |
+| R11-09 | Fix metric definitions flagged in the analysis (open vacancies, department chart)                                                                                                                                                                              | #10 |
+| R11-10 | In-app CV viewer (owner request 8 November 2026): PDFs drawn page by page with scripts and forms disabled, images shown as plain images, DOCX/DOC/Pages as extracted text, with **Download original** kept; the server still never serves a CV inline (DEC-07) | #8  |
 
 ## R1.2 — Hiring managers and approvals
 
