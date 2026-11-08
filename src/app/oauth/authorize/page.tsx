@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { ShieldCheck } from "lucide-react";
 import { OAuthConsent } from "@/components/auth/oauth-consent";
 import { getAuthOptions } from "@/lib/auth";
+import { twoStepSetupRequired } from "@/lib/auth-policy";
 import { getSession } from "@/lib/auth-session";
 import { checkAuthorizeRequest, consentTeams } from "@/lib/oauth";
 
@@ -71,15 +72,12 @@ export default async function Authorize({
       </Card>
     );
   const identity = await getSession(await headers());
-  if (!identity) {
-    const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(params))
-      for (const item of [value].flat())
-        if (item !== undefined) query.append(key, item);
-    redirect(
-      `/sign-in?next=${encodeURIComponent(`/oauth/authorize?${query}`)}`,
-    );
-  }
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params))
+    for (const item of [value].flat())
+      if (item !== undefined) query.append(key, item);
+  const here = encodeURIComponent(`/oauth/authorize?${query}`);
+  if (!identity) redirect(`/sign-in?next=${here}`);
   if (!identity.user.emailVerified) redirect("/verify-email");
   const teams = await consentTeams(identity.user.id);
   const { request } = check;
@@ -94,6 +92,30 @@ export default async function Authorize({
         </Link>
       </Card>
     );
+  if (!identity.user.twoFactorEnabled) {
+    // Owners and admins set it up before anything else; anyone else needs it to connect an app.
+    if (
+      twoStepSetupRequired(
+        false,
+        teams.map((team) => team.role),
+      )
+    )
+      redirect(`/two-step-setup?next=${here}`);
+    return (
+      <Card
+        title="Turn on two-step sign-in first"
+        description={`${request.client.name} can only be connected from an account that uses two-step sign-in.`}
+      >
+        <p>
+          Two-step sign-in asks for a code from your authenticator app when you
+          sign in. Turn it on, then you return here to review the connection.
+        </p>
+        <Link className="button" href={`/two-step-setup?next=${here}`}>
+          Turn on two-step sign-in
+        </Link>
+      </Card>
+    );
+  }
   const active =
     teams.find((team) => team.id === identity.session.activeOrganizationId) ??
     teams[0];

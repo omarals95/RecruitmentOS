@@ -80,7 +80,7 @@ describe("server-side record export over real migrations and RLS", () => {
   }
   const signIn = (p: Principal) =>
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: p.userId },
+      user: { id: p.userId, twoFactorEnabled: true },
       session: { activeOrganizationId: p.teamId },
     } as never);
 

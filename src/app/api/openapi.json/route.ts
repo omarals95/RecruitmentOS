@@ -95,7 +95,7 @@ const errors = {
   "400": errorResponse("Invalid fields, references, query or JSON."),
   "401": errorResponse("Missing, invalid, expired or revoked credentials."),
   "403": errorResponse(
-    "Scope, role, verification, origin or team access denied.",
+    "Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required.",
   ),
   "404": errorResponse("Record, resource or CV not found in this team."),
   "409": errorResponse(
@@ -911,6 +911,27 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  paths["/api/v1/teams/two-step-reset"] = {
+    post: operation(
+      [],
+      {
+        summary: "Reset a member's two-step sign-in",
+        description:
+          "Session only: a signed-in owner of the active team; others get 403 owner_required. Removes the member's authenticator key and backup codes, turns two-step sign-in off, signs them out everywhere and forgets their trusted devices, so they set it up again at their next sign-in when their role requires it. Writes one account-security activity row (two_step.reset) with the targetUserId. 400 cannot_reset_self for your own account (use backup codes or Account settings), 404 member_not_found when the user is not a member of this team, 409 member_in_other_team when they also belong to a team you do not own (the reset is account-wide), 409 two_step_not_enabled when there is nothing to reset. Body at most 1024 bytes.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["userId"],
+            additionalProperties: false,
+            properties: { userId: { type: "string", maxLength: 128 } },
+          },
+          { userId: "fictional-member-id" },
+        ),
+      },
+      { "200": { description: "{data:{reset:true}}." } },
+      { sessionOnly: true },
+    ),
+  };
   const storageSettings = {
     type: "object",
     required: ["maxBytes", "maxFiles", "uploadRequestsPerMinute"],
@@ -1058,7 +1079,7 @@ export function GET() {
       {
         summary: "Create an API token",
         description:
-          "Session only. Scopes are limited to the creator's role. The secret is returned once.",
+          "Session only. Scopes are limited to the creator's role. The creator must have two-step sign-in turned on, otherwise 403 two_step_required. The secret is returned once.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -1158,7 +1179,7 @@ export function GET() {
       {
         summary: "Approve or deny an OAuth connection",
         description:
-          "Session only, called by the consent page at /oauth/authorize. X-Team-Id selects the team. Every authorize rule is checked again; approved scopes must be requested, allowed by your current role and offered to MCP clients. Approve creates a grant listed in Settings → API tokens and returns the client redirect with a one-time code; deny returns error=access_denied and writes nothing. Both redirects include iss, the authorization server issuer (RFC 9207).",
+          "Session only, called by the consent page at /oauth/authorize. X-Team-Id selects the team. Every authorize rule is checked again; approved scopes must be requested, allowed by your current role and offered to MCP clients. Approve needs two-step sign-in turned on (403 two_step_required otherwise), creates a grant listed in Settings → API tokens and returns the client redirect with a one-time code; deny returns error=access_denied and writes nothing. Both redirects include iss, the authorization server issuer (RFC 9207).",
         requestBody: jsonBody(
           {
             type: "object",

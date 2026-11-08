@@ -3,12 +3,12 @@ import { redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { getSession } from "./auth-session";
 import { getAuthOptions } from "./auth";
-import { canCreateTeam } from "./auth-policy";
+import { canCreateTeam, twoStepSetupRequired } from "./auth-policy";
 import { getIdentityDb } from "@/db";
 import { member, organization } from "@/db/auth-schema";
 import { parseRole, type Role } from "./permissions";
 export interface WorkspaceContext {
-  user: { id: string; name: string; email: string };
+  user: { id: string; name: string; email: string; twoStepEnabled: boolean };
   team: { id: string; name: string; slug: string } | null;
   role: Role | null;
   environment: string;
@@ -34,6 +34,13 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
     .from(member)
     .innerJoin(organization, eq(member.organizationId, organization.id))
     .where(eq(member.userId, identity.user.id));
+  if (
+    twoStepSetupRequired(
+      identity.user.twoFactorEnabled,
+      memberships.map((m) => m.role),
+    )
+  )
+    redirect("/two-step-setup?next=/app");
   const active =
     memberships.find(
       (m) => m.team.id === identity.session.activeOrganizationId,
@@ -43,6 +50,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
       id: identity.user.id,
       name: identity.user.name,
       email: identity.user.email,
+      twoStepEnabled: Boolean(identity.user.twoFactorEnabled),
     },
     team: active
       ? { id: active.team.id, name: active.team.name, slug: active.team.slug }

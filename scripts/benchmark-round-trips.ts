@@ -1,5 +1,6 @@
 import "./load-env";
 import { randomUUID } from "node:crypto";
+import { seedTotpCode } from "./totp";
 
 /**
  * Local measurement only: database round trips, db time and total time per common action, read
@@ -29,6 +30,10 @@ async function main() {
   if (!password)
     refuse(
       "Set DEV_SEED_PASSWORD and run npm run db:seed first; the benchmark signs in the fictional seed account.",
+    );
+  if (!process.env.DEV_SEED_TOTP_KEY)
+    refuse(
+      "Set DEV_SEED_TOTP_KEY to the key npm run db:seed printed; the seed owner signs in with a two-step code.",
     );
   const origin = new URL(process.env.BETTER_AUTH_URL || "http://localhost:3000")
     .origin;
@@ -62,11 +67,30 @@ async function main() {
       refuse(
         `The fictional seed sign-in failed with status ${signIn.status}. Run npm run db:seed first.`,
       );
-    const cookie = signIn.headers
-      .getSetCookie()
-      .map((value) => value.split(";")[0])
-      .filter((pair) => !pair.endsWith("="))
-      .join("; ");
+    const cookieOf = (response: Response) =>
+      response.headers
+        .getSetCookie()
+        .map((value) => value.split(";")[0])
+        .filter((pair) => !pair.endsWith("="))
+        .join("; ");
+    // The seed owner has two-step sign-in: the password opens a challenge for the current code.
+    const verified = await auth.handler(
+      new Request(`${origin}/api/auth/two-factor/verify-totp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+          cookie: cookieOf(signIn),
+          "x-forwarded-for": "127.0.0.1",
+        },
+        body: JSON.stringify({ code: seedTotpCode(process.env) }),
+      }),
+    );
+    if (verified.status !== 200)
+      refuse(
+        `The fictional seed two-step code was refused with status ${verified.status}. Check DEV_SEED_TOTP_KEY.`,
+      );
+    const cookie = cookieOf(verified);
     const teams = (await (
       await auth.handler(
         new Request(`${origin}/api/auth/organization/list`, {
