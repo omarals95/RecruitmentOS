@@ -154,6 +154,72 @@ curl -sS -X POST "$RECRUITMENTOS_URL/api/v1/cvs/storage-reconciliation" \
 
 Send no body. It expires old reservations, deletes the objects of rejected or abandoned uploads once their last ticket expired at least 10 minutes ago, frees each retained charge only after the object is confirmed missing, and deletes stray or mismatched objects under the team's own CV prefix; pending uploads and matching ready CVs are never touched. The response holds counts only: `{"data":{"expiredReservations","chargesReleased","objectsChecked","objectsDeleted","failures","complete"}}`. Call it again while `complete` is `false`. A team's cleanup runs at most once per 10 minutes, shared with the automatic cleanup after each completed or rejected Blob upload: inside that time it returns 429 `STORAGE_RECONCILIATION_COOLDOWN` with `Retry-After` set to the seconds left. Other roles get 403 `storage_reconciliation_forbidden`; with S3 storage it returns 409 `STORAGE_RECONCILIATION_UNSUPPORTED`, and with Blob not set up 503 `STORAGE_SETUP_REQUIRED`.
 
+## Organisation levels and units
+
+The organisation routes under `/api/v1/org-units` need a signed-in browser session. They are not available to API tokens or MCP: a Bearer token, including an MCP OAuth token, gets 403 `session_required` on every method, and there is no MCP tool. Any signed-in member of a team in the company can read them. Creating and renaming levels and units needs a company owner, or a company admin with the organisation area; anyone else gets 403 `org_forbidden`. Moving or archiving a unit needs a company owner, because it changes who can see the records under that unit in later releases; a company admin gets 403 `org_owner_required`. The examples use fictional names and ids.
+
+Create the levels, top first. `depth` is 0 for the top and at most 7, so a company has at most 8 levels:
+
+```http
+POST /api/v1/org-units/levels
+Content-Type: application/json
+
+{"name":"Company","depth":0}
+```
+
+```json
+{
+  "data": {
+    "id": "00000000-0000-4000-a000-0000000000a0",
+    "name": "Company",
+    "depth": 0,
+    "archivedAt": null
+  }
+}
+```
+
+Create a unit on a level, at the top or under a parent on a higher level. Leave out `parentId`, or send `null`, for a top-level unit:
+
+```http
+POST /api/v1/org-units
+Content-Type: application/json
+
+{"name":"Fictional Holdings","code":"FH","levelId":"00000000-0000-4000-a000-0000000000a0"}
+```
+
+```http
+POST /api/v1/org-units
+Content-Type: application/json
+
+{"name":"Sample Division","code":"SD","levelId":"00000000-0000-4000-a000-0000000000a1","parentId":"00000000-0000-4000-a000-0000000000b0"}
+```
+
+Each returns 201 with `{"data":{"id","parentId","levelId","name","code","validFrom","archivedAt","hasChildren"}}`. Names and codes are stored as text facts: control, format, bidi and zero-width characters are removed, then they are trimmed and must be 1 to 120 characters. A code is unique among the company's current units.
+
+Read one level of the chart at a time: `GET /api/v1/org-units` lists the top-level units, and `GET /api/v1/org-units?parentId=00000000-0000-4000-a000-0000000000b0&page=1&pageSize=100` lists that unit's current children, ordered by name, with `hasChildren` on each and `{"pagination":{"page","pageSize","hasMore"}}` (`pageSize` 1 to 200, default 100). `GET /api/v1/org-units/levels` lists every level, archived ones included.
+
+Change a unit with exactly one operation per request:
+
+```http
+PATCH /api/v1/org-units/00000000-0000-4000-a000-0000000000b1
+Content-Type: application/json
+
+{"name":"Sample Division East"}
+```
+
+Send `{"parentId":"<unit id>"}` to move it with everything below it (`null` moves it to the top level), or `{"archived":true}` to archive it. A level takes `{"name"}` or `{"archived":true}` on `PATCH /api/v1/org-units/levels/{id}`. Two operations in one body, or any other shape, return 400 `invalid_input`. Archiving is permanent.
+
+| Error                    | When                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| 409 `org_level_order`    | The unit's level is not below its parent's level                                                      |
+| 409 `org_cycle`          | A move under the unit itself or a unit below it                                                       |
+| 409 `org_state_conflict` | An archived unit, parent or level, or archiving a unit or level that still has current units below it |
+| 409 `org_code_exists`    | Another current unit already uses the code                                                            |
+| 409 `org_level_exists`   | A level already exists at that depth                                                                  |
+| 404 `not_found`          | The level, unit or parent is not in your company                                                      |
+
+Every create, rename, move and archive appears in Activity for the team you made it from, with ids only. A move or archive also records that home units changed.
+
 ## Errors
 
 The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) and `token_guess_rate_limited` it is 60, and for 429 `STORAGE_RECONCILIATION_COOLDOWN` it is the seconds left of the team's 10-minute cleanup cooldown. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
