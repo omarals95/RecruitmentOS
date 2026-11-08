@@ -323,6 +323,30 @@ describe("speed settings", () => {
       "No timings have been recorded yet.",
     );
   });
+  it("keeps action and route names on one line inside the scrolling table area", () => {
+    const markup = renderToStaticMarkup(
+      <SpeedPanel
+        error=""
+        rows={[
+          {
+            kind: "route",
+            name: "PATCH /api/v1/task-workflow-items/[id]",
+            samples: 1,
+            medianMs: 20,
+            p95Ms: 30,
+          },
+        ]}
+      />,
+    );
+    expect(markup).toMatch(
+      /<div class="table-wrap"><table class="data-table speed-table">/,
+    );
+    const names = rules("src/styles/settings.css").find(
+      (rule) => rule.selector === ".settings-page .speed-table code",
+    );
+    expect(names?.body).toMatch(/white-space:\s*nowrap/);
+    expect(names?.body).toMatch(/overflow-wrap:\s*normal/);
+  });
 });
 
 describe("two-step sign-in in settings", () => {
@@ -341,6 +365,11 @@ describe("two-step sign-in in settings", () => {
     expect(on).toContain(">Create new backup codes</button>");
     expect(on).toContain(">Turn off</button>");
     expect(on).toContain('autoComplete="current-password"');
+    // One field serves both actions, so its label names both.
+    expect(on).toMatch(
+      /<label class="field"><span>Password to create new backup codes or turn off two-step sign-in<\/span><input[^>]*type="password"/,
+    );
+    expect(on).not.toContain("Confirm with your password");
     expect(on).not.toContain(">Turn on</a>");
     const page = renderToStaticMarkup(
       <WorkspaceProvider value={workspace}>
