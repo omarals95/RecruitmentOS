@@ -111,7 +111,7 @@ GRANT SELECT ON TABLE app.workspace_teams TO recruitmentos_data;
 GRANT SELECT ON TABLE app.workspace_admins TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
-GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.allows(text, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.allows_activity(text, text, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.allows_event(text, text, text, uuid) TO recruitmentos_data;
@@ -153,7 +153,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.oauth_codes TO recruitmentos_
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth.oauth_tokens TO recruitmentos_identity;
 GRANT SELECT ON TABLE auth.initial_admin_claim TO recruitmentos_identity;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_identity;
-GRANT EXECUTE ON FUNCTION tenant_context.install(text, text) TO recruitmentos_identity;
+GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.reset_two_step(text) TO recruitmentos_identity;
