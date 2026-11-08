@@ -67,7 +67,9 @@ vi.mock("pg", () => ({
   },
 }));
 
-import { applyMigrations } from "../src/db";
+import { sql } from "drizzle-orm";
+import { applyMigrations, type TeamTx } from "../src/db";
+import { withDeadlinesAndSnapshot } from "../src/db/deadlines";
 import {
   dataRoleBoundaryQuery,
   dataRoleHelpers,
@@ -83,9 +85,11 @@ import {
   platformDatabaseReason,
 } from "../scripts/db-role-evidence";
 import { templateGrantMatrix } from "../scripts/runtime-role-template";
+import { installTenantContext } from "../src/lib/tenant-context";
 import {
   createSplitRoleDb,
   readRuntimeRoleTemplate,
+  seedIdentity,
   splitRoles,
 } from "./helpers/db";
 
@@ -129,6 +133,8 @@ const workspaceWrites = [
   "UPDATE app.workspace_admins SET suspended_at = NULL",
   "DELETE FROM app.workspace_admins",
 ];
+/** Written by the data role under company authority, closed to the identity role (0030). */
+const configTables = ["config_objects", "config_versions", "config_layouts"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -154,6 +160,13 @@ const expectedData = {
     "app.workspaces": ["SELECT"],
     "app.workspace_teams": ["SELECT"],
     "app.workspace_admins": ["SELECT"],
+    // The configuration store, under allows_workspace and the immutability guard (0030).
+    ...Object.fromEntries(
+      configTables.map((table) => [
+        `app.${table}`,
+        ["DELETE", "INSERT", "SELECT", "UPDATE"],
+      ]),
+    ),
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -370,8 +383,14 @@ describe("split runtime role template", () => {
         kind,
       ).toEqual(["tenant_context.install(text,text,text[])"]);
       // Only the data role may run the cross-team bulk intake purge, the erasure helper, the
-      // two MCP CV helpers (0026) and the two company workspace helpers (0028).
+      // two MCP CV helpers (0026), the two company workspace helpers (0028) and the five
+      // configuration store helpers (0030).
       for (const helper of [
+        "tenant_context.allows_workspace(uuid,text,text)",
+        "tenant_context.publish_config_version(uuid)",
+        "tenant_context.retire_config_version(uuid)",
+        "tenant_context.audit_config(uuid,text)",
+        "tenant_context.config_history(uuid,timestamp with time zone,integer)",
         "tenant_context.purge_bulk_intake(uuid)",
         "tenant_context.erase_candidate(uuid,text,text)",
         "tenant_context.set_mcp_cv_text_access(boolean)",
@@ -498,6 +517,7 @@ describe("split runtime role template", () => {
         "speed_samples",
         "speed_sample_budgets",
         ...workspaceTables,
+        ...configTables,
       ].map((table) => `TRUNCATE app.${table}`),
       ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
@@ -546,8 +566,17 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.set_mcp_cv_text_access(false)",
       "SELECT tenant_context.audit_mcp_cv_read('get_cv_text', gen_random_uuid())",
       "SELECT tenant_context.set_workspace_authority('fictional', 'admin', '{fields}', true)",
+      "SELECT tenant_context.allows_workspace(gen_random_uuid(), 'read', 'fields')",
+      "SELECT tenant_context.publish_config_version(gen_random_uuid())",
+      "SELECT tenant_context.retire_config_version(gen_random_uuid())",
+      "SELECT tenant_context.audit_config(gen_random_uuid(), 'config.published')",
+      "SELECT * FROM tenant_context.config_history(NULL, NULL, 50)",
       ...workspaceTables.map((table) => `SELECT * FROM app.${table}`),
       ...workspaceWrites,
+      ...configTables.flatMap((table) => [
+        `SELECT * FROM app.${table}`,
+        `DELETE FROM app.${table}`,
+      ]),
       "SELECT * FROM app.candidate_erasures",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",
@@ -671,6 +700,63 @@ describe("split runtime role template", () => {
     await applyAsOwner();
     expect((await collect("identity")).evidence.pass).toBe(true);
     expect((await collect("data")).evidence.pass).toBe(true);
+  });
+
+  it("denies the data role every change of a published configuration version (0030)", async () => {
+    // A fictional company owner: the first seeded user creates the first team.
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    const asCompanyOwner = <T>(work: (tx: TeamTx) => Promise<T>) =>
+      harness.dataDb().then((db) =>
+        withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+          await installTenantContext(tx, owner, snapshot);
+          return work(tx);
+        }),
+      );
+    const { objectId, versionId } = await asCompanyOwner(async (tx) => {
+      const [object] = (
+        await tx.execute<{ id: string }>(
+          sql`insert into app.config_objects(workspace_id, type, key) select workspace_id, 'workflow', 'grants-probe' from app.workspace_teams where team_id = ${owner.teamId} returning id`,
+        )
+      ).rows;
+      const [version] = (
+        await tx.execute<{ id: string }>(
+          sql`insert into app.config_versions(object_id, workspace_id, body) select id, workspace_id, '{"label":"Fictional probe"}' from app.config_objects where id = ${object.id}::uuid returning id`,
+        )
+      ).rows;
+      await tx.execute(
+        sql`update app.config_objects set draft_version_id = ${version.id}::uuid where id = ${object.id}::uuid`,
+      );
+      await tx.execute(
+        sql`select tenant_context.publish_config_version(${version.id}::uuid)`,
+      );
+      return { objectId: object.id, versionId: version.id };
+    });
+    for (const statement of [
+      `UPDATE app.config_versions SET body = '{"label":"Forged"}' WHERE id = '${versionId}'`,
+      `UPDATE app.config_versions SET body_sha256 = repeat('0', 64) WHERE id = '${versionId}'`,
+      `UPDATE app.config_versions SET number = 5 WHERE id = '${versionId}'`,
+      `UPDATE app.config_versions SET object_id = gen_random_uuid() WHERE id = '${versionId}'`,
+      `UPDATE app.config_versions SET state = 'retired' WHERE id = '${versionId}'`,
+      `DELETE FROM app.config_versions WHERE id = '${versionId}'`,
+      `DELETE FROM app.config_objects WHERE id = '${objectId}'`,
+      `UPDATE app.config_objects SET current_version_id = NULL WHERE id = '${objectId}'`,
+    ])
+      await expect(
+        asCompanyOwner((tx) => tx.execute(sql.raw(statement))),
+        statement,
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+    await harness.asSuperuser();
+    expect(
+      (
+        await harness.client.query(
+          "SELECT state, number FROM app.config_versions WHERE id = $1",
+          [versionId],
+        )
+      ).rows,
+    ).toEqual([{ state: "published", number: 1 }]);
   });
 });
 
