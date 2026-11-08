@@ -10,7 +10,12 @@ import {
   type FormEvent,
 } from "react";
 import { Copy, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
-import { SCOPES, roleScopes, type Role, type Scope } from "@/lib/permissions";
+import {
+  API_TOKEN_SCOPES,
+  roleScopes,
+  type Role,
+  type Scope,
+} from "@/lib/permissions";
 import { scopeDescriptions } from "@/lib/scope-descriptions";
 import type { TokenDto } from "@/lib/api-tokens";
 import {
@@ -311,38 +316,38 @@ function TokenSettingsContent() {
                 >
                   <legend>Permissions</legend>
                   <div className="form-grid">
-                    {SCOPES.filter((scope) => available.includes(scope)).map(
-                      (scope) => (
-                        <label
-                          key={scope}
-                          style={{
-                            display: "flex",
-                            alignItems: "flex-start",
-                            gap: 10,
-                            padding: 8,
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={scopes.includes(scope)}
-                            onChange={(e) =>
-                              setScopes((previous) =>
-                                e.target.checked
-                                  ? [...previous, scope]
-                                  : previous.filter((item) => item !== scope),
-                              )
-                            }
-                          />
-                          <span>
-                            <strong>{scope}</strong>
-                            <br />
-                            <span className="muted">
-                              {scopeDescriptions[scope]}
-                            </span>
+                    {API_TOKEN_SCOPES.filter((scope) =>
+                      available.includes(scope),
+                    ).map((scope) => (
+                      <label
+                        key={scope}
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: 8,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={scopes.includes(scope)}
+                          onChange={(e) =>
+                            setScopes((previous) =>
+                              e.target.checked
+                                ? [...previous, scope]
+                                : previous.filter((item) => item !== scope),
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{scope}</strong>
+                          <br />
+                          <span className="muted">
+                            {scopeDescriptions[scope]}
                           </span>
-                        </label>
-                      ),
-                    )}
+                        </span>
+                      </label>
+                    ))}
                   </div>
                 </fieldset>
                 <p className="muted">
