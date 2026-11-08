@@ -13,7 +13,7 @@ describe("initial administrator recovery", () => {
       for (const file of [
         "0000_auth.sql",
         "0003_initial_admin.sql",
-        "0021_two_step_sign_in.sql",
+        "0022_two_step_sign_in.sql",
       ])
         await pg.exec(
           await readFile(

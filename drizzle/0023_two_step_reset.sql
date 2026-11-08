@@ -44,21 +44,26 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION tenant_context.reset_two_step(text) FROM PUBLIC;
 
--- As in 0018, plus: account-security rows come only from the owner (the helper above or the
--- owner-run recovery script); no runtime role inserts them directly.
+-- As in 0021 (which carries the 0018 branches and the candidate-erasure branch), plus: account-security
+-- rows come only from the owner (the helper above or the owner-run recovery script); no runtime
+-- role inserts them directly.
 DROP POLICY context_insert ON app.activity;
 CREATE POLICY context_insert ON app.activity FOR INSERT WITH CHECK (
-  (kind NOT IN ('api-token', 'mcp-tool', 'export', 'storage-settings', 'account-security') AND tenant_context.allows_event(team_id, actor_id, actor_type, token_id))
-  OR (kind = 'api-token' AND action IN ('token.created', 'token.revoked') AND tenant_context.allows(team_id, actor_id, 'read')
-    AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
-  OR (kind = 'mcp-tool' AND action IN ('mcp.tool_called', 'mcp.tool_denied') AND tenant_context.allows(team_id, actor_id, 'read')
-    AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
-  OR (kind = 'api-token' AND action = 'token.revoked' AND actor_type = 'token'
-    AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
-  OR (kind = 'export' AND action = 'records.exported' AND tenant_context.allows(team_id, actor_id, 'read')
-    AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
-  OR (kind = 'storage-settings' AND action = 'storage.settings_updated' AND actor_type = 'session'
-    AND tenant_context.allows(team_id, actor_id, 'read')
-    AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
-  OR (kind = 'account-security' AND action = 'two_step.reset' AND actor_type = 'session'
+  (erasure_id IS NULL AND (
+    (kind NOT IN ('api-token', 'mcp-tool', 'export', 'storage-settings', 'candidate-erasure', 'account-security') AND tenant_context.allows_event(team_id, actor_id, actor_type, token_id))
+    OR (kind = 'api-token' AND action IN ('token.created', 'token.revoked') AND tenant_context.allows(team_id, actor_id, 'read')
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
+    OR (kind = 'mcp-tool' AND action IN ('mcp.tool_called', 'mcp.tool_denied') AND tenant_context.allows(team_id, actor_id, 'read')
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
+    OR (kind = 'api-token' AND action = 'token.revoked' AND actor_type = 'token'
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
+    OR (kind = 'export' AND action = 'records.exported' AND tenant_context.allows(team_id, actor_id, 'read')
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
+    OR (kind = 'storage-settings' AND action = 'storage.settings_updated' AND actor_type = 'session'
+      AND tenant_context.allows(team_id, actor_id, 'read')
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))
+    OR (kind = 'account-security' AND action = 'two_step.reset' AND actor_type = 'session'
+      AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context'))))
+  OR (kind = 'candidate-erasure' AND action = 'candidate.erased' AND actor_type = 'session' AND token_id IS NULL
+    AND record_id IS NULL AND erasure_id IS NOT NULL AND tenant_context.allows(team_id, actor_id, 'read')
     AND current_user = (SELECT pg_catalog.pg_get_userbyid(n.nspowner) FROM pg_catalog.pg_namespace n WHERE n.nspname = 'tenant_context')));

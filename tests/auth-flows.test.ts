@@ -71,7 +71,7 @@ describe("Better Auth verified invite-only flows", () => {
         )) +
         "\n" +
         (await readFile(
-          new URL("../drizzle/0021_two_step_sign_in.sql", import.meta.url),
+          new URL("../drizzle/0022_two_step_sign_in.sql", import.meta.url),
           "utf8",
         )) +
         `

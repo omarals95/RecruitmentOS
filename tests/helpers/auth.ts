@@ -24,7 +24,7 @@ export async function createAuthDb() {
     "0000_auth.sql",
     "0003_initial_admin.sql",
     "0004_protect_initial_admin_claim.sql",
-    "0021_two_step_sign_in.sql",
+    "0022_two_step_sign_in.sql",
   ])
     sql +=
       (await readFile(
