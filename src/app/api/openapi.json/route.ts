@@ -1080,6 +1080,180 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  // Organisation levels and units (0033): session only, no MCP tool (D13).
+  const orgText = { type: "string", minLength: 1, maxLength: 120 };
+  const orgTextRule =
+    "Names and codes are stored as text facts: control, format, bidi and zero-width characters are removed, then they are trimmed and must be 1 to 120 characters.";
+  const orgWriteRule =
+    "Session only; Bearer tokens, including MCP OAuth tokens, get 403 session_required. Writes need a company owner, or a company admin with the organisation area; anyone else gets 403 org_forbidden.";
+  const orgLevelShape = "{data:{id, name, depth, archivedAt}}";
+  const orgUnitShape =
+    "{data:{id, parentId, levelId, name, code, validFrom, archivedAt, hasChildren}}";
+  const orgAudit =
+    "Each change writes one org activity row to your team with ids only, never a name or code.";
+  paths["/api/v1/org-units"] = {
+    get: operation(
+      [],
+      {
+        summary: "List one level of the organisation chart",
+        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens get 403 session_required. Returns the current, non-archived children of parentId, or the top-level units without it, ordered by name then id, with hasChildren for each. page starts at 1; pageSize is 1 to 200 (default 100). A parentId that is not a unit of your company returns 404 not_found; any other query key or value returns 400 invalid_input. Returns {data:[{id, parentId, levelId, name, code, validFrom, archivedAt, hasChildren}], pagination:{page, pageSize, hasMore}}.`,
+      },
+      {
+        "200": {
+          description:
+            "{data:[{id, parentId, levelId, name, code, validFrom, archivedAt, hasChildren}], pagination:{page, pageSize, hasMore}}.",
+        },
+      },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "parentId",
+            in: "query",
+            schema: { type: "string", format: "uuid" },
+          },
+          {
+            name: "page",
+            in: "query",
+            schema: { type: "integer", minimum: 1, default: 1 },
+          },
+          {
+            name: "pageSize",
+            in: "query",
+            schema: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+          },
+        ],
+      },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create an organisation unit",
+        description: `${orgWriteRule} Send {name, code, levelId} and an optional parentId (null or left out for the top level). ${orgTextRule} An unknown key returns 400 invalid_input. The unit's level must be below its parent's level (409 org_level_order); a parent that is archived or a level that is archived returns 409 org_state_conflict; a code another current unit uses returns 409 org_code_exists; a level or parent that is not in your company returns 404 not_found. Reusing the code of an archived unit under a different parent gives it a new parent, so it needs a company owner (403 org_forbidden). ${orgAudit} Returns ${orgUnitShape}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["name", "code", "levelId"],
+            additionalProperties: false,
+            properties: {
+              name: orgText,
+              code: orgText,
+              levelId: { type: "string", format: "uuid" },
+              parentId: { type: ["string", "null"], format: "uuid" },
+            },
+          },
+          {
+            name: "Sample Division",
+            code: "SD",
+            levelId: "00000000-0000-4000-a000-0000000000a1",
+            parentId: "00000000-0000-4000-a000-0000000000b1",
+          },
+        ),
+      },
+      { "201": { description: `${orgUnitShape}.` } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/org-units/{id}"] = {
+    patch: operation(
+      [],
+      {
+        summary: "Rename, move or archive an organisation unit",
+        description: `${orgWriteRule} Send exactly one of {name} (rename), {parentId} (move; null for the top level) or {archived: true} (archive); any other shape, including two operations, returns 400 invalid_input. Moving or archiving a unit changes who can see the records under it, so it needs a company owner: a company admin gets 403 org_owner_required. A move under the unit itself or a unit below it returns 409 org_cycle; a parent whose level is not above the unit's returns 409 org_level_order; an archived unit, an archived parent, or archiving a unit that still has current units below it returns 409 org_state_conflict; an unknown unit or parent returns 404 not_found. A move takes the units below it along. ${orgAudit} A move or archive also writes one scope.home_units_changed row. Archiving is permanent. Returns ${orgUnitShape}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                required: ["name"],
+                additionalProperties: false,
+                properties: { name: orgText },
+              },
+              {
+                type: "object",
+                required: ["parentId"],
+                additionalProperties: false,
+                properties: {
+                  parentId: { type: ["string", "null"], format: "uuid" },
+                },
+              },
+              {
+                type: "object",
+                required: ["archived"],
+                additionalProperties: false,
+                properties: { archived: { const: true } },
+              },
+            ],
+          },
+          { name: "Sample Division East" },
+        ),
+      },
+      { "200": { description: `${orgUnitShape}.` } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/org-units/levels"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the organisation levels",
+        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens get 403 session_required. Returns every level of your company, top (depth 0) first, archived ones included with archivedAt. Returns {data:[{id, name, depth, archivedAt}]}.`,
+      },
+      { "200": { description: "{data:[{id, name, depth, archivedAt}]}." } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create an organisation level",
+        description: `${orgWriteRule} Send {name, depth}: depth 0 is the top and 7 the lowest, so a company has at most 8 levels. ${orgTextRule} A depth outside 0 to 7 or an unknown key returns 400 invalid_input; a depth that already has a level returns 409 org_level_exists. ${orgAudit} Returns ${orgLevelShape}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["name", "depth"],
+            additionalProperties: false,
+            properties: {
+              name: orgText,
+              depth: { type: "integer", minimum: 0, maximum: 7 },
+            },
+          },
+          { name: "Division", depth: 1 },
+        ),
+      },
+      { "201": { description: `${orgLevelShape}.` } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/org-units/levels/{id}"] = {
+    patch: operation(
+      [],
+      {
+        summary: "Rename or archive an organisation level",
+        description: `${orgWriteRule} Send exactly one of {name} (rename) or {archived: true} (archive); any other shape returns 400 invalid_input. Archiving a level that still has current units returns 409 org_state_conflict, as does changing an archived level; an unknown level returns 404 not_found. An archived level keeps its depth and takes no new units. ${orgAudit} Returns ${orgLevelShape}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                required: ["name"],
+                additionalProperties: false,
+                properties: { name: orgText },
+              },
+              {
+                type: "object",
+                required: ["archived"],
+                additionalProperties: false,
+                properties: { archived: { const: true } },
+              },
+            ],
+          },
+          { name: "Business Unit" },
+        ),
+      },
+      { "200": { description: `${orgLevelShape}.` } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
   paths["/api/v1/cvs/storage-reconciliation"] = {
     post: operation(
       ["cvs:write"],
