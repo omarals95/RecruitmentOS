@@ -14,8 +14,8 @@ Principles that apply to every release:
 ## At a glance
 
 ```
-Phase 1  Usable core (go-live)        ── in progress, factory backlog (Release 1)
-Release 2 Configurable platform      ── admin portal: screens & fields, types, workflow builder, boards, roles & permissions,
+Phase 1  Usable core (Release 1)     ── build complete on Preview; Production go-live waits for Release 2
+Release 2 Configurable platform      ── next; then Production go-live of 1+2. Admin portal: screens & fields, types, workflow builder, boards, roles & permissions,
                                         org chart & directory, templates, AI connections, recruitment plan, team tasks
 R1.1     Feedback loop                ── scorecards, real users, pipeline speed, duplicates
 R1.2     Hiring managers & approvals  ── requester role, approvals, interview kits, debrief
@@ -26,7 +26,9 @@ R1.6     Workflow designer            ── merged into Release 2 (8 November 2
 R3       Reach & region               ── careers page, job boards, WhatsApp/SMS, Arabic/RTL, mobile, live AI
 ```
 
-## Phase 1 — Usable core (go-live release)
+## Phase 1 — Usable core (Release 1)
+
+**Release timing (owner decision, 8 November 2026):** Release 1 is built and running on the protected Preview. The Production go-live (P1-16 and P1-20) is deferred until Release 2 is complete, so Production launches with Releases 1 and 2 together. Real candidate data stays out of Preview.
 
 **Goal:** the recruitment team can use RecruitmentOS every day on Production with fictional data first, then real data after the separate migration approval.
 
