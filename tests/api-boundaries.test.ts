@@ -24,7 +24,10 @@ import { checkOrigin, readBody, errorResponse, json, runApi } from "@/lib/api";
 import { authenticateApiToken } from "@/lib/api-tokens";
 import { getSession, getVerifiedSession } from "@/lib/auth-session";
 import { ApiError } from "@/lib/errors";
-import { StorageConfigurationError } from "@/lib/storage";
+import {
+  resolveStorageBinding,
+  StorageConfigurationError,
+} from "@/lib/storage";
 import { getWorkspaceContext } from "@/lib/workspace";
 import { GET as overviewRoute } from "@/app/api/v1/overview/route";
 import { member } from "@/db/auth-schema";
@@ -256,6 +259,25 @@ describe("request boundaries", () => {
       expect(logged).toHaveBeenCalledTimes(1);
       expect(logged.mock.calls[0]).toEqual([
         `storage_configuration_error correlationId=${error.correlationId} code=STORAGE_SETUP_REQUIRED reason=not_configured`,
+      ]);
+    });
+
+    it("answers 503 STORAGE_SETUP_REQUIRED for a hosted deployment without a provider", async () => {
+      const response = await runApi(bearerRequest(), undefined, async () => {
+        resolveStorageBinding({
+          VERCEL: "1",
+          VERCEL_ENV: "preview",
+          BLOB_STORE_ID: "store_fictional",
+        });
+        return new Response(null, { status: 204 });
+      });
+      expect(response.status).toBe(503);
+      const error = await errorOf(response);
+      expect(error.code).toBe("STORAGE_SETUP_REQUIRED");
+      expect(logged.mock.calls).toEqual([
+        [
+          `storage_configuration_error correlationId=${error.correlationId} code=STORAGE_SETUP_REQUIRED reason=not_configured`,
+        ],
       ]);
     });
   });

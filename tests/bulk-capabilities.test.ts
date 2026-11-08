@@ -60,6 +60,7 @@ describe("bulk CV capabilities", () => {
 
   it("reports Blob uploads available only when hosted with a store and no static token", async () => {
     for (const key of storageKeys) vi.stubEnv(key, undefined);
+    vi.stubEnv("CV_STORAGE_PROVIDER", "blob");
     vi.stubEnv("BLOB_STORE_ID", "store_fictional");
     vi.stubEnv("VERCEL", "1");
     vi.stubEnv("VERCEL_ENV", "preview");
@@ -104,5 +105,22 @@ describe("bulk CV capabilities", () => {
         storageConfigured: false,
       },
     });
+  });
+
+  it("reports a hosted deployment without a provider as not set up", async () => {
+    for (const key of storageKeys) vi.stubEnv(key, undefined);
+    vi.stubEnv("BLOB_STORE_ID", "store_fictional");
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("VERCEL_ENV", "preview");
+    for (const provider of [undefined, "", "  "]) {
+      vi.stubEnv("CV_STORAGE_PROVIDER", provider);
+      expect(await capabilities(), String(provider)).toEqual({
+        data: {
+          uploadsAvailable: false,
+          aiAvailable: false,
+          storageConfigured: false,
+        },
+      });
+    }
   });
 });
