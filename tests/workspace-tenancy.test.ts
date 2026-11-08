@@ -706,6 +706,8 @@ describe("the signed context derives the workspace and company authority (R2a-02
     memberRole: principal.role,
     companyLevel,
     companyAreas,
+    versions: {},
+    documents: {},
   });
   const stored = (
     principal: Principal,
@@ -798,13 +800,15 @@ describe("the signed context derives the workspace and company authority (R2a-02
       });
   });
 
-  it("returns exactly the five access keys", async () => {
+  it("returns exactly the seven access keys", async () => {
     for (const principal of [owner, admin, teamOwner, suspended])
       expect(Object.keys((await derive(principal)).access).sort()).toEqual([
         "companyAreas",
         "companyLevel",
+        "documents",
         "memberRole",
         "scopes",
+        "versions",
         "workspaceId",
       ]);
   });

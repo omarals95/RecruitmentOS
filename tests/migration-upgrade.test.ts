@@ -298,7 +298,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -458,7 +458,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -588,7 +588,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -704,7 +704,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -722,6 +722,8 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
       memberRole: "recruiter",
       companyLevel: "admin",
       companyAreas: ["boards", "templates"],
+      versions: {},
+      documents: {},
     });
     expect(
       (
@@ -803,7 +805,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -932,7 +934,7 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 10 }]);
+    ).toEqual([{ version: 11 }]);
   });
 
   it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
@@ -953,5 +955,95 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
         p.role,
       ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
     }
+  });
+});
+
+// A team and a published company configuration object written by the 0031 schema, upgraded through
+// 0032: install keeps its one overload and its grants, and returns the object's version and body.
+describe("upgrade from 0031 to configuration versions through install", () => {
+  const pg = new PGlite();
+  const grantee = "versions_upgrade_runtime";
+  const company = "00000000-0000-4000-a000-000000000001";
+  const owner = principal(
+    "versions-upgrade-owner",
+    "versions-upgrade-team",
+    "owner",
+  );
+  const overloads = async () =>
+    (
+      await pg.query(
+        "SELECT oidvectortypes(p.proargtypes) AS args, p.prorettype::regtype::text AS returns, p.prosecdef AS definer, p.proacl::text AS acl FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'install'",
+      )
+    ).rows;
+  let before: Awaited<ReturnType<typeof overloads>>;
+  let object: string;
+  let version: { id: string; sha: string };
+
+  beforeAll(async () => {
+    await applyMigrations(pg, "0031_scope_ceilings.sql");
+    await pg.exec(`CREATE ROLE ${grantee} NOLOGIN;
+      GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO ${grantee};
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('versions-upgrade-owner','Fictional Upgrade Owner','versions-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('versions-upgrade-team','Fictional Upgrade Team','versions-upgrade-team','versions-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('versions-upgrade-mo','versions-upgrade-team','versions-upgrade-owner','owner');`);
+    object = (
+      await pg.query<{ id: string }>(
+        `INSERT INTO app.config_objects(workspace_id,type,key) VALUES ('${company}','workflow','upgrade-workflow') RETURNING id`,
+      )
+    ).rows[0].id;
+    version = (
+      await pg.query<{ id: string; sha: string }>(
+        `INSERT INTO app.config_versions(object_id,workspace_id,state,number,body,published_at) VALUES ('${object}','${company}','published',1,'{"label":"Fictional upgrade workflow"}',now()) RETURNING id, body_sha256 AS sha`,
+      )
+    ).rows[0];
+    await pg.exec(
+      `UPDATE app.config_objects SET current_version_id = '${version.id}' WHERE id = '${object}'`,
+    );
+    before = await overloads();
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps one install, (text, text, text[]) returning jsonb, with its grants, and sets storage schema 11", async () => {
+    expect(before).toEqual([
+      expect.objectContaining({
+        args: "text, text, text[]",
+        returns: "jsonb",
+        definer: true,
+        acl: expect.stringContaining(`${grantee}=X/`),
+      }),
+    ]);
+    expect(await overloads()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 11 }]);
+  });
+
+  it("returns the published object in versions and its body in documents", async () => {
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    const access = await withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+      installTenantContext(tx, owner, snapshot),
+    );
+    expect(access).toMatchObject({
+      workspaceId: company,
+      memberRole: "owner",
+      companyLevel: "owner",
+      versions: { [object]: version.id },
+    });
+    expect(access.documents).toEqual({
+      [version.id]: {
+        versionId: version.id,
+        objectId: object,
+        type: "workflow",
+        key: "upgrade-workflow",
+        number: 1,
+        bodySha256: version.sha,
+        body: { label: "Fictional upgrade workflow" },
+      },
+    });
   });
 });

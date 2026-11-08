@@ -18,7 +18,10 @@
  *   team owner without company authority cannot write company configuration (direct SQL or
  *   tenant_context.publish_config_version) but can write their own team's task board, which
  *   another team cannot read. A recruiter or viewer asserting any directory or plan scope is
- *   refused, and an owner asserting all eleven scopes is accepted.
+ *   refused, and an owner asserting all eleven scopes is accepted. An unsigned cache hint naming
+ *   another workspace's and another team's published versions returns neither their ids nor
+ *   their bodies and changes no scope, workspace or company authority; it only drops the bodies
+ *   of the context's own current versions.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -38,7 +41,9 @@
  *   the trigger suspends it). As the owner it makes the team A fixture owner company owner, writes
  *   fixture configuration objects keyed by the run prefix, and briefly inserts a second fixture
  *   workspace (team creation fails on the database while it exists) with one object, removing
- *   both in the same check; the data role commits one task board in fixture team B. As the
+ *   both in the same check; the data role commits one task board in fixture team B. In one more
+ *   check the owner inserts the second workspace again with one published object, a published
+ *   team B task board and a published company object, and removes all of them there. As the
  *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
@@ -370,13 +375,26 @@ async function assertionFor(
 const installSql =
   "SELECT tenant_context.install($1,$2,'{}'::text[]) AS access";
 
-/** The access state install derived and returned (0029). */
+/**
+ * The access state install derived and returned (0029), with the current configuration versions
+ * and the bodies the hint did not name (0032).
+ */
 type Access = {
   scopes: string[];
   workspaceId: string;
   memberRole: string;
   companyLevel: string | null;
   companyAreas: string[];
+  versions: Record<string, string>;
+  documents: {
+    versionId: string;
+    objectId: string;
+    type: string;
+    key: string;
+    number: number;
+    bodySha256: string;
+    body: string;
+  }[];
 };
 
 async function installAs(db: Db, signer: Signer, principal: Principal) {
@@ -2680,6 +2698,140 @@ async function runChecks(run: Run) {
         ["positive-control", teamB === 2],
         ["end-state", (await draftState()) === before],
       )
+    );
+  });
+
+  // Configuration versions through install (0032): the unsigned hint may only drop bodies.
+  await check("config-cached-hint", async (probe) => {
+    probe.at("setup");
+    const ownerPublished = async (
+      workspace: string,
+      team: string | null,
+      key: string,
+      label: string,
+    ) => {
+      const { rows } = await owner.query(
+        "INSERT INTO app.config_objects(workspace_id,team_id,type,key,created_by) VALUES($1::uuid,$2,$3,$4,$5) RETURNING id::text AS id",
+        [workspace, team, team ? "task-board" : "workflow", key, f.users.a1],
+      );
+      const object = rows[0].id as string;
+      const version = (
+        await owner.query(
+          "INSERT INTO app.config_versions(object_id,workspace_id,state,number,body,created_by,published_at) VALUES($1::uuid,$2::uuid,'published',1,jsonb_build_object('label',$3::text),$4,now()) RETURNING id::text AS id",
+          [object, workspace, label, f.users.a1],
+        )
+      ).rows[0].id as string;
+      await owner.query(
+        "UPDATE app.config_objects SET current_version_id = $2::uuid WHERE id = $1::uuid",
+        [object, version],
+      );
+      return { object, version };
+    };
+    // A second fixture workspace briefly makes team creation fail on this database (D15).
+    const other = randomUUID();
+    await owner.query(
+      "INSERT INTO app.workspaces(id,name) VALUES($1::uuid,$2)",
+      [other, `${f.prefix}-workspace`],
+    );
+    const created: string[] = [];
+    let pass: boolean;
+    try {
+      const labels = {
+        foreign: "Fictional foreign workflow",
+        board: "Fictional team B board",
+      };
+      const foreign = await ownerPublished(
+        other,
+        null,
+        configKey("hint-foreign"),
+        labels.foreign,
+      );
+      created.push(foreign.object);
+      const board = await ownerPublished(
+        COMPANY_WORKSPACE,
+        f.teams.b,
+        configKey("hint-board"),
+        labels.board,
+      );
+      created.push(board.object);
+      const own = await ownerPublished(
+        COMPANY_WORKSPACE,
+        null,
+        configKey("hint-own"),
+        "Fictional own workflow",
+      );
+      created.push(own.object);
+      const install = (cached: (string | null)[]) =>
+        transaction(data, async () => {
+          const assertion = await assertionFor(data, signer, p.ownerA);
+          const { rows } = await data.query(
+            "SELECT tenant_context.install($1,$2,$3::text[]) AS access",
+            [assertion.payload, assertion.signature, cached],
+          );
+          return rows[0].access as Access;
+        });
+      probe.at("install");
+      const forged = await install([
+        foreign.version,
+        board.version,
+        own.version,
+        "fictional-not-a-uuid",
+        null,
+      ]);
+      const empty = await install([]);
+      probe.at("outcome");
+      const hidden = [
+        foreign.object,
+        foreign.version,
+        board.object,
+        board.version,
+        labels.foreign,
+        labels.board,
+      ];
+      const leaked = [forged, empty].some((access) =>
+        hidden.some((value) => JSON.stringify(access).includes(value)),
+      );
+      const authority = (access: Access) =>
+        JSON.stringify([
+          access.scopes,
+          access.workspaceId,
+          access.memberRole,
+          access.companyLevel,
+          access.companyAreas,
+        ]);
+      const listed = (access: Access) =>
+        access.documents.map((document) => document.versionId);
+      pass = probe.all(
+        ["outcome", !leaked],
+        ["outcome", authority(forged) === authority(empty)],
+        [
+          "positive-control",
+          forged.versions[own.object] === own.version &&
+            empty.versions[own.object] === own.version &&
+            listed(empty).includes(own.version) &&
+            !listed(forged).includes(own.version),
+        ],
+      );
+    } finally {
+      await owner.query(
+        "DELETE FROM app.config_objects WHERE id = ANY($1::uuid[]) OR workspace_id = $2::uuid",
+        [created, other],
+      );
+      await owner.query("DELETE FROM app.workspaces WHERE id = $1::uuid", [
+        other,
+      ]);
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await count(
+          owner,
+          "SELECT ((SELECT count(*) FROM app.workspaces WHERE id = $1::uuid) + (SELECT count(*) FROM app.config_objects WHERE id = ANY($2::uuid[])))::int AS n",
+          [other, created],
+        )) === 0,
+      ])
     );
   });
 

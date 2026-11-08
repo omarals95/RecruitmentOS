@@ -188,6 +188,8 @@ describe("signed tenant context under separate nonowner data and identity roles"
     memberRole: "owner",
     companyLevel: "owner",
     companyAreas: [],
+    versions: {},
+    documents: {},
   };
 
   beforeAll(async () => {
@@ -912,6 +914,8 @@ describe("signed tenant context under separate nonowner data and identity roles"
     memberRole: "recruiter",
     companyLevel: null,
     companyAreas: [],
+    versions: {},
+    documents: {},
   });
 
   it("passes the access state install derived to withTeam's work", async () => {
@@ -994,7 +998,9 @@ describe("signed tenant context under separate nonowner data and identity roles"
         ).rejects.toMatchObject(denied);
       });
     }
-    expect(results).toEqual([memberAccess(), memberAccess(), memberAccess()]);
+    // A direct call returns the documents as install's JSON array.
+    const direct = { ...memberAccess(), documents: [] };
+    expect(results).toEqual([direct, direct, direct]);
     await harness.asSuperuser();
     const { rows } = await harness.client.query(
       "SELECT team_id, actor_id, auth_type, token_id, scopes, workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE xid::text IN ($1, $2, $3)",
@@ -1013,6 +1019,97 @@ describe("signed tenant context under separate nonowner data and identity roles"
       plan_access: false,
     };
     expect(rows).toEqual([stored, stored, stored]);
+  });
+
+  it("gives the same checks, stored row and result for cached hints with NULL elements and duplicates (0032)", async () => {
+    // A published company object, so a hint that dropped every body, or raised, would show.
+    await harness.asOwner();
+    const objectId = (
+      await harness.client.query<{ id: string }>(
+        `INSERT INTO app.config_objects(workspace_id, type, key) VALUES ('${COMPANY}', 'workflow', 'ctx-hint') RETURNING id`,
+      )
+    ).rows[0].id;
+    const version = (
+      await harness.client.query<{ id: string; sha: string; text: string }>(
+        `INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) VALUES ('${objectId}', '${COMPANY}', 'published', 1, '{"label":"Fictional hint workflow"}', now()) RETURNING id, body_sha256 AS sha, body::text AS text`,
+      )
+    ).rows[0];
+    await harness.client.query(
+      `UPDATE app.config_objects SET current_version_id = '${version.id}' WHERE id = '${objectId}'`,
+    );
+    try {
+      const client = await asData();
+      const xids: string[] = [];
+      const results: unknown[] = [];
+      const hints = [
+        "{}",
+        "{NULL}",
+        "{NULL,NULL,fictional-version-1,fictional-version-1}",
+        `{${version.id},NULL,${version.id}}`,
+      ];
+      for (const cached of hints) {
+        await client.exec("BEGIN");
+        try {
+          const claim = await claimFor(memberA);
+          results.push(await installed(claim, cached));
+          xids.push(claim.xid);
+          await client.exec("COMMIT");
+        } catch (error) {
+          await client.exec("ROLLBACK");
+          throw error;
+        }
+        await dataTransaction(async () => {
+          const claim = await claimFor(memberA);
+          await expect(
+            installed({ ...claim, exp: claim.exp - 31_000 }, cached),
+            cached,
+          ).rejects.toMatchObject(denied);
+        });
+      }
+      const listed = {
+        ...memberAccess(),
+        versions: { [objectId]: version.id },
+      };
+      const document = {
+        versionId: version.id,
+        objectId,
+        type: "workflow",
+        key: "ctx-hint",
+        number: 1,
+        bodySha256: version.sha,
+        body: version.text,
+      };
+      expect(results).toEqual([
+        { ...listed, documents: [document] },
+        { ...listed, documents: [document] },
+        { ...listed, documents: [document] },
+        { ...listed, documents: [] },
+      ]);
+      await harness.asSuperuser();
+      const { rows } = await harness.client.query(
+        "SELECT team_id, actor_id, auth_type, token_id, scopes, workspace_id, member_role, company_level, company_areas, plan_access FROM tenant_context.contexts WHERE xid::text = ANY($1::text[])",
+        [xids],
+      );
+      expect(rows).toEqual(
+        hints.map(() => ({
+          team_id: memberA.teamId,
+          actor_id: memberA.userId,
+          auth_type: "session",
+          token_id: null,
+          scopes: [...memberA.scopes],
+          workspace_id: COMPANY,
+          member_role: "recruiter",
+          company_level: null,
+          company_areas: [],
+          plan_access: false,
+        })),
+      );
+    } finally {
+      await harness.asOwner();
+      await harness.client.query(
+        `DELETE FROM app.config_objects WHERE id = '${objectId}'`,
+      );
+    }
   });
 
   it("keeps token audit rows out of the data role's reach so revocation cannot be blocked", async () => {

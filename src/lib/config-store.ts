@@ -9,10 +9,20 @@ import {
   configKey,
   type ConfigType,
 } from "@/domain/config";
+import type { ConfigDocument } from "@/lib/config-cache";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
+
+// The instance body cache lives in its own module, so tenant-context.ts imports it without a cycle.
+export {
+  CONFIG_CACHE_BYTES,
+  ConfigBodyCache,
+  configBodyCache,
+  type ConfigDocument,
+  type ConfigDocumentRow,
+} from "@/lib/config-cache";
 
 /** The bound the database enforces on bodies (54000) and layouts, in bytes of JSON text. */
 const MAX_BYTES = 524_288;
@@ -309,6 +319,28 @@ export async function getConfigObject(
     );
     return rows[0]?.object ?? null;
   });
+}
+
+/**
+ * The current published body of the object with this type and key, read from the access state
+ * install returned; it runs no statement. Null when the object has no current version, is archived
+ * or is not visible to the context (another workspace, or another team's task board).
+ */
+export function currentConfigBody(
+  access: TenantAccess,
+  type: ConfigType,
+  key: string,
+): Pick<ConfigDocument, "versionId" | "number" | "body"> | null {
+  const document = Object.values(access.documents).find(
+    (candidate) => candidate.type === type && candidate.key === key,
+  );
+  return document
+    ? {
+        versionId: document.versionId,
+        number: document.number,
+        body: document.body,
+      }
+    : null;
 }
 
 /** Company owners and admins only: config events of every team in the workspace, newest first. */

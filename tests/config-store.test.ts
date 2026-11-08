@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { setDbForTests, type AppDb, type TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
@@ -14,16 +14,21 @@ import {
 } from "@/domain/config";
 import {
   archiveConfigObject,
+  CONFIG_CACHE_BYTES,
+  ConfigBodyCache,
   createConfigDraft,
+  currentConfigBody,
   getConfigObject,
   listConfigHistory,
   publishConfigVersion,
   retireConfigVersion,
   saveConfigLayout,
   updateConfigDraft,
+  type ConfigDocumentRow,
 } from "@/lib/config-store";
+import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
-import { installTenantContext } from "@/lib/tenant-context";
+import { installTenantContext, type TenantAccess } from "@/lib/tenant-context";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with two fictional teams, and a second fictional
@@ -966,6 +971,494 @@ describe("versioned configuration store under the split runtime roles", () => {
       await expect(
         run(() => listConfigHistory(owner, { pageSize: 0 })),
       ).rejects.toBeInstanceOf(z.ZodError);
+    });
+  });
+
+  describe("configuration versions through install (R2a-05, 0032)", () => {
+    type Fixture = { objectId: string; versionId: string };
+    type DirectAccess = Omit<TenantAccess, "documents"> & {
+      documents: ConfigDocumentRow[];
+    };
+    let own: Fixture, archived: Fixture, draftOnly: Fixture;
+    let retired: Fixture, current: Fixture, teamBoard: Fixture;
+    let foreign: Fixture;
+    const authority = (access: Record<string, unknown>) =>
+      Object.fromEntries(
+        [
+          "scopes",
+          "workspaceId",
+          "memberRole",
+          "companyLevel",
+          "companyAreas",
+        ].map((key) => [key, access[key]]),
+      );
+
+    /** One data-role install with the given cache, as withTeam runs it. */
+    const installWith = (p: Principal, cache: ConfigBodyCache) =>
+      harness
+        .dataDb()
+        .then((db) =>
+          withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+            installTenantContext(tx, p, snapshot, cache),
+          ),
+        );
+    /** A direct data-role install, signed as installTenantContext signs, with a forged hint. */
+    const directInstall = (p: Principal, hint: (string | null)[]) =>
+      harness.dataDb().then((db) =>
+        withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+          const key = Buffer.from(
+            process.env.TENANT_CONTEXT_SIGNING_KEY!,
+            "base64url",
+          );
+          const payload = JSON.stringify({
+            aud: "recruitmentos-tenant-context-v1",
+            kid: createHash("sha256").update(key).digest("hex").slice(0, 16),
+            env: snapshot.env,
+            pid: Number(snapshot.pid),
+            xid: snapshot.xid,
+            team: p.teamId,
+            actor: p.userId,
+            auth: p.authType,
+            token: p.authType === "token" ? (p.tokenId ?? null) : null,
+            scopes: SCOPES.filter((scope) => p.scopes.includes(scope)),
+            exp: Number(snapshot.now) + 60_000,
+          });
+          const signature = createHmac("sha256", key)
+            .update(payload)
+            .digest("hex");
+          const { rows } = await tx.execute<{ access: DirectAccess }>(
+            sql`select tenant_context.install(${payload}, ${signature}, ${sql.param(hint)}::text[]) as access`,
+          );
+          return rows[0].access;
+        }),
+      );
+    const published = async (p: Principal, type: ConfigType, key: string) => {
+      const fixture = await draft(p, type, key);
+      await run(() => publishConfigVersion(p, fixture.versionId));
+      return fixture;
+    };
+    /** The current published versions of a workspace and team, read as the superuser. */
+    const expected = async (workspace: string, team: string) =>
+      Object.fromEntries(
+        (
+          await look<{ object: string; version: string }>(
+            `SELECT o.id::text AS object, v.id::text AS version FROM app.config_objects o
+             JOIN app.config_versions v ON v.id = o.current_version_id AND v.state = 'published'
+             WHERE o.workspace_id = $1 AND o.archived_at IS NULL AND (o.team_id IS NULL OR o.team_id = $2)`,
+            [workspace, team],
+          )
+        ).map((row) => [row.object, row.version]),
+      );
+
+    beforeAll(async () => {
+      own = await published(owner, "workflow", "hint-workflow");
+      archived = await published(owner, "board", "hint-archived");
+      await run(() => archiveConfigObject(owner, archived.objectId));
+      draftOnly = await draft(owner, "template", "hint-draft");
+      retired = await published(owner, "kind-schema", "hint-retired");
+      current = await published(owner, "kind-schema", "hint-retired");
+      await run(() => retireConfigVersion(owner, retired.versionId));
+      teamBoard = await published(ownerB, "task-board", "hint-board");
+      // The other workspace's published object, written by the owner as the migration owner would.
+      await harness.asOwner();
+      const objectId = (
+        await harness.client.query<{ id: string }>(
+          `INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ('${OTHER}', 'workflow', 'hint-foreign', 'cfg-owner-x') RETURNING id`,
+        )
+      ).rows[0].id;
+      const versionId = (
+        await harness.client.query<{ id: string }>(
+          `INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) VALUES ('${objectId}', '${OTHER}', 'published', 1, '{"label":"Fictional foreign published workflow"}', now()) RETURNING id`,
+        )
+      ).rows[0].id;
+      await harness.client.query(
+        `UPDATE app.config_objects SET current_version_id = '${versionId}' WHERE id = '${objectId}'`,
+      );
+      foreign = { objectId, versionId };
+    });
+
+    it("returns the current versions of the workspace and the context's own team, with verified bodies", async () => {
+      const access = await installWith(owner, new ConfigBodyCache());
+      expect(access.versions).toEqual(await expected(COMPANY, owner.teamId));
+      expect(access.versions[own.objectId]).toBe(own.versionId);
+      expect(access.versions[current.objectId]).toBe(current.versionId);
+      for (const absent of [archived, draftOnly, teamBoard, foreign])
+        expect(access.versions).not.toHaveProperty(absent.objectId);
+      const ids = Object.values(access.versions);
+      for (const absent of [retired, draftOnly, teamBoard, foreign])
+        expect(ids).not.toContain(absent.versionId);
+      expect(Object.keys(access.documents).sort()).toEqual([...ids].sort());
+      for (const [objectId, versionId] of Object.entries(access.versions)) {
+        const stored = await version(versionId);
+        expect(access.documents[versionId]).toMatchObject({
+          versionId,
+          objectId,
+          number: stored.number,
+          bodySha256: stored.body_sha256,
+          body: stored.body,
+        });
+      }
+      expect(access.documents[own.versionId]).toEqual({
+        versionId: own.versionId,
+        objectId: own.objectId,
+        type: "workflow",
+        key: "hint-workflow",
+        number: 1,
+        bodySha256: (await version(own.versionId)).body_sha256,
+        body: { label: "Fictional hint-workflow" },
+      });
+      // Team B sees its own board and not team A's; the other workspace sees only its own object.
+      const teamB = await installWith(ownerB, new ConfigBodyCache());
+      expect(teamB.versions).toEqual(await expected(COMPANY, ownerB.teamId));
+      expect(teamB.versions[teamBoard.objectId]).toBe(teamBoard.versionId);
+      const other = await installWith(ownerX, new ConfigBodyCache());
+      expect(other.versions).toEqual({
+        [foreign.objectId]: foreign.versionId,
+      });
+      expect(Object.keys(other.documents)).toEqual([foreign.versionId]);
+    });
+
+    it("never returns another workspace's or team's version for a forged hint, and changes no authority", async () => {
+      const empty = await directInstall(owner, []);
+      const forged = await directInstall(owner, [
+        foreign.versionId,
+        teamBoard.versionId,
+        retired.versionId,
+        draftOnly.versionId,
+        "fictional-not-a-uuid",
+        null,
+        own.versionId,
+        own.versionId,
+      ]);
+      for (const result of [empty, forged]) {
+        const text = JSON.stringify(result);
+        for (const hidden of [
+          foreign.versionId,
+          foreign.objectId,
+          teamBoard.versionId,
+          teamBoard.objectId,
+          "Fictional foreign published workflow",
+          "Fictional hint-board",
+        ])
+          expect(text).not.toContain(hidden);
+      }
+      expect(authority(forged)).toEqual(authority(empty));
+      expect(authority(empty)).toEqual({
+        scopes: owner.scopes,
+        workspaceId: COMPANY,
+        memberRole: "owner",
+        companyLevel: "owner",
+        companyAreas: [],
+      });
+      expect(forged.versions).toEqual(empty.versions);
+      // Only the caller's own current version leaves documents; the list stays ordered by id.
+      const listed = (result: DirectAccess) =>
+        result.documents.map((document) => document.versionId);
+      expect(listed(empty)).toEqual(Object.values(empty.versions).sort());
+      expect(listed(forged)).toEqual(
+        listed(empty).filter((id) => id !== own.versionId),
+      );
+      // The body is the stored text, so its hash checks byte for byte.
+      for (const document of empty.documents)
+        expect(
+          createHash("sha256").update(document.body, "utf8").digest("hex"),
+        ).toBe(document.bodySha256);
+      // A token context, and the other workspace's context naming this workspace's version.
+      const token = await directInstall(ownerToken, [foreign.versionId]);
+      expect(token.versions).toEqual(empty.versions);
+      expect(await directInstall(ownerX, [own.versionId])).toMatchObject({
+        workspaceId: OTHER,
+        versions: { [foreign.objectId]: foreign.versionId },
+      });
+    });
+
+    it("shows a publish to the next install of two independent caches", async () => {
+      const [first, second] = [new ConfigBodyCache(), new ConfigBodyCache()];
+      const v1 = await published(owner, "workflow", "hint-visible");
+      for (const cache of [first, second]) {
+        await installWith(owner, cache);
+        expect(cache.ids()).toContain(v1.versionId);
+      }
+      const v2 = await draft(
+        owner,
+        "workflow",
+        "hint-visible",
+        "Fictional visible workflow 2",
+      );
+      expect(await run(() => publishConfigVersion(owner, v2.versionId))).toBe(
+        2,
+      );
+      const add = vi.spyOn(second, "add");
+      for (const cache of [first, second]) {
+        const access = await installWith(owner, cache);
+        expect(access.versions[v1.objectId]).toBe(v2.versionId);
+        expect(access.documents[v2.versionId].body).toEqual({
+          label: "Fictional visible workflow 2",
+        });
+        expect(access.documents).not.toHaveProperty(v1.versionId);
+        expect(cache.ids()).toContain(v2.versionId);
+      }
+      // The second cache had not named version 2 in its hint, so the response carried its body.
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add.mock.calls[0].map((row) => row.versionId)).toEqual([
+        v2.versionId,
+      ]);
+    });
+
+    it("asks again for an evicted body and still serves the whole set", async () => {
+      const cache = new ConfigBodyCache(64);
+      const add = vi.spyOn(cache, "add");
+      const first = await installWith(owner, cache);
+      const ids = Object.values(first.versions);
+      expect(ids.length).toBeGreaterThan(1);
+      expect(cache.bytes).toBeLessThanOrEqual(64);
+      expect(cache.ids().length).toBeLessThan(ids.length);
+      const evicted = ids.filter((id) => !cache.ids().includes(id));
+      const second = await installWith(owner, cache);
+      expect(second.versions).toEqual(first.versions);
+      expect(second.documents).toEqual(first.documents);
+      expect(add.mock.calls[1].map((row) => row.versionId)).toEqual(
+        expect.arrayContaining(evicted),
+      );
+    });
+
+    it("gives a company owner's token context the same versions and still refuses every write", async () => {
+      const session = await installWith(owner, new ConfigBodyCache());
+      const token = await installWith(ownerToken, new ConfigBodyCache());
+      expect(token.versions).toEqual(session.versions);
+      expect(token.documents).toEqual(session.documents);
+      const pending = await draft(owner, "workflow", "hint-workflow");
+      for (const call of [
+        () =>
+          createConfigDraft(ownerToken, {
+            type: "workflow",
+            key: "hint-token",
+            body: { label: "Denied" },
+          }),
+        () =>
+          updateConfigDraft(ownerToken, pending.versionId, {
+            body: { label: "Denied" },
+          }),
+        () => publishConfigVersion(ownerToken, pending.versionId),
+        () => retireConfigVersion(ownerToken, retired.versionId),
+        () => archiveConfigObject(ownerToken, own.objectId),
+        () => saveConfigLayout(ownerToken, pending.versionId, { nodes: [] }),
+      ])
+        await expect(run<unknown>(call)).rejects.toMatchObject({
+          status: 403,
+          code: "config_forbidden",
+        });
+    });
+
+    it("reads the current body from the access state without a statement", async () => {
+      const access = await installWith(owner, new ConfigBodyCache());
+      const teamB = await installWith(ownerB, new ConfigBodyCache());
+      const query = vi.spyOn(harness.client, "query");
+      const exec = vi.spyOn(harness.client, "exec");
+      try {
+        expect(currentConfigBody(access, "workflow", "hint-workflow")).toEqual({
+          versionId: own.versionId,
+          number: 1,
+          body: { label: "Fictional hint-workflow" },
+        });
+        expect(
+          currentConfigBody(access, "kind-schema", "hint-retired"),
+        ).toMatchObject({ versionId: current.versionId, number: 2 });
+        expect(currentConfigBody(access, "board", "hint-archived")).toBeNull();
+        expect(currentConfigBody(access, "template", "hint-draft")).toBeNull();
+        expect(
+          currentConfigBody(access, "task-board", "hint-board"),
+        ).toBeNull();
+        expect(
+          currentConfigBody(teamB, "task-board", "hint-board"),
+        ).toMatchObject({ versionId: teamBoard.versionId });
+        expect(query).not.toHaveBeenCalled();
+        expect(exec).not.toHaveBeenCalled();
+      } finally {
+        query.mockRestore();
+        exec.mockRestore();
+      }
+    });
+  });
+});
+
+describe("configuration body cache", () => {
+  /** A fictional document row whose hash matches its body text. */
+  const row = (body: string): ConfigDocumentRow => ({
+    versionId: randomUUID(),
+    objectId: randomUUID(),
+    type: "workflow",
+    key: "fictional",
+    number: 1,
+    bodySha256: createHash("sha256").update(body, "utf8").digest("hex"),
+    body,
+  });
+  /** A body of exactly this many UTF-8 bytes. */
+  const sized = (bytes: number) =>
+    JSON.stringify({ label: "x".repeat(bytes - 12) });
+
+  it("keys entries by version id and checks the hash and shape of every body on entry", () => {
+    const cache = new ConfigBodyCache();
+    const good = row('{"label": "Fictional"}');
+    expect(cache.add(good)[0]).toMatchObject({
+      versionId: good.versionId,
+      body: { label: "Fictional" },
+    });
+    expect(cache.ids()).toEqual([good.versionId]);
+    expect(cache.entries().get(good.versionId)?.body).toEqual({
+      label: "Fictional",
+    });
+    const before = cache.bytes;
+    for (const bad of [
+      { ...row('{"label": "Fictional"}'), bodySha256: "0".repeat(64) },
+      { ...row('{"label": "Fictional"}'), body: '{"label": "Forged"}' },
+      row('["Fictional"]'),
+      row("null"),
+      row("not json"),
+    ]) {
+      expect(() => cache.add(bad)).toThrow();
+      // One bad row refuses the whole batch, so the good row beside it is not stored either.
+      const beside = row('{"label": "Fictional beside"}');
+      expect(() => cache.add(beside, bad)).toThrow();
+      expect(cache.ids()).toEqual([good.versionId]);
+      expect(cache.bytes).toBe(before);
+    }
+  });
+
+  it("stays at or under 8 MiB while about 500 KiB bodies are added past it", () => {
+    const cache = new ConfigBodyCache();
+    expect(cache.cap).toBe(CONFIG_CACHE_BYTES);
+    expect(CONFIG_CACHE_BYTES).toBe(8_388_608);
+    const added: string[] = [];
+    for (let index = 0; index < 24; index++) {
+      const entry = row(sized(512_000));
+      cache.add(entry);
+      added.push(entry.versionId);
+      expect(cache.bytes).toBeLessThanOrEqual(CONFIG_CACHE_BYTES);
+    }
+    // 16 bodies of 512,000 bytes fit; the eight least recently used went first.
+    expect(cache.ids()).toEqual(added.slice(8));
+    expect(cache.bytes).toBe(16 * 512_000);
+    // A body larger than the cap is returned but never stored.
+    const huge = row(sized(CONFIG_CACHE_BYTES + 1));
+    expect(cache.add(huge)).toHaveLength(1);
+    expect(cache.ids()).not.toContain(huge.versionId);
+    expect(cache.bytes).toBe(16 * 512_000);
+  });
+
+  it("evicts the least recently used entry first; a used entry survives", () => {
+    const cache = new ConfigBodyCache(300);
+    const [a, b, c, d] = [1, 2, 3, 4].map(() => row(sized(100)));
+    cache.add(a, b, c);
+    cache.use(a.versionId);
+    cache.add(d);
+    expect(cache.ids()).toEqual([c.versionId, a.versionId, d.versionId]);
+    expect(cache.bytes).toBe(300);
+    cache.use(b.versionId);
+    expect(cache.ids()).not.toContain(b.versionId);
+    cache.clear();
+    expect([cache.ids(), cache.bytes]).toEqual([[], 0]);
+  });
+
+  it("fails the install closed and caches nothing for a bad hash, a missing body or another object's body", async () => {
+    const principal: Principal = {
+      userId: "cfg-fake-owner",
+      teamId: "cfg-fake-team",
+      role: "owner",
+      scopes: [],
+      authType: "session",
+    };
+    const snapshot = { pid: 1, xid: "1", env: randomUUID(), now: "0" };
+    /** A transaction whose one statement returns this install result. */
+    const returning = (versions: object, documents: ConfigDocumentRow[]) =>
+      ({
+        execute: () =>
+          Promise.resolve({
+            rows: [
+              {
+                access: {
+                  scopes: [],
+                  workspaceId: COMPANY,
+                  memberRole: "owner",
+                  companyLevel: null,
+                  companyAreas: [],
+                  versions,
+                  documents,
+                },
+              },
+            ],
+          }),
+      }) as unknown as TeamTx;
+    const good = row('{"label": "Fictional"}');
+    const held = row('{"label": "Fictional held"}');
+    const bad = row('{"label": "Fictional bad"}');
+    const cases: [object, ConfigDocumentRow[]][] = [
+      // A body that does not match its hash, beside a good one.
+      [
+        { [good.objectId]: good.versionId, [bad.objectId]: bad.versionId },
+        [good, { ...bad, bodySha256: "0".repeat(64) }],
+      ],
+      // A current version with no body from the response or the cache.
+      [
+        { [good.objectId]: good.versionId, [randomUUID()]: randomUUID() },
+        [good],
+      ],
+      // A body of another object under this object's version.
+      [{ [randomUUID()]: good.versionId }, [good]],
+      // A cached body of another object.
+      [{ [randomUUID()]: held.versionId }, []],
+    ];
+    for (const [versions, documents] of cases) {
+      const cache = new ConfigBodyCache();
+      cache.add(held);
+      await expect(
+        installTenantContext(
+          returning(versions, documents),
+          principal,
+          snapshot,
+          cache,
+        ),
+      ).rejects.toThrow(Error);
+      expect(cache.ids()).toEqual([held.versionId]);
+    }
+    // The same set, complete and verified, is served from the response and the cache.
+    const cache = new ConfigBodyCache();
+    cache.add(held);
+    const access = await installTenantContext(
+      returning(
+        { [good.objectId]: good.versionId, [held.objectId]: held.versionId },
+        [good],
+      ),
+      principal,
+      snapshot,
+      cache,
+    );
+    expect(Object.keys(access.documents).sort()).toEqual(
+      [good.versionId, held.versionId].sort(),
+    );
+    // Adding and using both count as use: the held entry was used last.
+    expect(cache.ids()).toEqual([good.versionId, held.versionId]);
+  });
+
+  it("freezes cached bodies so no caller can change them", () => {
+    const cache = new ConfigBodyCache();
+    const entry = row(
+      '{"label": "Fictional", "nested": {"options": ["Fictional option"]}}',
+    );
+    const [document] = cache.add(entry);
+    const body = document.body as {
+      label: string;
+      nested: { options: string[] };
+    };
+    expect(Object.isFrozen(document)).toBe(true);
+    expect(Object.isFrozen(body.nested.options)).toBe(true);
+    expect(() => {
+      body.label = "Changed";
+    }).toThrow(TypeError);
+    expect(() => body.nested.options.push("Changed")).toThrow(TypeError);
+    expect(cache.entries().get(entry.versionId)?.body).toEqual({
+      label: "Fictional",
+      nested: { options: ["Fictional option"] },
     });
   });
 });

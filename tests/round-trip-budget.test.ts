@@ -4,6 +4,12 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 
 import { getVerifiedSession } from "@/lib/auth-session";
+import {
+  configBodyCache,
+  createConfigDraft,
+  publishConfigVersion,
+} from "@/lib/config-store";
+import { withTeam } from "@/lib/db-team";
 import { bootstrapTeam, createRecord, listRecords } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
@@ -204,5 +210,110 @@ describe("database round trips per request", () => {
       id: missing,
     });
     expect(response.status).toBe(404);
+  });
+
+  // Configuration versions and bodies come back in the install statement (R2a-05, 0032).
+  describe("with a published company configuration object", () => {
+    let versionId: string;
+    let moveTo = 0;
+    let stage: "Interview" | "Screening" = "Interview";
+
+    /** The six common requests, in the order of the cases above; returns their round trips. */
+    async function measure(beforeEach: () => void) {
+      const counts: number[] = [];
+      const record = async (
+        method: "GET" | "PATCH",
+        path: string,
+        params: Record<string, string>,
+        body?: unknown,
+      ) => {
+        beforeEach();
+        const result = await call(method, path, params, body);
+        expect(result.status).toBe(200);
+        counts.push(result.roundTrips);
+        return result.body.data;
+      };
+      await record("GET", "/api/v1/tasks?page=1&pageSize=25", {
+        resource: "tasks",
+      });
+      await record("GET", `/api/v1/candidates/${candidate.id}`, {
+        resource: "candidates",
+        id: candidate.id,
+      });
+      moveTo = 1 - moveTo;
+      task = await record(
+        "PATCH",
+        `/api/v1/tasks/${task.id}`,
+        { resource: "tasks", id: task.id },
+        { version: task.version, bucketId: buckets[moveTo].id },
+      );
+      stage = stage === "Interview" ? "Screening" : "Interview";
+      application = await record(
+        "PATCH",
+        `/api/v1/applications/${application.id}`,
+        { resource: "applications", id: application.id },
+        { version: application.version, data: { stage } },
+      );
+      await record("GET", `/api/v1/vacancies/${vacancy.id}`, {
+        resource: "vacancies",
+        id: vacancy.id,
+      });
+      beforeEach();
+      const response = await overviewRoute(
+        new Request(`${ORIGIN}/api/v1/overview`, {
+          headers: { origin: ORIGIN, "x-team-id": owner.teamId },
+        }),
+      );
+      expect(response.status).toBe(200);
+      const timing = response.headers.get("server-timing") ?? "";
+      expect(timing).toMatch(TIMING);
+      counts.push(Number(TIMING.exec(timing)![1]));
+      return counts;
+    }
+
+    beforeAll(async () => {
+      // The budget owner is the first seeded user, so the company owner (0028).
+      ({ versionId } = await createConfigDraft(owner, {
+        type: "workflow",
+        key: "budget-workflow",
+        body: { label: "Fictional budget workflow" },
+      }));
+      await publishConfigVersion(owner, versionId);
+      task = (
+        await listRecords(owner, "tasks", new URLSearchParams())
+      ).data.find((row) => row.id === task.id)!;
+      application = (
+        await listRecords(owner, "applications", new URLSearchParams())
+      ).data.find((row) => row.id === application.id)!;
+      moveTo = buckets.findIndex((bucket) => bucket.id === task.bucketId);
+      stage = (application.data as { stage: typeof stage }).stage;
+    });
+
+    it("keeps every request within budget with a cold cache", async () => {
+      expect(await measure(() => configBodyCache.clear())).toEqual([
+        6, 6, 11, 11, 6, 15,
+      ]);
+      configBodyCache.clear();
+      const access = await withTeam(owner, (tx, state) =>
+        Promise.resolve(state),
+      );
+      expect(Object.values(access.versions)).toContain(versionId);
+      expect(access.documents[versionId].body).toEqual({
+        label: "Fictional budget workflow",
+      });
+      expect(configBodyCache.ids()).toContain(versionId);
+    });
+
+    it("keeps every request within budget with a warm cache", async () => {
+      expect(configBodyCache.ids()).toContain(versionId);
+      expect(await measure(() => {})).toEqual([6, 6, 11, 11, 6, 15]);
+      const access = await withTeam(owner, (tx, state) =>
+        Promise.resolve(state),
+      );
+      expect(access.documents[versionId].body).toEqual({
+        label: "Fictional budget workflow",
+      });
+      expect(configBodyCache.ids()).toContain(versionId);
+    });
   });
 });
