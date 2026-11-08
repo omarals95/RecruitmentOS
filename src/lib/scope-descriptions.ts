@@ -16,9 +16,10 @@ export const scopeDescriptions: Record<Scope, string> = {
 export const mcpScopeDescriptions: Record<McpScope, string> = {
   "candidates:read":
     "Search candidates and read their stated facts and evidence summaries",
-  "recruitment:read": "Read vacancies, applications, tasks and interviews",
+  "recruitment:read":
+    "Read job roles, vacancies, applications, tasks, interviews, offers and onboarding",
   "cvs:read": "See CV file names, types and sizes, but not CV contents",
   "candidates:write": "Add new candidates",
   "recruitment:write":
-    "Add comments to vacancies and applications; comments on candidates also need candidates:read and candidates:write",
+    "Create, update, archive and restore job roles, vacancies, applications, interviews, offers and onboarding, move application stages and add comments; comments on candidates also need candidates:read and candidates:write",
 };

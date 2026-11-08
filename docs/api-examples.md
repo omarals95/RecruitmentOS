@@ -61,6 +61,67 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/applications/bulk" \
 
 The response is `{data, existing, created, skipped}`. `data` lists the applications this request created and `created` is its length. `existing` lists the active applications that already existed for the vacancy and requested candidates; `skipped` equals its length. Without `recruitment:read`, each `existing` entry contains only `id`, `kind`, `candidateId` and `vacancyId`, never another user's application details. A pair that already has an active application is never duplicated, so a retry after an uncertain result, with or without the key, reports the earlier applications in `existing`.
 
+## Create a vacancy
+
+`POST /api/v1/vacancies` needs `recruitment:write`. `status` defaults to `Draft`; send `Open` to open the vacancy at once. `jobRoleId` is optional and must name an active job role in the team.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: vacancy-fictional-payroll-1" \
+  --data '{"jobRoleId":"5a1d7e3c-2b9f-4c6a-8d0e-1f2a3b4c5d6e","data":{"title":"Fictional Payroll Analyst","department":"Finance","location":"Dubai","openings":2,"status":"Open"}}'
+```
+
+## Add a candidate to a vacancy
+
+`POST /api/v1/applications` needs `recruitment:write`. A candidate has at most one active application per vacancy; a second one returns 409 `duplicate_record`. `stage` defaults to `Sourced`.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/applications" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: application-fictional-1" \
+  --data '{"candidateId":"3f6c1d2e-8a4b-4c7d-9e1f-2a3b4c5d6e7f","vacancyId":"7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b","data":{"stage":"Screening","source":"Fictional referral"}}'
+```
+
+## Schedule an interview
+
+`POST /api/v1/interviews` needs `recruitment:write`. `startAt` is ISO 8601 with an offset; it is stored in UTC and shown in Asia/Dubai. A `meetingUrl` must be http or https and is never opened by RecruitmentOS.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/interviews" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: interview-fictional-1" \
+  --data '{"applicationId":"9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","data":{"title":"Fictional first interview","startAt":"2026-11-12T14:30:00+04:00","minutes":45,"interviewer":"Fictional Interviewer","meetingUrl":"https://meet.example.com/fictional-room"}}'
+```
+
+## Move an application to another stage
+
+`PATCH /api/v1/applications/{id}` needs `recruitment:write` and the application's latest `version`. A 409 `version_conflict` means it changed since you read it.
+
+```bash
+curl --fail-with-body -X PATCH "$RECRUITMENTOS_URL/api/v1/applications/9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"version":3,"data":{"stage":"Interview"}}'
+```
+
+Over REST a reason for the move is a separate comment: `POST /api/v1/comments` with `{"parentRecordId":"<application id>","data":{"body":"Fictional reason"}}`. The MCP tool `move_application_stage` writes the stage and its reason comment in one step.
+
+## Create an offer
+
+`POST /api/v1/offers` needs `recruitment:write`. `amount` is a decimal string, never a number; `currency` defaults to `AED` and `status` to `Draft`. Change the status later with `PATCH /api/v1/offers/{id}` and the offer's `version`.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/offers" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: offer-fictional-1" \
+  --data '{"applicationId":"9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","data":{"title":"Fictional Payroll Analyst offer","amount":"15000.00","currency":"AED","payPeriod":"Monthly","expiryDate":"2026-12-01"}}'
+```
+
 ## Upload a CV
 
 CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private storage.

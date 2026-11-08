@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import {
   afterAll,
@@ -29,7 +29,7 @@ import { GET as activityRoute } from "../src/app/api/v1/activity/route";
 import { GET as overviewRoute } from "../src/app/api/v1/overview/route";
 import { GET as candidatesRoute } from "../src/app/api/v1/[resource]/route";
 import { activity } from "../src/db/schema";
-import { createTokenMaterial, hashToken } from "../src/lib/api-token-policy";
+import { createTokenMaterial } from "../src/lib/api-token-policy";
 import { rateLimitClientKey } from "../src/lib/client-ip";
 import { withTeam } from "../src/lib/db-team";
 import { TOOLS } from "../src/lib/mcp/tools";
@@ -49,9 +49,9 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import { ORIGIN, mcpHarness } from "./helpers/mcp";
 import { CLIENT_IP, stubLocalAuthReadiness } from "./helpers/readiness";
 
-const ORIGIN = "http://localhost:3000";
 const TEAM = "mcp-team";
 const OTHER_TEAM = "mcp-other-team";
 /** Fictional values that only sit in sensitive fields or source copies of them. */
@@ -67,27 +67,38 @@ const INJECTION =
 const TOOL_NAMES = [
   "search_candidates",
   "get_candidate",
+  "create_candidate",
+  "list_job_roles",
+  "create_job_role",
+  "update_job_role",
   "list_vacancies",
   "get_vacancy",
+  "create_vacancy",
+  "update_vacancy",
   "list_applications",
-  "list_tasks",
+  "get_application",
+  "create_application",
+  "bulk_create_applications",
+  "update_application",
+  "move_application_stage",
   "list_interviews",
+  "schedule_interview",
+  "update_interview",
+  "list_offers",
+  "create_offer",
+  "update_offer",
+  "list_onboarding",
+  "create_onboarding",
+  "update_onboarding",
+  "list_checklist_items",
+  "create_checklist_item",
+  "update_checklist_item",
+  "list_tasks",
   "get_overview",
-  "create_candidate",
   "add_comment",
+  "archive_record",
+  "restore_record",
 ];
-type Result = {
-  isError?: boolean;
-  structuredContent: {
-    untrustedData?: boolean;
-    notice?: string;
-    data?: unknown;
-    pagination?: { page: number; pageSize: number; total: number };
-    error?: { code: string; message: string };
-  };
-  content: { type: string; text: string }[];
-};
-
 const session = (userId: string, role: Principal["role"]): Principal => ({
   userId,
   teamId: TEAM,
@@ -114,136 +125,157 @@ describe("MCP endpoint over real migrations and RLS", () => {
     | "interview"
     | "view"
     | "foreignCandidate"
-    | "foreignVacancy",
+    | "foreignVacancy"
+    | "scopeApplicant"
+    | "scopeRole"
+    | "scopeVacancy"
+    | "scopeApplication"
+    | "scopeInterview"
+    | "scopeOffer"
+    | "scopeOnboarding"
+    | "scopeChecklist"
+    | "archiveRole",
     string
   >;
-  let rpc = 0;
-
-  /** Runs fixture inspection or setup as the database owner, outside RLS. */
-  async function asOwner<T>(work: () => Promise<T>): Promise<T> {
-    await fixture.client.exec("RESET ROLE");
-    try {
-      return await work();
-    } finally {
-      await fixture.client.exec("SET ROLE recruitment_test_runtime");
-    }
-  }
-  const query = <T>(text: string, params: unknown[] = []) =>
-    asOwner(async () => (await fixture.client.query<T>(text, params)).rows);
-  const count = async (text: string, params: unknown[] = []) =>
-    (await query<{ count: number }>(text, params))[0].count;
-
-  async function apiToken(
-    userId: string,
-    scopes: readonly string[],
-    teamId = TEAM,
-  ) {
-    const material = createTokenMaterial();
-    const id = randomUUID();
-    await fixture.client.query(
-      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
-        VALUES($1,$2,$3,'Fictional MCP token',$4,$5,$6::jsonb,now()+interval '1 day')`,
-      [
-        id,
-        teamId,
-        userId,
-        material.tokenHash,
-        material.prefix,
-        JSON.stringify(scopes),
-      ],
-    );
-    return { id, token: material.token };
-  }
-  /** A consented OAuth grant with one access token, written as the token endpoint would. */
-  async function oauthAccess(userId: string, scopes: readonly string[]) {
-    const clientId = `ros_client_${randomBytes(16).toString("base64url")}`;
-    await fixture.client.query(
-      `INSERT INTO auth.oauth_clients(id,name,redirect_uris) VALUES($1,'Fictional Connector','["https://claude.ai/api/mcp/auth_callback"]')`,
-      [clientId],
-    );
-    const grant = await apiToken(userId, scopes);
-    await fixture.client.query(
-      "UPDATE auth.api_tokens SET oauth_client_id=$1 WHERE id=$2",
-      [clientId, grant.id],
-    );
-    const token = `ros_oat_${randomBytes(32).toString("base64url")}`;
-    await fixture.client.query(
-      `INSERT INTO auth.oauth_tokens(grant_id,kind,token_hash,audience,expires_at)
-        VALUES($1,'access',$2,'${ORIGIN}/api/mcp',now()+interval '1 hour')`,
-      [grant.id, hashToken(token)],
-    );
-    return { clientId, id: grant.id, token };
-  }
-  function post(
-    token: string | null,
-    body: unknown,
-    headers: Record<string, string> = {},
-  ) {
-    return mcpRoute.POST(
-      new Request(`${ORIGIN}/api/mcp`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream",
-          "x-forwarded-for": CLIENT_IP,
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...headers,
-        },
-        body: typeof body === "string" ? body : JSON.stringify(body),
+  const {
+    asOwner,
+    query,
+    count,
+    apiToken,
+    oauthAccess,
+    post,
+    message,
+    rpcResult,
+    listNames,
+    call,
+    data,
+    toolError,
+  } = mcpHarness(() => fixture, TEAM);
+  const version = async (id: string) =>
+    (
+      await query<{ version: number }>(
+        "SELECT version FROM app.records WHERE id=$1",
+        [id],
+      )
+    )[0].version;
+  const key = () => `scope-${randomUUID()}`;
+  /** Valid arguments for one tool; updates read the record's current version first. */
+  const validArgs = async (name: string): Promise<Record<string, unknown>> => {
+    const args: Record<string, () => Promise<Record<string, unknown>>> = {
+      search_candidates: async () => ({}),
+      get_candidate: async () => ({ id: ids.candidate }),
+      create_candidate: async () => ({
+        idempotencyKey: key(),
+        name: "Scope Check Fictional",
       }),
-    );
-  }
-  const message = (method: string, params?: unknown) => ({
-    jsonrpc: "2.0",
-    id: ++rpc,
-    method,
-    ...(params === undefined ? {} : { params }),
-  });
-  async function rpcResult(token: string, method: string, params?: unknown) {
-    const response = await post(token, message(method, params));
-    expect(response.status, method).toBe(200);
-    const body = await response.json();
-    expect(body.error, JSON.stringify(body.error)).toBeUndefined();
-    return body.result;
-  }
-  const listNames = async (token: string) =>
-    ((await rpcResult(token, "tools/list")).tools as { name: string }[]).map(
-      (item) => item.name,
-    );
-  const call = async (token: string, name: string, args: unknown = {}) =>
-    (await rpcResult(token, "tools/call", {
-      name,
-      arguments: args,
-    })) as Result;
-  const data = <T = Record<string, unknown>>(result: Result) => {
-    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(
-      true,
-    );
-    return result.structuredContent.data as T;
+      list_job_roles: async () => ({}),
+      create_job_role: async () => ({
+        idempotencyKey: key(),
+        title: "Fictional Scope Role",
+      }),
+      update_job_role: async () => ({
+        id: ids.scopeRole,
+        version: await version(ids.scopeRole),
+        department: "Fictional Finance",
+      }),
+      list_vacancies: async () => ({}),
+      get_vacancy: async () => ({ id: ids.vacancy }),
+      create_vacancy: async () => ({
+        idempotencyKey: key(),
+        title: "Fictional Scope Opening",
+      }),
+      update_vacancy: async () => ({
+        id: ids.scopeVacancy,
+        version: await version(ids.scopeVacancy),
+        recruiter: "Fictional Recruiter",
+      }),
+      list_applications: async () => ({ vacancyId: ids.vacancy }),
+      get_application: async () => ({ id: ids.application }),
+      create_application: async () => ({
+        idempotencyKey: key(),
+        candidateId: ids.scopeApplicant,
+        vacancyId: ids.scopeVacancy,
+      }),
+      bulk_create_applications: async () => ({
+        idempotencyKey: key(),
+        vacancyId: ids.scopeVacancy,
+        candidateIds: [ids.scopeApplicant],
+      }),
+      update_application: async () => ({
+        id: ids.scopeApplication,
+        version: await version(ids.scopeApplication),
+        owner: "Fictional Owner",
+      }),
+      move_application_stage: async () => ({
+        id: ids.scopeApplication,
+        version: await version(ids.scopeApplication),
+        stage: "Interview",
+      }),
+      list_interviews: async () => ({}),
+      schedule_interview: async () => ({
+        idempotencyKey: key(),
+        applicationId: ids.scopeApplication,
+        title: "Fictional scope interview",
+        startAt: "2026-12-01T09:00:00+04:00",
+      }),
+      update_interview: async () => ({
+        id: ids.scopeInterview,
+        version: await version(ids.scopeInterview),
+        location: "Fictional Room 2",
+      }),
+      list_offers: async () => ({}),
+      create_offer: async () => ({
+        idempotencyKey: key(),
+        applicationId: ids.scopeApplication,
+        title: "Fictional scope offer",
+      }),
+      update_offer: async () => ({
+        id: ids.scopeOffer,
+        version: await version(ids.scopeOffer),
+        status: "Sent",
+      }),
+      list_onboarding: async () => ({}),
+      create_onboarding: async () => ({
+        idempotencyKey: key(),
+        applicationId: ids.application,
+      }),
+      update_onboarding: async () => ({
+        id: ids.scopeOnboarding,
+        version: await version(ids.scopeOnboarding),
+        owner: "Fictional Owner",
+      }),
+      list_checklist_items: async () => ({}),
+      create_checklist_item: async () => ({
+        idempotencyKey: key(),
+        onboardingId: ids.scopeOnboarding,
+        title: "Fictional scope document",
+      }),
+      update_checklist_item: async () => ({
+        id: ids.scopeChecklist,
+        version: await version(ids.scopeChecklist),
+        status: "In progress",
+      }),
+      list_tasks: async () => ({}),
+      get_overview: async () => ({}),
+      add_comment: async () => ({
+        idempotencyKey: key(),
+        parentRecordId: ids.vacancy,
+        body: "Fictional scope check comment.",
+      }),
+      // archive_record runs first, so restore_record finds the role archived.
+      archive_record: async () => ({
+        recordType: "job_role",
+        id: ids.archiveRole,
+        version: await version(ids.archiveRole),
+      }),
+      restore_record: async () => ({
+        recordType: "job_role",
+        id: ids.archiveRole,
+        version: await version(ids.archiveRole),
+      }),
+    };
+    return args[name]();
   };
-  const toolError = (result: Result) => {
-    expect(result.isError).toBe(true);
-    return result.structuredContent.error!.code;
-  };
-  const validArgs = (): Record<string, unknown> => ({
-    search_candidates: {},
-    get_candidate: { id: ids.candidate },
-    list_vacancies: {},
-    get_vacancy: { id: ids.vacancy },
-    list_applications: { vacancyId: ids.vacancy },
-    list_tasks: {},
-    list_interviews: {},
-    get_overview: {},
-    create_candidate: {
-      idempotencyKey: `scope-${randomUUID()}`,
-      name: "Scope Check Fictional",
-    },
-    add_comment: {
-      idempotencyKey: `scope-${randomUUID()}`,
-      parentRecordId: ids.vacancy,
-      body: "Fictional scope check comment.",
-    },
-  });
 
   beforeAll(async () => {
     stubLocalAuthReadiness();
@@ -397,6 +429,65 @@ describe("MCP endpoint over real migrations and RLS", () => {
     ids.foreignVacancy = (
       await createRecord(outsider, "vacancies", {
         data: { title: "Foreign Fictional Vacancy" },
+      })
+    ).id;
+    // Records the write tools change in the per-scope test, apart from the ones above.
+    ids.scopeApplicant = (
+      await createRecord(owner, "candidates", {
+        data: { name: "Scope Fictional Applicant" },
+      })
+    ).id;
+    ids.scopeRole = (
+      await createRecord(owner, "job-roles", {
+        data: { title: "Fictional Scope Role" },
+      })
+    ).id;
+    ids.archiveRole = (
+      await createRecord(owner, "job-roles", {
+        data: { title: "Fictional Archive Role" },
+      })
+    ).id;
+    ids.scopeVacancy = (
+      await createRecord(owner, "vacancies", {
+        data: { title: "Fictional Scope Vacancy", status: "Open" },
+      })
+    ).id;
+    ids.scopeApplication = (
+      await createRecord(owner, "applications", {
+        candidateId: (
+          await createRecord(owner, "candidates", {
+            data: { name: "Scope Fictional Candidate" },
+          })
+        ).id,
+        vacancyId: ids.scopeVacancy,
+        data: { stage: "Screening" },
+      })
+    ).id;
+    ids.scopeInterview = (
+      await createRecord(owner, "interviews", {
+        applicationId: ids.scopeApplication,
+        data: {
+          title: "Fictional scope interview",
+          startAt: "2026-11-20T06:00:00.000Z",
+        },
+      })
+    ).id;
+    ids.scopeOffer = (
+      await createRecord(owner, "offers", {
+        applicationId: ids.scopeApplication,
+        data: { title: "Fictional scope offer" },
+      })
+    ).id;
+    ids.scopeOnboarding = (
+      await createRecord(owner, "onboarding", {
+        applicationId: ids.scopeApplication,
+        data: {},
+      })
+    ).id;
+    ids.scopeChecklist = (
+      await createRecord(owner, "checklist", {
+        onboardingId: ids.scopeOnboarding,
+        data: { title: "Fictional scope document" },
       })
     ).id;
     await asOwner(() =>
@@ -729,6 +820,52 @@ describe("MCP endpoint over real migrations and RLS", () => {
   it("lists, refuses and audits each tool by every one of its required scopes", async () => {
     expect(TOOLS.map((item) => item.name)).toEqual(TOOL_NAMES);
     for (const definition of TOOLS) {
+      expect(definition.name).toMatch(/^[a-z]+(_[a-z]+)+$/);
+      expect(
+        definition.description.length,
+        definition.name,
+      ).toBeLessThanOrEqual(300);
+    }
+    // Annotations by name, for a token with all four read and write scopes.
+    const writer = await apiToken(owner.userId, [
+      "candidates:read",
+      "candidates:write",
+      "recruitment:read",
+      "recruitment:write",
+    ]);
+    const annotations = Object.fromEntries(
+      (
+        (await rpcResult(writer.token, "tools/list")).tools as {
+          name: string;
+          annotations: Record<string, boolean>;
+        }[]
+      ).map((item) => [item.name, item.annotations]),
+    );
+    expect(Object.keys(annotations).sort()).toEqual([...TOOL_NAMES].sort());
+    for (const [name, hints] of Object.entries(annotations))
+      expect(hints, name).toEqual(
+        /^(list|get|search)_/.test(name)
+          ? { readOnlyHint: true, openWorldHint: false }
+          : {
+              readOnlyHint: false,
+              destructiveHint:
+                /^update_/.test(name) ||
+                [
+                  "move_application_stage",
+                  "archive_record",
+                  "restore_record",
+                ].includes(name),
+              idempotentHint: true,
+              openWorldHint: false,
+            },
+      );
+    for (const name of [
+      "add_comment",
+      "bulk_create_applications",
+      "schedule_interview",
+    ])
+      expect(annotations[name].destructiveHint, name).toBe(false);
+    for (const definition of TOOLS) {
       for (const missing of definition.scopes) {
         const held = SCOPES.filter((scope) => scope !== missing);
         const token = await apiToken(owner.userId, held);
@@ -738,7 +875,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
         const result = await call(
           token.token,
           definition.name,
-          validArgs()[definition.name],
+          await validArgs(definition.name),
         );
         expect(toolError(result), definition.name).toBe("scope_required");
         expect(
@@ -754,7 +891,7 @@ describe("MCP endpoint over real migrations and RLS", () => {
       const result = await call(
         exact.token,
         definition.name,
-        validArgs()[definition.name],
+        await validArgs(definition.name),
       );
       expect(
         result.isError,
@@ -770,14 +907,14 @@ describe("MCP endpoint over real migrations and RLS", () => {
       expect(listed.inputSchema.type).toBe("object");
       expect(listed.inputSchema.additionalProperties).toBe(false);
       expect(listed.annotations).toEqual(
-        definition.writes
-          ? {
+        definition.effect === "read"
+          ? { readOnlyHint: true, openWorldHint: false }
+          : {
               readOnlyHint: false,
-              destructiveHint: false,
+              destructiveHint: definition.effect === "change",
               idempotentHint: true,
               openWorldHint: false,
-            }
-          : { readOnlyHint: true, openWorldHint: false },
+            },
       );
     }
     const any = await apiToken(owner.userId, ["candidates:read"]);
@@ -1005,10 +1142,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
     }>(await call(valid.token, "get_vacancy", { id: ids.longVacancy }));
     expect(vacancy.facts.description).toBe("D".repeat(2000));
     expect(vacancy.truncatedFields).toBeUndefined();
-    for (const [name, args] of Object.entries(validArgs()).filter(
-      ([name]) => !["create_candidate", "add_comment"].includes(name),
-    )) {
-      const result = await call(valid.token, name, args);
+    for (const { name } of TOOLS.filter((item) => item.effect === "read")) {
+      const result = await call(valid.token, name, await validArgs(name));
       expect(result.structuredContent.untrustedData, name).toBe(true);
       expect(result.structuredContent.notice, name).toBe(NOTICE);
       expect(result.content).toEqual([
@@ -1109,6 +1244,8 @@ describe("MCP endpoint over real migrations and RLS", () => {
     expect(data(result)).toEqual([
       {
         id: ids.interview,
+        version: 1,
+        archived: false,
         applicationId: ids.application,
         title: "Fictional first interview",
         startAt: "2026-11-05T06:30:00.000Z",
@@ -1519,5 +1656,31 @@ describe("MCP audit rows under the split data role", () => {
         metadata: { tool: "get_candidate", oauthClientId: null },
       },
     ]);
+  });
+
+  it("accepts exactly the names in TOOLS (migration 0024)", async () => {
+    for (const { name } of TOOLS)
+      await withTeam(token, (tx) => tx.execute(audit(name)));
+    for (const name of ["delete_record", "list_members", "create_api_token"])
+      await denied(() => withTeam(token, (tx) => tx.execute(audit(name))));
+    const source = (
+      await (
+        await harness.asSuperuser()
+      ).execute<{ src: string }>(
+        sql`select p.prosrc as src from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'tenant_context' and p.proname = 'audit_mcp_call'`,
+      )
+    ).rows[0].src;
+    const listed = /tool NOT IN \(([^)]*)\)/.exec(source)![1];
+    expect([...listed.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual(
+      TOOLS.map((item) => item.name),
+    );
+    const called = await (
+      await harness.asSuperuser()
+    ).execute<{ tool: string }>(
+      sql`select metadata->>'tool' as tool from app.activity where kind='mcp-tool' and action='mcp.tool_called' order by created_at, id`,
+    );
+    expect(called.rows.map((row) => row.tool).sort()).toEqual(
+      TOOLS.map((item) => item.name).sort(),
+    );
   });
 });
