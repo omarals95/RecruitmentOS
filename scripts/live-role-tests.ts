@@ -17,7 +17,8 @@
  *   config activity row and tenant_context.audit_config refuses a duplicate publish audit, and a
  *   team owner without company authority cannot write company configuration (direct SQL or
  *   tenant_context.publish_config_version) but can write their own team's task board, which
- *   another team cannot read.
+ *   another team cannot read. A recruiter or viewer asserting any directory or plan scope is
+ *   refused, and an owner asserting all eleven scopes is accepted.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -37,8 +38,9 @@
  *   the trigger suspends it). As the owner it makes the team A fixture owner company owner, writes
  *   fixture configuration objects keyed by the run prefix, and briefly inserts a second fixture
  *   workspace (team creation fails on the database while it exists) with one object, removing
- *   both in the same check; the data role commits one task board in fixture team B. It never
- *   changes budgets, keys, roles, grants, policies, migrations or settings beyond
+ *   both in the same check; the data role commits one task board in fixture team B. As the
+ *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
+ *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
@@ -80,7 +82,7 @@ import {
   TRANSACTION_TIMEOUT_MS as APP_TRANSACTION_TIMEOUT_MS,
 } from "../src/db/deadlines.ts";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role.ts";
-import { SCOPES } from "../src/lib/permissions.ts";
+import { SCOPES, roleScopes } from "../src/lib/permissions.ts";
 import { assertTenantContextKey } from "../src/lib/tenant-context.ts";
 
 type Env = Record<string, string | undefined>;
@@ -161,8 +163,15 @@ const CONFIG_TABLES = [
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
-const RECRUITER_SCOPES = SCOPES.filter((scope) => scope !== "imports:write");
-const VIEWER_SCOPES = SCOPES.filter((scope) => scope.endsWith(":read"));
+const RECRUITER_SCOPES = roleScopes("recruiter");
+const VIEWER_SCOPES = roleScopes("viewer");
+/** The directory and plan scopes (0031): owner and admin membership ceilings only. */
+const CEILING_SCOPES = [
+  "directory:read",
+  "directory:write",
+  "plans:read",
+  "plans:write",
+] as const;
 const INSERT_UPLOAD = `INSERT INTO app.uploads(team_id,candidate_id,original_name,mime_type,size_bytes,object_key,
     storage_provider,storage_environment,storage_store,created_by,expires_at)
   VALUES($1,$2,$3,'application/pdf',$4,$5,'blob','development',$6,$7,now() + interval '1 hour') RETURNING id::text AS id`;
@@ -479,6 +488,7 @@ function principals(f: Fixtures) {
   return {
     ownerA: session(f.teams.a, f.users.a1, ALL_SCOPES),
     memberA: session(f.teams.a, f.users.a2, RECRUITER_SCOPES),
+    viewerA: session(f.teams.a, f.users.a2, VIEWER_SCOPES),
     ownerB: session(f.teams.b, f.users.b1, ALL_SCOPES),
     ownerC: session(f.teams.c, f.users.c1, ALL_SCOPES),
     demotedB: session(f.teams.b, f.users.b2, ALL_SCOPES),
@@ -2091,6 +2101,70 @@ async function runChecks(run: Run) {
       ],
     );
   });
+
+  /**
+   * Each directory or plan scope on top of the principal's own is refused, each in its own
+   * transaction; the principal's own scopes are then accepted.
+   */
+  const ceilingHolds = async (probe: Probe, principal: Principal) => {
+    probe.at("outcome");
+    const rejected: Outcome[] = [];
+    for (const scope of CEILING_SCOPES)
+      rejected.push(
+        await transaction(data, async () => {
+          const assertion = await assertionFor(data, signer, {
+            ...principal,
+            scopes: [...principal.scopes, scope],
+          });
+          return attempt(data, installSql, [
+            assertion.payload,
+            assertion.signature,
+          ]);
+        }),
+      );
+    probe.at("positive-control");
+    const { access } = await transaction(data, () =>
+      installAs(data, signer, principal),
+    );
+    return probe.all(...rejected.map(denial), [
+      "positive-control",
+      JSON.stringify(access.scopes) === JSON.stringify(principal.scopes),
+    ]);
+  };
+  await check("scope-ceiling-recruiter", (probe) =>
+    ceilingHolds(probe, p.memberA),
+  );
+  await check("scope-ceiling-viewer", async (probe) => {
+    const setRole = (role: string) =>
+      identity.query("UPDATE auth.member SET role = $2 WHERE id = $1", [
+        f.members.a2,
+        role,
+      ]);
+    probe.at("setup");
+    const changed = await setRole("viewer");
+    let held: boolean;
+    let restored: number | null;
+    try {
+      held =
+        probe.all(["setup", changed.rowCount === 1]) &&
+        (await ceilingHolds(probe, p.viewerA));
+    } finally {
+      restored = (await setRole("recruiter")).rowCount;
+    }
+    probe.at("end-state");
+    return probe.all(["end-state", restored === 1]) && held;
+  });
+  await check("scope-ceiling-owner", (probe) =>
+    transaction(data, async () => {
+      probe.at("outcome");
+      const { access } = await installAs(data, signer, p.ownerA);
+      return probe.all([
+        "outcome",
+        ALL_SCOPES.length === 11 &&
+          JSON.stringify(access.scopes) === JSON.stringify(ALL_SCOPES),
+      ]);
+    }),
+  );
 
   /** A rejected install, then a valid session install and a read on the same connection. */
   const rejectedThenSession = (
