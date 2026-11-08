@@ -78,7 +78,7 @@ describe("storage reference migration and startup check", () => {
       status: 503,
       code: "storage_schema_mismatch",
     });
-    expect(STORAGE_SCHEMA_VERSION).toBe(5);
+    expect(STORAGE_SCHEMA_VERSION).toBe(6);
     await expect(assertStorageSchema(pg)).resolves.toBeUndefined();
   });
 
@@ -87,6 +87,7 @@ describe("storage reference migration and startup check", () => {
     "0017_bulk_intake_tombstones.sql",
     "0018_blob_storage_enablement.sql",
     "0020_speed_log.sql",
+    "0025_mcp_candidate_task_tools.sql",
   ])
     it(`refuses a database migrated only through ${through.slice(0, 4)} and accepts the full set`, async () => {
       const partial = new PGlite();
@@ -104,14 +105,14 @@ describe("storage reference migration and startup check", () => {
     });
 
   it("refuses a marker the owner changed to another version", async () => {
-    await pg.exec("UPDATE db_boundary.storage_schema SET version=6");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version=7");
     try {
       await expect(assertStorageSchema(pg)).rejects.toMatchObject({
         status: 503,
         code: "storage_schema_mismatch",
       });
     } finally {
-      await pg.exec("UPDATE db_boundary.storage_schema SET version=5");
+      await pg.exec("UPDATE db_boundary.storage_schema SET version=6");
     }
   });
 

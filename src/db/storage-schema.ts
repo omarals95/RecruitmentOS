@@ -2,9 +2,9 @@ import { ApiError } from "../lib/errors";
 
 /**
  * The storage reference, ledger, Blob read-lease, team limit, Blob charge release, PUT ticket count,
- * cleanup cooldown and candidate erasure schema this code was written for (`0021`).
+ * cleanup cooldown, candidate erasure and MCP CV text setting schema this code was written for (`0026`).
  */
-export const STORAGE_SCHEMA_VERSION = 5;
+export const STORAGE_SCHEMA_VERSION = 6;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {

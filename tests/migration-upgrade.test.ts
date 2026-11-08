@@ -292,7 +292,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 5 }]);
+    ).toEqual([{ version: 6 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -452,7 +452,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 5 }]);
+    ).toEqual([{ version: 6 }]);
     expect(
       (
         await pg.query<{ name: string }>(

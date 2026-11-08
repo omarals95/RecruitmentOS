@@ -24,6 +24,8 @@ export const dataRoleHelpers = [
   "tenant_context.release_blob_charge(text,uuid)",
   "tenant_context.claim_blob_reconciliation(text)",
   "tenant_context.erase_candidate(uuid,text,text)",
+  "tenant_context.set_mcp_cv_text_access(boolean)",
+  "tenant_context.audit_mcp_cv_read(text,uuid)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text)",

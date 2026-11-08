@@ -1283,6 +1283,141 @@ describe("signed tenant context under separate nonowner data and identity roles"
     ).rejects.toMatchObject(denied);
   });
 
+  it("records MCP CV text reads only through audit_mcp_cv_read and its checks (0026)", async () => {
+    const superuser = await harness.asSuperuser();
+    const upload = async (
+      teamId: string,
+      candidateId: string,
+      ready: boolean,
+    ) => {
+      const [{ id }] = (
+        await superuser.execute<{ id: string }>(
+          sql`INSERT INTO app.uploads(team_id,candidate_id,original_name,mime_type,size_bytes,object_key,storage_provider,storage_environment,storage_store,created_by,expires_at)
+            VALUES (${teamId}, ${candidateId}::uuid, 'fictional-audit-name.pdf', 'application/pdf', 10, ${`teams/${teamId}/cvs/${randomUUID()}`}, 's3', 'development', 'fictional-tenant-bucket', ${teamId === ownerA.teamId ? ownerA.userId : ownerB.userId}, now() + interval '1 hour') RETURNING id`,
+        )
+      ).rows;
+      if (ready)
+        await superuser.execute(
+          sql`UPDATE app.uploads SET status='ready', s3_version_id='fictional-v1', completed_at=now() WHERE id=${id}::uuid`,
+        );
+      return id;
+    };
+    const readyA = await upload(ownerA.teamId, candidateA, true);
+    const pendingA = await upload(ownerA.teamId, candidateA, false);
+    const readyB = await upload(ownerB.teamId, candidateB, true);
+    const reader = await seedApiToken(await harness.asOwner(), memberA, [
+      "cvs:read",
+      "candidates:read",
+    ]);
+    const noCandidates = await seedApiToken(await harness.asOwner(), memberA, [
+      "cvs:read",
+      "recruitment:read",
+    ]);
+    const read = (p: Principal, tool: string, id: string) =>
+      withTeam(p, async (tx) => {
+        const { rows } = await tx.execute<{ candidate: string }>(
+          sql`select tenant_context.audit_mcp_cv_read(${tool}, ${id}::uuid) as candidate`,
+        );
+        return rows[0].candidate;
+      });
+    const rows = async () =>
+      (
+        await (
+          await harness.asSuperuser()
+        ).execute<{
+          record_id: string;
+          actor_type: string;
+          token_id: string;
+          summary: string;
+          metadata: unknown;
+        }>(
+          sql`select record_id, actor_type, token_id, summary, metadata from app.activity where action='mcp.cv_text_read' order by created_at, id`,
+        )
+      ).rows;
+    const refused = { cause: { code: "42501" } };
+    for (const [p, tool, id] of [
+      [memberA, "get_cv_text", readyA],
+      [
+        { ...memberA, scopes: ["cvs:read", "candidates:read"] },
+        "get_cv_text",
+        readyA,
+      ],
+      [reader, "get_cv_text", readyB],
+      [reader, "get_cv_text", pendingA],
+      [reader, "get_cv_text", randomUUID()],
+      [reader, "get_candidate", readyA],
+      [reader, "fetch_cv", readyA],
+      [noCandidates, "get_cv_text", readyA],
+    ] as const)
+      await expect(
+        read(p as Principal, tool, id),
+        `${p.authType} ${tool}`,
+      ).rejects.toMatchObject(refused);
+    await expect(
+      (await asData()).query(
+        `SELECT tenant_context.audit_mcp_cv_read('get_cv_text', '${readyA}')`,
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    expect(await rows()).toEqual([]);
+    expect(await read(reader, "get_cv_texts", readyA)).toBe(candidateA);
+    expect(await rows()).toEqual([
+      {
+        record_id: candidateA,
+        actor_type: "token",
+        token_id: reader.tokenId,
+        summary: "MCP tool get_cv_texts read a CV's text",
+        metadata: {
+          tool: "get_cv_texts",
+          uploadId: readyA,
+          candidateId: candidateA,
+          oauthClientId: null,
+        },
+      },
+    ]);
+    // The team setting off refuses with RQ003 and records nothing.
+    await withTeam(ownerA, (tx) =>
+      tx.execute(sql`select tenant_context.set_mcp_cv_text_access(false)`),
+    );
+    await expect(read(reader, "get_cv_text", readyA)).rejects.toMatchObject({
+      cause: { code: "RQ003" },
+    });
+    await withTeam(ownerA, (tx) =>
+      tx.execute(sql`select tenant_context.set_mcp_cv_text_access(true)`),
+    );
+    expect(await rows()).toHaveLength(1);
+    // No runtime role writes the row itself.
+    await expect(
+      withTeam(reader, (tx) =>
+        tx.insert(activity).values({
+          teamId: reader.teamId,
+          recordId: candidateA,
+          actorId: reader.userId,
+          actorType: "token",
+          tokenId: reader.tokenId,
+          action: "mcp.cv_text_read",
+          kind: "mcp-tool",
+          summary: "Forged CV text read",
+        }),
+      ),
+    ).rejects.toMatchObject(refused);
+    await expect(
+      withTeam(
+        { ...memberA, scopes: ["candidates:write", "cvs:write"] },
+        (tx) =>
+          tx.insert(activity).values({
+            teamId: memberA.teamId,
+            recordId: candidateA,
+            actorId: memberA.userId,
+            actorType: "session",
+            action: "mcp.cv_text_read",
+            kind: "mcp-tool",
+            summary: "Forged CV text read",
+          }),
+      ),
+    ).rejects.toMatchObject(refused);
+    expect(await rows()).toHaveLength(1);
+  });
+
   it("claims a team's Blob cleanup once per 10 minutes only through the cooldown helper", async () => {
     const claim = (p: Principal, store = "store_fictional") =>
       withTeam(p, async (tx) => {

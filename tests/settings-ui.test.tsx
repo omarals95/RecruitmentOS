@@ -183,6 +183,7 @@ describe("CV storage settings", () => {
       maxBytes: null,
       maxFiles: null,
       uploadRequestsPerMinute: null,
+      mcpCvTextEnabled: true,
       usage,
     });
     for (const text of [
@@ -204,6 +205,7 @@ describe("CV storage settings", () => {
       maxBytes: 500_000_000,
       maxFiles: 100,
       uploadRequestsPerMinute: 10,
+      mcpCvTextEnabled: true,
       usage,
     });
     expect(below).toContain("Maximum storage");
@@ -217,6 +219,7 @@ describe("CV storage settings", () => {
         maxBytes: 1_000_000_000,
         maxFiles: 4,
         uploadRequestsPerMinute: null,
+        mcpCvTextEnabled: true,
         usage,
       }),
     ).toContain(belowNotice);
@@ -225,9 +228,32 @@ describe("CV storage settings", () => {
         maxBytes: 1_000_000_000,
         maxFiles: 5,
         uploadRequestsPerMinute: null,
+        mcpCvTextEnabled: true,
         usage,
       }),
     ).not.toContain(belowNotice);
+  });
+
+  it("shows the CV contents checkbox, checked by the saved setting, with its hint", () => {
+    const settings = {
+      maxBytes: null,
+      maxFiles: null,
+      uploadRequestsPerMinute: null,
+      usage,
+    };
+    const checkbox = (markup: string) =>
+      /<input type="checkbox"([^>]*)\/>\s*Connected AI apps can read CV contents<\/label>/.exec(
+        markup,
+      )?.[1];
+    const on = form({ ...settings, mcpCvTextEnabled: true });
+    expect(checkbox(on)).toContain('checked=""');
+    expect(checkbox(on)).toContain('aria-describedby="storage-cv-text-hint"');
+    expect(on).toContain(
+      "Apps connected through MCP with CV permission can read the text of this team&#x27;s CVs. Each read is recorded in Activity.",
+    );
+    const off = form({ ...settings, mcpCvTextEnabled: false });
+    expect(checkbox(off)).toBeDefined();
+    expect(checkbox(off)).not.toContain("checked");
   });
 });
 

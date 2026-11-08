@@ -6,7 +6,10 @@ import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
 
-/** Both storage limits are off (null) or both set; a null rate turns the upload rate limit off. */
+/**
+ * Both storage limits are off (null) or both set; a null rate turns the upload rate limit off.
+ * mcpCvTextEnabled is whether connected AI apps can read CV contents over MCP.
+ */
 export const storageSettingsSchema = z
   .object({
     maxBytes: z
@@ -17,6 +20,7 @@ export const storageSettingsSchema = z
       .nullable(),
     maxFiles: z.number().int().min(1).max(1_000_000).nullable(),
     uploadRequestsPerMinute: z.number().int().min(1).max(600).nullable(),
+    mcpCvTextEnabled: z.boolean(),
   })
   .strict()
   .refine((input) => (input.maxBytes === null) === (input.maxFiles === null), {
@@ -35,7 +39,10 @@ function requireAdmin(p: Principal) {
   if (p.role !== "owner" && p.role !== "admin") throw forbidden();
 }
 
-/** The team's limits and current charges; a team that never reserved storage reads as zero. */
+/**
+ * The team's limits, CV text setting and current charges; a team that never reserved storage reads
+ * as zero, with the setting on.
+ */
 async function readSettings(tx: TeamTx, p: Principal) {
   const [row] = await tx
     .select()
@@ -45,6 +52,7 @@ async function readSettings(tx: TeamTx, p: Principal) {
     maxBytes: row?.maxBytes ?? null,
     maxFiles: row?.maxFiles ?? null,
     uploadRequestsPerMinute: row?.uploadRequestsPerMinute ?? null,
+    mcpCvTextEnabled: row?.mcpCvTextEnabled ?? true,
     usage: {
       usedBytes: row?.usedBytes ?? 0,
       usedFiles: row?.usedFiles ?? 0,
@@ -62,8 +70,9 @@ export async function getStorageSettings(p: Principal) {
 }
 
 /**
- * The owner-run helper rechecks the owner or admin membership, writes the limits and one audit row
- * per actual change. A limit below current usage is accepted: new reservations are then refused.
+ * The owner-run helpers recheck the owner or admin membership and each write their own audit row
+ * only when their own value changed. A limit below current usage is accepted: new reservations are
+ * then refused.
  */
 export async function updateStorageSettings(
   p: Principal,
@@ -74,6 +83,9 @@ export async function updateStorageSettings(
     try {
       await tx.execute(
         sql`select tenant_context.set_storage_limits(${input.maxBytes}::bigint, ${input.maxFiles}::integer, ${input.uploadRequestsPerMinute}::integer)`,
+      );
+      await tx.execute(
+        sql`select tenant_context.set_mcp_cv_text_access(${input.mcpCvTextEnabled}::boolean)`,
       );
     } catch (error) {
       const cause = error instanceof DrizzleQueryError ? error.cause : error;
