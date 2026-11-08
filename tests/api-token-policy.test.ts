@@ -6,6 +6,28 @@ import {
   effectiveTokenScopes,
   parseBearerToken,
 } from "../src/lib/api-token-policy";
+import {
+  API_TOKEN_SCOPES,
+  MCP_SCOPES,
+  SCOPES,
+  roleScopes,
+} from "../src/lib/permissions";
+
+const added = [
+  "directory:read",
+  "directory:write",
+  "plans:read",
+  "plans:write",
+] as const;
+const recruiter = [
+  "candidates:read",
+  "candidates:write",
+  "recruitment:read",
+  "recruitment:write",
+  "cvs:read",
+  "cvs:write",
+];
+const viewer = ["candidates:read", "recruitment:read", "cvs:read"];
 
 describe("personal API token policy", () => {
   it("creates a 256-bit secret and retains only its SHA256 digest for persistence", () => {
@@ -65,6 +87,24 @@ describe("personal API token policy", () => {
         expiresInDays: 0,
       }).success,
     ).toBe(false);
+  });
+
+  it("appends the directory and plan scopes and caps them at owner and admin", () => {
+    expect(SCOPES).toEqual([...recruiter, "imports:write", ...added]);
+    expect(roleScopes("owner")).toEqual([...SCOPES]);
+    expect(roleScopes("admin")).toEqual([...SCOPES]);
+    expect(roleScopes("recruiter")).toEqual(recruiter);
+    expect(roleScopes("viewer")).toEqual(viewer);
+    expect(effectiveTokenScopes([...SCOPES], "recruiter")).toEqual(recruiter);
+    expect(effectiveTokenScopes([...SCOPES], "viewer")).toEqual(viewer);
+    for (const scope of added) {
+      expect(
+        tokenInputSchema.safeParse({ name: "Import", scopes: [scope] }).success,
+        scope,
+      ).toBe(false);
+      expect(MCP_SCOPES as readonly string[], scope).not.toContain(scope);
+      expect(API_TOKEN_SCOPES as readonly string[], scope).not.toContain(scope);
+    }
   });
 
   it("accepts only one strict bearer credential", () => {

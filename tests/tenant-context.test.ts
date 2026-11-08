@@ -1606,4 +1606,66 @@ describe("signed tenant context under separate nonowner data and identity roles"
     expect(await claim(memberB)).toBe(0);
     expect(await claim(memberB)).toBeGreaterThan(0);
   });
+
+  it("caps the directory and plan scopes at the owner and admin team roles (0031)", async () => {
+    const added = [
+      "directory:read",
+      "directory:write",
+      "plans:read",
+      "plans:write",
+    ] as const;
+    const db = await harness.asOwner();
+    const seed = (role: Principal["role"]) =>
+      seedIdentity(db, {
+        userId: `ctx-ceiling-${role}`,
+        teamId: "ctx-ceiling",
+        role,
+      });
+    const teamOwner = await seed("owner");
+    const teamAdmin = await seed("admin");
+    const recruiter = await seed("recruiter");
+    const viewer = await seed("viewer");
+    for (const p of [recruiter, viewer]) {
+      await dataTransaction(async () => {
+        await install(await claimFor(p));
+      });
+      for (const scope of added) {
+        const label = `${p.role} ${scope}`;
+        await dataTransaction(async () => {
+          await expect(
+            install(await claimFor(p, { scopes: [...p.scopes, scope] })),
+            label,
+          ).rejects.toMatchObject(denied);
+        });
+        await expect(
+          withTeam({ ...p, scopes: [...p.scopes, scope] }, () =>
+            Promise.resolve(),
+          ),
+          label,
+        ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
+      }
+    }
+    for (const p of [teamOwner, teamAdmin]) {
+      expect(p.scopes).toEqual([...SCOPES]);
+      await dataTransaction(async () => {
+        expect(
+          await installed(await claimFor(p, { scopes: [...SCOPES] }), "{}"),
+          p.role,
+        ).toMatchObject({ scopes: [...SCOPES], memberRole: p.role });
+      });
+      expect(
+        await withTeam(p, (tx, access) => Promise.resolve(access.scopes)),
+        p.role,
+      ).toEqual([...SCOPES]);
+    }
+    await dataTransaction(async () => {
+      await expect(
+        install(
+          await claimFor(teamOwner, {
+            scopes: ["plans:read", "directory:read"],
+          }),
+        ),
+      ).rejects.toMatchObject(denied);
+    });
+  });
 });
