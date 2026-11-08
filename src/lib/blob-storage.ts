@@ -1,4 +1,4 @@
-import { readVerifiedBlobSlice } from "./blob-integrity.ts";
+import { readVerifiedBlob, readVerifiedBlobSlice } from "./blob-integrity.ts";
 import {
   createBlobPutTicket,
   type BlobTicketSigner,
@@ -38,6 +38,15 @@ export interface BlobClient {
     pathname: string,
     options: { signal: AbortSignal },
   ): Promise<BlobMetadata | null>;
+  /**
+   * Stores a new private object at exactly this pathname: no random suffix and no overwrite.
+   * Resolves "exists" when an object is already there, which is left unchanged.
+   */
+  put(
+    pathname: string,
+    bytes: Buffer,
+    options: { contentType: string; signal: AbortSignal },
+  ): Promise<"stored" | "exists">;
   /** Resolves for a missing object as well. */
   delete(pathname: string, options: { signal: AbortSignal }): Promise<void>;
   list(options: {
@@ -82,6 +91,20 @@ export interface BlobGateway {
     length: number,
     timeoutMs?: number,
   ): Promise<Buffer | null>;
+  /** The whole object, only when it matches the reference's size, type and SHA-256. */
+  readVerifiedObject(
+    reference: BlobReference,
+    timeoutMs?: number,
+  ): Promise<Buffer | null>;
+  /**
+   * Server-side upload of a reservation's exact bytes to its pathname under its own deadline; the
+   * CV is then completed and verified as any other upload. Refuses bytes of another length.
+   */
+  putReservedObject(
+    reservation: BlobReservation,
+    bytes: Buffer,
+    timeoutMs?: number,
+  ): Promise<"stored" | "exists">;
   /** Cleanup calls; each gets its own deadline and keeps provider error text inside. */
   headObject(pathname: string, timeoutMs: number): Promise<BlobMetadata | null>;
   deleteObject(pathname: string, timeoutMs: number): Promise<void>;
@@ -291,6 +314,46 @@ export function createBlobGateway(
             { controller, timeoutMs },
           );
         },
+      );
+    },
+    readVerifiedObject(reference, timeoutMs = MAX_BLOB_READ_MS) {
+      return withObject(
+        client,
+        reference.objectKey,
+        timeoutMs,
+        async (object, controller) => {
+          if (
+            object.sizeBytes !== reference.sizeBytes ||
+            object.mimeType !== reference.mimeType
+          )
+            throw new CvValidationError(
+              "Stored document differs from its validated reference.",
+            );
+          return readVerifiedBlob(
+            object.stream,
+            reference.sizeBytes,
+            reference.sha256,
+            { controller, timeoutMs },
+          );
+        },
+      );
+    },
+    async putReservedObject(reservation, bytes, timeoutMs = MAX_BLOB_READ_MS) {
+      if (
+        bytes.byteLength !== reservation.sizeBytes ||
+        bytes.byteLength > MAX_CV_BYTES
+      )
+        throw new CvValidationError(
+          "The CV bytes differ from the reserved upload size.",
+        );
+      return withDeadline(
+        timeoutMs,
+        "Private Blob object could not be stored.",
+        (signal) =>
+          client.put(reservation.objectKey, bytes, {
+            contentType: reservation.mimeType,
+            signal,
+          }),
       );
     },
     headObject(pathname, timeoutMs) {

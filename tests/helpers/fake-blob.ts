@@ -55,14 +55,15 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
     /** Every open resolves only after this delay, even when its read already gave up. */
     openDelayMs: 0,
     streams: [] as { pathname: string; closed: boolean }[],
-    /** Every head, delete and list call in order, as "head:<pathname>" or "list:<prefix>". */
+    /** Every head, put, delete and list call in order, as "head:<pathname>" or "list:<prefix>". */
     calls: [] as string[],
     failHead: false,
+    failPut: false,
     failDelete: false,
     failList: false,
     /** A delete that resolves but leaves the object in place. */
     keepOnDelete: false,
-    /** Runs before each head, delete and list, for ordering checks or a slow provider. */
+    /** Runs before each head, put, delete and list, for ordering checks or a slow provider. */
     beforeCall: undefined as undefined | ((call: string) => Promise<void>),
   };
   async function track(call: string, fail: boolean) {
@@ -149,6 +150,16 @@ export function fakeBlob(binding: StorageBinding = blobBinding) {
         mimeType: object.headMimeType ?? object.mimeType,
         uploadedAt: object.uploadedAt ?? new Date(),
       };
+    },
+    async put(pathname, bytes, { contentType }) {
+      await track(`put:${pathname}`, state.failPut);
+      // No overwrite, as the real client asks of the provider.
+      if (objects.has(pathname)) return "exists";
+      objects.set(pathname, {
+        bytes: Buffer.from(bytes),
+        mimeType: contentType,
+      });
+      return "stored";
     },
     async delete(pathname) {
       await track(`delete:${pathname}`, state.failDelete);
