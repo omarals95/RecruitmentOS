@@ -2,6 +2,12 @@ import { createHash, createHmac } from "node:crypto";
 import { DrizzleQueryError, sql } from "drizzle-orm";
 import type { TeamTx } from "@/db";
 import type { TransactionSnapshot } from "@/db/deadlines";
+import {
+  configBodyCache,
+  type ConfigBodyCache,
+  type ConfigDocument,
+  type ConfigDocumentRow,
+} from "./config-cache";
 import { ApiError } from "./errors";
 import { SCOPES, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
@@ -53,6 +59,8 @@ export async function installTenantContextKey(client: {
 /**
  * The access state tenant_context.install stored for this transaction: the verified scopes, and the
  * workspace, team role and company authority it derived from database rows, never from the payload.
+ * versions maps each configuration object of the workspace (company objects and this team's task
+ * boards) to its current published version id; documents holds exactly those versions, verified.
  */
 export type TenantAccess = {
   scopes: Scope[];
@@ -60,20 +68,63 @@ export type TenantAccess = {
   memberRole: Role;
   companyLevel: "owner" | "admin" | null;
   companyAreas: string[];
+  versions: Record<string, string>;
+  documents: Record<string, ConfigDocument>;
 };
+type InstallResult = Omit<TenantAccess, "documents"> & {
+  documents: ConfigDocumentRow[];
+};
+
+const unverified = () =>
+  new Error(
+    "The configuration versions of this context could not be verified.",
+  );
+
+/**
+ * The document of every current version, from the response or from the entries the hint named.
+ * Nothing from the response is cached unless the whole set is complete and verified.
+ */
+function mergeDocuments(
+  cache: ConfigBodyCache,
+  held: Map<string, ConfigDocument>,
+  versions: Record<string, string>,
+  returned: ConfigDocumentRow[],
+): Record<string, ConfigDocument> {
+  const fresh = new Map(returned.map((row) => [row.versionId, row]));
+  for (const [objectId, versionId] of Object.entries(versions)) {
+    const document = fresh.get(versionId) ?? held.get(versionId);
+    if (document?.objectId !== objectId) throw unverified();
+  }
+  const added = new Map(
+    cache.add(...returned).map((document) => [document.versionId, document]),
+  );
+  const documents: Record<string, ConfigDocument> = {};
+  for (const versionId of Object.values(versions)) {
+    const document = added.get(versionId);
+    if (document) documents[versionId] = document;
+    else {
+      documents[versionId] = held.get(versionId)!;
+      cache.use(versionId);
+    }
+  }
+  return documents;
+}
 
 /**
  * Signs exactly one assertion for this transaction and installs it. Only withTeam and the
  * identity-side token transactions call this, with the snapshot their first statement read
  * (withDeadlinesAndSnapshot: deadlines, pid, xid, marker and clock). withTeam calls it as the next
  * statement, before any other statement or savepoint; tenant_context.install rechecks pid and xid.
- * The third argument, an unsigned cache hint, is empty until configuration versions are cached.
+ * The third argument, an unsigned hint, names every version id the cache holds; install leaves
+ * those bodies out, and the entries are kept for this request so a concurrent eviction loses none.
  */
 export async function installTenantContext(
   tx: TeamTx,
   principal: Principal,
   snapshot: TransactionSnapshot,
+  cache: ConfigBodyCache = configBodyCache,
 ): Promise<TenantAccess> {
+  const held = cache.entries();
   const { key, id } = signingKey();
   const payload = JSON.stringify({
     aud: AUDIENCE,
@@ -89,11 +140,12 @@ export async function installTenantContext(
     exp: Number(snapshot.now) + LIFETIME_MS,
   });
   const signature = createHmac("sha256", key).update(payload).digest("hex");
+  let result: InstallResult;
   try {
-    const { rows } = await tx.execute<{ access: TenantAccess }>(
-      sql`select tenant_context.install(${payload}, ${signature}, '{}'::text[]) as access`,
+    const { rows } = await tx.execute<{ access: InstallResult }>(
+      sql`select tenant_context.install(${payload}, ${signature}, ${sql.param([...held.keys()])}::text[]) as access`,
     );
-    return rows[0].access;
+    result = rows[0].access;
   } catch (error) {
     // The query wrapper carries the bound assertion; surface only the database error.
     const cause = error instanceof DrizzleQueryError ? error.cause : error;
@@ -105,4 +157,9 @@ export async function installTenantContext(
       );
     throw cause ?? new Error("Tenant context installation failed.");
   }
+  const { documents, ...access } = result;
+  return {
+    ...access,
+    documents: mergeDocuments(cache, held, access.versions, documents),
+  };
 }
