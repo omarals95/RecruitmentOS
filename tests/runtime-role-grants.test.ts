@@ -135,6 +135,8 @@ const expectedData = {
     ),
     // Speed samples are written and purged, never updated.
     "app.speed_samples": ["DELETE", "INSERT", "SELECT"],
+    // One budget row per member and team, upserted, never deleted.
+    "app.speed_sample_budgets": ["INSERT", "SELECT", "UPDATE"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -459,7 +461,7 @@ describe("split runtime role template", () => {
   it("denies the data role TRUNCATE, role switching, identity, key, ledger and marker writes", async () => {
     await harness.dataDb();
     await expectDenied([
-      ...[...appTables, "speed_samples"].map(
+      ...[...appTables, "speed_samples", "speed_sample_budgets"].map(
         (table) => `TRUNCATE app.${table}`,
       ),
       `SET ROLE ${splitRoles.identity}`,

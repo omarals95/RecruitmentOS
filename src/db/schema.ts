@@ -314,3 +314,18 @@ export const speedSamples = appSchema.table(
   },
   (t) => [index("speed_samples_team_recorded_idx").on(t.teamId, t.recordedAt)],
 );
+/** Speed sample budgets (0027): one row per member and team, the samples stored this clock hour. */
+export const speedSampleBudgets = appSchema.table(
+  "speed_sample_budgets",
+  {
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id),
+    windowStart: time("window_start").notNull(),
+    rowCount: integer("row_count").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.teamId, t.userId] })],
+);

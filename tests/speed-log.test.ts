@@ -299,6 +299,98 @@ describe("speed log routes", () => {
     expect(await count("activity", owner.teamId)).toBe(0);
     expect(await count("activity", otherOwner.teamId)).toBe(0);
   });
+
+  const currentHour = (teamId: string) =>
+    asOwner<{ n: number }>(
+      "SELECT count(*)::int AS n FROM app.speed_samples WHERE team_id = $1 AND recorded_at = date_trunc('hour', now())",
+      [teamId],
+    ).then((rows) => rows[0].n);
+  const batch = (size: number) => ({
+    samples: Array.from({ length: size }, (_, index) => action(index)),
+  });
+  async function resetSpeed() {
+    await asOwner("DELETE FROM app.speed_samples");
+    await asOwner("DELETE FROM app.speed_sample_budgets");
+  }
+
+  it("stores at most 120 samples per member per clock hour and drops the rest with 202", async () => {
+    await resetSpeed();
+    const before = await currentHour(recruiter.teamId);
+    const accepted = [];
+    for (let index = 0; index < 4; index++)
+      accepted.push(await post(recruiter, batch(50)));
+    expect(accepted).toEqual([
+      { status: 202, body: { accepted: 50 } },
+      { status: 202, body: { accepted: 50 } },
+      { status: 202, body: { accepted: 20 } },
+      { status: 202, body: { accepted: 0 } },
+    ]);
+    expect((await currentHour(recruiter.teamId)) - before).toBe(120);
+    // The first samples of a post are kept, in request order.
+    expect(
+      (
+        await asOwner<{ n: number }>(
+          "SELECT count(*)::int AS n FROM app.speed_samples WHERE team_id = $1 AND duration_ms >= 20",
+          [recruiter.teamId],
+        )
+      )[0].n,
+    ).toBe(60);
+    expect(
+      await asOwner(
+        "SELECT team_id, user_id, row_count, window_start = date_trunc('hour', now()) AS current FROM app.speed_sample_budgets",
+      ),
+    ).toEqual([
+      {
+        team_id: recruiter.teamId,
+        user_id: recruiter.userId,
+        row_count: 120,
+        current: true,
+      },
+    ]);
+    expect(await post(admin, batch(1))).toEqual({
+      status: 202,
+      body: { accepted: 1 },
+    });
+    expect((await currentHour(recruiter.teamId)) - before).toBe(121);
+  });
+
+  it("stores at most 1000 samples per team per clock hour, counting only this hour and team", async () => {
+    await resetSpeed();
+    await asOwner(
+      "INSERT INTO app.speed_samples(team_id, kind, name, duration_ms) SELECT $1, 'action', 'task.move', 10 FROM generate_series(1, 990)",
+      [viewer.teamId],
+    );
+    expect(await post(viewer, batch(50))).toEqual({
+      status: 202,
+      body: { accepted: 10 },
+    });
+    expect(await post(owner, batch(50))).toEqual({
+      status: 202,
+      body: { accepted: 0 },
+    });
+    expect(await currentHour(viewer.teamId)).toBe(1000);
+    // A budget row from an earlier hour counts as 0, and the full team above does not count here.
+    await asOwner(
+      "INSERT INTO app.speed_sample_budgets(team_id, user_id, window_start, row_count) VALUES ($1, $2, date_trunc('hour', now()) - interval '1 hour', 120)",
+      [otherOwner.teamId, otherOwner.userId],
+    );
+    expect(await post(otherOwner, batch(50))).toEqual({
+      status: 202,
+      body: { accepted: 50 },
+    });
+    expect(
+      await asOwner(
+        "SELECT row_count, window_start = date_trunc('hour', now()) AS current FROM app.speed_sample_budgets WHERE team_id = $1",
+        [otherOwner.teamId],
+      ),
+    ).toEqual([{ row_count: 50, current: true }]);
+    expect(
+      await asOwner(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'speed_samples' AND column_name LIKE '%user%'",
+      ),
+    ).toEqual([]);
+    await resetSpeed();
+  });
 });
 
 describe("speed log browser buffer", () => {

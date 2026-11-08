@@ -18,6 +18,8 @@ import {
   idempotency,
   notificationReads,
   records,
+  speedSampleBudgets,
+  speedSamples,
   storageUsage,
   uploads,
 } from "@/db/schema";
@@ -62,6 +64,8 @@ const TABLES = [
   "notification_reads",
   "bulk_intake_batches",
   "bulk_intake_items",
+  "speed_samples",
+  "speed_sample_budgets",
 ] as const;
 const AUDIENCE = "recruitmentos-tenant-context-v1";
 const testKey = () =>
@@ -260,6 +264,19 @@ describe("signed tenant context under separate nonowner data and identity roles"
           payloadHash: "0".repeat(64),
           createdAt: now,
           updatedAt: now,
+        });
+        // Speed rows keep recorded_at at its default, the current clock hour.
+        await tx.insert(speedSamples).values({
+          teamId: p.teamId,
+          kind: "action",
+          name: "task.move",
+          durationMs: 10,
+        });
+        await tx.insert(speedSampleBudgets).values({
+          teamId: p.teamId,
+          userId: p.userId,
+          windowStart: sql`date_trunc('hour', now())`,
+          rowCount: 1,
         });
         await tx.insert(activity).values([
           {

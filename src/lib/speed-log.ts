@@ -1,6 +1,6 @@
 import { and, asc, eq, gte, sql, type AnyColumn } from "drizzle-orm";
 import { z } from "zod";
-import { speedSamples } from "@/db/schema";
+import { speedSampleBudgets, speedSamples } from "@/db/schema";
 import {
   SPEED_ACTIONS,
   SPEED_MAX_MS,
@@ -8,6 +8,8 @@ import {
   SPEED_RETENTION_DAYS,
   SPEED_ROUTE_MAX_LENGTH,
   SPEED_ROUTE_NAME,
+  SPEED_TEAM_HOURLY_ROWS,
+  SPEED_USER_HOURLY_ROWS,
 } from "@/domain/speed";
 import { withTeam } from "./db-team";
 import { ApiError } from "./errors";
@@ -50,27 +52,59 @@ export type SpeedSamplesInput = z.infer<typeof speedSamplesSchema>;
 const PURGE_LIMIT = 1000;
 
 /**
- * Any team member, viewers included, under the read context like notification reads: one
- * multi-row insert and one bounded purge of the team's expired rows. Nothing is audited.
+ * Any team member, viewers included, under the read context like notification reads. Under the
+ * team's speed lock it stores only the first samples that fit the caller's and the team's budget
+ * for this clock hour, updates the caller's budget row and runs one bounded purge of the team's
+ * expired rows. Returns the number stored; the rest is dropped. Nothing is audited.
  */
 export async function recordSpeedSamples(
   p: Principal,
   input: SpeedSamplesInput,
 ): Promise<number> {
   return withTeam(p, async (tx) => {
-    await tx.insert(speedSamples).values(
-      input.samples.map((sample) => ({
-        teamId: p.teamId,
-        kind: sample.kind,
-        name: sample.name,
-        durationMs: sample.durationMs,
-        dbMs: sample.kind === "route" ? (sample.dbMs ?? null) : null,
-      })),
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`speed-samples:${p.teamId}`}, 0))`,
     );
+    // A budget row from an earlier hour counts as 0.
+    const {
+      rows: [used],
+    } = await tx.execute<{ userRows: number; teamRows: number }>(
+      sql`select coalesce((select row_count from app.speed_sample_budgets where team_id = ${p.teamId} and user_id = ${p.userId} and window_start = date_trunc('hour', now())), 0)::integer as "userRows", (select count(*) from app.speed_samples where team_id = ${p.teamId} and recorded_at = date_trunc('hour', now()))::integer as "teamRows"`,
+    );
+    const userRows = Number(used?.userRows ?? 0);
+    const allowed = Math.max(
+      0,
+      Math.min(
+        input.samples.length,
+        SPEED_USER_HOURLY_ROWS - userRows,
+        SPEED_TEAM_HOURLY_ROWS - Number(used?.teamRows ?? 0),
+      ),
+    );
+    if (allowed > 0)
+      await tx.insert(speedSamples).values(
+        input.samples.slice(0, allowed).map((sample) => ({
+          teamId: p.teamId,
+          kind: sample.kind,
+          name: sample.name,
+          durationMs: sample.durationMs,
+          dbMs: sample.kind === "route" ? (sample.dbMs ?? null) : null,
+        })),
+      );
+    const budget = {
+      windowStart: sql`date_trunc('hour', now())`,
+      rowCount: userRows + allowed,
+    };
+    await tx
+      .insert(speedSampleBudgets)
+      .values({ teamId: p.teamId, userId: p.userId, ...budget })
+      .onConflictDoUpdate({
+        target: [speedSampleBudgets.teamId, speedSampleBudgets.userId],
+        set: budget,
+      });
     await tx.execute(
       sql`delete from app.speed_samples where id in (select id from app.speed_samples where team_id = ${p.teamId} and recorded_at < now() - make_interval(days => ${SPEED_RETENTION_DAYS}) limit ${PURGE_LIMIT})`,
     );
-    return input.samples.length;
+    return allowed;
   });
 }
 
