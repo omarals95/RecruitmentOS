@@ -790,7 +790,7 @@ describe("Blob storage cleanup after ticket expiry", () => {
     };
     const signIn = (p: Principal) =>
       vi.mocked(getVerifiedSession).mockResolvedValue({
-        user: { id: p.userId },
+        user: { id: p.userId, twoFactorEnabled: true },
         session: { activeOrganizationId: p.teamId },
       } as never);
 

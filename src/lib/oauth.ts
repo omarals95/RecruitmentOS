@@ -407,6 +407,7 @@ export async function consentTeams(userId: string) {
     return {
       id: row.id,
       name: row.name,
+      role,
       allowed: MCP_SCOPES.filter((scope) => roleScopes(role).includes(scope)),
     };
   });

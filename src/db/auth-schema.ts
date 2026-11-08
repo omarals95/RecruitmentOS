@@ -28,6 +28,7 @@ export const user = authSchema.table(
     email: text("email").notNull(),
     emailVerified: boolean("email_verified").notNull().default(false),
     initialAdmin: boolean("initial_admin").notNull().default(false),
+    twoFactorEnabled: boolean("two_factor_enabled").notNull().default(false),
     image: text("image"),
     createdAt: date("created_at").notNull().defaultNow(),
     updatedAt: date("updated_at").notNull().defaultNow(),
@@ -115,6 +116,22 @@ export const verification = authSchema.table(
   },
   (t) => [index("auth_verification_identifier_idx").on(t.identifier)],
 );
+
+/** Better Auth two-factor plugin: the encrypted TOTP secret and backup codes, one row per user. */
+export const twoFactor = authSchema.table("two_factor", {
+  id: id(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => user.id, { onDelete: "cascade" }),
+  secret: text("secret").notNull(),
+  backupCodes: text("backup_codes").notNull(),
+  verified: boolean("verified").notNull().default(true),
+  failedVerificationCount: integer("failed_verification_count")
+    .notNull()
+    .default(0),
+  lockedUntil: date("locked_until"),
+});
 
 export const member = authSchema.table(
   "member",
@@ -258,6 +275,7 @@ export const authTables = {
   session,
   account,
   verification,
+  twoFactor,
   organization,
   member,
   invitation,

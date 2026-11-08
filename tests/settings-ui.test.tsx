@@ -6,8 +6,14 @@ import { SettingsNavigation } from "../src/components/settings/settings-navigati
 import {
   deviceListMessage,
   ProfileSettings,
+  TwoStepPanel,
 } from "../src/components/settings/profile-settings";
-import { TeamSettings } from "../src/components/settings/team-settings";
+import {
+  canResetTwoStep,
+  MemberActions,
+  TeamSettings,
+} from "../src/components/settings/team-settings";
+import { TokenSettings } from "../src/components/settings/token-settings";
 import {
   formatStorageBytes,
   parseStorageAmount,
@@ -25,6 +31,7 @@ const workspace = {
     id: "fictional-user",
     name: "Fictional Settings User",
     email: "settings-user@example.test",
+    twoStepEnabled: true,
   },
   team: { id: "fictional-team", name: "Fictional Team", slug: "fictional" },
   role: "owner",
@@ -289,5 +296,84 @@ describe("speed settings", () => {
     expect(renderToStaticMarkup(<SpeedPanel error="" rows={[]} />)).toContain(
       "No timings have been recorded yet.",
     );
+  });
+});
+
+describe("two-step sign-in in settings", () => {
+  it("shows Off with a Turn on link, or On with new backup codes and Turn off", () => {
+    const off = renderToStaticMarkup(
+      <TwoStepPanel enabled={false} required={false} />,
+    );
+    expect(off).toContain("Two-step sign-in");
+    expect(off).toContain("<strong>Off</strong>");
+    expect(off).toMatch(
+      /<a[^>]*href="\/two-step-setup\?next=\/app\/settings\/profile"[^>]*>Turn on<\/a>/,
+    );
+    expect(off).not.toContain("Turn off");
+    const on = renderToStaticMarkup(<TwoStepPanel enabled required />);
+    expect(on).toContain("<strong>On</strong>");
+    expect(on).toContain(">Create new backup codes</button>");
+    expect(on).toContain(">Turn off</button>");
+    expect(on).toContain('autoComplete="current-password"');
+    expect(on).not.toContain(">Turn on</a>");
+    const page = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <ProfileSettings providers={{ google: false, microsoft: false }} />
+      </WorkspaceProvider>,
+    );
+    expect(page).toContain("<strong>On</strong>");
+  });
+
+  it("replaces the token form with the two-step notice and keeps the token list", () => {
+    const without = renderToStaticMarkup(
+      <WorkspaceProvider
+        value={{
+          ...workspace,
+          user: { ...workspace.user, twoStepEnabled: false },
+        }}
+      >
+        <TokenSettings />
+      </WorkspaceProvider>,
+    );
+    expect(without).toContain(
+      "Turn on two-step sign-in in your profile before creating API tokens or connecting apps.",
+    );
+    expect(without).toMatch(
+      /<a[^>]*href="\/two-step-setup\?next=\/app\/settings\/api-tokens"[^>]*>Turn on two-step sign-in<\/a>/,
+    );
+    expect(without).not.toContain("Token name");
+    expect(without).not.toContain(">Create token</button>");
+    expect(without).toContain("My tokens");
+    const withTwoStep = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TokenSettings />
+      </WorkspaceProvider>,
+    );
+    expect(withTwoStep).toContain("Token name");
+    expect(withTwoStep).not.toContain("Turn on two-step sign-in</a>");
+  });
+
+  it("offers Reset two-step sign-in only to owners and never on their own row", () => {
+    expect(canResetTwoStep("owner", "other", "me")).toBe(true);
+    expect(canResetTwoStep("owner", "me", "me")).toBe(false);
+    for (const role of ["admin", "recruiter", "viewer", null])
+      expect(canResetTwoStep(role, "other", "me"), String(role)).toBe(false);
+    const actions = (canEdit: boolean, canReset: boolean) =>
+      renderToStaticMarkup(
+        <MemberActions
+          canEdit={canEdit}
+          canResetTwoStep={canReset}
+          busy={false}
+          saveDisabled={false}
+          removeDisabled={false}
+          onSave={() => {}}
+          onRemove={() => {}}
+          onResetTwoStep={() => {}}
+        />,
+      );
+    expect(actions(true, true)).toContain(">Reset two-step sign-in</button>");
+    expect(actions(true, false)).not.toContain("Reset two-step sign-in");
+    expect(actions(true, false)).toContain(">Save role</button>");
+    expect(actions(false, false)).toBe("");
   });
 });

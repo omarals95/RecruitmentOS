@@ -1,6 +1,7 @@
 import "./load-env";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
+import { seedTotpCode } from "./totp";
 type Row = { id: string; version: number; data: Record<string, unknown> };
 async function main() {
   if (
@@ -18,7 +19,11 @@ async function main() {
     url.protocol !== "http:"
   )
     throw new Error("Only an HTTP loopback test server is allowed.");
-  const login = await fetch(`${origin}/api/auth/sign-in/email`, {
+  if (!process.env.DEV_SEED_TOTP_KEY)
+    throw new Error(
+      "Set DEV_SEED_TOTP_KEY to the key npm run db:seed printed; the seed owner signs in with a two-step code.",
+    );
+  const password = await fetch(`${origin}/api/auth/sign-in/email`, {
     method: "POST",
     headers: { origin, "content-type": "application/json" },
     body: JSON.stringify({
@@ -27,11 +32,31 @@ async function main() {
     }),
     redirect: "error",
   });
-  assert.equal(login.status, 200, "fictional sign-in");
-  const cookie = login.headers
-    .getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
+  assert.equal(password.status, 200, "fictional sign-in");
+  assert.equal(
+    ((await password.json()) as { twoFactorRedirect?: boolean })
+      .twoFactorRedirect,
+    true,
+    "two-step challenge",
+  );
+  const cookieOf = (response: Response) =>
+    response.headers
+      .getSetCookie()
+      .map((value) => value.split(";")[0])
+      .filter((pair) => !pair.endsWith("="))
+      .join("; ");
+  const login = await fetch(`${origin}/api/auth/two-factor/verify-totp`, {
+    method: "POST",
+    headers: {
+      origin,
+      "content-type": "application/json",
+      cookie: cookieOf(password),
+    },
+    body: JSON.stringify({ code: seedTotpCode(process.env) }),
+    redirect: "error",
+  });
+  assert.equal(login.status, 200, "fictional two-step code");
+  const cookie = cookieOf(login);
   assert.ok(cookie, "session cookie");
   const authHeaders = { origin, cookie, "content-type": "application/json" };
   const teamsResponse = await fetch(`${origin}/api/auth/organization/list`, {

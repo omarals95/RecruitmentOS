@@ -52,7 +52,7 @@ describe("team scoped API tokens against actual SQL", () => {
   });
   beforeEach(async () => {
     await pg.exec(`TRUNCATE app.activity; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;
-      UPDATE auth."user" SET email_verified=true;
+      UPDATE auth."user" SET email_verified=true, two_factor_enabled=true;
       INSERT INTO auth.member(id,organization_id,user_id,role) VALUES('recruiter-member','team','recruiter','recruiter') ON CONFLICT(id) DO UPDATE SET role='recruiter';`);
   });
   afterAll(async () => {
@@ -78,6 +78,39 @@ describe("team scoped API tokens against actual SQL", () => {
     expect(
       (await pg.query("SELECT action FROM app.activity")).rows,
     ).toContainEqual({ action: "token.created" });
+  });
+
+  it("requires two-step sign-in to create a token and writes nothing without it", async () => {
+    await pg.exec(
+      `UPDATE auth."user" SET two_factor_enabled=false WHERE id='recruiter'`,
+    );
+    await expect(
+      createToken(principal(), {
+        name: "Without two-step",
+        scopes: ["candidates:read"],
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "two_step_required",
+      message:
+        "Turn on two-step sign-in in your profile before creating API tokens or connecting apps.",
+    });
+    expect(
+      (await pg.query("SELECT id FROM auth.api_tokens")).rows,
+    ).toHaveLength(0);
+    expect((await pg.query("SELECT id FROM app.activity")).rows).toHaveLength(
+      0,
+    );
+    // Listing stays available without two-step sign-in.
+    expect(await listTokens(principal())).toEqual([]);
+    await pg.exec(
+      `UPDATE auth."user" SET two_factor_enabled=true WHERE id='recruiter'`,
+    );
+    const created = await createToken(principal(), {
+      name: "With two-step",
+      scopes: ["candidates:read"],
+    });
+    expect(created.token).toMatch(/^ros_live_/);
   });
 
   it("rolls back token creation if the corresponding audit entry fails", async () => {

@@ -32,6 +32,8 @@ export async function seedIdentity(
     teamId?: string;
     role?: Role;
     emailVerified?: boolean;
+    /** Seeded people have two-step sign-in on unless a test turns it off. */
+    twoFactorEnabled?: boolean;
   } = {},
 ) {
   const userId = options.userId ?? "test-owner";
@@ -48,6 +50,7 @@ export async function seedIdentity(
       name: "Fictional Test User",
       email: `${userId}@example.test`,
       emailVerified: options.emailVerified ?? true,
+      twoFactorEnabled: options.twoFactorEnabled ?? true,
       initialAdmin: claim.length === 0,
     })
     .onConflictDoNothing();

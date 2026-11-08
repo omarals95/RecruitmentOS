@@ -82,7 +82,7 @@ describe("team CV storage settings and upload rate limit", () => {
     headers: Record<string, string> = {},
   ) {
     vi.mocked(getVerifiedSession).mockResolvedValue({
-      user: { id: p.userId },
+      user: { id: p.userId, twoFactorEnabled: true },
       session: { activeOrganizationId: p.teamId },
     } as never);
     const response = await (method === "GET" ? GET : PUT)(
