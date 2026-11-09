@@ -194,7 +194,7 @@ describe("Import from Excel panel", () => {
       "Unit BAD-LVL: unknown level &quot;Fictional Region&quot;.",
     );
     expect(markup).toContain("<h3>Flagged cells</h3>");
-    expect(markup).toContain('<td data-label="Column">Work phone</td>');
+    expect(markup).toMatch(/<td data-label="Column"[^>]*>Work phone<\/td>/);
     expect(markup).toContain("<h3>Needs a company owner</h3>");
     expect(markup).toContain("Unit DIV-B: moves the unit to another parent.");
     expect(markup).toContain("Each list below shows its first 500 rows");

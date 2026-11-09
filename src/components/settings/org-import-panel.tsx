@@ -46,6 +46,10 @@ const SHEETS = [
   ["positions", "Positions"],
   ["employees", "Employees"],
 ] as const;
+// The data-table's last column is sized for buttons; in these lists it holds the text, so it takes
+// the free width, and Sheet and Row stay as narrow as their contents.
+const narrow = { width: "1%", whiteSpace: "nowrap" } as const;
+const free = { width: "auto", maxWidth: "none" } as const;
 const total = (report: ImportReport, key: keyof ImportCounts) =>
   SHEETS.reduce((sum, [sheet]) => sum + report.sheets[sheet][key], 0);
 
@@ -229,21 +233,27 @@ export function OrgImportView({
                 are stored as plain text, never as formulas.
               </p>
               <div className="table-wrap">
-                <table className="data-table">
+                <table className="data-table compact">
                   <caption className="sr-only">Flagged cells</caption>
                   <thead>
                     <tr>
-                      <th>Sheet</th>
-                      <th>Row</th>
-                      <th>Column</th>
+                      <th style={narrow}>Sheet</th>
+                      <th style={narrow}>Row</th>
+                      <th style={free}>Column</th>
                     </tr>
                   </thead>
                   <tbody>
                     {report.flagged.map((cell) => (
                       <tr key={`${cell.sheet}:${cell.row}:${cell.column}`}>
-                        <td data-label="Sheet">{cell.sheet}</td>
-                        <td data-label="Row">{cell.row}</td>
-                        <td data-label="Column">{cell.column}</td>
+                        <td data-label="Sheet" style={narrow}>
+                          {cell.sheet}
+                        </td>
+                        <td data-label="Row" style={narrow}>
+                          {cell.row}
+                        </td>
+                        <td data-label="Column" style={free}>
+                          {cell.column}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -367,21 +377,27 @@ function IssueTable({
       <h3>{title}</h3>
       {note && <p className="muted">{note}</p>}
       <div className="table-wrap">
-        <table className="data-table">
+        <table className="data-table compact">
           <caption className="sr-only">{title}</caption>
           <thead>
             <tr>
-              <th>Sheet</th>
-              <th>Row</th>
-              <th>Reason</th>
+              <th style={narrow}>Sheet</th>
+              <th style={narrow}>Row</th>
+              <th style={free}>Reason</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr key={`${row.sheet}:${row.row}`}>
-                <td data-label="Sheet">{row.sheet}</td>
-                <td data-label="Row">{row.row}</td>
-                <td data-label="Reason">{row.reason}</td>
+                <td data-label="Sheet" style={narrow}>
+                  {row.sheet}
+                </td>
+                <td data-label="Row" style={narrow}>
+                  {row.row}
+                </td>
+                <td data-label="Reason" style={free}>
+                  {row.reason}
+                </td>
               </tr>
             ))}
           </tbody>
