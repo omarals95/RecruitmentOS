@@ -474,7 +474,12 @@ export const PERSONAL_MCP_TOOLS = [
  * Company structure and authority rows: ids and field names only, but only for sessions with
  * company authority; API tokens, OAuth grants and members without it never see them in the feed.
  */
-const COMPANY_ACTIVITY_KINDS = ["directory", "scope", "role-assignment"];
+const COMPANY_ACTIVITY_KINDS = [
+  "directory",
+  "scope",
+  "role-assignment",
+  "workspace-authority",
+];
 
 /**
  * Validates an activity query inside the caller's transaction and builds its filter from the

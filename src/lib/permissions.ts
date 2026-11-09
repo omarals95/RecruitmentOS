@@ -65,6 +65,14 @@ export function roleScopes(role: Role): Scope[] {
       : [...VIEWER_SCOPES];
 }
 export const getRoleScopes = roleScopes;
+/** The refusal message for a member whose assigned role install could not use (failed closed). */
+export const ROLE_UNAVAILABLE =
+  "Your role is no longer available. Ask a company owner to choose a role for you.";
+// Principals whose context install failed closed on an assigned role; withTeam marks them.
+const roleUnavailable = new WeakSet<object>();
+export function markRoleUnavailable(p: object) {
+  roleUnavailable.add(p);
+}
 // The scopes each principal has passed requireScope with, so withTeam can refuse a request whose
 // stored scopes lack one that was checked before the transaction.
 const passed = new WeakMap<object, Set<Scope>>();
@@ -73,7 +81,9 @@ export function requireScope(p: { scopes: readonly string[] }, scope: Scope) {
     throw new ApiError(
       403,
       "scope_required",
-      `Permission ${scope} is required.`,
+      roleUnavailable.has(p)
+        ? ROLE_UNAVAILABLE
+        : `Permission ${scope} is required.`,
     );
   const checked = passed.get(p) ?? new Set<Scope>();
   passed.set(p, checked.add(scope));

@@ -23,6 +23,7 @@ import {
   ADMIN_ROLE,
   OWNER_ROLE,
   RECRUITER_ROLE,
+  VIEWER_ROLE,
   builtInRoleFor,
 } from "@/domain/config-defaults";
 import { resourceToKind } from "@/domain/records";
@@ -44,6 +45,11 @@ import type { Principal } from "@/lib/principal";
 import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
 import { GET as configHistoryRoute } from "@/app/api/v1/config-history/route";
 import { GET as accessChangesRoute } from "@/app/api/v1/access-changes/route";
+import { GET as activityRoute } from "@/app/api/v1/activity/route";
+import * as authorityRoute from "@/app/api/v1/company-authority/route";
+import * as rolesRoute from "@/app/api/v1/roles/route";
+import * as roleRoute from "@/app/api/v1/roles/[id]/route";
+import * as publishRoute from "@/app/api/v1/roles/[id]/publish/route";
 import { createSplitRoleDb, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with two fictional teams (R2a-11).
@@ -609,6 +615,623 @@ describe("Admin portal routes under the split runtime roles", () => {
       );
       expect(query.status).toBe(400);
       expect(query.body.error.code).toBe("invalid_input");
+    });
+  });
+});
+
+// R2a-12 (job 056): the role routes and the company authority route, company owners only.
+describe("Roles & permissions routes under the split runtime roles", () => {
+  let harness: Harness;
+  let owner: Principal, member: Principal, leaver: Principal;
+  let recruiter: Principal, companyAdmin: Principal, teamOwnerB: Principal;
+
+  const superuser = async (text: string, params: unknown[] = []) => {
+    await harness.asSuperuser();
+    return (await harness.client.query(text, params)).rows;
+  };
+  const authorityRows = () =>
+    superuser(
+      "SELECT team_id, actor_id, metadata FROM app.activity WHERE kind = 'workspace-authority' AND action = 'workspace_authority.changed' ORDER BY created_at, id",
+    );
+  const holders = () =>
+    superuser(
+      "SELECT user_id, level, areas, plan_access, suspended_at IS NOT NULL AS suspended FROM app.workspace_admins ORDER BY user_id",
+    );
+  const configRows = () =>
+    superuser(
+      "SELECT o.id, o.key, o.current_version_id, o.draft_version_id, v.body FROM app.config_objects o LEFT JOIN app.config_versions v ON v.id = o.draft_version_id ORDER BY o.key",
+    );
+  /** One request through a route handler, as a signed-in member or with a Bearer token. */
+  async function call(
+    handler: (request: Request, context: never) => Promise<Response>,
+    as: Principal | "bearer",
+    method: string,
+    path: string,
+    options: { body?: unknown; params?: Record<string, string> } = {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ status: number; body: any }> {
+    if (as !== "bearer") signIn(as);
+    const response = await handler(
+      new Request(`${ORIGIN}${path}`, {
+        method,
+        headers: {
+          origin: ORIGIN,
+          ...(options.body === undefined
+            ? {}
+            : { "content-type": "application/json" }),
+          ...(as === "bearer"
+            ? { authorization: "Bearer fictional-roles-token" }
+            : { "x-team-id": as.teamId }),
+        },
+        body:
+          options.body === undefined ? undefined : JSON.stringify(options.body),
+      }),
+      { params: Promise.resolve(options.params ?? {}) } as never,
+    );
+    return { status: response.status, body: await response.json() };
+  }
+  const grant = (as: Principal | "bearer", body: unknown) =>
+    call(authorityRoute.POST, as, "POST", "/api/v1/company-authority", {
+      body,
+    });
+  /** Expects the call to be refused without changing a holder or writing an audit row. */
+  async function refusedGrant(
+    as: Principal | "bearer",
+    body: unknown,
+    status: number,
+    code: string,
+    message?: string,
+  ) {
+    const before = [await holders(), await authorityRows()];
+    const response = await grant(as, body);
+    expect(response.status, JSON.stringify(body)).toBe(status);
+    expect(response.body.error.code, JSON.stringify(body)).toBe(code);
+    if (message) expect(response.body.error.message).toBe(message);
+    expect([await holders(), await authorityRows()]).toEqual(before);
+  }
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db: AppDb = await harness.asOwner();
+    owner = await seedIdentity(db, {
+      userId: "roles-owner",
+      teamId: "roles-team-a",
+    });
+    member = await seedIdentity(db, {
+      userId: "roles-member",
+      teamId: "roles-team-a",
+      role: "recruiter",
+    });
+    leaver = await seedIdentity(db, {
+      userId: "roles-leaver",
+      teamId: "roles-team-a",
+      role: "recruiter",
+    });
+    recruiter = await seedIdentity(db, {
+      userId: "roles-recruiter",
+      teamId: "roles-team-a",
+      role: "recruiter",
+    });
+    teamOwnerB = await seedIdentity(db, {
+      userId: "roles-owner-b",
+      teamId: "roles-team-b",
+    });
+    companyAdmin = await seedIdentity(db, {
+      userId: "roles-company-admin",
+      teamId: "roles-team-b",
+      role: "recruiter",
+    });
+    await harness.client.exec(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','roles-company-admin','admin','{fields}')`,
+    );
+  });
+  afterAll(async () => harness?.close());
+
+  describe("company authority", () => {
+    it("grants, changes and removes admin and owner levels, areas and plan access, auditing each change once", async () => {
+      const list = await call(
+        authorityRoute.GET,
+        owner,
+        "GET",
+        "/api/v1/company-authority",
+      );
+      expect(list.status).toBe(200);
+      expect(list.body.data).toEqual([
+        {
+          userId: owner.userId,
+          name: "Fictional Test User",
+          level: "owner",
+          areas: [],
+          planAccess: false,
+          suspended: false,
+        },
+        {
+          userId: companyAdmin.userId,
+          name: "Fictional Test User",
+          level: "admin",
+          areas: ["fields"],
+          planAccess: false,
+          suspended: false,
+        },
+      ]);
+      const before = (await authorityRows()).length;
+      const steps: [unknown, boolean, Record<string, unknown> | null][] = [
+        [
+          {
+            userId: member.userId,
+            level: "admin",
+            areas: ["fields"],
+            planAccess: true,
+          },
+          true,
+          { level: "admin", areas: ["fields"], planAccess: true },
+        ],
+        // The same grant again changes nothing and writes no row.
+        [
+          {
+            userId: member.userId,
+            level: "admin",
+            areas: ["fields"],
+            planAccess: true,
+          },
+          false,
+          null,
+        ],
+        [
+          {
+            userId: member.userId,
+            level: "admin",
+            areas: ["organisation", "fields"],
+            planAccess: false,
+          },
+          true,
+          {
+            level: "admin",
+            areas: ["fields", "organisation"],
+            planAccess: false,
+          },
+        ],
+        [
+          {
+            userId: member.userId,
+            level: "owner",
+            areas: [],
+            planAccess: true,
+          },
+          true,
+          { level: "owner", areas: [], planAccess: true },
+        ],
+        // The owner's own plan access.
+        [
+          {
+            userId: owner.userId,
+            level: "owner",
+            areas: [],
+            planAccess: true,
+          },
+          true,
+          { level: "owner", areas: [], planAccess: true },
+        ],
+        [{ userId: member.userId, level: null }, true, null],
+        [{ userId: member.userId, level: null }, false, null],
+      ];
+      let expected = before;
+      for (const [body, changed, after] of steps) {
+        const response = await grant(owner, body);
+        expect(response, JSON.stringify(body)).toEqual({
+          status: 200,
+          body: { data: { changed } },
+        });
+        if (changed) expected += 1;
+        const rows = await authorityRows();
+        expect(rows, JSON.stringify(body)).toHaveLength(expected);
+        if (changed)
+          expect(rows.at(-1)).toMatchObject({
+            team_id: owner.teamId,
+            actor_id: owner.userId,
+            metadata: {
+              targetUserId: (body as { userId: string }).userId,
+              after: after ? { ...after, suspended: false } : null,
+            },
+          });
+      }
+      expect(
+        (await holders()).filter(
+          (row) => (row as { user_id: string }).user_id === member.userId,
+        ),
+      ).toEqual([]);
+      expect(
+        (await holders()).find(
+          (row) => (row as { user_id: string }).user_id === owner.userId,
+        ),
+      ).toMatchObject({ level: "owner", plan_access: true });
+    });
+
+    it("refuses removing or demoting the last company owner, and a grant to someone in no team", async () => {
+      for (const body of [
+        { userId: owner.userId, level: null },
+        {
+          userId: owner.userId,
+          level: "admin",
+          areas: ["fields"],
+          planAccess: true,
+        },
+      ])
+        await refusedGrant(
+          owner,
+          body,
+          409,
+          "last_company_owner",
+          "The last company owner cannot be removed or demoted. Make someone else a company owner first.",
+        );
+      await refusedGrant(
+        owner,
+        {
+          userId: "roles-nobody",
+          level: "admin",
+          areas: [],
+          planAccess: false,
+        },
+        409,
+        "not_in_company",
+        "This person is not a member of any team in this company. Invite them to a team first.",
+      );
+    });
+
+    it("restores a suspended admin after they rejoin a team, clearing the suspension with an audit row", async () => {
+      const body = {
+        userId: leaver.userId,
+        level: "admin",
+        areas: ["workflows"],
+        planAccess: true,
+      };
+      expect((await grant(owner, body)).body).toEqual({
+        data: { changed: true },
+      });
+      await superuser("DELETE FROM auth.member WHERE user_id = $1", [
+        leaver.userId,
+      ]);
+      const listed = await call(
+        authorityRoute.GET,
+        owner,
+        "GET",
+        "/api/v1/company-authority",
+      );
+      expect(
+        listed.body.data.find(
+          (row: { userId: string }) => row.userId === leaver.userId,
+        ),
+      ).toMatchObject({
+        level: "admin",
+        areas: ["workflows"],
+        suspended: true,
+      });
+      // Not in any team: restore is refused plainly.
+      await refusedGrant(owner, body, 409, "not_in_company");
+      await seedIdentity(await harness.asOwner(), {
+        userId: leaver.userId,
+        teamId: "roles-team-b",
+        role: "viewer",
+      });
+      const rowsBefore = (await authorityRows()).length;
+      expect((await grant(owner, body)).body).toEqual({
+        data: { changed: true },
+      });
+      const rows = await authorityRows();
+      expect(rows).toHaveLength(rowsBefore + 1);
+      expect(rows.at(-1)).toMatchObject({
+        metadata: {
+          targetUserId: leaver.userId,
+          before: { level: "admin", suspended: true },
+          after: { level: "admin", suspended: false },
+        },
+      });
+      expect(
+        (await holders()).find(
+          (row) => (row as { user_id: string }).user_id === leaver.userId,
+        ),
+      ).toMatchObject({ suspended: false });
+    });
+
+    it("answers 400 for a grant the helper would refuse, and 403 for anyone but a company owner", async () => {
+      for (const body of [
+        {
+          userId: member.userId,
+          level: "owner",
+          areas: ["fields"],
+          planAccess: true,
+        },
+        {
+          userId: member.userId,
+          level: "admin",
+          areas: ["roles"],
+          planAccess: true,
+        },
+        ...["ai", "plan", "home-units"].map((area) => ({
+          userId: member.userId,
+          level: "admin",
+          areas: [area],
+          planAccess: false,
+        })),
+        {
+          userId: member.userId,
+          level: "admin",
+          areas: ["fields", "fields"],
+          planAccess: false,
+        },
+        { userId: member.userId, level: "admin", areas: ["fields"] },
+        { userId: member.userId, level: null, planAccess: false },
+        { userId: member.userId, level: "superuser" },
+        { userId: member.userId, level: null, extra: true },
+      ])
+        await refusedGrant(owner, body, 400, "invalid_input");
+      const body = {
+        userId: member.userId,
+        level: "admin",
+        areas: ["fields"],
+        planAccess: true,
+      };
+      for (const p of [companyAdmin, teamOwnerB, recruiter]) {
+        await refusedGrant(
+          p,
+          body,
+          403,
+          "authority_forbidden",
+          "Only a company owner can manage company authority.",
+        );
+        const list = await call(
+          authorityRoute.GET,
+          p,
+          "GET",
+          "/api/v1/company-authority",
+        );
+        expect(list.status, p.userId).toBe(403);
+        expect(list.body.error.code, p.userId).toBe("authority_forbidden");
+      }
+      await refusedGrant("bearer", body, 403, "session_required");
+      const bearer = await call(
+        authorityRoute.GET,
+        "bearer",
+        "GET",
+        "/api/v1/company-authority",
+      );
+      expect(bearer.status).toBe(403);
+      expect(bearer.body.error.code).toBe("session_required");
+    });
+
+    it("leaves authority rows out of the activity feed for a member without company authority", async () => {
+      const kinds = async (p: Principal) => {
+        const { status, body } = await call(
+          activityRoute,
+          p,
+          "GET",
+          "/api/v1/activity?pageSize=100",
+        );
+        expect(status, p.userId).toBe(200);
+        return new Set(body.data.map((row: { kind: string }) => row.kind));
+      };
+      expect((await kinds(owner)).has("workspace-authority")).toBe(true);
+      expect((await kinds(recruiter)).has("workspace-authority")).toBe(false);
+    });
+  });
+
+  describe("role routes", () => {
+    const recruiterBody = () =>
+      structuredClone({
+        ...(RECRUITER_ROLE.body as RoleBody),
+        name: "Copy of Recruiter",
+      });
+
+    it("copies the Recruiter template, edits pages, an action, a field rule and the name, and publishes it into History", async () => {
+      const created = await call(
+        rolesRoute.POST,
+        owner,
+        "POST",
+        "/api/v1/roles",
+        {
+          body: { key: "fictional-copy", body: recruiterBody() },
+        },
+      );
+      expect(created.status).toBe(201);
+      const { objectId, versionId } = created.body.data;
+      expect(Object.keys(created.body.data).sort()).toEqual([
+        "objectId",
+        "versionId",
+      ]);
+      const listed = await call(rolesRoute.GET, owner, "GET", "/api/v1/roles");
+      expect(listed.status).toBe(200);
+      expect(listed.body.data).toEqual([
+        expect.objectContaining({
+          id: objectId,
+          type: "role",
+          key: "fictional-copy",
+          current: null,
+          draft: expect.objectContaining({ id: versionId, state: "draft" }),
+        }),
+      ]);
+      const edited = recruiterBody();
+      edited.name = "Fictional sourcing recruiter";
+      edited.pages = edited.pages.filter((page) => page !== "analytics");
+      edited.actions.candidates = ["view", "comment"];
+      edited.fields = { candidate: { email: "read" } };
+      const saved = await call(
+        roleRoute.PUT,
+        owner,
+        "PUT",
+        `/api/v1/roles/${versionId}`,
+        { body: { body: edited }, params: { id: versionId } },
+      );
+      expect(saved).toEqual({ status: 200, body: { data: { versionId } } });
+      const published = await call(
+        publishRoute.POST,
+        owner,
+        "POST",
+        `/api/v1/roles/${versionId}/publish`,
+        { params: { id: versionId } },
+      );
+      expect(published).toEqual({
+        status: 200,
+        body: { data: { versionId, number: 1 } },
+      });
+      const after = await call(rolesRoute.GET, owner, "GET", "/api/v1/roles");
+      expect(after.body.data[0]).toMatchObject({
+        current: { id: versionId, number: 1, body: edited },
+        draft: null,
+      });
+      const history = await call(
+        configHistoryRoute,
+        owner,
+        "GET",
+        "/api/v1/config-history",
+      );
+      expect(
+        history.body.data
+          .filter(
+            (row: { objectKey: string }) => row.objectKey === "fictional-copy",
+          )
+          .map((row: { action: string; objectType: string }) => [
+            row.action,
+            row.objectType,
+          ]),
+      ).toEqual([
+        ["config.published", "role"],
+        ["config.draft_created", "role"],
+      ]);
+      // A new draft of the published role uses the same key.
+      const next = await call(rolesRoute.POST, owner, "POST", "/api/v1/roles", {
+        body: { key: "fictional-copy", body: edited },
+      });
+      expect(next.status).toBe(201);
+      expect(next.body.data.objectId).toBe(objectId);
+      const again = await call(
+        rolesRoute.POST,
+        owner,
+        "POST",
+        "/api/v1/roles",
+        {
+          body: { key: "fictional-copy", body: edited },
+        },
+      );
+      expect(again.status).toBe(409);
+      expect(again.body.error.code).toBe("config_draft_exists");
+    });
+
+    it("refuses a body outside the membership ceiling or with membership owner, storing nothing", async () => {
+      const viewer = structuredClone({
+        ...(VIEWER_ROLE.body as RoleBody),
+        name: "Fictional viewer",
+      });
+      const writing = structuredClone({
+        ...viewer,
+        actions: { ...viewer.actions, candidates: ["view", "edit"] },
+      });
+      const importing = recruiterBody();
+      importing.actions.candidates = [
+        ...(importing.actions.candidates ?? []),
+        "import",
+      ];
+      const ownerBody = structuredClone(OWNER_ROLE.body);
+      const before = await configRows();
+      for (const body of [
+        writing,
+        importing,
+        ownerBody,
+        { ...viewer, extra: 1 },
+      ]) {
+        const response = await call(
+          rolesRoute.POST,
+          owner,
+          "POST",
+          "/api/v1/roles",
+          { body: { key: "fictional-refused", body } },
+        );
+        expect(response.status).toBe(400);
+        expect(response.body.error.code).toBe("invalid_input");
+      }
+      const unknownKey = await call(
+        rolesRoute.POST,
+        owner,
+        "POST",
+        "/api/v1/roles",
+        {
+          body: { key: "fictional-refused", body: viewer, extra: true },
+        },
+      );
+      expect(unknownKey.status).toBe(400);
+      expect(await configRows()).toEqual(before);
+      // A stored draft keeps its body when an edit is refused.
+      const { body: created } = await call(
+        rolesRoute.POST,
+        owner,
+        "POST",
+        "/api/v1/roles",
+        { body: { key: "fictional-viewer", body: viewer } },
+      );
+      const draftId = created.data.versionId;
+      const stored = await configRows();
+      for (const body of [writing, ownerBody]) {
+        const response = await call(
+          roleRoute.PUT,
+          owner,
+          "PUT",
+          `/api/v1/roles/${draftId}`,
+          { body: { body }, params: { id: draftId } },
+        );
+        expect(response.status).toBe(400);
+        expect(response.body.error.code).toBe("invalid_input");
+      }
+      expect(await configRows()).toEqual(stored);
+    });
+
+    it("answers 404 for another configuration type's version, leaving it unchanged", async () => {
+      await harness.dataDb();
+      const workflow = await createConfigDraft(owner, {
+        type: "workflow",
+        key: "fictional-roles-workflow",
+        body: { label: "Fictional workflow" },
+      });
+      const before = await configRows();
+      const edit = await call(
+        roleRoute.PUT,
+        owner,
+        "PUT",
+        `/api/v1/roles/${workflow.versionId}`,
+        {
+          body: { body: { label: "Fictional changed" } },
+          params: { id: workflow.versionId },
+        },
+      );
+      expect(edit.status).toBe(404);
+      expect(edit.body.error.code).toBe("not_found");
+      const publish = await call(
+        publishRoute.POST,
+        owner,
+        "POST",
+        `/api/v1/roles/${workflow.versionId}/publish`,
+        { params: { id: workflow.versionId } },
+      );
+      expect(publish.status).toBe(404);
+      expect(publish.body.error.code).toBe("not_found");
+      expect(await configRows()).toEqual(before);
+    });
+
+    it("refuses a Bearer token on every role route", async () => {
+      const id = "00000000-0000-4000-a000-000000000099";
+      for (const [handler, method, path, body] of [
+        [rolesRoute.GET, "GET", "/api/v1/roles", undefined],
+        [rolesRoute.POST, "POST", "/api/v1/roles", { key: "x", body: {} }],
+        [roleRoute.PUT, "PUT", `/api/v1/roles/${id}`, { body: {} }],
+        [publishRoute.POST, "POST", `/api/v1/roles/${id}/publish`, undefined],
+      ] as const) {
+        const response = await call(handler, "bearer", method, path, {
+          body,
+          params: { id },
+        });
+        expect(response.status, path).toBe(403);
+        expect(response.body.error.code, path).toBe("session_required");
+      }
     });
   });
 });

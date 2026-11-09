@@ -1,16 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { Building2, Plus, RefreshCw, UserPlus, Users } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import type { MemberRoles } from "@/lib/member-roles";
 import {
+  ClientError,
   clearWorkspaceCache,
   humanError,
   requestJson,
+  useApi,
   useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import type { MeAccess } from "./admin-portal";
 import { SettingsNavigation } from "./settings-navigation";
 import { StorageSettings } from "./storage-settings";
 
@@ -65,6 +75,11 @@ export function canResetTwoStep(
   userId: string,
 ) {
   return role === "owner" && memberUserId !== userId;
+}
+
+/** Only a company owner assigns configured roles; a team role never allows it (D1). */
+export function canAssignRoles(companyLevel: string | null | undefined) {
+  return companyLevel === "owner";
 }
 
 /** Row actions in the members table. */
@@ -124,6 +139,97 @@ export function MemberActions({
   );
 }
 
+type MemberRoleAssignment = MemberRoles["assignments"][number];
+export const SCOPED_ROLES_HIDDEN =
+  "Roles limited to a unit or to assigned records are not offered yet.";
+
+/** Above the members table for a company owner: a load error, or why some roles are not offered. */
+export function ConfiguredRolesNotice({
+  error,
+  scopedRolesHidden,
+}: {
+  error: string;
+  scopedRolesHidden: boolean;
+}) {
+  return error ? (
+    <p className="notice error" role="alert">
+      Could not load configured roles. {error}
+    </p>
+  ) : scopedRolesHidden ? (
+    <p className="muted">{SCOPED_ROLES_HIDDEN}</p>
+  ) : null;
+}
+
+/**
+ * A company owner's configured-role control for one member row. Team owners keep the Owner role;
+ * an assigned role that is no longer available is named, with reassign and clear.
+ */
+export function MemberRoleControl({
+  name,
+  teamOwner,
+  assignment,
+  roles,
+  busy,
+  onSave,
+}: {
+  name: string;
+  teamOwner: boolean;
+  assignment: MemberRoleAssignment | null;
+  roles: MemberRoles["roles"];
+  busy: boolean;
+  onSave: (roleObjectId: string | null) => void;
+}) {
+  const current = assignment?.roleObjectId ?? "";
+  const [choice, setChoice] = useState(assignment?.available ? current : "");
+  if (teamOwner)
+    return <span className="muted">Team owners keep the Owner role</span>;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {assignment && !assignment.available && (
+        <span className="badge warning">
+          Role no longer available
+          {assignment.roleName ? `: ${assignment.roleName}` : ""}
+        </span>
+      )}
+      <label className="field">
+        <span className="sr-only">Configured role for {name}</span>
+        <select
+          value={choice}
+          disabled={busy}
+          onChange={(e) => setChoice(e.target.value)}
+        >
+          <option value="">Team role only (no configured role)</option>
+          {roles.map((role) => (
+            <option key={role.roleObjectId} value={role.roleObjectId}>
+              {role.name} ({role.membership})
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy || choice === current}
+          onClick={() => onSave(choice || null)}
+        >
+          Save configured role
+        </button>
+        {assignment && (
+          <button
+            type="button"
+            className="button secondary"
+            disabled={busy}
+            onClick={() => onSave(null)}
+          >
+            Clear role
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function TeamSettings() {
   const { team } = useWorkspace();
   return <TeamSettingsContent key={team?.id ?? "no-team"} />;
@@ -146,6 +252,17 @@ function TeamSettingsContent() {
   const [roleDrafts, setRoleDrafts] = useState<Record<string, TeamRole>>({});
   const { confirm, dialog } = useConfirm();
   const canAdmin = role === "owner" || role === "admin";
+  // Only a company owner assigns configured roles; nobody else requests them.
+  const me = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
+  const companyOwner = canAssignRoles(me.data?.data.companyLevel);
+  const memberRoles = useApi<{ data: MemberRoles }>(
+    team && companyOwner ? "/api/v1/teams/member-roles" : null,
+  );
+  const outcome = useRef<HTMLDivElement>(null);
+  const [outcomeFocus, setOutcomeFocus] = useState(0);
+  useEffect(() => {
+    if (outcomeFocus) outcome.current?.focus();
+  }, [outcomeFocus]);
   const load = useCallback(async () => {
     try {
       const teamResult = await authClient.organization.list();
@@ -322,6 +439,57 @@ function TeamSettingsContent() {
       "Member role updated.",
     );
   }
+  const assignmentOf = (person: TeamMember) =>
+    memberRoles.data?.data.assignments.find(
+      (item) => item.userId === person.userId,
+    ) ?? null;
+  async function saveMemberRole(
+    person: TeamMember,
+    roleObjectId: string | null,
+  ) {
+    if (!team) return;
+    const chosen = memberRoles.data?.data.roles.find(
+      (item) => item.roleObjectId === roleObjectId,
+    );
+    if (
+      !(await confirm(
+        chosen
+          ? {
+              title: "Give a configured role?",
+              message: `Give ${person.user.name} the ${chosen.name} role? Their access narrows to the role, and their team role becomes ${chosen.membership} when it differs.`,
+              confirmLabel: "Give role",
+            }
+          : {
+              title: "Clear configured role?",
+              message: `Clear ${person.user.name}'s configured role? They keep their team role, ${person.role}.`,
+              confirmLabel: "Clear role",
+              destructive: true,
+            },
+      ))
+    )
+      return;
+    await action(
+      `member-role-${person.id}`,
+      async () => {
+        try {
+          await requestJson(team.id, "/api/v1/teams/member-roles", {
+            method: "POST",
+            body: JSON.stringify({ userId: person.userId, roleObjectId }),
+          });
+        } catch (e) {
+          // The service's own words: the role may be saved even when the team role is not.
+          throw e instanceof ClientError ? new Error(e.message) : e;
+        } finally {
+          memberRoles.refresh();
+          await load();
+        }
+        if (person.userId === user.id) window.location.reload();
+      },
+      roleObjectId ? "Configured role saved." : "Configured role cleared.",
+    );
+    // The row's control is replaced with the new assignment, so focus moves to the outcome.
+    setOutcomeFocus((count) => count + 1);
+  }
   async function removeMember(person: TeamMember) {
     if (
       !team ||
@@ -391,12 +559,17 @@ function TeamSettingsContent() {
       </header>
       <SettingsNavigation active="team" role={role} />
       {error && (
-        <div className="notice error" role="alert">
+        <div ref={outcome} tabIndex={-1} className="notice error" role="alert">
           {error} Your unsaved fields are retained.
         </div>
       )}
       {notice && (
-        <div className="notice success" role="status">
+        <div
+          ref={outcome}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </div>
       )}
@@ -524,6 +697,12 @@ function TeamSettingsContent() {
               At least one owner must remain. Access changes also apply to each
               member’s API tokens.
             </p>
+            {companyOwner && (
+              <ConfiguredRolesNotice
+                error={memberRoles.error}
+                scopedRolesHidden={!!memberRoles.data?.data.scopedRolesHidden}
+              />
+            )}
             {!details ? (
               <p>
                 {loading
@@ -537,6 +716,7 @@ function TeamSettingsContent() {
                     <tr>
                       <th>Member</th>
                       <th>Role</th>
+                      {companyOwner && <th>Configured role</th>}
                       <th>
                         <span className="sr-only">Actions</span>
                       </th>
@@ -587,6 +767,27 @@ function TeamSettingsContent() {
                               <span className="badge">{person.role}</span>
                             )}
                           </td>
+                          {companyOwner && (
+                            <td>
+                              {memberRoles.data ? (
+                                <MemberRoleControl
+                                  key={JSON.stringify(assignmentOf(person))}
+                                  name={person.user.name}
+                                  teamOwner={person.role === "owner"}
+                                  assignment={assignmentOf(person)}
+                                  roles={memberRoles.data.data.roles}
+                                  busy={!!busy}
+                                  onSave={(roleObjectId) =>
+                                    void saveMemberRole(person, roleObjectId)
+                                  }
+                                />
+                              ) : (
+                                !memberRoles.error && (
+                                  <span role="status">Loading…</span>
+                                )
+                              )}
+                            </td>
+                          )}
                           <td>
                             <MemberActions
                               canEdit={canEdit}

@@ -9,8 +9,12 @@ import {
   TwoStepPanel,
 } from "../src/components/settings/profile-settings";
 import {
+  canAssignRoles,
   canResetTwoStep,
+  ConfiguredRolesNotice,
   MemberActions,
+  MemberRoleControl,
+  SCOPED_ROLES_HIDDEN,
   TeamSettings,
 } from "../src/components/settings/team-settings";
 import { TokenSettings } from "../src/components/settings/token-settings";
@@ -495,5 +499,148 @@ describe("two-step sign-in in settings", () => {
     expect(actions(true, false)).not.toContain("Reset two-step sign-in");
     expect(actions(true, false)).toContain(">Save role</button>");
     expect(actions(false, false)).toBe("");
+  });
+});
+
+// R2a-12 (job 056): the configured-role control in Team & access, company owners only.
+describe("configured role control", () => {
+  const roles = [
+    {
+      roleObjectId: "fictional-role-1",
+      name: "Fictional sourcing recruiter",
+      membership: "recruiter" as const,
+    },
+    {
+      roleObjectId: "fictional-role-2",
+      name: "Fictional reader",
+      membership: "viewer" as const,
+    },
+  ];
+  const control = (
+    assignment: {
+      roleObjectId: string;
+      roleName: string | null;
+      available: boolean;
+    } | null,
+    teamOwner = false,
+  ) =>
+    renderToStaticMarkup(
+      <MemberRoleControl
+        name="Fictional Member"
+        teamOwner={teamOwner}
+        assignment={assignment && { userId: "fictional-member", ...assignment }}
+        roles={roles}
+        busy={false}
+        onSave={() => {}}
+      />,
+    );
+
+  it("offers the control only to a company owner, never from the team role", () => {
+    expect(canAssignRoles("owner")).toBe(true);
+    for (const level of ["admin", null, undefined, "member"])
+      expect(canAssignRoles(level), String(level)).toBe(false);
+    // Before the access is known nothing is shown, whatever the team role.
+    for (const role of ["owner", "admin", "recruiter", "viewer"]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={{ ...workspace, role }}>
+          <TeamSettings />
+        </WorkspaceProvider>,
+      );
+      expect(markup, role).not.toContain("Configured role");
+      expect(markup, role).not.toContain("Save configured role");
+    }
+  });
+
+  it("lists the assignable roles with a labelled select and Save configured role", () => {
+    const none = control(null);
+    expect(none).toContain(
+      '<span class="sr-only">Configured role for Fictional Member</span><select>',
+    );
+    expect(none).toContain(
+      '<option value="" selected="">Team role only (no configured role)</option>',
+    );
+    expect(none).toContain(
+      '<option value="fictional-role-1">Fictional sourcing recruiter (recruiter)</option>',
+    );
+    expect(none).toContain(
+      '<option value="fictional-role-2">Fictional reader (viewer)</option>',
+    );
+    expect(none).toMatch(
+      /<button type="button" class="button secondary" disabled="">Save configured role<\/button>/,
+    );
+    expect(none).not.toContain("Clear role");
+    expect(none).not.toContain("Role no longer available");
+    const assigned = control({
+      roleObjectId: "fictional-role-2",
+      roleName: "Fictional reader",
+      available: true,
+    });
+    expect(assigned).toContain(
+      '<option value="fictional-role-2" selected="">Fictional reader (viewer)</option>',
+    );
+    expect(assigned).toContain(">Clear role</button>");
+    expect(assigned).not.toContain("Role no longer available");
+  });
+
+  it("names a role that is no longer available, with reassign and Clear role", () => {
+    const markup = control({
+      roleObjectId: "fictional-archived-role",
+      roleName: "Fictional archived role",
+      available: false,
+    });
+    expect(markup).toContain(
+      "Role no longer available: Fictional archived role",
+    );
+    expect(markup).not.toContain('value="fictional-archived-role"');
+    expect(markup).toContain(
+      '<option value="" selected="">Team role only (no configured role)</option>',
+    );
+    expect(markup).toContain(
+      '<option value="fictional-role-1">Fictional sourcing recruiter (recruiter)</option>',
+    );
+    expect(markup).toMatch(
+      /<button type="button" class="button secondary">Clear role<\/button>/,
+    );
+    expect(
+      control({
+        roleObjectId: "fictional-archived-role",
+        roleName: null,
+        available: false,
+      }),
+    ).toContain(">Role no longer available</span>");
+  });
+
+  it("shows no control on a team owner's row", () => {
+    const markup = control(null, true);
+    expect(markup).toBe(
+      '<span class="muted">Team owners keep the Owner role</span>',
+    );
+    expect(markup).not.toMatch(/<select|<button/);
+  });
+
+  it("says when roles limited to a unit or to assigned records are left out", () => {
+    expect(
+      renderToStaticMarkup(
+        <ConfiguredRolesNotice error="" scopedRolesHidden />,
+      ),
+    ).toBe(
+      '<p class="muted">Roles limited to a unit or to assigned records are not offered yet.</p>',
+    );
+    expect(SCOPED_ROLES_HIDDEN).toBe(
+      "Roles limited to a unit or to assigned records are not offered yet.",
+    );
+    expect(
+      renderToStaticMarkup(
+        <ConfiguredRolesNotice error="" scopedRolesHidden={false} />,
+      ),
+    ).toBe("");
+    expect(
+      renderToStaticMarkup(
+        <ConfiguredRolesNotice
+          error="Only a company owner can assign roles."
+          scopedRolesHidden
+        />,
+      ),
+    ).toContain('role="alert"');
   });
 });

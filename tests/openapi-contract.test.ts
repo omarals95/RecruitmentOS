@@ -591,6 +591,59 @@ describe("OpenAPI contract", () => {
       expect(JSON.stringify(changes)).toContain(text);
   });
 
+  it("documents the Roles & permissions operations as session-only, with their codes", () => {
+    const labels = [
+      ["/api/v1/roles", "get"],
+      ["/api/v1/roles", "post"],
+      ["/api/v1/roles/{id}", "put"],
+      ["/api/v1/roles/{id}/publish", "post"],
+      ["/api/v1/teams/member-roles", "get"],
+      ["/api/v1/company-authority", "get"],
+      ["/api/v1/company-authority", "post"],
+    ] as const;
+    const text = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method]);
+    for (const [path, method] of labels) {
+      const operation = document.paths[path][method];
+      expect(operation["x-session-only"], path).toBe(true);
+      expect(operation["x-required-scopes"], path).toEqual([]);
+      expect(Object.keys(operation.responses), path).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      expect(text(path, method), path).toContain("session_required");
+    }
+    for (const [path, method] of labels.slice(0, 4))
+      expect(text(path, method), path).toContain("config_forbidden");
+    for (const code of [
+      "invalid_input",
+      "membership owner",
+      "config_draft_exists",
+    ])
+      expect(text("/api/v1/roles", "post")).toContain(code);
+    expect(text("/api/v1/roles/{id}", "put")).toContain("not_found");
+    expect(text("/api/v1/roles/{id}/publish", "post")).toContain("not_found");
+    for (const code of [
+      "role_assignment_forbidden",
+      "scopedRolesHidden",
+      "available",
+    ])
+      expect(text("/api/v1/teams/member-roles", "get")).toContain(code);
+    const assign = document.paths["/api/v1/teams/member-roles"].post;
+    expect(JSON.stringify(assign)).toContain("team_role_unconfirmed");
+    expect(Object.keys(assign.responses)).toContain("503");
+    for (const code of [
+      "authority_forbidden",
+      "invalid_input",
+      "last_company_owner",
+      "not_in_company",
+      "workspace_authority.changed",
+    ])
+      expect(text("/api/v1/company-authority", "post")).toContain(code);
+    expect(text("/api/v1/company-authority", "get")).toContain(
+      "authority_forbidden",
+    );
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],
@@ -628,6 +681,13 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/me/access",
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",
+        "GET /api/v1/roles",
+        "POST /api/v1/roles",
+        "PUT /api/v1/roles/{id}",
+        "POST /api/v1/roles/{id}/publish",
+        "GET /api/v1/teams/member-roles",
+        "GET /api/v1/company-authority",
+        "POST /api/v1/company-authority",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {

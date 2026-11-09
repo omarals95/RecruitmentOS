@@ -64,6 +64,26 @@ import {
 } from "@/lib/mcp/tools";
 import { eq, sql } from "drizzle-orm";
 import { records } from "@/db/schema";
+import { afterAll, beforeAll, vi } from "vitest";
+import type { AppDb } from "@/db";
+import { getVerifiedSession } from "@/lib/auth-session";
+import { createConfigDraft } from "@/lib/config-store";
+import * as authorityRoute from "@/app/api/v1/company-authority/route";
+import * as memberRolesRoute from "@/app/api/v1/teams/member-roles/route";
+import * as rolesRoute from "@/app/api/v1/roles/route";
+import * as roleRoute from "@/app/api/v1/roles/[id]/route";
+import * as publishRoute from "@/app/api/v1/roles/[id]/publish/route";
+import { createSplitRoleDb, seedIdentity } from "./helpers/db";
+
+// The escalation cases below run through the routes on a split-role PGlite: the identity role
+// reads memberships, the data role runs withTeam. The pure cases above never reach the database.
+const pools = vi.hoisted(() => ({ data: vi.fn(), identity: vi.fn() }));
+vi.mock("@/db", async (original) => ({
+  ...(await original<typeof import("@/db")>()),
+  getDb: pools.data,
+  getIdentityDb: pools.identity,
+}));
+vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 
 // Fictional ids only.
 const TEAM = "10000000-0000-4000-8000-000000000001";
@@ -1416,4 +1436,235 @@ it("lists every record resource except private saved views", () => {
   expect(ACTION_RESOURCES).not.toContain("views");
   expect(PAGE_KEYS).not.toContain("shortlist" as never);
   expect(PAGE_KEYS).not.toContain("notifications" as never);
+});
+
+// R2a-12 (job 056): editing, publishing, assigning and granting are company-owner only, through
+// the API. Fictional people and teams only.
+describe("escalation through the Roles & permissions routes", () => {
+  const ORIGIN = "http://localhost:3000";
+  const COMPANY = "00000000-0000-4000-a000-000000000001";
+  let harness: Awaited<ReturnType<typeof createSplitRoleDb>>;
+  let owner: Principal, memberA: Principal;
+  let companyAdmin: Principal, teamOwnerB: Principal, memberB: Principal;
+  let draft: { objectId: string; versionId: string };
+
+  /** Every row an escalation could write: roles, assignments, authority and audit rows. */
+  const stored = async () => {
+    await harness.asSuperuser();
+    const read = async (text: string) =>
+      (await harness.client.query(text)).rows;
+    return [
+      await read(
+        "SELECT id, key, current_version_id, draft_version_id, archived_at FROM app.config_objects ORDER BY id",
+      ),
+      await read(
+        "SELECT id, state, body, number FROM app.config_versions ORDER BY id",
+      ),
+      await read("SELECT * FROM app.member_roles ORDER BY team_id, user_id"),
+      await read(
+        "SELECT user_id, level, areas, plan_access, suspended_at FROM app.workspace_admins ORDER BY user_id",
+      ),
+      await read("SELECT id FROM app.activity ORDER BY id"),
+      await read("SELECT id, role FROM auth.member ORDER BY id"),
+    ];
+  };
+  async function call(
+    handler: (request: Request, context: never) => Promise<Response>,
+    p: Principal,
+    method: string,
+    path: string,
+    body?: unknown,
+    params: Record<string, string> = {},
+  ) {
+    vi.mocked(getVerifiedSession).mockResolvedValue({
+      user: { id: p.userId, twoFactorEnabled: true },
+      session: { activeOrganizationId: p.teamId },
+    } as never);
+    const response = await handler(
+      new Request(`${ORIGIN}${path}`, {
+        method,
+        headers: {
+          origin: ORIGIN,
+          "x-team-id": p.teamId,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+      { params: Promise.resolve(params) } as never,
+    );
+    return {
+      status: response.status,
+      code: ((await response.json()) as { error?: { code: string } }).error
+        ?.code,
+    };
+  }
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db: AppDb = await harness.asOwner();
+    // The first seeded user is the initial administrator; their first team makes them company owner.
+    owner = await seedIdentity(db, {
+      userId: "esc-owner",
+      teamId: "esc-team-a",
+    });
+    memberA = await seedIdentity(db, {
+      userId: "esc-member-a",
+      teamId: "esc-team-a",
+      role: "viewer",
+    });
+    // A company admin holding every grantable area, and team A admin.
+    companyAdmin = await seedIdentity(db, {
+      userId: "esc-company-admin",
+      teamId: "esc-team-a",
+      role: "admin",
+    });
+    await harness.client.exec(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,plan_access) VALUES ('${COMPANY}','esc-company-admin','admin','{fields,workflows,boards,organisation,templates}',true)`,
+    );
+    // A team created later: its owner holds no company authority.
+    teamOwnerB = await seedIdentity(db, {
+      userId: "esc-owner-b",
+      teamId: "esc-team-b",
+    });
+    memberB = await seedIdentity(db, {
+      userId: "esc-member-b",
+      teamId: "esc-team-b",
+      role: "viewer",
+    });
+    await harness.dataDb();
+    draft = await createConfigDraft(owner, {
+      type: "role",
+      key: "esc-role",
+      body: { ...structuredClone(VIEWER_ROLE.body), name: "Fictional role" },
+    });
+  });
+  afterAll(async () => harness?.close());
+
+  it("refuses a company admin and a team-B owner listing, creating, editing, publishing, assigning or granting, storing nothing", async () => {
+    const viewer = structuredClone({
+      ...(VIEWER_ROLE.body as RoleBody),
+      name: "Fictional escalation",
+    });
+    const before = await stored();
+    for (const [p, target] of [
+      [companyAdmin, memberA],
+      [teamOwnerB, memberB],
+    ] as const) {
+      const cases: [
+        () => Promise<{ status: number; code?: string }>,
+        string,
+        string,
+      ][] = [
+        [
+          () => call(rolesRoute.GET, p, "GET", "/api/v1/roles"),
+          "config_forbidden",
+          "list roles",
+        ],
+        [
+          () =>
+            call(rolesRoute.POST, p, "POST", "/api/v1/roles", {
+              key: "esc-new",
+              body: viewer,
+            }),
+          "config_forbidden",
+          "create a role",
+        ],
+        [
+          () =>
+            call(
+              roleRoute.PUT,
+              p,
+              "PUT",
+              `/api/v1/roles/${draft.versionId}`,
+              { body: viewer },
+              { id: draft.versionId },
+            ),
+          "config_forbidden",
+          "edit a role",
+        ],
+        [
+          () =>
+            call(
+              publishRoute.POST,
+              p,
+              "POST",
+              `/api/v1/roles/${draft.versionId}/publish`,
+              undefined,
+              { id: draft.versionId },
+            ),
+          "config_forbidden",
+          "publish a role",
+        ],
+        [
+          () =>
+            call(memberRolesRoute.GET, p, "GET", "/api/v1/teams/member-roles"),
+          "role_assignment_forbidden",
+          "list member roles",
+        ],
+        [
+          () =>
+            call(
+              memberRolesRoute.POST,
+              p,
+              "POST",
+              "/api/v1/teams/member-roles",
+              {
+                userId: target.userId,
+                roleObjectId: draft.objectId,
+              },
+            ),
+          "role_assignment_forbidden",
+          "assign a role",
+        ],
+        [
+          () =>
+            call(
+              memberRolesRoute.POST,
+              p,
+              "POST",
+              "/api/v1/teams/member-roles",
+              {
+                userId: target.userId,
+                roleObjectId: null,
+              },
+            ),
+          "role_assignment_forbidden",
+          "clear a role",
+        ],
+        [
+          () => call(authorityRoute.GET, p, "GET", "/api/v1/company-authority"),
+          "authority_forbidden",
+          "list company authority",
+        ],
+        [
+          () =>
+            call(authorityRoute.POST, p, "POST", "/api/v1/company-authority", {
+              userId: p.userId,
+              level: "owner",
+              areas: [],
+              planAccess: true,
+            }),
+          "authority_forbidden",
+          "grant themselves company owner",
+        ],
+        [
+          () =>
+            call(authorityRoute.POST, p, "POST", "/api/v1/company-authority", {
+              userId: owner.userId,
+              level: null,
+            }),
+          "authority_forbidden",
+          "remove the company owner",
+        ],
+      ];
+      for (const [request, code, label] of cases)
+        expect(await request(), `${p.userId}: ${label}`).toEqual({
+          status: 403,
+          code,
+        });
+    }
+    expect(await stored()).toEqual(before);
+  });
 });

@@ -14,6 +14,7 @@ import {
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { adminTabs, type AdminTabKey } from "./admin-tabs";
+import { RolesTab } from "./roles-tab";
 
 /** GET /api/v1/me/access. */
 export type MeAccess = AccessMap & {
@@ -73,7 +74,7 @@ const accessActions: Record<string, string> = {
 const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
 const teamPanels: Record<
-  Exclude<AdminTabKey, "history">,
+  Exclude<AdminTabKey, "roles" | "history">,
   { title: string; text: string; href: string; link: string }
 > = {
   members: {
@@ -119,6 +120,7 @@ export function AdminPortal({ tab }: { tab: AdminTabKey | null }) {
       access={access}
       denied={!team || result.status === 403}
       error={result.error}
+      onAccessChanged={result.refresh}
     />
   );
 }
@@ -128,11 +130,14 @@ export function AdminPortalView({
   access,
   denied,
   error,
+  onAccessChanged = () => {},
 }: {
   tab: AdminTabKey | null;
   access: MeAccess | null;
   denied: boolean;
   error: string;
+  /** Reloads the caller's access after a change to their own company authority. */
+  onAccessChanged?: () => void;
 }) {
   const tabs = access ? adminTabs(access) : [];
   const current = tabs.find((item) => item.key === tab);
@@ -188,6 +193,8 @@ export function AdminPortalView({
               <ConfigHistory />
               {access.companyLevel === "owner" && <RecentAccessChanges />}
             </>
+          ) : current.key === "roles" ? (
+            <RolesTab onAccessChanged={onAccessChanged} />
           ) : (
             <TeamPanel tab={current.key} />
           )}
@@ -206,7 +213,11 @@ function NoAccess() {
 }
 
 /** Team tabs link to the existing settings pages, which keep their own guards. */
-function TeamPanel({ tab }: { tab: Exclude<AdminTabKey, "history"> }) {
+function TeamPanel({
+  tab,
+}: {
+  tab: Exclude<AdminTabKey, "roles" | "history">;
+}) {
   const panel = teamPanels[tab];
   return (
     <section className="panel">

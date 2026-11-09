@@ -393,6 +393,108 @@ It holds no user, team, workspace, role, version or configuration id and no conf
 
 At most the latest 100 changes of each kind are read. `truncated` is `true` when 100 changes of a kind were read and the oldest of them is still inside the seven days, so older changes from those days are not listed.
 
+## Roles, member roles and company authority
+
+These routes serve the **Roles & permissions** tab and **Team & access**. They need a signed-in browser session of a company owner: a Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The examples use fictional names and ids.
+
+### Roles
+
+`GET /api/v1/roles` lists the company's roles that are not archived, ordered by key, at most 100, each with its current published version (`current`) and its draft (`draft`), or `null`. Anyone but a company owner, company admins and team owners included, gets 403 `config_forbidden` on every role route.
+
+`POST /api/v1/roles` creates a role draft. Send the key and the whole role body; a new key creates the role, and the key of an existing role adds a new draft to it. The screen copies a built-in template's body and changes its name:
+
+```json
+{
+  "key": "fictional-reader",
+  "body": {
+    "name": "Fictional reader",
+    "membership": "viewer",
+    "scopes": ["candidates:read", "recruitment:read", "cvs:read"],
+    "pages": ["home", "candidates", "vacancies"],
+    "actions": { "candidates": ["view", "export"], "vacancies": ["view"] },
+    "fields": { "candidate": { "email": "read" } },
+    "recordScope": { "pipeline": "all", "candidates": "all", "tasks": "all" }
+  }
+}
+```
+
+It returns 201 `{"data":{"objectId":"…","versionId":"…"}}`. The strict role schema refuses an unknown key, membership `owner` and any grant outside the membership, such as `edit` for a viewer, `import` for a recruiter or any `plans` action, with 400 `invalid_input`; nothing is stored. A role that already has a draft gives 409 `config_draft_exists`.
+
+`PUT /api/v1/roles/{versionId}` replaces the draft's body with `{"body":{…}}` and returns `{"data":{"versionId":"…"}}`. `POST /api/v1/roles/{versionId}/publish` publishes the draft and returns `{"data":{"versionId":"…","number":1}}`; publishing changes access for every member who holds the role. Both answer 404 `not_found` for a version of another configuration type, and 409 `config_state_conflict` for a version that is no longer a draft. Every draft and publish appears in `GET /api/v1/config-history` as type `role`.
+
+### Member roles
+
+`GET /api/v1/teams/member-roles` returns the configured roles of the active team's members and the roles that can be assigned. Anyone but a company owner gets 403 `role_assignment_forbidden`.
+
+```json
+{
+  "data": {
+    "assignments": [
+      {
+        "userId": "fictional-member-id",
+        "roleObjectId": "00000000-0000-4000-a000-000000000010",
+        "roleName": "Fictional archived reader",
+        "available": false
+      }
+    ],
+    "roles": [
+      {
+        "roleObjectId": "00000000-0000-4000-a000-000000000011",
+        "name": "Fictional reader",
+        "membership": "viewer"
+      }
+    ],
+    "scopedRolesHidden": true
+  }
+}
+```
+
+`available` is `false` when the assigned role is archived, has no published version or was republished limited to a unit or to assigned records; that member is refused everything with "Your role is no longer available. Ask a company owner to choose a role for you." until the role is reassigned or cleared with `POST /api/v1/teams/member-roles` and `{"userId":"fictional-member-id","roleObjectId":null}`. `roles` leaves out roles limited to a unit or to assigned records, and `scopedRolesHidden` says one was left out. If the role is saved but the team role could not be checked or changed for another reason than a refusal, the POST answers 503 `team_role_unconfirmed`; the role stays saved and the request can be retried.
+
+### Company authority
+
+`GET /api/v1/company-authority` lists the company owners and admins, owners first. Anyone but a company owner gets 403 `authority_forbidden`.
+
+```json
+{
+  "data": [
+    {
+      "userId": "fictional-owner-id",
+      "name": "Fictional Company Owner",
+      "level": "owner",
+      "areas": [],
+      "planAccess": true,
+      "suspended": false
+    },
+    {
+      "userId": "fictional-admin-id",
+      "name": "Fictional Company Admin",
+      "level": "admin",
+      "areas": ["fields", "organisation"],
+      "planAccess": false,
+      "suspended": true
+    }
+  ]
+}
+```
+
+`POST /api/v1/company-authority` grants, changes or removes one person's authority and returns `{"data":{"changed":true}}`, or `false` when nothing changed:
+
+```json
+{
+  "userId": "fictional-member-id",
+  "level": "admin",
+  "areas": ["fields"],
+  "planAccess": true
+}
+```
+
+- A company owner is `{"userId":"…","level":"owner","areas":[],"planAccess":true}`; removal is `{"userId":"…","level":null}`.
+- `areas` is a unique subset of `fields`, `workflows`, `boards`, `organisation` and `templates`. Anything else, including `roles`, `ai`, `plan` or `home-units`, gives 400 `invalid_input`.
+- Removing or demoting the last company owner gives 409 `last_company_owner`; a person in no team of the company gives 409 `not_in_company`.
+- `suspended` is `true` for someone who left every team of the company. After they rejoin a team, sending their grant again restores it.
+- Each change writes one `workspace_authority.changed` row to your team's activity, shown only to people with company authority.
+
 ## Errors
 
 The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) and `token_guess_rate_limited` it is 60, and for 429 `STORAGE_RECONCILIATION_COOLDOWN` it is the seconds left of the team's 10-minute cleanup cooldown. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
