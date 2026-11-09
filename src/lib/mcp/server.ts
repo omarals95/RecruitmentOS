@@ -81,9 +81,24 @@ export function createMcpServer(p: Principal): Server {
     },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: await listStoredTools(p),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+      return { tools: await listStoredTools(p) };
+    } catch (error) {
+      // As for a failed tool call: logged safely, and only the envelope's code and message are sent.
+      const response = errorResponse(error);
+      const { error: safe } = (await response.json()) as {
+        error: { code: string; message: string };
+      };
+      throw new McpError(
+        response.status >= 500
+          ? ErrorCode.InternalError
+          : ErrorCode.InvalidRequest,
+        safe.message,
+        { code: safe.code },
+      );
+    }
+  });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const definition = TOOLS.find((item) => item.name === request.params.name);
     if (!definition)
