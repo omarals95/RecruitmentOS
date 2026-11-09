@@ -168,7 +168,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
   const [focusNotice, setFocusNotice] = useState(0);
   const noticeRef = useRef<HTMLParagraphElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
-  const focusStatus = useRef(false);
+  const focusStatus = useRef<"page" | "write" | null>(null);
   const { confirm, dialog } = useConfirm();
   const { members, error: memberError } = useTeamMembers(
     teamId,
@@ -204,12 +204,13 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
       active = false;
     };
   }, [request]);
-  // After paging, focus moves to the page line, since the pressed button may be gone.
+  // After paging, focus moves to the page line, since the pressed button may be gone; after a row
+  // write, only when the reload removed the focused control.
   useEffect(() => {
-    if (!busy && focusStatus.current) {
-      focusStatus.current = false;
-      statusRef.current?.focus();
-    }
+    if (busy || !focusStatus.current) return;
+    const lost = document.activeElement === document.body;
+    if (focusStatus.current === "page" || lost) statusRef.current?.focus();
+    focusStatus.current = null;
   }, [busy]);
   // After the closed dialog has returned focus to its button, which the reload then removes.
   useEffect(() => {
@@ -242,7 +243,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
     setPage(1);
   }
   function goTo(next: number) {
-    focusStatus.current = true;
+    focusStatus.current = "page";
     setPage(next);
   }
   async function patchRow(
@@ -257,6 +258,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
         method: "PATCH",
         body: JSON.stringify(body),
       });
+      focusStatus.current = "write";
       reload();
     } catch (e) {
       setRowError(row.id, plainError(e));
@@ -299,6 +301,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
   async function write(path: string, method: string, body: unknown) {
     if (!request) return;
     await request(path, { method, body: JSON.stringify(body) });
+    focusStatus.current = "write";
     setForm(null);
     reload();
   }

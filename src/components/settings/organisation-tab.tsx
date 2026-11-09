@@ -209,6 +209,25 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
       active = false;
     };
   }, [request]);
+  // A move or archive can remove the control that had focus; focus then goes to the first of
+  // these on the page: the units' expand buttons, then Add top-level unit.
+  const [refocus, setRefocus] = useState<{ selectors: string[] } | null>(null);
+  useEffect(() => {
+    if (!refocus || document.activeElement !== document.body) return;
+    refocus.selectors
+      .map((selector) => document.querySelector<HTMLElement>(selector))
+      .find(Boolean)
+      ?.focus();
+  }, [refocus]);
+  const focusNear = (...unitIds: (string | null)[]) =>
+    setRefocus({
+      selectors: [
+        ...unitIds
+          .filter((id): id is string => !!id)
+          .map((id) => `[aria-controls="org-unit-${id}"]`),
+        "[data-org-add-top]",
+      ],
+    });
 
   async function reloadLevels() {
     if (!request) return;
@@ -346,7 +365,8 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
           message:
             "The unit leaves the org chart. A unit with current units below it cannot be archived.",
         },
-        () => reloadList(unit.parentId ?? ""),
+        () =>
+          reloadList(unit.parentId ?? "").then(() => focusNear(unit.parentId)),
       );
     },
     archivePosition(position) {
@@ -358,7 +378,10 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
           message:
             "The position leaves the org chart and ends for everyone who holds it.",
         },
-        () => reloadPositions(position.orgUnitId),
+        () =>
+          reloadPositions(position.orgUnitId).then(() =>
+            focusNear(position.orgUnitId),
+          ),
       );
     },
   };
@@ -396,7 +419,10 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         message:
           "No new unit can use an archived level. A level that current units still use cannot be archived.",
       },
-      () => reloadLevels().catch((e) => setLoadError(humanError(e))),
+      () =>
+        reloadLevels()
+          .catch((e) => setLoadError(humanError(e)))
+          .then(() => setRefocus({ selectors: ["[data-org-level-name]"] })),
     );
   }
   async function addLevel(name: string, depth: number) {
@@ -452,6 +478,7 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         await reloadList(current.unit.parentId ?? "");
         if (to !== (current.unit.parentId ?? "") && (!to || chart.lists[to]))
           await reloadList(to);
+        focusNear(current.unit.id, current.unit.parentId);
         break;
       }
       case "add-position":
@@ -483,6 +510,7 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         await reloadPositions(current.position.orgUnitId);
         if (to !== current.position.orgUnitId && chart.contents[to])
           await reloadPositions(to);
+        focusNear(current.position.orgUnitId);
         break;
       }
     }
@@ -682,6 +710,7 @@ export function AddLevelFormView({
             <input
               required
               maxLength={120}
+              data-org-level-name=""
               value={name}
               disabled={busy}
               onChange={(event) => onName(event.target.value)}
@@ -758,6 +787,7 @@ export function OrgChartPanel({
         <button
           type="button"
           className="button"
+          data-org-add-top=""
           onClick={() => on.open?.({ kind: "add-unit", parent: null })}
         >
           Add top-level unit
