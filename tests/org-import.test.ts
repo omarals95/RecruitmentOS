@@ -901,6 +901,50 @@ describe("organisation import from Excel", () => {
     const streamed = { ...plain, name: "xl/streamed.xml", streamed: true };
     // The same shapes, honestly sized, pass the archive check.
     expect(() => checkWorkbookArchive(zip([plain, streamed]))).not.toThrow();
+    /**
+     * One honest stored entry and its directory record, with the local header of a bit 3 bomb placed
+     * after the directory record, before the end record; covered says whether the end record's
+     * directory size includes it.
+     */
+    const hiddenEntry = (covered: boolean) => {
+      const honest = zip([
+        {
+          name: "[Content_Types].xml",
+          data: Buffer.from("<Types/>"),
+          method: 0,
+          expanded: 8,
+        },
+      ]);
+      const end = Buffer.from(honest.subarray(honest.length - 22));
+      const directory = honest.subarray(end.readUInt32LE(16), -22);
+      const bombZip = zip([
+        { ...streamed, name: "xl/worksheets/sheet1.xml", data: bomb },
+      ]);
+      const hidden = bombZip.subarray(
+        0,
+        bombZip.readUInt32LE(bombZip.length - 6),
+      );
+      if (covered) end.writeUInt32LE(directory.length + hidden.length, 12);
+      return Buffer.concat([
+        honest.subarray(0, end.readUInt32LE(16)),
+        directory,
+        hidden,
+        end,
+      ]);
+    };
+    // Without the hidden local entry the same file passes.
+    expect(() =>
+      checkWorkbookArchive(
+        zip([
+          {
+            name: "[Content_Types].xml",
+            data: Buffer.from("<Types/>"),
+            method: 0,
+            expanded: 8,
+          },
+        ]),
+      ),
+    ).not.toThrow();
     const big = Buffer.alloc(5 * 1024 * 1024 + 1);
     const archives: [string, Buffer, string][] = [
       [
@@ -963,6 +1007,21 @@ describe("organisation import from Excel", () => {
             streamed: true,
           },
         ]),
+        "import_unreadable",
+      ],
+      [
+        "a bit 3 entry hidden between the directory and the end record",
+        hiddenEntry(false),
+        "import_unreadable",
+      ],
+      [
+        "a bit 3 entry hidden in directory bytes the end record covers",
+        hiddenEntry(true),
+        "import_unreadable",
+      ],
+      [
+        "bytes after the end record",
+        Buffer.concat([zip([plain]), Buffer.from("x")]),
         "import_unreadable",
       ],
     ];

@@ -33,8 +33,8 @@ const MAX_EXPANDED = 50 * 1024 * 1024;
 const LIST_LIMIT = 500;
 /** Rows per write statement. */
 const CHUNK = 1_000;
-/** The activity insert policy (tenant_context.allows_event) needs one of these in the context. */
 const DATA_DESCRIPTOR = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
+/** The activity insert policy (tenant_context.allows_event) needs one of these in the context. */
 const AUDIT_SCOPES = [
   "candidates:write",
   "recruitment:write",
@@ -218,7 +218,10 @@ export function checkWorkbookArchive(bytes: Buffer) {
     entries === 0xffff ||
     size === 0xffffffff ||
     offset === 0xffffffff ||
-    offset + size > eocd ||
+    // The directory ends where the end record starts, and the end record and its comment end the
+    // file, so unzipper, which reads on until an end record, meets no record the checks skip.
+    offset + size !== eocd ||
+    eocd + 22 + bytes.readUInt16LE(eocd + 20) !== bytes.length ||
     (eocd >= 20 && bytes.readUInt32LE(eocd - 20) === 0x07064b50)
   )
     throw unreadable();
@@ -269,6 +272,7 @@ export function checkWorkbookArchive(bytes: Buffer) {
     total += expanded;
     pointer = end;
   }
+  if (pointer !== offset + size) throw unreadable();
   if (entries > MAX_ENTRIES || total > MAX_EXPANDED) throw archiveTooLarge();
   if (
     names.some(
