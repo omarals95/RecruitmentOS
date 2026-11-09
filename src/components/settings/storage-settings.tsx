@@ -290,7 +290,7 @@ export function StorageSettings({
   const current = useApi<{ data: StorageSettingsData }>(team ? path : null);
   const settings = current.data?.data;
   return (
-    <section className="panel">
+    <section className="panel" id="cv-storage">
       <h2>
         <HardDrive
           size={20}

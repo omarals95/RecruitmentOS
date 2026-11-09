@@ -5,7 +5,7 @@ export function SettingsNavigation({
   role,
 }: {
   active: "profile" | "team" | "api-tokens" | "speed" | "about";
-  /** Speed is listed only for team owners and admins; About for everyone. */
+  /** Speed and the Admin portal link only for team owners and admins; About for everyone. */
   role?: string | null;
 }) {
   const sections: [typeof active, string][] = [
@@ -33,6 +33,11 @@ export function SettingsNavigation({
           {label}
         </Link>
       ))}
+      {(role === "owner" || role === "admin") && (
+        <Link href="/app/admin" className="button secondary">
+          Admin portal
+        </Link>
+      )}
     </nav>
   );
 }
