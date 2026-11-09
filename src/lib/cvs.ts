@@ -541,15 +541,18 @@ export async function beginCvUpload(
   // Resolve configuration errors before reserving quota, without contacting a provider.
   if (!storage && !storageConfigured()) await storageClient();
   const binding = storageBinding(storage);
-  if (
-    (input.legacySourceId || input.sourcePath) &&
-    !p.scopes.includes("imports:write")
-  )
-    throw new ApiError(
-      403,
-      "IMPORT_PERMISSION_REQUIRED",
-      "Legacy CV source metadata requires import permission.",
-    );
+  const requireImport = () => {
+    if (
+      (input.legacySourceId || input.sourcePath) &&
+      !p.scopes.includes("imports:write")
+    )
+      throw new ApiError(
+        403,
+        "IMPORT_PERMISSION_REQUIRED",
+        "Legacy CV source metadata requires import permission.",
+      );
+  };
+  requireImport();
   let metadata;
   try {
     metadata = validateCvMetadata(
@@ -574,6 +577,8 @@ export async function beginCvUpload(
     .digest("hex");
   // Expiry commits independently, even if the following reservation is refused or a retry conflicts.
   const overRate = await withTeam(p, async (tx) => {
+    // Again with the scopes install stored, which a configured role may have narrowed.
+    requireImport();
     await assertCandidate(tx, p, candidateId);
     await expireCvReservations(tx, p.teamId, binding, now);
     // Early, so an over-rate request makes no provider call; the locked check below stays authoritative.
