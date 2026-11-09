@@ -307,6 +307,92 @@ The list is ordered by display name.
 
 Every create, update and archive appears in Activity for the team you made it from, with ids and field names only, never a name, number, email or phone. Each owner-only change also records which users' home units changed.
 
+## Your access and the Admin portal reads
+
+These three routes serve the Admin portal and need a signed-in browser session. A Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The examples use fictional names.
+
+`GET /api/v1/me/access` returns your own access in the active team, as the server decides it, so a screen can hide what the server would refuse. Any signed-in member can read it. It takes no query parameters. This response is trimmed:
+
+```json
+{
+  "data": {
+    "teamRole": "recruiter",
+    "companyLevel": "admin",
+    "role": { "name": "Recruiter", "membership": "recruiter" },
+    "scopes": ["candidates:read", "candidates:write", "recruitment:read"],
+    "pages": ["home", "candidates", "vacancies", "settings", "admin"],
+    "actions": {
+      "candidates": ["view", "create", "edit", "transition", "archive"],
+      "vacancies": ["view", "create", "edit", "transition", "archive"]
+    },
+    "fields": {
+      "candidate": { "name": "edit", "email": "edit", "phone": "edit" }
+    },
+    "adminAreas": ["fields"]
+  }
+}
+```
+
+- `teamRole` is your team role and `companyLevel` your company authority (`owner`, `admin` or `null`).
+- `role` is the name and level of the role that applies to you: the built-in template of your team role, or the configured role a company owner gave you. It is `null` when no role applies; `pages`, `actions` and `fields` are then empty.
+- `actions` lists the allowed actions per resource and leaves out a resource with none. `fields` gives the rule of each field (`hidden`, `read` or `edit`) for each record kind you may view.
+- `adminAreas` lists the company areas you hold.
+
+It holds no user, team, workspace, role, version or configuration id and no configuration body.
+
+`GET /api/v1/config-history?pageSize=25` lists the company configuration changes made in any team of the workspace, newest first. Only company owners and company admins can read it; anyone else, team owners and admins without company authority included, gets 403 `config_forbidden`.
+
+```json
+{
+  "data": [
+    {
+      "occurredAt": "2026-11-08T10:15:00.000Z",
+      "action": "config.published",
+      "objectType": "workflow",
+      "objectKey": "fictional-hiring",
+      "versionNumber": 2,
+      "fromVersionNumber": 1,
+      "actorName": "Fictional Company Owner"
+    }
+  ],
+  "pagination": {
+    "pageSize": 25,
+    "hasMore": true,
+    "nextBefore": "2026-11-08T10:15:00.000Z"
+  }
+}
+```
+
+`pageSize` is 1 to 100 (default 25). While `hasMore` is `true`, send `nextBefore` as `before` for the next page: `GET /api/v1/config-history?pageSize=25&before=2026-11-08T10%3A15%3A00.000Z`. The cursor has millisecond precision, so changes made in the same millisecond as the last one listed may be skipped. Any other query key or value returns 400 `invalid_input`.
+
+`GET /api/v1/access-changes` lists the role assignments and home-unit changes of every team in the workspace from the last seven days, newest first. Only company owners can read it; anyone else, company admins and team owners included, gets 403 `role_assignment_forbidden`. It takes no query parameters; any key returns 400 `invalid_input`.
+
+```json
+{
+  "data": [
+    {
+      "occurredAt": "2026-11-08T09:00:00.000Z",
+      "kind": "role-assignment",
+      "action": "role.assigned",
+      "affectedUserIds": ["fictional-member-id"],
+      "roleName": "Fictional Hiring Manager",
+      "actorName": "Fictional Company Owner"
+    },
+    {
+      "occurredAt": "2026-11-07T09:00:00.000Z",
+      "kind": "home-units",
+      "action": "scope.home_units_changed",
+      "affectedUserIds": ["fictional-member-id"],
+      "roleName": null,
+      "actorName": "Fictional Company Owner"
+    }
+  ],
+  "truncated": false
+}
+```
+
+At most the latest 100 changes of each kind are read. `truncated` is `true` when 100 changes of a kind were read and the oldest of them is still inside the seven days, so older changes from those days are not listed.
+
 ## Errors
 
 The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) and `token_guess_rate_limited` it is 60, and for 429 `STORAGE_RECONCILIATION_COOLDOWN` it is the seconds left of the team's 10-minute cleanup cooldown. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
