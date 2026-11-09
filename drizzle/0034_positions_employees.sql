@@ -3,7 +3,8 @@
 -- the data role SELECT, INSERT and UPDATE on the three tables and EXECUTE on
 -- tenant_context.allows_directory and tenant_context.home_unit_changes. The facts that set a member's
 -- home units (an employee's user link, a linked employee's positions and the unit of a position a
--- linked employee holds) need a company owner session, as unit moves do. app.guard_scope_sources(),
+-- linked employee holds) need a company owner session, as unit moves do, and a position names a
+-- current job role of the writer's own team only. app.guard_scope_sources(),
 -- app.maintain_org_closure() and app.guard_org_archive() are replaced to also refuse a runtime
 -- transaction that is not read committed. The storage schema marker goes to 13, so startup refuses a
 -- database without this migration. tenant_context.install, the team tables and their policies are
@@ -181,6 +182,47 @@ CREATE TRIGGER employees_guard BEFORE INSERT OR UPDATE ON app.employees
   FOR EACH ROW EXECUTE FUNCTION app.guard_directory_row();
 CREATE TRIGGER employee_positions_guard BEFORE INSERT OR UPDATE ON app.employee_positions
   FOR EACH ROW EXECUTE FUNCTION app.guard_directory_row();
+
+-- A position names a job role of the writer's own team only. The foreign key alone accepts any
+-- record of any team, and its check ignores RLS. So for any caller with a context, an insert or a
+-- change of the job role to a non-null value needs the context's team, a job-role record that is
+-- not archived, and that team in the row's workspace (42501 otherwise). Other record kinds, which
+-- erasure deletes, can then never be referenced, and no other team's id is planted in a row the
+-- whole workspace reads. A security definer function, because only the owner reads the context
+-- table and other teams' records; the owner's own SQL has no context row and is let through.
+CREATE FUNCTION app.guard_position_job_role() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  ctx tenant_context.contexts%ROWTYPE;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM tenant_context.contexts c WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()) THEN
+    RETURN NEW;
+  END IF;
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'Organisation and directory changes need a read committed transaction' USING ERRCODE = '42501';
+  END IF;
+  IF NEW.job_role_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF (NEW.job_role_team_id, NEW.job_role_id) IS NOT DISTINCT FROM (OLD.job_role_team_id, OLD.job_role_id) THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+  SELECT * INTO ctx FROM tenant_context.contexts c
+    WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
+      AND c.expires_at > clock_timestamp();
+  IF NOT FOUND OR NEW.job_role_team_id IS DISTINCT FROM ctx.team_id
+     OR NOT EXISTS (SELECT 1 FROM app.records r JOIN app.workspace_teams t ON t.team_id = r.team_id
+       WHERE r.team_id = NEW.job_role_team_id AND r.id = NEW.job_role_id AND r.kind = 'job-role'
+         AND r.archived_at IS NULL AND t.workspace_id = NEW.workspace_id) THEN
+    RAISE EXCEPTION 'A position names a current job role of your own team only' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION app.guard_position_job_role() FROM PUBLIC;
+CREATE TRIGGER positions_job_role BEFORE INSERT OR UPDATE ON app.positions
+  FOR EACH ROW EXECUTE FUNCTION app.guard_position_job_role();
 
 -- As in 0033, plus the home-unit facts of R2a-14 (architecture 6.5): an employee insert with a user
 -- link or any change of the link; any insert, update or delete of a position row of a linked

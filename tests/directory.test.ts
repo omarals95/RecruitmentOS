@@ -1728,6 +1728,55 @@ describe("positions and employees under the split runtime roles", () => {
       expect(
         (await updatePosition(owner, made.id, { jobRoleId: null })).jobRoleId,
       ).toBeNull();
+
+      // The database refuses the same by direct SQL: another team's job role, a record of another
+      // kind in the writer's own team (here a candidate, which erasure deletes), an archived job role.
+      const [{ id: teamBRole }] = await sqlAs(
+        orgAdmin,
+        `INSERT INTO app.records(team_id, kind, data, created_by) VALUES ('dir-team-b', 'job-role', '{"title":"Fictional Team B Role"}', 'dir-org-admin') RETURNING id`,
+      );
+      const [{ id: candidate }] = await sqlAs(
+        owner,
+        `INSERT INTO app.records(team_id, kind, data, created_by) VALUES ('dir-team-a', 'candidate', '{"name":"Fictional Role Candidate"}', 'dir-owner') RETURNING id`,
+      );
+      const insert = (team: string, record: unknown) =>
+        `INSERT INTO app.positions(workspace_id, org_unit_id, title, code, job_role_team_id, job_role_id) VALUES ('${COMPANY}', '${unitA}', 'Denied', 'POS-ROLE-X', '${team}', '${record}')`;
+      const relink = (team: string, record: unknown) =>
+        `UPDATE app.positions SET job_role_team_id = '${team}', job_role_id = '${record}' WHERE id = '${made.id}'`;
+      for (const [p, statement] of [
+        [owner, insert("dir-team-b", teamBRole)],
+        [owner, insert("dir-team-a", candidate)],
+        [owner, insert("dir-team-a", archivedRole)],
+        [owner, relink("dir-team-b", teamBRole)],
+        [owner, relink("dir-team-a", candidate)],
+        [owner, relink("dir-team-a", archivedRole)],
+        [orgAdmin, insert("dir-team-a", jobRole)],
+        [orgAdmin, relink("dir-team-a", jobRole)],
+        [orgAdmin, relink("dir-team-b", candidate)],
+      ] as const)
+        await refused(() => sqlAs(p, statement), "42501");
+      // A current job role of the writer's team is accepted, and a later change by another team's
+      // writer that leaves the job role alone still passes.
+      await sqlAs(
+        orgAdmin,
+        insert("dir-team-b", teamBRole).replace("'POS-ROLE-X'", "'POS-ROLE-B'"),
+      );
+      const [teamB] = await look<{ id: string }>(
+        "SELECT id FROM app.positions WHERE code = 'POS-ROLE-B'",
+      );
+      expect(
+        (
+          await updatePosition(owner, teamB.id, {
+            title: "Fictional Team B Desk",
+          })
+        ).jobRoleId,
+      ).toBeNull();
+      expect(
+        await look(
+          "SELECT job_role_team_id, job_role_id FROM app.positions WHERE id = $1",
+          [teamB.id],
+        ),
+      ).toEqual([{ job_role_team_id: "dir-team-b", job_role_id: teamBRole }]);
     });
 
     it("refuses position writes to a fields-only company admin and to team roles", async () => {

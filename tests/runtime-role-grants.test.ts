@@ -856,6 +856,7 @@ describe("split runtime role template", () => {
     ];
     const triggers = [
       "app.guard_directory_row()",
+      "app.guard_position_job_role()",
       "app.audit_directory_change()",
       "app.guard_scope_sources()",
       "app.maintain_org_closure()",
