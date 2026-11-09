@@ -127,7 +127,7 @@ How a company owner permanently erases one employee of the company directory (R2
 ### Erase in the app
 
 1. Sign in as a company owner whose team role has directory:read (a team owner or admin), and open **Admin portal > Directory**.
-2. Search for the employee, or find them in the retention review, and choose **Permanently erase employee** on their row.
+2. Search for the employee and choose **Actions** on their row, then **Permanently erase employee**; or find them in the retention review and choose **Permanently erase employee** on their row.
 3. Read what is removed, kept and not covered.
 4. Type the employee's name exactly as shown (case matters; spaces at either end are ignored). **Permanently erase** stays disabled until it matches.
 5. Choose **Permanently erase**. The page shows "Employee permanently erased." and both lists reload without the employee.
