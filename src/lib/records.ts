@@ -72,17 +72,32 @@ const recordColumns = {
     string | null
   >`case when ${records.kind}='vacancy' then (select u.name || ' (' || u.code || ')' from app.org_units u where u.id=${records.orgUnitId}) end`,
 };
-/** Maps app.maintain_record_scope()'s refusal of a vacancy's unit (RQ012) to a reference error. */
-async function unitChecked<T>(statement: PromiseLike<T>): Promise<T> {
+/**
+ * Maps app.maintain_record_scope()'s refusal of a vacancy's unit (RQ012) to a reference error, and
+ * the record-scope policy's refusal of a row outside the caller's scope (42501, 0038) to a plain 403
+ * for a caller whose record scope is not all in every group; anything else is re-thrown unchanged.
+ */
+async function unitChecked<T>(
+  ctx: AccessContext,
+  statement: PromiseLike<T>,
+): Promise<T> {
   try {
     return await statement;
   } catch (error) {
     const cause = error instanceof DrizzleQueryError ? error.cause : error;
-    if ((cause as { code?: unknown } | undefined)?.code === "RQ012")
+    const { code } = (cause as { code?: unknown } | undefined) ?? {};
+    if (code === "RQ012")
       throw new ApiError(
         400,
         "invalid_reference",
         "orgUnitId does not reference a current unit of this company.",
+      );
+    // No rule for any kind means a record scope of all in every group.
+    if (code === "42501" && anyRecordScopeRule(ctx, "records") !== null)
+      throw new ApiError(
+        403,
+        "record_out_of_scope",
+        "This change would put the record outside the records you can see.",
       );
     throw error;
   }
@@ -644,18 +659,28 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 /**
+ * The owner of a stored idempotent response: tenant_context.context_actor_key() builds the same key
+ * from the verified context, and the app.idempotency policy shows a context only its own rows.
+ */
+export function idempotencyActorKey(p: Principal) {
+  return `${p.userId}:${p.authType}:${p.tokenId ?? "session"}`;
+}
+/**
  * Keys are never reused for different content, even after expiry. An expired
- * same-payload retry runs `reconcile` (or `work` when it cannot duplicate) and
- * renews the stored result in place.
+ * same-payload retry, or one under another role version than the response was
+ * composed under, runs `reconcile` (or `work` when it cannot duplicate) and
+ * renews the stored result in place. Every cached response returned passes
+ * through `replay`.
  */
 export async function idempotent<T>(
   tx: TeamTx,
-  p: Principal,
+  actor: Pick<AccessContext, "principal" | "access">,
   operation: string,
   key: string | undefined,
   payload: unknown,
   work: () => Promise<T>,
   reconcile?: (previous: unknown) => Promise<T>,
+  replay?: (cached: T) => T,
 ): Promise<T> {
   if (!key) return work();
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key))
@@ -664,7 +689,9 @@ export async function idempotent<T>(
       "invalid_idempotency_key",
       "Use an Idempotency-Key of 1–128 letters, digits, dots, underscores, colons or hyphens.",
     );
-  const actorKey = `${p.userId}:${p.authType}:${p.tokenId ?? "session"}`;
+  const { principal: p } = actor;
+  const roleVersionId = actor.access.roleVersionId ?? null;
+  const actorKey = idempotencyActorKey(p);
   const payloadHash = createHash("sha256")
     .update(canonical(payload))
     .digest("hex");
@@ -682,7 +709,15 @@ export async function idempotent<T>(
         "idempotency_mismatch",
         "This Idempotency-Key was used with different content.",
       );
-    if (previous.expiresAt > new Date()) return previous.response as T;
+    // A row written before role versions were stored (null) counts as another version.
+    if (
+      previous.expiresAt > new Date() &&
+      previous.roleVersionId !== null &&
+      previous.roleVersionId === roleVersionId
+    ) {
+      const cached = previous.response as T;
+      return replay ? replay(cached) : cached;
+    }
     const result = reconcile
       ? await reconcile(previous.response)
       : await work();
@@ -690,6 +725,7 @@ export async function idempotent<T>(
       .update(idempotency)
       .set({
         response: result,
+        roleVersionId,
         expiresAt: new Date(Date.now() + 7 * 86400000),
       })
       .where(where);
@@ -703,6 +739,7 @@ export async function idempotent<T>(
     key,
     payloadHash,
     response: result,
+    roleVersionId,
     createdAt: new Date(),
     expiresAt: new Date(Date.now() + 7 * 86400000),
   });
@@ -1475,6 +1512,7 @@ export async function createInside(
     input.data.appliedDate = dubaiToday();
   const now = new Date();
   const [row] = await unitChecked(
+    ctx,
     tx
       .insert(records)
       .values({
@@ -1534,7 +1572,7 @@ export async function createRecord(
     await lockTeam(tx, p);
     return idempotent(
       tx,
-      p,
+      ctx,
       `create:${resource}`,
       idempotencyKey,
       input,
@@ -1574,9 +1612,10 @@ export async function createRecord(
             resource === "candidates" ? "candidates:read" : "recruitment:read",
           )
         )
-          return previous as RecordDto;
+          return redact(ctx, previous as RecordDto);
         return redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
       },
+      (cached) => redact(ctx, cached),
     );
   });
 }
@@ -1720,6 +1759,7 @@ export async function updateRecord(
     }
     const archivedAt = archived ? (existing.archivedAt ?? now) : null;
     const [row] = await unitChecked(
+      ctx,
       tx
         .update(records)
         .set({
@@ -1793,7 +1833,7 @@ export async function bulkApplications(
     // Expired keys re-run: existing active pairs are reported, never duplicated.
     return idempotent(
       tx,
-      p,
+      ctx,
       "bulk:applications",
       idempotencyKey,
       input,
@@ -1874,6 +1914,15 @@ export async function bulkApplications(
           skipped: existing.length,
         };
       },
+      undefined,
+      // Each cached record under the current role; reference-only rows hold no field.
+      (cached) => ({
+        ...cached,
+        data: cached.data.map((row) => redact(ctx, row)),
+        existing: cached.existing.map((row) =>
+          "data" in row ? redact(ctx, row as RecordDto) : row,
+        ),
+      }),
     );
   });
 }

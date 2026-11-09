@@ -463,11 +463,12 @@ function scopeRule(
         : sql`(${own} or ${linked("candidate", "candidate_id")} or ${linked("vacancy", "vacancy_id")})`;
     }
     case "comment": {
-      // The nearest parent that is not a comment, under its own kind's rule.
+      // The nearest parent that is not a comment, under its own kind's rule. The cycle clause ends a
+      // loop of comments re-pointed into each other, as tenant_context.in_scope does (0038).
       const alias = `${row}_p`;
       const parent = anyKindRule(ctx, scopes, alias);
       return parent
-        ? sql`exists(with recursive up(id, kind, parent_record_id) as (select x.id, x.kind, x.parent_record_id from ${records} x where x.team_id=${p.teamId} and x.id=${column("parent_record_id")} union all select x.id, x.kind, x.parent_record_id from up join ${records} x on x.team_id=${p.teamId} and x.id=up.parent_record_id where up.kind='comment') select 1 from up join ${records} ${sql.raw(alias)} on ${sql.raw(alias)}.team_id=${p.teamId} and ${sql.raw(alias)}.id=up.id where up.kind<>'comment' and ${parent})`
+        ? sql`exists(with recursive up(id, kind, parent_record_id) as (select x.id, x.kind, x.parent_record_id from ${records} x where x.team_id=${p.teamId} and x.id=${column("parent_record_id")} union all select x.id, x.kind, x.parent_record_id from up join ${records} x on x.team_id=${p.teamId} and x.id=up.parent_record_id where up.kind='comment') cycle id set looped using path select 1 from up join ${records} ${sql.raw(alias)} on ${sql.raw(alias)}.team_id=${p.teamId} and ${sql.raw(alias)}.id=up.id where up.kind<>'comment' and not up.looped and ${parent})`
         : null;
     }
     default:

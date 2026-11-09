@@ -25,6 +25,7 @@ import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
 import { accessContext, scopeFilter, type AccessContext } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
+import { idempotencyActorKey } from "@/lib/records";
 import { requireScope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import type { BlobGateway } from "@/lib/blob-storage";
@@ -116,9 +117,6 @@ function validId(id: string) {
       "INVALID_ID",
       "A valid candidate or CV identifier is required.",
     );
-}
-function actorKey(p: Principal) {
-  return `${p.authType}:${p.tokenId ?? p.userId}`;
 }
 /** Setup refusals all show one plain message; their own text can name a provider or setting. */
 function storageFailure(error: unknown): never {
@@ -506,7 +504,7 @@ async function isUploadReplay(
     .where(
       and(
         eq(idempotency.teamId, p.teamId),
-        eq(idempotency.actorKey, actorKey(p)),
+        eq(idempotency.actorKey, idempotencyActorKey(p)),
         eq(idempotency.operation, operation),
         eq(idempotency.key, input.clientUploadId),
       ),
@@ -609,7 +607,7 @@ export async function beginCvUpload(
       .where(
         and(
           eq(idempotency.teamId, p.teamId),
-          eq(idempotency.actorKey, actorKey(p)),
+          eq(idempotency.actorKey, idempotencyActorKey(p)),
           eq(idempotency.operation, operation),
           eq(idempotency.key, input.clientUploadId),
         ),
@@ -717,11 +715,12 @@ export async function beginCvUpload(
       .catch(ledgerFailure);
     await tx.insert(idempotency).values({
       teamId: p.teamId,
-      actorKey: actorKey(p),
+      actorKey: idempotencyActorKey(p),
       operation,
       key: input.clientUploadId,
       payloadHash: hash,
       response: { uploadId: id },
+      roleVersionId: access.roleVersionId,
       createdAt: now,
       expiresAt: new Date(now.getTime() + 7 * 86400_000),
     });
