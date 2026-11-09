@@ -2,6 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 import { DrizzleQueryError, sql } from "drizzle-orm";
 import type { TeamTx } from "@/db";
 import type { TransactionSnapshot } from "@/db/deadlines";
+import type { RoleBody } from "@/domain/config";
 import {
   configBodyCache,
   type ConfigBodyCache,
@@ -63,7 +64,9 @@ export async function installTenantContextKey(client: {
  * boards) to its current published version id; documents holds exactly those versions, verified.
  * scopes are already narrowed to the member's configured role, whose version roleVersionId names:
  * a built-in template's fixed id without an assigned role, null for an assigned role install could
- * not use (no scopes are then stored).
+ * not use (no scopes are then stored). recordScope is that role's record scope per group (all in
+ * every group without an assigned role, null when it failed closed); homeUnits are the actor's home
+ * org units, sorted, from the employee linked to their user.
  */
 export type TenantAccess = {
   scopes: Scope[];
@@ -74,6 +77,8 @@ export type TenantAccess = {
   versions: Record<string, string>;
   documents: Record<string, ConfigDocument>;
   roleVersionId: string | null;
+  recordScope: RoleBody["recordScope"] | null;
+  homeUnits: string[];
 };
 type InstallResult = Omit<TenantAccess, "documents"> & {
   documents: ConfigDocumentRow[];

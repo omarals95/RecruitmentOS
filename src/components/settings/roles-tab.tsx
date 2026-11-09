@@ -18,16 +18,20 @@ import {
   FIELD_RULE_KINDS,
   GRANTABLE_ADMIN_AREAS,
   PAGE_KEYS,
+  RECORD_SCOPES,
   configKey,
   roleBodySchema,
   type Action,
   type ActionResource,
   type FieldRule,
   type PageKey,
+  type RecordScope,
   type RoleBody,
 } from "@/domain/config";
 import {
   ADMIN_ROLE,
+  HIRING_MANAGER_ROLE,
+  INTERVIEWER_ROLE,
   KIND_LABELS,
   OWNER_ROLE,
   RECRUITER_ROLE,
@@ -71,15 +75,15 @@ export interface RoleIssue {
   message: string;
 }
 
-/** The built-in templates offered; Hiring manager and Interviewer wait for record scope (R2a-18). */
+/** The built-in templates offered. */
 export const ROLE_TEMPLATE_LIST: readonly RoleTemplate[] = [
   OWNER_ROLE,
   ADMIN_ROLE,
   RECRUITER_ROLE,
   VIEWER_ROLE,
+  HIRING_MANAGER_ROLE,
+  INTERVIEWER_ROLE,
 ];
-export const SCOPED_ROLES_LATER =
-  "Roles limited to a unit or to assigned records, such as hiring manager and interviewer, arrive in a later release.";
 const LAST_OWNER =
   "The last company owner cannot be removed. Make someone else a company owner first.";
 const membershipLabels: Record<Membership, string> = {
@@ -174,16 +178,11 @@ const recordGroups: [RecordGroup, string][] = [
   ["candidates", "Candidates"],
   ["tasks", "Recruitment tasks"],
 ];
-const scopeLabels = {
+const scopeLabels: Record<RecordScope, string> = {
   all: "All records",
-  unit: "Records of their unit",
-  assigned: "Records assigned to them",
+  unit: "My org unit and below",
+  assigned: "Assigned records",
 };
-const ALL_RECORDS = {
-  pipeline: "all",
-  candidates: "all",
-  tasks: "all",
-} as const;
 const areaLabels: Record<GrantableArea, string> = {
   fields: "Record fields",
   workflows: "Workflows",
@@ -205,8 +204,6 @@ const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
 /** Only the API's own message: humanError adds draft advice to a 409 that does not fit here. */
 const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
-const scoped = (body: Pick<RoleBody, "recordScope">) =>
-  Object.values(body.recordScope).some((scope) => scope !== "all");
 const groupOf = (path: readonly PropertyKey[]) =>
   path[0] === "actions" || path[0] === "fields"
     ? `${String(path[0])}.${String(path[1])}`
@@ -517,7 +514,6 @@ export function RolesList({
           </li>
         ))}
       </ul>
-      <p className="muted">{SCOPED_ROLES_LATER}</p>
       <h3>Company roles</h3>
       {error ? (
         <p className="notice error" role="alert">
@@ -556,14 +552,6 @@ export function RolesList({
                       {current
                         ? `Published (version ${current.number})${draft ? ", draft in progress" : ""}`
                         : "Draft"}
-                      {currentBody && scoped(currentBody) && (
-                        <>
-                          {" "}
-                          <span className="badge warning">
-                            Cannot be assigned yet
-                          </span>
-                        </>
-                      )}
                     </td>
                     <td data-label="Actions">
                       <div className="row" style={actionRow}>
@@ -835,7 +823,7 @@ function Group({
 
 /**
  * A role draft in standard labelled controls. The membership, scopes and directory rule stay as
- * copied; record scope is All records only. The schema runs on every change, and a refused body is
+ * copied; record scope is chosen per group. The schema runs on every change, and a refused body is
  * never sent.
  */
 export function RoleEditor({
@@ -858,12 +846,10 @@ export function RoleEditor({
   const later = useId();
   const [body, setBody] = useState<RoleBody>(() => structuredClone(initial));
   const [saved, setSaved] = useState(() => canonical(initial));
-  const next: RoleBody = { ...body, recordScope: { ...ALL_RECORDS } };
-  const issues = roleIssues(next);
+  const issues = roleIssues(body);
   const issuesOf = (group: string) =>
     issues.filter((issue) => issue.group === group).map((i) => i.message);
-  const dirty = canonical(next) !== saved;
-  const wasScoped = scoped(initial);
+  const dirty = canonical(body) !== saved;
   const togglePage = (page: PageKey, on: boolean) =>
     setBody((current) => ({
       ...current,
@@ -896,13 +882,18 @@ export function RoleEditor({
       if (!Object.keys(rules).length) delete fields[kind];
       return { ...current, fields };
     });
+  const setScope = (group: RecordGroup, scope: RecordScope) =>
+    setBody((current) => ({
+      ...current,
+      recordScope: { ...current.recordScope, [group]: scope },
+    }));
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (issues.length) {
       summary.current?.focus();
       return;
     }
-    if (await onSave(next)) setSaved(canonical(next));
+    if (await onSave(body)) setSaved(canonical(body));
   }
   const pageCheck = (page: PageKey, describedBy?: string) => (
     <label key={page} className="checkbox-label">
@@ -924,12 +915,6 @@ export function RoleEditor({
         Membership: {membershipLabels[body.membership]}. A role can only narrow
         its membership, so its permissions stay as copied from the template.
       </p>
-      {wasScoped && (
-        <p className="notice" role="status">
-          This draft limits records to a unit or to assigned records. Saving
-          sets every group to All records, the only scope available today.
-        </p>
-      )}
       {issues.length > 0 && (
         <div ref={summary} tabIndex={-1} className="notice error" role="alert">
           <p style={{ margin: 0 }}>
@@ -1101,15 +1086,24 @@ export function RoleEditor({
       <fieldset style={box}>
         <legend>Record scope</legend>
         <p className="muted">
-          Roles limited to a unit or to assigned records arrive in a later
-          release.
+          My org unit and below means the records of the member&rsquo;s org
+          units in the directory and every unit below them, plus records
+          assigned to them. Assigned records means only records assigned to
+          them.
         </p>
         <div className="form-grid">
           {recordGroups.map(([group, label]) => (
             <label key={group} className="field">
               <span>{label}</span>
-              <select defaultValue="all">
-                <option value="all">All records</option>
+              <select
+                value={body.recordScope[group]}
+                onChange={(e) => setScope(group, e.target.value as RecordScope)}
+              >
+                {RECORD_SCOPES.map((scope) => (
+                  <option key={scope} value={scope}>
+                    {scopeLabels[scope]}
+                  </option>
+                ))}
               </select>
             </label>
           ))}

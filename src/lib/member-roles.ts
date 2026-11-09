@@ -28,7 +28,6 @@ export type MemberRoles = {
     name: string;
     membership: Exclude<RoleBody["membership"], "owner">;
   }[];
-  scopedRolesHidden: boolean;
 };
 export type RoleAssignmentChange = {
   occurredAt: string;
@@ -43,12 +42,6 @@ const assignmentForbidden = () =>
     403,
     "role_assignment_forbidden",
     "Only a company owner can assign roles.",
-  );
-const recordScopeUnsupported = () =>
-  new ApiError(
-    409,
-    "role_record_scope_unsupported",
-    "Roles limited to a unit or to assigned records cannot be assigned yet. Choose a role that sees all records.",
   );
 const assignmentInput = z
   .object({
@@ -76,7 +69,6 @@ async function inRoles<T>(
         { code?: unknown } | undefined
     )?.code;
     if (code === "42501") throw assignmentForbidden();
-    if (code === "RQ011") throw recordScopeUnsupported();
     throw error;
   }
 }
@@ -168,8 +160,6 @@ export async function assignMemberRole(
         "role_invalid",
         "This role's published version is not a valid role. Publish a corrected version before assigning it.",
       );
-    if (Object.values(parsed.data.recordScope).some((scope) => scope !== "all"))
-      throw recordScopeUnsupported();
     await tx.execute(
       sql`insert into app.member_roles(team_id, user_id, role_object_id) values (${p.teamId}, ${userId}, ${roleObjectId}::uuid) on conflict (team_id, user_id) do update set role_object_id = excluded.role_object_id`,
     );
@@ -220,25 +210,21 @@ export async function assignMemberRole(
 /**
  * Company owners, signed in: the configured role of each member of the active team, and the roles
  * that can be assigned. A role can be assigned, and an assignment is available, only when its
- * current published version is in force for this context, is a valid role and sees all records,
- * the rule tenant_context.install applies; roleName is the last published name, else the draft's.
+ * current published version is in force for this context and is a valid role, the rule
+ * tenant_context.install applies; roleName is the last published name, else the draft's.
  */
 export async function listMemberRoles(p: Principal): Promise<MemberRoles> {
   return inRoles(p, async (tx, access) => {
     if (p.authType !== "session" || access.companyLevel !== "owner")
       throw assignmentForbidden();
-    let scopedRolesHidden = false;
     const assignable = new Map<string, MemberRoles["roles"][number]>();
     for (const [objectId, versionId] of Object.entries(access.versions)) {
       const document = access.documents[versionId];
       if (document?.type !== "role") continue;
       const parsed = roleBodySchema.safeParse(document.body);
       if (!parsed.success) continue;
-      const { name, membership, recordScope } = parsed.data;
-      if (Object.values(recordScope).some((scope) => scope !== "all"))
-        scopedRolesHidden = true;
-      else
-        assignable.set(objectId, { roleObjectId: objectId, name, membership });
+      const { name, membership } = parsed.data;
+      assignable.set(objectId, { roleObjectId: objectId, name, membership });
     }
     const { rows } = await tx.execute<{
       userId: string;
@@ -255,7 +241,6 @@ export async function listMemberRoles(p: Principal): Promise<MemberRoles> {
       roles: [...assignable.values()].sort((a, b) =>
         a.name.localeCompare(b.name),
       ),
-      scopedRolesHidden,
     };
   });
 }

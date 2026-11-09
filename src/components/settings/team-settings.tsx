@@ -140,23 +140,13 @@ export function MemberActions({
 }
 
 type MemberRoleAssignment = MemberRoles["assignments"][number];
-export const SCOPED_ROLES_HIDDEN =
-  "Roles limited to a unit or to assigned records are not offered yet.";
 
-/** Above the members table for a company owner: a load error, or why some roles are not offered. */
-export function ConfiguredRolesNotice({
-  error,
-  scopedRolesHidden,
-}: {
-  error: string;
-  scopedRolesHidden: boolean;
-}) {
+/** Above the members table for a company owner: a load error, if any. */
+export function ConfiguredRolesNotice({ error }: { error: string }) {
   return error ? (
     <p className="notice error" role="alert">
       Could not load configured roles. {error}
     </p>
-  ) : scopedRolesHidden ? (
-    <p className="muted">{SCOPED_ROLES_HIDDEN}</p>
   ) : null;
 }
 
@@ -698,10 +688,7 @@ function TeamSettingsContent() {
               member’s API tokens.
             </p>
             {companyOwner && (
-              <ConfiguredRolesNotice
-                error={memberRoles.error}
-                scopedRolesHidden={!!memberRoles.data?.data.scopedRolesHidden}
-              />
+              <ConfiguredRolesNotice error={memberRoles.error} />
             )}
             {!details ? (
               <p>

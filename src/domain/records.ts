@@ -85,6 +85,9 @@ export interface RecordDto<
   /** Applications only: the vacancy's title. */
   vacancyLabel?: string;
   authorName?: string | null;
+  /** Vacancies with an org unit only: the unit and its "Name (CODE)". */
+  orgUnitId?: string;
+  orgUnitLabel?: string | null;
 }
 export const referencesByKind: Record<
   RecordKind,
@@ -127,6 +130,9 @@ export const referencesByKind: Record<
 const referenceShape = Object.fromEntries(
   referenceFields.map((key) => [key, uuidSchema.nullable().optional()]),
 ) as { [K in ReferenceField]: z.ZodOptional<z.ZodNullable<typeof uuidSchema>> };
+/** A vacancy's org unit, or null to clear it; every other kind refuses the key. */
+const orgUnitShape = (kind: string) =>
+  kind === "vacancy" ? { orgUnitId: uuidSchema.nullable().optional() } : {};
 export const createRecordSchemas = Object.fromEntries(
   Object.entries(recordDataSchemas).map(([kind, data]) => [
     kind,
@@ -134,6 +140,7 @@ export const createRecordSchemas = Object.fromEntries(
       .object({
         data,
         ...referenceShape,
+        ...orgUnitShape(kind),
         legacyId: z.string().trim().min(1).max(200).optional(),
         importMeta: jsonObject.optional(),
         archived: z.boolean().optional(),
@@ -169,6 +176,7 @@ export const updateRecordSchemas = Object.fromEntries(
         version: z.number().int().min(1),
         data: partialDataSchema(data).optional(),
         ...referenceShape,
+        ...orgUnitShape(kind),
         archived: z.boolean().optional(),
         moveToBucketId: uuidSchema.optional(),
         importMeta: jsonObject.optional(),

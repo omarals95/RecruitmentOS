@@ -678,27 +678,34 @@ describe("configured roles and member assignment under the split runtime roles",
     expect(await publishConfigVersion(owner, versionId)).toBe(1);
   });
 
-  it("refuses roles limited to a unit or to assigned records, by the service and by owner-session SQL", async () => {
+  // R2a-18 (job 060): record scope is enforced, so the job 052 refusal is lifted.
+  it("assigns roles limited to a unit or to assigned records, by the service and by owner-session SQL", async () => {
     const target = viewers["record-scope"];
-    authApi.updateMemberRole.mockClear();
-    for (const role of [hiringManager, interviewer, unitScoped]) {
-      await refused(() => assign(owner, target.userId, role.objectId), {
-        status: 409,
-        code: "role_record_scope_unsupported",
-        message:
-          "Roles limited to a unit or to assigned records cannot be assigned yet. Choose a role that sees all records.",
+    for (const role of [interviewer, hiringManager]) {
+      expect(await assign(owner, target.userId, role.objectId)).toMatchObject({
+        roleObjectId: role.objectId,
+        roleVersionId: role.versionId,
       });
-      await refused(
-        () =>
-          sqlAs(
-            owner,
-            `INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('${owner.teamId}', '${target.userId}', '${role.objectId}')`,
-          ),
-        { cause: { code: "RQ011" } },
-      );
+      const { access, stored } = await installed(target);
+      expect(access).toMatchObject({
+        roleVersionId: role.versionId,
+        recordScope: role.body.recordScope,
+        homeUnits: [],
+      });
+      expect(stored.role_version_id).toBe(role.versionId);
     }
-    expect(authApi.updateMemberRole).not.toHaveBeenCalled();
-    expect(await teamRole(target)).toBe("viewer");
+    expect(await teamRole(target)).toBe("recruiter");
+    await sqlAs(
+      owner,
+      `UPDATE app.member_roles SET role_object_id = '${unitScoped.objectId}' WHERE team_id = '${owner.teamId}' AND user_id = '${target.userId}'`,
+    );
+    expect(
+      (await rows()).filter((row) => row.user_id === target.userId),
+    ).toMatchObject([{ role_object_id: unitScoped.objectId }]);
+    expect((await installed(target)).access).toMatchObject({
+      roleVersionId: unitScoped.versionId,
+      recordScope: { pipeline: "unit", candidates: "all", tasks: "all" },
+    });
     // Other refusals before any write.
     await refused(() => assign(owner, target.userId, unpublished.objectId), {
       status: 409,
@@ -726,7 +733,7 @@ describe("configured roles and member assignment under the split runtime roles",
     );
   });
 
-  it("fails closed when an assigned role is republished with unit scope or archived", async () => {
+  it("keeps an assigned role republished with unit scope and fails closed when it is archived", async () => {
     await assign(owner, viewers.later.userId, later.objectId);
     await assign(owner, viewers.archived.userId, archived.objectId);
     expect((await installed(viewers.later)).stored).toEqual({
@@ -745,7 +752,16 @@ describe("configured roles and member assignment under the split runtime roles",
     await publishConfigVersion(owner, versionId);
     await harness.dataDb();
     await archiveConfigObject(owner, archived.objectId);
-    for (const p of [viewers.later, viewers.archived]) {
+    const republished = await installed(viewers.later);
+    expect(republished.stored).toEqual({
+      scopes: roleScopes("recruiter"),
+      role_version_id: versionId,
+    });
+    expect(republished.access).toMatchObject({
+      roleVersionId: versionId,
+      recordScope: { pipeline: "unit", candidates: "unit", tasks: "unit" },
+    });
+    for (const p of [viewers.archived]) {
       const { principal, access, stored } = await installed(p);
       expect(stored, p.userId).toEqual({ scopes: [], role_version_id: null });
       expect(access).toMatchObject({ scopes: [], roleVersionId: null });
@@ -1558,14 +1574,15 @@ describe("configured roles and member assignment under the split runtime roles",
   });
 
   // R2a-12 (job 056): the picker, failed-closed roles and an unconfirmed team role.
-  it("lists member roles for a company owner, leaving out roles limited to a unit or to assigned records", async () => {
+  it("lists member roles for a company owner, roles limited to a unit or to assigned records included", async () => {
     const { status, body: listed } = await get(
       memberRolesListRoute,
       owner,
       "/api/v1/teams/member-roles",
     );
     expect(status).toBe(200);
-    const { assignments, roles, scopedRolesHidden } = listed.data as {
+    expect(Object.keys(listed.data).sort()).toEqual(["assignments", "roles"]);
+    const { assignments, roles } = listed.data as {
       assignments: {
         userId: string;
         roleObjectId: string;
@@ -1573,12 +1590,10 @@ describe("configured roles and member assignment under the split runtime roles",
         available: boolean;
       }[];
       roles: { roleObjectId: string; name: string; membership: string }[];
-      scopedRolesHidden: boolean;
     };
-    expect(scopedRolesHidden).toBe(true);
     const offered = roles.map((role) => role.roleObjectId);
     for (const role of [hiringManager, interviewer, unitScoped, later])
-      expect(offered).not.toContain(role.objectId);
+      expect(offered).toContain(role.objectId);
     expect(offered).not.toContain(archived.objectId);
     expect(offered).not.toContain(unpublished.objectId);
     expect(roles).toContainEqual({
@@ -1604,7 +1619,7 @@ describe("configured roles and member assignment under the split runtime roles",
     ).toBeUndefined();
   });
 
-  it("reports archived and unit-republished roles as no longer available, and reassigns and clears them", async () => {
+  it("reports archived roles as no longer available, unit-republished ones as available, and reassigns and clears them", async () => {
     const assignmentOf = async (userId: string) =>
       (
         await get(memberRolesListRoute, owner, "/api/v1/teams/member-roles")
@@ -1615,7 +1630,7 @@ describe("configured roles and member assignment under the split runtime roles",
       userId: viewers.later.userId,
       roleObjectId: later.objectId,
       roleName: "Fictional later recruiter",
-      available: false,
+      available: true,
     });
     expect(await assignmentOf(viewers.archived.userId)).toEqual({
       userId: viewers.archived.userId,

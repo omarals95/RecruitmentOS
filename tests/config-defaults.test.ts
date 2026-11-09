@@ -429,6 +429,8 @@ describe("built-in default kind schemas (R2b-01)", () => {
       versions: {},
       documents: {},
       roleVersionId: null,
+      recordScope: null,
+      homeUnits: [],
     };
     for (const kind of CONFIGURABLE_KINDS)
       expect(kindSchemaFor(access, kind)).toEqual({

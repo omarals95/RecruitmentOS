@@ -1,5 +1,5 @@
 import { eq, sql, type SQL } from "drizzle-orm";
-import { records } from "@/db/schema";
+import { recordAssignments, records } from "@/db/schema";
 import { ApiError } from "@/lib/errors";
 import {
   ROLE_UNAVAILABLE,
@@ -55,7 +55,12 @@ export type AccessContext = {
     | "companyAreas"
     | "versions"
   > &
-    Partial<Pick<TenantAccess, "roleVersionId" | "documents">>;
+    Partial<
+      Pick<
+        TenantAccess,
+        "roleVersionId" | "documents" | "recordScope" | "homeUnits"
+      >
+    >;
   /**
    * Null for a team role outside the four known roles, or an assigned role install or the strict
    * schema could not use: every request is then refused.
@@ -366,17 +371,182 @@ export function accessMap(ctx: AccessContext): AccessMap {
   };
 }
 
-// The record-scope step: every role reads all records of its team until R2a-18 adds unit and
-// assigned predicates.
-const recordScopePredicates = (_ctx: AccessContext, _kind: RecordKind) =>
-  [] as SQL[];
+const PIPELINE_KINDS: readonly RecordKind[] = [
+  "application",
+  "interview",
+  "offer",
+  "onboarding",
+  "checklist",
+];
+/** Kinds with a record-scope rule; every other kind is always in scope (architecture §3.5). */
+const SCOPED_KINDS: readonly RecordKind[] = [
+  "vacancy",
+  ...PIPELINE_KINDS,
+  "candidate",
+  "task",
+  "comment",
+];
+
+/**
+ * The record scope per group from the access state install returned. An access state without one
+ * (never one install returned) takes the role it names; null fails closed.
+ */
+function recordScopeOf(ctx: AccessContext): RoleBody["recordScope"] | null {
+  const { access } = ctx;
+  if (access.recordScope !== undefined) return access.recordScope;
+  return assignedRole(ctx.principal, access)?.recordScope ?? null;
+}
+
+/**
+ * The record-scope rule of one kind for the row named `row` (a table alias), or null when every row
+ * of the kind is in scope: architecture §3.5 for unit and assigned principals, from the context's
+ * home units and the caller's user id. "Under a home unit" is a closure probe; "an assignment" is any
+ * relation of the caller on the record. Nested rows take aliases derived from `row`, so a rule never
+ * shadows the row it tests.
+ */
+function scopeRule(
+  ctx: AccessContext,
+  scopes: RoleBody["recordScope"],
+  kind: RecordKind,
+  row: string,
+): SQL | null {
+  const { principal: p } = ctx;
+  const homeUnits = ctx.access.homeUnits ?? [];
+  const column = (name: string) => sql.raw(`${row}.${name}`);
+  const assignedOn = (...columns: string[]) =>
+    sql`exists(select 1 from ${recordAssignments} ra where ra.team_id=${p.teamId} and ra.user_id=${p.userId} and ra.record_id in (${sql.join(columns.map(column), sql`,`)}))`;
+  // A unit principal with no home units reaches records only through assignments and the creator.
+  const underHome = homeUnits.length
+    ? sql`exists(select 1 from app.org_unit_closure c where c.ancestor_id=any(${sql.param(homeUnits)}::uuid[]) and c.descendant_id=${column("org_unit_id")})`
+    : null;
+  const pipeline = (scope: RecordScope, own: SQL) =>
+    scope === "all"
+      ? null
+      : scope === "unit" && underHome
+        ? sql`(${underHome} or ${own})`
+        : own;
+  const linked = (target: RecordKind, reference: string) => {
+    const alias = `${row}_${target === "vacancy" ? "v" : "c"}`;
+    const rule = scopeRule(ctx, scopes, target, alias);
+    return sql`exists(select 1 from ${records} ${sql.raw(alias)} where ${sql.raw(alias)}.team_id=${p.teamId} and ${sql.raw(alias)}.kind=${target} and ${sql.raw(alias)}.id=${column(reference)}${rule ? sql` and ${rule}` : sql``})`;
+  };
+  switch (kind) {
+    case "vacancy":
+      return pipeline(scopes.pipeline, assignedOn("id"));
+    case "application":
+    case "interview":
+    case "offer":
+    case "onboarding":
+    case "checklist":
+      return pipeline(
+        scopes.pipeline,
+        assignedOn("id", "scope_application_id", "scope_vacancy_id"),
+      );
+    case "candidate": {
+      // An application of the candidate in scope under the application rule, with this group's scope.
+      const alias = `${row}_a`;
+      const rule = scopeRule(
+        ctx,
+        { ...scopes, pipeline: scopes.candidates },
+        "application",
+        alias,
+      );
+      return rule
+        ? sql`exists(select 1 from ${records} ${sql.raw(alias)} where ${sql.raw(alias)}.team_id=${p.teamId} and ${sql.raw(alias)}.kind='application' and ${sql.raw(alias)}.candidate_id=${column("id")} and ${rule})`
+        : null;
+    }
+    case "task": {
+      if (scopes.tasks === "all") return null;
+      const own = sql`${column("created_by")}=${p.userId} or ${assignedOn("id")}`;
+      return scopes.tasks === "assigned"
+        ? sql`(${own})`
+        : sql`(${own} or ${linked("candidate", "candidate_id")} or ${linked("vacancy", "vacancy_id")})`;
+    }
+    case "comment": {
+      // The nearest parent that is not a comment, under its own kind's rule.
+      const alias = `${row}_p`;
+      const parent = anyKindRule(ctx, scopes, alias);
+      return parent
+        ? sql`exists(with recursive up(id, kind, parent_record_id) as (select x.id, x.kind, x.parent_record_id from ${records} x where x.team_id=${p.teamId} and x.id=${column("parent_record_id")} union all select x.id, x.kind, x.parent_record_id from up join ${records} x on x.team_id=${p.teamId} and x.id=up.parent_record_id where up.kind='comment') select 1 from up join ${records} ${sql.raw(alias)} on ${sql.raw(alias)}.team_id=${p.teamId} and ${sql.raw(alias)}.id=up.id where up.kind<>'comment' and ${parent})`
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** The rule for a row of any kind: its own kind's rule, or null when no kind is limited. */
+function anyKindRule(
+  ctx: AccessContext,
+  scopes: RoleBody["recordScope"],
+  row: string,
+): SQL | null {
+  const rules = SCOPED_KINDS.filter((kind) => kind !== "comment").flatMap(
+    (kind) => {
+      const rule = scopeRule(ctx, scopes, kind, row);
+      return rule ? [{ kind, rule }] : [];
+    },
+  );
+  if (!rules.length) return null;
+  const kind = sql.raw(`${row}.kind`);
+  return sql`(${kind} not in (${sql.join(
+    rules.map((item) => sql`${item.kind}`),
+    sql`,`,
+  )}) or ${sql.join(
+    rules.map((item) => sql`(${kind}=${item.kind} and ${item.rule})`),
+    sql` or `,
+  )})`;
+}
+
+/**
+ * Whether the row named `row` (a table alias) of `kind` is in the caller's record scope, or null when
+ * every row of the kind is. A context without a usable record scope sees nothing.
+ */
+export function recordScopeRule(
+  ctx: AccessContext,
+  kind: RecordKind,
+  row: string,
+): SQL | null {
+  const scopes = recordScopeOf(ctx);
+  return scopes ? scopeRule(ctx, scopes, kind, row) : sql`false`;
+}
+
+/**
+ * The same for a record of any kind, for statements that do not know the kind: the row's own kind
+ * decides, and comments follow their parent. Null when no group is limited.
+ */
+export function anyRecordScopeRule(
+  ctx: AccessContext,
+  row: string,
+): SQL | null {
+  const scopes = recordScopeOf(ctx);
+  if (!scopes) return sql`false`;
+  const rule = anyKindRule(ctx, scopes, row);
+  const comment = scopeRule(ctx, scopes, "comment", row);
+  return rule && comment
+    ? sql`((${sql.raw(`${row}.kind`)}<>'comment' and ${rule}) or (${sql.raw(`${row}.kind`)}='comment' and ${comment}))`
+    : rule;
+}
+
+/**
+ * For statements over rows that name a record (the activity feed and the stage history): a row whose
+ * record id is null keeps today's rules, and any other only when its record exists in the team and is
+ * in the caller's scope for its kind. Null for a caller whose record scope is all in every group.
+ */
+export function recordIdInScope(ctx: AccessContext, recordId: SQL): SQL | null {
+  const rule = anyRecordScopeRule(ctx, "scoped");
+  return rule
+    ? sql`(${recordId} is null or exists(select 1 from ${records} scoped where scoped.team_id=${ctx.principal.teamId} and scoped.id=${recordId} and ${rule}))`
+    : null;
+}
 
 /**
  * Team and kind, saved views for their private owner and candidate comments only with
- * candidates:read, plus the record-scope step.
+ * candidates:read, plus the record-scope rule of architecture §3.5 inside the same statement.
  */
 export function scopeFilter(ctx: AccessContext, kind: RecordKind): SQL[] {
   const { principal: p } = ctx;
+  const rule = recordScopeRule(ctx, kind, "records");
   return [
     eq(records.teamId, p.teamId),
     eq(records.kind, kind),
@@ -388,7 +558,7 @@ export function scopeFilter(ctx: AccessContext, kind: RecordKind): SQL[] {
           sql`exists(select 1 from ${records} parent where parent.team_id=${p.teamId} and parent.id=${records.parentRecordId} and parent.kind<>'candidate')`,
         ]
       : []),
-    ...recordScopePredicates(ctx, kind),
+    ...(rule ? [rule] : []),
   ];
 }
 

@@ -137,6 +137,25 @@ const recordDto = {
     },
     authorName: { type: ["string", "null"] },
     archivedAt: { type: ["string", "null"], format: "date-time" },
+    orgUnitId: {
+      type: "string",
+      format: "uuid",
+      description:
+        "Vacancies with an org unit only: the unit. Left out of exports, search and MCP results.",
+    },
+    orgUnitLabel: {
+      type: ["string", "null"],
+      description:
+        'Vacancies with an org unit only: the unit as "Name (CODE)". Left out of exports, search and MCP results.',
+    },
+  },
+};
+const orgUnitInput = {
+  orgUnitId: {
+    type: ["string", "null"],
+    format: "uuid",
+    description:
+      "Vacancies only: a current, non-archived org unit of the company, or null to clear it; 400 invalid_reference otherwise. Every other resource refuses the key with 400 invalid_input. The unit's applications, interviews, offers, onboarding, checklist items and comments follow it.",
   },
 };
 export function GET() {
@@ -190,6 +209,7 @@ export function GET() {
       properties: {
         data: { $ref: `#/components/schemas/${schemaName}` },
         ...refs,
+        ...(kind === "vacancy" ? orgUnitInput : {}),
         legacyId: {
           type: "string",
           description: "Requires imports:write and an owner/admin role.",
@@ -303,6 +323,7 @@ export function GET() {
                     "Partial fields from the resource data schema; server validates strictly.",
                 },
                 ...refs,
+                ...(kind === "vacancy" ? orgUnitInput : {}),
                 archived: { type: "boolean" },
                 moveToBucketId: { type: "string", format: "uuid" },
                 importMeta: { type: "object" },
@@ -959,13 +980,13 @@ export function GET() {
     ),
   };
   const memberRolesShape =
-    "{data:{assignments:[{userId, roleObjectId, roleName, available}], roles:[{roleObjectId, name, membership}], scopedRolesHidden}}";
+    "{data:{assignments:[{userId, roleObjectId, roleName, available}], roles:[{roleObjectId, name, membership}]}}";
   paths["/api/v1/teams/member-roles"] = {
     get: operation(
       [],
       {
         summary: "List the active team's configured roles",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, including team owners and admins without company authority and company admins, gets 403 role_assignment_forbidden. assignments lists each member of the active team who holds a configured role, with the role's last published name (else its draft's, else null) and available: true only when the role's current published version is in force, is a valid role and sees all records, the rule the request context applies; a member whose role is not available is refused everything until it is reassigned or cleared. roles lists the roles that can be assigned, by the same rule, ordered by name. scopedRolesHidden is true when a published role was left out because it is limited to a unit or to assigned records, which cannot be assigned yet. Nothing is audited. Returns ${memberRolesShape}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, including team owners and admins without company authority and company admins, gets 403 role_assignment_forbidden. assignments lists each member of the active team who holds a configured role, with the role's last published name (else its draft's, else null) and available: true only when the role's current published version is in force and is a valid role, the rule the request context applies; a member whose role is not available is refused everything until it is reassigned or cleared. roles lists the roles that can be assigned, by the same rule and of any record scope, ordered by name. Nothing is audited. Returns ${memberRolesShape}.`,
       },
       { "200": { description: memberRolesShape } },
       { sessionOnly: true },
@@ -975,7 +996,7 @@ export function GET() {
       {
         summary: "Assign or clear a member's configured role",
         description:
-          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies; if the change fails in any other way, 503 team_role_unconfirmed says the same and the request can be retried. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role, 409 role_record_scope_unsupported for a role limited to a unit or to assigned records (refused until record scope is enforced). Body at most 1024 bytes.",
+          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies; if the change fails in any other way, 503 team_role_unconfirmed says the same and the request can be retried. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role. A role limited to the member's org unit or to assigned records can be assigned; it limits the records the member sees. Body at most 1024 bytes.",
         requestBody: jsonBody(
           {
             type: "object",
