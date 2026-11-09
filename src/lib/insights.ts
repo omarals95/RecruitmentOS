@@ -22,6 +22,7 @@ import type { TeamTx } from "@/db";
 import { withTeam } from "./db-team";
 import type { Principal } from "./principal";
 import { requireScope } from "./permissions";
+import type { TenantAccess } from "./tenant-context";
 import { ApiError } from "./errors";
 import {
   APPLICATION_STAGES,
@@ -132,7 +133,7 @@ export async function overview(p: Principal) {
     new URLSearchParams({ pageSize: "8" }),
     { excludeKinds: ["mcp-tool"] },
   );
-  const result = await withTeam(p, async (tx) => {
+  const result = await withTeam(p, async (tx, access) => {
     const counts = await inventory(tx, p);
     const [shortlisted] = await tx
       .select({ count: count() })
@@ -229,7 +230,7 @@ export async function overview(p: Principal) {
       overdueTasks: overdue.map(asDto),
       // In the same transaction, so the signed context is installed once; the page needs no total.
       // MCP tool audit rows stay on the Activity screen; they would flood the dashboard.
-      recentActivity: await activityPage(tx, recentActivity),
+      recentActivity: await activityPage(tx, recentActivity, access),
     };
   });
   return {
@@ -360,7 +361,16 @@ export const PERSONAL_MCP_TOOLS = [
   "mark_notifications_read",
 ] as const;
 
-/** Validates an activity query and builds its filter; the statements run in the caller's transaction. */
+/**
+ * Company structure and authority rows: ids and field names only, but only for sessions with
+ * company authority; API tokens, OAuth grants and members without it never see them in the feed.
+ */
+const COMPANY_ACTIVITY_KINDS = ["directory", "scope", "role-assignment"];
+
+/**
+ * Validates an activity query; its filter is built inside the caller's transaction, from the scopes
+ * install stored and the company authority it derived, and the statements run there too.
+ */
 function activityQuery(
   p: Principal,
   params: URLSearchParams,
@@ -413,26 +423,31 @@ function activityQuery(
       sql`strpos(lower(concat_ws(' ',${activity.summary},${activity.action},${actorName})),lower(${search}))>0`,
     );
   }
-  const filter = and(
-    eq(activity.teamId, p.teamId),
-    ...(recordId ? [eq(activity.recordId, recordId)] : []),
-    sql`(${activity.action}<>'personal_state_updated' or ${activity.actorId}=${p.userId})`,
-    sql`(${activity.kind}<>'saved-view' or ${activity.actorId}=${p.userId})`,
-    sql`(${activity.kind}<>'mcp-tool' or not ${inArray(sql`coalesce(${activity.metadata}->>'tool','')`, [...PERSONAL_MCP_TOOLS])} or ${activity.actorId}=${p.userId})`,
-    ...(!p.scopes.includes("candidates:read")
-      ? [sql`${activity.kind}<>'candidate'`]
-      : []),
-    ...(kind ? [eq(activity.kind, kind)] : []),
-    ...(options.excludeKinds?.length
-      ? [notInArray(activity.kind, options.excludeKinds)]
-      : []),
-    ...searchFilter,
-  );
+  const filter = (access: TenantAccess) =>
+    and(
+      eq(activity.teamId, p.teamId),
+      ...(recordId ? [eq(activity.recordId, recordId)] : []),
+      sql`(${activity.action}<>'personal_state_updated' or ${activity.actorId}=${p.userId})`,
+      sql`(${activity.kind}<>'saved-view' or ${activity.actorId}=${p.userId})`,
+      sql`(${activity.kind}<>'mcp-tool' or not ${inArray(sql`coalesce(${activity.metadata}->>'tool','')`, [...PERSONAL_MCP_TOOLS])} or ${activity.actorId}=${p.userId})`,
+      ...(!p.scopes.includes("candidates:read")
+        ? [sql`${activity.kind}<>'candidate'`]
+        : []),
+      ...(kind ? [eq(activity.kind, kind)] : []),
+      ...(options.excludeKinds?.length
+        ? [notInArray(activity.kind, options.excludeKinds)]
+        : []),
+      ...(p.authType !== "session" || access.companyLevel === null
+        ? [notInArray(activity.kind, COMPANY_ACTIVITY_KINDS)]
+        : []),
+      ...searchFilter,
+    );
   return { page, pageSize, filter, actorName };
 }
 async function activityPage(
   tx: TeamTx,
   { page, pageSize, filter, actorName }: ReturnType<typeof activityQuery>,
+  access: TenantAccess,
 ) {
   const data = await tx
     .select({
@@ -448,7 +463,7 @@ async function activityPage(
       createdAt: activity.createdAt,
     })
     .from(activity)
-    .where(filter)
+    .where(filter(access))
     .orderBy(desc(activity.createdAt), desc(activity.id))
     .limit(pageSize)
     .offset((page - 1) * pageSize);
@@ -465,12 +480,12 @@ export async function listActivity(
   requireScope(p, "recruitment:read");
   const query = activityQuery(p, params, options);
   const { page, pageSize } = query;
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
     const [total] = await tx
       .select({ count: count() })
       .from(activity)
-      .where(query.filter);
-    const data = await activityPage(tx, query);
+      .where(query.filter(access));
+    const data = await activityPage(tx, query, access);
     return {
       data,
       pagination: {
