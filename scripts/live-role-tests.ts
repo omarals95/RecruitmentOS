@@ -34,7 +34,8 @@
  *   without company authority cannot change their own employee row's user link or positions, nor
  *   link another employee; a company admin with the organisation area cannot change a linked
  *   employee's positions or move or archive the position they hold, but places unlinked employees;
- *   and a token context, even one holding the directory scopes, writes no directory row.
+ *   a token context, even one holding the directory scopes, writes no directory row; and a
+ *   position names only a current job role of the writer's own team.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -3727,6 +3728,57 @@ async function runChecks(run: Run) {
     } finally {
       await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
     }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await dirCommitted()) === before]);
+  });
+
+  // A position names only a current job role of the writer's own team: not another team's record,
+  // not a record of another kind (here a candidate, which erasure deletes), not an archived job role.
+  await check("directory-job-role-denied", async (probe) => {
+    const before = await dirCommitted();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      // The team A recruiter, a company admin with the organisation area; rolled back at the end.
+      await installAs(data, signer, p.memberA);
+      probe.at("setup");
+      const jobRole = async (archived: boolean) =>
+        (
+          await data.query(
+            `INSERT INTO app.records(team_id,kind,data,created_by,archived_at) VALUES($1,'job-role',$2::jsonb,$3,${archived ? "now()" : "NULL"}) RETURNING id::text AS id`,
+            [
+              f.teams.a,
+              JSON.stringify({ title: `Fictional job role ${f.prefix}` }),
+              f.users.a2,
+            ],
+          )
+        ).rows[0].id as string;
+      const current = await jobRole(false);
+      const archived = await jobRole(true);
+      const position = (team: string, record: string, name: string) =>
+        attempt(
+          data,
+          "INSERT INTO app.positions(workspace_id,org_unit_id,title,code,job_role_team_id,job_role_id) VALUES($1::uuid,$2::uuid,'Fictional position',$3,$4,$5::uuid)",
+          [COMPANY_WORKSPACE, org.p1, dirCode(name), team, record],
+        );
+      probe.at("outcome");
+      const otherTeam = await position(f.teams.b, b.vacancy, "role-b");
+      const otherKind = await position(f.teams.a, a.candidate, "role-kind");
+      const old = await position(f.teams.a, archived, "role-old");
+      const relinked = await attempt(
+        data,
+        "UPDATE app.positions SET job_role_team_id = $2, job_role_id = $3::uuid WHERE id = $1::uuid",
+        [dir.free, f.teams.a, a.candidate],
+      );
+      probe.at("positive-control");
+      const own = await position(f.teams.a, current, "role-own");
+      return probe.all(
+        denial(otherTeam),
+        denial(otherKind),
+        denial(old),
+        denial(relinked),
+        outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+      );
+    });
     probe.at("end-state");
     return pass && probe.all(["end-state", (await dirCommitted()) === before]);
   });
