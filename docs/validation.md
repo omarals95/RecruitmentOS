@@ -1,5 +1,44 @@
 # Validation before deployment
 
+## Update: record scope in row-level security (R2a-19)
+
+**Local validation.** On 9 November 2026, with Node v24.20.0, job 061 ran `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:storage`, `npm run build` and Prettier on every changed file; the results are in the job's build record. No dependency was added. Migration `0038_record_scope_rls.sql` adds five owner-owned helpers and restrictive record-scope policies on `app.records`, `app.activity`, `app.uploads` and `app.record_assignments`, an actor-only policy on `app.idempotency` and `app.idempotency.role_version_id`, and raises the storage schema marker to 17 ([identity-boundary-plan.md](identity-boundary-plan.md#record-scope-in-row-level-security)).
+
+**Method.** `npm run bench:round-trips -- --fixture` on two copies of one fictional fixture database (the seed plus 2,000 candidates, 20 vacancies and 1,200 applications, built once with the `main` code). "Before" is the application code of `main` at `f040601` on the copy at `0037`. "After" is this branch on the other copy, which its first run migrated to `0038`. Nine runs of each, alternating after, before, after, and so on. Each figure is the median db ms over the nine runs of each run's own median of 5 samples after one warm-up, as the scope-all seed owner, with row-level security enforced. Round trips include the session lookup, so 8, 13 and 17 here correspond to the 6, 11 and 15 of `tests/round-trip-budget.test.ts`. Run-to-run noise is about ±25% (see below).
+
+| Request (scope-all owner)                               | Round trips | Before db ms | After db ms | Change |
+| ------------------------------------------------------- | ----------: | -----------: | ----------: | -----: |
+| `GET /api/v1/overview`                                  |          17 |        162.6 |       165.8 |  +2.0% |
+| `GET /api/v1/candidates` (list, 25 by name)             |           8 |         30.6 |        30.5 |  -0.3% |
+| `GET /api/v1/applications` (list, 25)                   |           9 |         22.4 |        21.6 |  -3.6% |
+| `GET /api/v1/vacancies` (list, 25)                      |           8 |          6.6 |         6.3 |  -4.5% |
+| `GET /api/v1/applications?vacancyId=` (board, 100 rows) |           9 |         14.5 |        16.2 | +11.7% |
+| `GET /api/v1/activity`                                  |           9 |         82.3 |        79.2 |  -3.8% |
+| `GET /api/v1/analytics`                                 |          20 |        219.9 |       226.4 |  +3.0% |
+
+The overview and the three list screens are within 10% and every round-trip count is unchanged. The vacancy board is 1.7 ms (11.7%) slower over the nine runs: +12.7% over the first six, +0.7% over runs 4 to 6 and +15.0% over runs 7 to 9. That is above the 10% bound for a list, so it is reported here and nothing was loosened. A probe on a copy of the fixture measured about 35 µs per evaluation of `(SELECT tenant_context.scope_is_all())`, which the policies add once per statement for every reference to a limited table.
+
+**Scoped member.** `npm run bench:round-trips -- --fixture --scoped` on this branch's copy set up, once, a fictional hiring manager: a recruiter member holding a published Hiring manager copy with view on tasks and onboarding, linked to a position in a fictional unit that holds 10 of the 20 fixture vacancies. It then signed that member in and ran the same requests; requests the role refuses (task and candidate edits, buckets, analytics, activity) answered 403 in 7 round trips. For comparison, the same run on a copy with the five restrictive policies dropped measures the service-only rule of R2a-18 on the same data:
+
+| Request (hiring manager)                      | Round trips | With 0038 db ms | Policies dropped db ms |
+| --------------------------------------------- | ----------: | --------------: | ---------------------: |
+| `GET /api/v1/overview`                        |          17 |          29,866 |                 45,529 |
+| `GET /api/v1/candidates` (list)               |           8 |          13,944 |                 22,576 |
+| `GET /api/v1/candidates` (needs review)       |           8 |           3,990 |                  5,849 |
+| `GET /api/v1/tasks` (list)                    |           8 |            19.2 |                 22,957 |
+| `GET /api/v1/applications` (list)             |           9 |            93.9 |                   40.1 |
+| `GET /api/v1/applications?vacancyId=` (board) |           9 |            87.6 |                   30.8 |
+| `PATCH /api/v1/applications/:id` (stage)      |          13 |            64.8 |                   31.8 |
+| `POST /api/v1/interviews`                     |          13 |            12.1 |                   10.5 |
+
+Round-trip counts are the scope-all ones. The overview and the candidate lists of a scoped member take seconds on the local PGlite fixture with or without the new policies: the per-row candidate rule (an application probe for each of the 2,000 candidates) is already slow in the service-only rule of R2a-18, and the policies make it faster by filtering rows before the service predicate. PGlite runs no `ANALYZE`, so these plans have no statistics, and hosted timings will differ. The pipeline lists of a scoped member are two to three times slower with the per-row `in_scope` call.
+
+**Live harness.** `scripts/live-role-tests.ts` writes its idempotency fixture rows with the shared actor key and adds `record-scope-direct-sql` (under a unit-limited recruiter without home units, assigned to the fixture vacancy: direct SQL reads only that record, its assignment and no out-of-scope activity or upload; an out-of-scope vacancy insert, activity insert and upload insert are refused with `42501`, an out-of-scope update touches nothing, and the in-scope update and activity insert succeed) and `record-scope-idempotency-actor-only` (that context reads, updates and deletes none of the team owner's cached rows, cannot insert one under the owner's key, and inserts its own). It passed 65/65 directly against a throwaway local PostgreSQL 18 cluster in the worktree `.data` folder on a loopback port, migrated and then given the role template, in the open and the closed bootstrap variant, with every fixture removed. With the `app.records` and `app.idempotency` restrictive policies dropped on that cluster, both new checks failed at `outcome`; after restoring them, `pg_policies` matched the earlier snapshot. The pooled run was not done, because no PgBouncer binary was available and none may be downloaded. The cluster was stopped and deleted afterwards.
+
+**Evidence.** `scripts/db-role-evidence.ts` passed with zero drift for both roles before and after the live runs.
+
+No remote service was contacted: tests use PGlite and the local cluster with fictional data only. Owner steps: apply `0038` after `0037` on Preview, rerun the role template, then `scripts/db-role-evidence.ts` and `npm run test:live-roles`, direct and through the pooler.
+
 ## Update: configuration versions through install (R2a-05)
 
 **Local validation.** On 9 November 2026, with Node v24.20.0, job 046 passed `npm run typecheck`, `npm run lint`, `npm test` (1227 Vitest tests in 90 files, none skipped), `npm run test:storage` (58 native storage tests), `npm run build` (Next.js 16.4.5) and Prettier on every changed file. No dependency was added, so `npm audit` was not rerun (it contacts the npm registry). Migration `0032_config_versions_install.sql` makes `tenant_context.install(text, text, text[])` also return `versions` and `documents`, read after every existing check and the context row, and raises the storage schema marker to 11 ([identity-boundary-plan.md](identity-boundary-plan.md#payload-fields)).
