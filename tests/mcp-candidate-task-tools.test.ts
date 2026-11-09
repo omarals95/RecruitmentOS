@@ -1407,4 +1407,98 @@ describe("MCP candidate, task and collaboration tools over real migrations and R
       ).reminders,
     ).toContainEqual(expect.objectContaining({ key: due.key, read: false }));
   });
+
+  // R2a-20 (job 062): assignees and a link on the task tools, returned as user and record ids only.
+  it("assigns and links tasks through assigneeIds and parentRecordId, and lists them as ids", async () => {
+    const both = await token(["recruitment:read", "recruitment:write"]);
+    const assigneeRows = async (id: string) =>
+      (
+        await query<{ user_id: string }>(
+          "SELECT user_id FROM app.record_assignments WHERE record_id=$1 AND relation='assignee' ORDER BY user_id",
+          [id],
+        )
+      ).map((item) => item.user_id);
+    const created = data<Args>(
+      await call(both, "create_task", {
+        idempotencyKey: key(),
+        bucketId: ids.bucket,
+        title: "Fictional assigned MCP task",
+        assigneeIds: [owner.userId, member.userId],
+        parentRecordId: ids.vacancy,
+      }),
+    );
+    expect(Object.keys(created).sort()).toEqual([
+      "archived",
+      "bucketId",
+      "candidateId",
+      "createdAt",
+      "id",
+      "parentRecordId",
+      "updatedAt",
+      "vacancyId",
+      "version",
+    ]);
+    expect(created).toMatchObject({ version: 1, parentRecordId: ids.vacancy });
+    const id = created.id as string;
+    expect((await row(id)).data).not.toHaveProperty("assigneeIds");
+    expect(await assigneeRows(id)).toEqual(
+      [member.userId, owner.userId].sort(),
+    );
+    const listedTask = () =>
+      call(both, "list_tasks", { bucketId: ids.bucket, pageSize: 25 }).then(
+        (result) => data<Args[]>(result).find((item) => item.id === id)!,
+      );
+    const item = await listedTask();
+    expect(item).toMatchObject({
+      assigneeIds: [member.userId, owner.userId].sort(),
+      parentRecordId: ids.vacancy,
+    });
+    // User ids only: no member name or email.
+    expect(JSON.stringify(item)).not.toMatch(/Fictional Test User|@example/);
+
+    const changed = data<Args>(
+      await call(both, "update_task", {
+        id,
+        version: 1,
+        assigneeIds: [owner.userId],
+        parentRecordId: null,
+      }),
+    );
+    expect(changed).toMatchObject({ version: 2, parentRecordId: null });
+    expect(await assigneeRows(id)).toEqual([owner.userId]);
+    expect(await listedTask()).toMatchObject({
+      assigneeIds: [owner.userId],
+      parentRecordId: null,
+    });
+
+    // Refusals are tool errors and change nothing.
+    const snapshot = await fingerprint();
+    expect(
+      toolError(
+        await call(both, "update_task", {
+          id,
+          version: 2,
+          assigneeIds: [outsider.userId],
+        }),
+      ),
+    ).toBe("invalid_assignee");
+    for (const parentRecordId of [ids.comment, ids.view, ids.application])
+      expect(
+        toolError(
+          await call(both, "update_task", { id, version: 2, parentRecordId }),
+        ),
+      ).toBe("invalid_reference");
+    expect(
+      toolError(
+        await call(both, "create_task", {
+          idempotencyKey: key(),
+          bucketId: ids.bucket,
+          title: "Fictional refused MCP task",
+          assigneeIds: [member.userId, outsider.userId],
+        }),
+      ),
+    ).toBe("invalid_assignee");
+    expect(await fingerprint()).toBe(snapshot);
+    expect(await assigneeRows(id)).toEqual([owner.userId]);
+  });
 });
