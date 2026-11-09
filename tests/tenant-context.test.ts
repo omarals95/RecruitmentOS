@@ -44,7 +44,7 @@ import {
 } from "@/lib/api-tokens";
 import { beginCvUpload } from "@/lib/cvs";
 import { analytics, listActivity, overview } from "@/lib/insights";
-import { createRecord, getRecord } from "@/lib/records";
+import { createRecord, getRecord, idempotencyActorKey } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { TeamTx } from "@/db";
 import type { StorageGateway } from "@/lib/storage";
@@ -2130,6 +2130,51 @@ describe("signed tenant context under separate nonowner data and identity roles"
           `UPDATE app.config_objects SET archived_at = now() WHERE id = '${objectId}'`,
         );
         expect((await derived(failing)).stored, "archived").toEqual(closed);
+      });
+
+      // R2a-19 (job 061): the two helpers the new policies call read the verified context only.
+      it("answers scope_is_all and context_actor_key per context kind, false and null without one (0038)", async () => {
+        const answers = (p: Principal) =>
+          withTeam(p, async (tx) => {
+            const { rows } = await tx.execute<{
+              everything: boolean;
+              key: string | null;
+            }>(
+              sql`select tenant_context.scope_is_all() as everything, tenant_context.context_actor_key() as key`,
+            );
+            return rows[0];
+          });
+        const token = await seedApiToken(await harness.asOwner(), plain);
+        expect(await answers(ownerA)).toEqual({
+          everything: true,
+          key: idempotencyActorKey(ownerA),
+        });
+        expect(await answers(plain)).toEqual({
+          everything: true,
+          key: `${plain.userId}:session:session`,
+        });
+        expect(await answers(token)).toEqual({
+          everything: true,
+          key: `${plain.userId}:token:${token.tokenId}`,
+        });
+        // A partial record scope and a role that failed closed (archived above) are not all.
+        expect(await answers(scoped)).toEqual({
+          everything: false,
+          key: idempotencyActorKey(scoped),
+        });
+        expect((await derived(failing)).stored.record_scope).toBeNull();
+        expect(await answers(failing)).toEqual({
+          everything: false,
+          key: idempotencyActorKey(failing),
+        });
+        const client = await asData();
+        expect(
+          (
+            await client.query(
+              "SELECT tenant_context.scope_is_all() AS everything, tenant_context.context_actor_key() AS key",
+            )
+          ).rows,
+        ).toEqual([{ everything: false, key: null }]);
       });
     });
   });

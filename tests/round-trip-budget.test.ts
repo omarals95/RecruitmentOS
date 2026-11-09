@@ -393,6 +393,49 @@ describe("database round trips per request", () => {
         signIn(owner);
       }
     });
+
+    // R2a-19: a replay under a changed role version re-reads the record instead of the cached body,
+    // inside the budget of a simple write.
+    it("replays an idempotent create after the member's role changed in at most 11 round trips", async () => {
+      const member = await seedIdentity(fixture.db, {
+        userId: "budget-replay",
+        teamId: owner.teamId,
+        role: "recruiter",
+      });
+      const payload = { data: { name: "Fictional Budget Replay Person" } };
+      const first = await createRecord(
+        member,
+        "candidates",
+        payload,
+        "budget-replay",
+      );
+      const role = await createConfigDraft(owner, {
+        type: "role",
+        key: "budget-replay-role",
+        body: {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional budget replay role",
+        },
+      });
+      await publishConfigVersion(owner, role.versionId);
+      await assignMemberRole(
+        owner,
+        { userId: member.userId, roleObjectId: role.objectId },
+        new Headers(),
+      );
+      const { replay, timing } = await runWithServerTiming(async (finish) => {
+        const replay = await createRecord(
+          member,
+          "candidates",
+          payload,
+          "budget-replay",
+        );
+        return { replay, timing: finish() };
+      });
+      expect(replay.id).toBe(first.id);
+      expect(timing).toMatch(TIMING);
+      expect(Number(TIMING.exec(timing)![1])).toBeLessThanOrEqual(11);
+    });
   });
 
   // R2a-16: one org chart level and one directory page on a fictional 500-unit, 6-level tree,

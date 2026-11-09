@@ -219,6 +219,48 @@ describe("database identity separation", () => {
     }
   });
 
+  it("allows the data role the five record-scope helpers, with and without arguments, and never the identity role (0038)", async () => {
+    const helpers = [
+      "tenant_context.scope_is_all()",
+      "tenant_context.in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+      "tenant_context.record_in_scope(text,uuid)",
+      "tenant_context.candidate_in_scope(text,uuid)",
+      "tenant_context.context_actor_key()",
+    ];
+    expect(dataRoleHelpers.slice(-5)).toEqual(helpers);
+    for (const helper of helpers)
+      expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      for (const helper of [
+        "scope_is_all()",
+        "in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+      ]) {
+        await harness.asOwner();
+        await harness.client.exec(
+          `GRANT EXECUTE ON FUNCTION tenant_context.${helper} TO ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(true);
+        await harness.asOwner();
+        await harness.client.exec(
+          `REVOKE EXECUTE ON FUNCTION tenant_context.${helper} FROM ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(false);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("requires both connections to the same explicit database endpoint without query overrides", () => {
     const data =
       "postgresql://data:fake@example.test:5432/neondb?sslmode=require";

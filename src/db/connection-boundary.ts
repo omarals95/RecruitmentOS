@@ -39,6 +39,11 @@ export const dataRoleHelpers = [
   "tenant_context.erase_employee(uuid,text,text)",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",
+  "tenant_context.scope_is_all()",
+  "tenant_context.in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+  "tenant_context.record_in_scope(text,uuid)",
+  "tenant_context.candidate_in_scope(text,uuid)",
+  "tenant_context.context_actor_key()",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text,text[])",

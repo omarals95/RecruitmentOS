@@ -16,6 +16,10 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
+import { assignMemberRole } from "@/lib/member-roles";
+import { RECRUITER_ROLE } from "@/domain/config-defaults";
+import type { RoleBody } from "@/domain/config";
 import type { RecordDto } from "@/domain/records";
 import { roleSnapshot } from "@/components/workspace/helpers";
 import { interviewsOnDay } from "@/components/workspace/calendar";
@@ -1457,7 +1461,7 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
         vacancyId: job.id,
       },
     ]);
-    const [stored] = await withTeam(owner, (tx) =>
+    const [stored] = await withTeam(token, (tx) =>
       tx
         .select()
         .from(idempotency)
@@ -1505,6 +1509,78 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     );
     expect(retry).toEqual(first);
     expect(JSON.stringify(retry)).not.toContain("Fictional later edit");
+  });
+
+  // R2a-19: a cached response belongs to the role version it was composed under.
+  it("returns the current, redacted state on a replay after the member's role changes", async () => {
+    const recruiter = await seedIdentity(fixture.db, {
+      userId: "replay-recruiter",
+      role: "recruiter",
+    });
+    const payload = {
+      data: {
+        name: "Fictional Role Replay Person",
+        email: "role.replay@example.test",
+      },
+    };
+    const key = "fictional-role-replay";
+    const stored = () =>
+      withTeam(recruiter, (tx) =>
+        tx
+          .select()
+          .from(idempotency)
+          .where(
+            and(
+              eq(idempotency.teamId, recruiter.teamId),
+              eq(idempotency.key, key),
+            ),
+          ),
+      );
+    const first = await createRecord(recruiter, "candidates", payload, key);
+    expect(first.data).toMatchObject({ email: "role.replay@example.test" });
+    expect((await stored())[0].roleVersionId).toBe(RECRUITER_ROLE.versionId);
+    await updateRecord(owner, "candidates", first.id, {
+      version: 1,
+      data: { jobTitle: "Fictional role replay edit" },
+    });
+    // The same role version: the cached body, without the later edit.
+    expect(await createRecord(recruiter, "candidates", payload, key)).toEqual(
+      first,
+    );
+    const { body } = RECRUITER_ROLE;
+    const narrowed = await createConfigDraft(owner, {
+      type: "role",
+      key: "replay-narrowed-recruiter",
+      body: {
+        ...structuredClone(body),
+        name: "Fictional narrowed recruiter",
+        fields: {
+          ...structuredClone(body.fields),
+          candidate: { ...body.fields.candidate, email: "hidden" },
+        },
+      } as RoleBody,
+    });
+    await publishConfigVersion(owner, narrowed.versionId);
+    await assignMemberRole(
+      owner,
+      { userId: recruiter.userId, roleObjectId: narrowed.objectId },
+      new Headers(),
+    );
+    const replay = await createRecord(recruiter, "candidates", payload, key);
+    expect(replay.id).toBe(first.id);
+    expect(replay.version).toBe(2);
+    expect(replay.data).toMatchObject({
+      jobTitle: "Fictional role replay edit",
+    });
+    expect(replay.data).not.toHaveProperty("email");
+    expect(JSON.stringify(replay)).not.toContain("role.replay@example.test");
+    const [row] = await stored();
+    expect(row.roleVersionId).toBe(narrowed.versionId);
+    expect(row.response).toEqual(JSON.parse(JSON.stringify(replay)));
+    // The same version again: the renewed cached body.
+    expect(await createRecord(recruiter, "candidates", payload, key)).toEqual(
+      replay,
+    );
   });
 
   it("rolls back the business record and retry cache when its audit append fails", async () => {

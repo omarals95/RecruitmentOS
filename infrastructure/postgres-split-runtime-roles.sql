@@ -154,6 +154,11 @@ GRANT EXECUTE ON FUNCTION tenant_context.home_unit_changes(timestamp with time z
 GRANT EXECUTE ON FUNCTION tenant_context.role_assignment_changes(timestamp with time zone, integer) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.remove_assignment(uuid, text, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.scope_is_all() TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.in_scope(text, text, uuid, uuid, uuid, uuid, uuid, text, uuid, uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.record_in_scope(text, uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.candidate_in_scope(text, uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.context_actor_key() TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and

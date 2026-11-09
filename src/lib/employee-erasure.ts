@@ -62,7 +62,7 @@ export async function eraseEmployee(
     const { confirmName } = parse(employeeErasureSchema, input);
     return idempotent(
       tx,
-      p,
+      { principal: p, access },
       "employee.erase",
       idempotencyKey,
       { employeeId },
