@@ -370,6 +370,112 @@ It deletes the employee and their position history, removes the user link (with 
 
 See [erasure-runbook.md](erasure-runbook.md#erase-an-employee) for the steps before and after erasing.
 
+## Organisation import
+
+`POST /api/v1/org-import/dry-run` checks an .xlsx workbook and `POST /api/v1/org-import/apply` applies it. Both need a signed-in browser session; a Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The caller is a company owner, or a company admin with the organisation area, and a workbook with Employees rows also needs a role with directory create and edit. The body is the raw workbook, not JSON, at most 5 MiB.
+
+The workbook has up to three sheets, matched by name ignoring case: `Units` (Code, Name, Level, Parent code), `Positions` (Code, Title, Unit code, Manager) and `Employees` (Employee number, Name, Work email, Work phone, Position codes, Primary position). Row 1 names the columns. `Level` is the name of a current level; `Manager` is yes, no, true or false; `Position codes` are separated by commas or semicolons. A blank cell leaves the stored value unchanged. Formulas are never evaluated, and a value starting with `=`, `+`, `-`, `@`, tab or CR is stored as text and listed in `flagged`.
+
+The dry run runs in a read-only transaction and writes nothing:
+
+```http
+POST /api/v1/org-import/dry-run
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+
+<the bytes of fictional-organisation.xlsx>
+```
+
+```json
+{
+  "data": {
+    "sha256": "3b1f0c2e9d8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+    "sheets": {
+      "units": {
+        "create": 1,
+        "update": 1,
+        "unchanged": 4,
+        "reject": 1,
+        "needsOwner": 1
+      },
+      "positions": {
+        "create": 2,
+        "update": 0,
+        "unchanged": 3,
+        "reject": 0,
+        "needsOwner": 0
+      },
+      "employees": {
+        "create": 2,
+        "update": 1,
+        "unchanged": 6,
+        "reject": 1,
+        "needsOwner": 0
+      }
+    },
+    "rejected": [
+      {
+        "sheet": "Units",
+        "row": 5,
+        "reason": "Unit FIN-EAST: unknown level \"Region\"."
+      },
+      {
+        "sheet": "Employees",
+        "row": 9,
+        "reason": "Employee EMP-0009: Work email is not a valid email address."
+      }
+    ],
+    "needsOwner": [
+      {
+        "sheet": "Units",
+        "row": 3,
+        "reason": "Unit FIN: moves the unit to another parent."
+      }
+    ],
+    "flagged": [{ "sheet": "Employees", "row": 4, "column": "Work phone" }],
+    "truncated": false
+  }
+}
+```
+
+`rejected`, `needsOwner` and `flagged` hold at most 500 entries each, and `truncated` is true when one was cut; the counts are always complete. Apply sends the same file with the dry run's `sha256`:
+
+```http
+POST /api/v1/org-import/apply?sha256=3b1f0c2e9d8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+
+<the same bytes>
+```
+
+It plans again against the data as it is now and writes the create and update rows in one transaction per sheet: units, then positions, then employees. It returns the same shape plus `"group":"normal"`, with `create` and `update` counting the rows written. Applying the same file again writes nothing and reports those rows as unchanged. New employees get `"source":"excel"`; the import never sets a user link. Each sheet that wrote rows adds one `org-import` activity row with counts only, shown only to people with company authority.
+
+Rows in `needsOwner` move a unit, move a position an employee linked to a user holds, or change such an employee's positions. A normal apply never writes them. A company owner applies only those rows with `group=owner`:
+
+```http
+POST /api/v1/org-import/apply?sha256=3b1f0c2e9d8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c&group=owner
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+
+<the same bytes>
+```
+
+Its `create` and `update` count the owner rows written; a row whose new parent, unit or position does not exist yet is rejected, so run the normal apply first.
+
+| Error                          | When                                                                                                 |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| 403 `session_required`         | A Bearer token, including an MCP OAuth token                                                         |
+| 403 `org_forbidden`            | Not a company owner, or a company admin with the organisation area                                   |
+| 403 `directory_forbidden`      | Employees rows without a role that can create and edit employees                                     |
+| 403 `org_owner_required`       | `group=owner` by anyone but a company owner                                                          |
+| 403 `org_import_forbidden`     | Apply by a role with none of `candidates:write`, `recruitment:write`, `cvs:write` or `imports:write` |
+| 415 `xlsx_required`            | Another content type                                                                                 |
+| 413 `import_too_large`         | A body over 5 MiB                                                                                    |
+| 422 `import_unreadable`        | Not a readable .xlsx, ZIP64 or encrypted, or an unsafe entry name such as `../x.xml`                 |
+| 422 `import_archive_too_large` | More than 2,000 archive entries or 50 MiB declared uncompressed                                      |
+| 422 `import_too_many_rows`     | More than 20,000 rows below the headers                                                              |
+| 422 `import_columns_missing`   | A present sheet without one of its columns                                                           |
+| 422 `import_empty`             | No rows to import                                                                                    |
+| 400 `invalid_input`            | Apply without a 64-character `sha256`, with a `group` other than `owner`, or with another query key  |
+| 409 `import_file_changed`      | The body is not the file whose `sha256` was sent; run the dry run again                              |
+
 ## Your access and the Admin portal reads
 
 These three routes serve the Admin portal and need a signed-in browser session. A Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The examples use fictional names.
