@@ -5,6 +5,7 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNull,
   or,
@@ -14,6 +15,13 @@ import {
 import { z } from "zod";
 import { activity, candidateStates, idempotency, records } from "@/db/schema";
 import type { TeamTx } from "@/db";
+import {
+  accessContext,
+  authorize,
+  redact,
+  scopeFilter,
+  type AccessContext,
+} from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
@@ -49,36 +57,6 @@ type WriteInput = Partial<RecordReferences> & {
   archived?: boolean;
   moveToBucketId?: string;
 };
-const knownRoles = new Set(["owner", "admin", "recruiter", "viewer"]);
-// permission, importPermission and owned are exported for tests/authz.test.ts until R2a-07 removes them.
-export function permission(
-  p: Principal,
-  resource: ResourceName,
-  write = false,
-) {
-  const scope = `${resource === "candidates" ? "candidates" : "recruitment"}:${write ? "write" : "read"}`;
-  if (
-    !knownRoles.has(p.role) ||
-    (write && p.role === "viewer") ||
-    !p.scopes.includes(scope as Principal["scopes"][number])
-  )
-    throw new ApiError(
-      403,
-      "forbidden",
-      "You do not have permission for this action.",
-    );
-}
-export function importPermission(p: Principal) {
-  if (
-    !["owner", "admin"].includes(p.role) ||
-    !p.scopes.includes("imports:write")
-  )
-    throw new ApiError(
-      403,
-      "import_forbidden",
-      "Legacy source fields require an owner or admin import token.",
-    );
-}
 function kindOf(resource: ResourceName): RecordKind {
   if (!Object.hasOwn(resourceToKind, resource))
     throw new ApiError(404, "not_found", "Unknown resource.");
@@ -126,9 +104,10 @@ function dto(row: DbRecord): RecordDto {
 }
 async function decorate(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   rows: RecordDto[],
 ): Promise<RecordDto[]> {
+  const { principal: p } = ctx;
   const commentIds = rows
     .filter((row) => row.kind === "comment")
     .map((row) => row.id);
@@ -158,10 +137,11 @@ async function decorate(
     );
   }
   if (
-    !p.scopes.includes("recruitment:read") ||
+    !ctx.scopes.includes("recruitment:read") ||
     !rows.some((row) => ["application", "onboarding"].includes(row.kind))
   )
     return rows;
+  const candidates = ctx.scopes.includes("candidates:read");
   const applications = new Map(
     rows
       .filter((row) => row.kind === "application")
@@ -186,11 +166,7 @@ async function decorate(
       })
       .from(records)
       .where(
-        and(
-          eq(records.teamId, p.teamId),
-          eq(records.kind, "application"),
-          inArray(records.id, parentIds),
-        ),
+        and(...scopeFilter(ctx, "application"), inArray(records.id, parentIds)),
       );
     for (const parent of parents) applications.set(parent.id, parent);
   }
@@ -199,7 +175,7 @@ async function decorate(
       [...applications.values()]
         .flatMap((row) => [
           row.vacancyId,
-          ...(p.scopes.includes("candidates:read") ? [row.candidateId] : []),
+          ...(candidates ? [row.candidateId] : []),
         ])
         .filter((value): value is string => !!value),
     ),
@@ -211,27 +187,27 @@ async function decorate(
   if (parentRefs.length) {
     const parents = await tx
       .select({
-        id: records.id,
-        kind: records.kind,
-        name: sql<string>`${records.data}->>'name'`,
-        title: sql<string>`${records.data}->>'title'`,
-        archivedAt: records.archivedAt,
+        ...getTableColumns(records),
+        // Only the label fields, so a card label never loads a candidate's full data.
+        data: sql<
+          DbRecord["data"]
+        >`jsonb_build_object('name', ${records.data}->'name', 'title', ${records.data}->'title')`,
       })
       .from(records)
       .where(
         and(
-          eq(records.teamId, p.teamId),
           inArray(records.id, parentRefs),
-          inArray(
-            records.kind,
-            p.scopes.includes("candidates:read")
-              ? ["candidate", "vacancy"]
-              : ["vacancy"],
+          or(
+            and(...scopeFilter(ctx, "vacancy")),
+            ...(candidates ? [and(...scopeFilter(ctx, "candidate"))] : []),
           ),
         ),
       );
     for (const parent of parents) {
-      const name = parent.kind === "candidate" ? parent.name : parent.title;
+      // Labels come only from fields the caller may see; a hidden one reads as an empty name.
+      const data: Data = redact(ctx, dto(parent)).data;
+      const value = parent.kind === "candidate" ? data.name : data.title;
+      const name = typeof value === "string" ? value : "";
       labels.set(parent.id, name);
       references.set(
         parent.id,
@@ -270,22 +246,9 @@ async function decorate(
         : row,
   );
 }
-export function owned(p: Principal, kind: RecordKind): SQL[] {
-  return [
-    eq(records.teamId, p.teamId),
-    eq(records.kind, kind),
-    ...(kind === "saved-view" ? [eq(records.privateOwnerId, p.userId)] : []),
-    // Without candidates:read, comments on candidates do not exist for the caller.
-    ...(kind === "comment" && !p.scopes.includes("candidates:read")
-      ? [
-          sql`exists(select 1 from ${records} parent where parent.team_id=${p.teamId} and parent.id=${records.parentRecordId} and parent.kind<>'candidate')`,
-        ]
-      : []),
-  ];
-}
 async function find(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   kind: RecordKind,
   recordId: string,
   lock = false,
@@ -293,7 +256,7 @@ async function find(
   const query = tx
     .select()
     .from(records)
-    .where(and(...owned(p, kind), eq(records.id, recordId)))
+    .where(and(...scopeFilter(ctx, kind), eq(records.id, recordId)))
     .limit(1);
   const rows = lock ? await query.for("update") : await query;
   if (!rows[0])
@@ -329,7 +292,8 @@ async function audit(
   });
 }
 function importedInput(
-  p: Principal,
+  ctx: AccessContext,
+  resource: ResourceName,
   kind: RecordKind,
   input: WriteInput,
   submittedData: Data = input.data,
@@ -345,18 +309,19 @@ function importedInput(
     (kind === "comment" && submittedData.legacyAuthorLabel !== undefined) ||
     sourceFields;
   if (imported || (input.archived === true && input.version === undefined))
-    importPermission(p);
+    authorize(ctx, { resource, action: "import" });
   return imported;
 }
 async function checkReferences(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   kind: RecordKind,
   input: Partial<RecordReferences>,
   existing?: DbRecord,
   allowArchived = false,
   restoring = false,
 ) {
+  const { principal: p } = ctx;
   const allowed = referencesByKind[kind];
   for (const key of referenceFields) {
     const value =
@@ -382,10 +347,15 @@ async function checkReferences(
         `${key} cannot be changed.`,
       );
     if (!value || (!restoring && existing && value === existing[key])) continue;
+    // A parent of a named kind is looked up in the caller's scope; any kind is matched by id.
     const [parent] = await tx
       .select()
       .from(records)
-      .where(and(eq(records.teamId, p.teamId), eq(records.id, value)))
+      .where(
+        config && config.kind !== "*"
+          ? and(...scopeFilter(ctx, config.kind), eq(records.id, value))
+          : and(eq(records.teamId, p.teamId), eq(records.id, value)),
+      )
       .limit(1);
     // A candidate the caller cannot read is answered exactly as a missing parent.
     const candidateComment = kind === "comment" && parent?.kind === "candidate";
@@ -393,14 +363,15 @@ async function checkReferences(
       !parent ||
       (config?.kind !== "*" && parent.kind !== config?.kind) ||
       (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId) ||
-      (candidateComment && !p.scopes.includes("candidates:read"))
+      (candidateComment && !ctx.scopes.includes("candidates:read"))
     )
       throw new ApiError(
         400,
         "invalid_reference",
         `${key} does not reference the expected record in this team.`,
       );
-    if (candidateComment) permission(p, "candidates", true);
+    if (candidateComment)
+      authorize(ctx, { resource: "candidates", action: "comment" });
     if (parent.archivedAt && !allowArchived)
       throw new ApiError(
         400,
@@ -469,7 +440,7 @@ function validCustomValue(field: DbRecord, value: unknown): boolean {
 }
 async function checkCustomValues(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   data: Data,
   existing?: DbRecord,
   importing = false,
@@ -477,7 +448,7 @@ async function checkCustomValues(
   const fields = await tx
     .select()
     .from(records)
-    .where(and(...owned(p, "task-field")));
+    .where(and(...scopeFilter(ctx, "task-field")));
   const values = data.customValues as Data;
   const oldValues = (existing?.data.customValues ?? {}) as Data;
   const byId = new Map(fields.map((field) => [field.id, field]));
@@ -529,7 +500,7 @@ async function checkCustomValues(
 }
 async function checkFieldCompatibility(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   existing: DbRecord | undefined,
   data: Data,
   archived: boolean,
@@ -538,7 +509,7 @@ async function checkFieldCompatibility(
   const tasks = await tx
     .select()
     .from(records)
-    .where(and(...owned(p, "task")));
+    .where(and(...scopeFilter(ctx, "task")));
   const proposed = { ...existing, data } as DbRecord;
   for (const task of tasks) {
     const values = (task.data.customValues ?? {}) as Data;
@@ -556,14 +527,14 @@ async function checkFieldCompatibility(
 }
 async function uniqueChecks(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   kind: RecordKind,
   data: Data,
   refs: Partial<RecordReferences>,
   existing?: DbRecord,
   archived = false,
 ) {
-  const conditions: SQL[] = [...owned(p, kind)];
+  const conditions: SQL[] = [...scopeFilter(ctx, kind)];
   if (existing) conditions.push(sql`${records.id} <> ${existing.id}`);
   let relevant = false;
   if (kind === "application" && !archived) {
@@ -702,13 +673,15 @@ export async function getRecord(
   recordId: string,
 ): Promise<RecordDto> {
   const kind = kindOf(resource);
-  permission(p, resource);
-  id(recordId);
-  return withTeam(
-    p,
-    async (tx) =>
-      (await decorate(tx, p, [dto(await find(tx, p, kind, recordId))]))[0],
-  );
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource, action: "view" });
+    id(recordId);
+    return redact(
+      ctx,
+      (await decorate(tx, ctx, [dto(await find(tx, ctx, kind, recordId))]))[0],
+    );
+  });
 }
 
 /**
@@ -720,7 +693,8 @@ export async function recordKindOf(
   recordId: string,
 ): Promise<{ kind: RecordKind; archived: boolean }> {
   id(recordId);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
     const [row] = await tx
       .select({
         kind: records.kind,
@@ -733,7 +707,7 @@ export async function recordKindOf(
     if (
       !row ||
       (row.kind === "saved-view" && row.privateOwnerId !== p.userId) ||
-      (row.kind === "candidate" && !p.scopes.includes("candidates:read"))
+      (row.kind === "candidate" && !ctx.scopes.includes("candidates:read"))
     )
       throw new ApiError(404, "not_found", "Record not found in this team.");
     return { kind: row.kind as RecordKind, archived: !!row.archivedAt };
@@ -754,9 +728,12 @@ export const candidateDuplicateQuerySchema = z
 
 /** Contact matches are possible duplicates for review, never an identity decision. */
 export async function findCandidateDuplicates(p: Principal, input: unknown) {
-  permission(p, "candidates");
-  const query = parse(candidateDuplicateQuerySchema, input);
-  return withTeam(p, (tx) => matchCandidateContacts(tx, p, query));
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "candidates", action: "view" });
+    const query = parse(candidateDuplicateQuerySchema, input);
+    return matchCandidateContacts(tx, ctx, query);
+  });
 }
 
 /** Most suggestions per field. */
@@ -771,19 +748,20 @@ export async function candidateSuggestions(
   p: Principal,
   query: URLSearchParams,
 ): Promise<{ skills: string[]; certifications: string[] }> {
-  permission(p, "candidates");
-  if ([...query.keys()].length)
-    throw new ApiError(
-      400,
-      "invalid_query",
-      "Suggestions take no query parameters.",
-    );
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "candidates", action: "view" });
+    if ([...query.keys()].length)
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "Suggestions take no query parameters.",
+      );
     const result = await tx.execute<{ field: string; label: string }>(
-      sql`with tags as(select distinct f.field, r.id, btrim(tag.value) as spelling from ${records} r
+      sql`with tags as(select distinct f.field, ${records.id} as id, btrim(tag.value) as spelling from ${records}
         cross join (values ('skills'), ('certifications')) f(field)
-        cross join lateral jsonb_array_elements_text(case when jsonb_typeof(r.data->f.field)='array' then r.data->f.field else '[]'::jsonb end) tag(value)
-        where r.team_id=${p.teamId} and r.kind='candidate' and r.archived_at is null and btrim(tag.value)<>''),
+        cross join lateral jsonb_array_elements_text(case when jsonb_typeof(${records.data}->f.field)='array' then ${records.data}->f.field else '[]'::jsonb end) tag(value)
+        where ${and(...scopeFilter(ctx, "candidate"))} and ${records.archivedAt} is null and btrim(tag.value)<>''),
       spellings as(select field, lower(spelling) as value, spelling, count(*) as holders from tags group by field, lower(spelling), spelling),
       labels as(select distinct on (field, value) field, value, spelling as label from spellings order by field, value, holders desc, spelling collate "C"),
       totals as(select field, lower(spelling) as value, count(distinct id) as holders from tags group by field, lower(spelling)),
@@ -805,7 +783,7 @@ export async function candidateSuggestions(
  */
 export async function matchCandidateContacts(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   query: { email?: string; phone?: string },
 ) {
   const email = query.email?.toLowerCase() || "";
@@ -821,7 +799,7 @@ export async function matchCandidateContacts(
   const rows = await tx
     .select({ id: records.id, data: records.data })
     .from(records)
-    .where(and(...owned(p, "candidate"), or(...predicates)))
+    .where(and(...scopeFilter(ctx, "candidate"), or(...predicates)))
     .orderBy(asc(records.id))
     .limit(CANDIDATE_DUPLICATE_LIMIT + 1);
   const data = rows.slice(0, CANDIDATE_DUPLICATE_LIMIT).map((row) => {
@@ -902,12 +880,13 @@ export const EXPORT_LIMIT = 100000;
 
 /** Validates a list or export query and builds its filter and order, so both share one filter SQL. */
 function recordQuery(
-  p: Principal,
+  ctx: AccessContext,
   kind: RecordKind,
   query: URLSearchParams,
   allowed: readonly string[],
   options: { omitFromSearch?: readonly string[] } = {},
 ) {
+  const { principal: p } = ctx;
   for (const key of query.keys())
     if (!allowed.includes(key) || query.getAll(key).length > 1)
       throw new ApiError(
@@ -933,7 +912,7 @@ function recordQuery(
           ? "position"
           : "createdAt"),
   );
-  const where: SQL[] = owned(p, kind);
+  const where: SQL[] = scopeFilter(ctx, kind);
   if (query.has("includeArchived"))
     parse(z.enum(["true", "false"]), query.get("includeArchived"));
   if (query.has("archived")) {
@@ -1152,7 +1131,7 @@ function recordQuery(
     kind === "application"
       ? sql`concat_ws(' ',${ownFacts},
       (select concat_ws(' ',v.data->>'title',v.data->>'department') from ${records} v where v.team_id=${p.teamId} and v.kind='vacancy' and v.id=${records.vacancyId}),
-      ${p.scopes.includes("candidates:read") ? sql`(select concat_ws(' ',c.data->>'name',c.data->>'email',c.data->>'jobTitle') from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
+      ${ctx.scopes.includes("candidates:read") ? sql`(select concat_ws(' ',c.data->>'name',c.data->>'email',c.data->>'jobTitle') from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
       : ownFacts;
   for (const term of searchTerms(search)) {
     const position = sql`strpos(lower(${factual}),lower(${term.value}))`;
@@ -1179,23 +1158,24 @@ export async function listRecords(
   options: { omitFromSearch?: readonly string[] } = {},
 ) {
   const kind = kindOf(resource);
-  permission(p, resource);
-  const { condition, orderBy } = recordQuery(
-    p,
-    kind,
-    query,
-    LIST_QUERY_KEYS,
-    options,
-  );
-  const page = parse(
-    z.coerce.number().int().min(1).max(1000000),
-    query.get("page") || 1,
-  );
-  const pageSize = parse(
-    z.coerce.number().int().min(1).max(100),
-    query.get("pageSize") || 30,
-  );
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource, action: "view" });
+    const { condition, orderBy } = recordQuery(
+      ctx,
+      kind,
+      query,
+      LIST_QUERY_KEYS,
+      options,
+    );
+    const page = parse(
+      z.coerce.number().int().min(1).max(1000000),
+      query.get("page") || 1,
+    );
+    const pageSize = parse(
+      z.coerce.number().int().min(1).max(100),
+      query.get("pageSize") || 30,
+    );
     // The page carries the matching total; only an empty page past the first needs its own count.
     const rows = await tx
       .select({
@@ -1215,11 +1195,13 @@ export async function listRecords(
           )[0].total
         : 0);
     return {
-      data: await decorate(
-        tx,
-        p,
-        rows.map((row) => dto(row.record)),
-      ),
+      data: (
+        await decorate(
+          tx,
+          ctx,
+          rows.map((row) => dto(row.record)),
+        )
+      ).map((row) => redact(ctx, row)),
       pagination: {
         page,
         pageSize,
@@ -1245,18 +1227,6 @@ export async function exportRecords(
     throw new ApiError(404, "not_found", "Unknown resource.");
   const name = resource as ExportResource;
   const kind = kindOf(name);
-  permission(p, name);
-  if (query.has("page") || query.has("pageSize"))
-    throw new ApiError(
-      400,
-      "invalid_query",
-      "An export covers every matching record; remove page and pageSize.",
-    );
-  const { condition, orderBy } = recordQuery(p, kind, query, [
-    ...EXPORT_FILTER_KEYS,
-    "sort",
-    "direction",
-  ]);
   const privateKeys =
     PRIVATE_EXPORT_FILTER_KEYS[name === "candidates" ? "candidates" : "all"];
   const filters = [...query.entries()]
@@ -1274,7 +1244,20 @@ export async function exportRecords(
       "export_too_large",
       "This export is too large. Narrow your filters.",
     );
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: name, action: "export" });
+    if (query.has("page") || query.has("pageSize"))
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "An export covers every matching record; remove page and pageSize.",
+      );
+    const { condition, orderBy } = recordQuery(ctx, kind, query, [
+      ...EXPORT_FILTER_KEYS,
+      "sort",
+      "direction",
+    ]);
     const [matching] = await tx.select({ total: count() }).from(
       tx
         .select({ id: records.id })
@@ -1308,16 +1291,17 @@ export async function exportRecords(
 /** `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review. */
 export async function createInside(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   kind: RecordKind,
   input: WriteInput,
   imported: boolean,
   auditMetadata: Data = {},
 ): Promise<RecordDto> {
+  const { principal: p } = ctx;
   validateRelations(kind, input.data);
   await checkReferences(
     tx,
-    p,
+    ctx,
     kind,
     input,
     undefined,
@@ -1326,7 +1310,7 @@ export async function createInside(
   const refs = refsFor(input);
   await uniqueChecks(
     tx,
-    p,
+    ctx,
     kind,
     input.data,
     refs,
@@ -1334,11 +1318,11 @@ export async function createInside(
     !!input.archived,
   );
   if (kind === "task")
-    await checkCustomValues(tx, p, input.data, undefined, imported);
+    await checkCustomValues(tx, ctx, input.data, undefined, imported);
   if (kind === "task-field")
     await checkFieldCompatibility(
       tx,
-      p,
+      ctx,
       undefined,
       input.data,
       !!input.archived,
@@ -1410,10 +1394,17 @@ export async function createRecord(
   idempotencyKey?: string,
 ): Promise<RecordDto> {
   const kind = kindOf(resource);
-  permission(p, resource, true);
-  const input = parse(createRecordSchemas[kind], raw) as WriteInput;
-  const imported = importedInput(p, kind, input, (raw as { data: Data }).data);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource, action: "create" });
+    const input = parse(createRecordSchemas[kind], raw) as WriteInput;
+    const imported = importedInput(
+      ctx,
+      resource,
+      kind,
+      input,
+      (raw as { data: Data }).data,
+    );
     await lockTeam(tx, p);
     return idempotent(
       tx,
@@ -1422,11 +1413,14 @@ export async function createRecord(
       idempotencyKey,
       input,
       async () =>
-        (
-          await decorate(tx, p, [
-            await createInside(tx, p, kind, input, imported),
-          ])
-        )[0],
+        redact(
+          ctx,
+          (
+            await decorate(tx, ctx, [
+              await createInside(tx, ctx, kind, input, imported),
+            ])
+          )[0],
+        ),
       async (previous) => {
         // Return the record's current state, including archived records; never create again.
         const recordId = (previous as { id?: unknown } | null)?.id;
@@ -1434,7 +1428,12 @@ export async function createRecord(
           ? await tx
               .select()
               .from(records)
-              .where(and(...owned(p, kind), eq(records.id, recordId as string)))
+              .where(
+                and(
+                  ...scopeFilter(ctx, kind),
+                  eq(records.id, recordId as string),
+                ),
+              )
               .limit(1)
           : [];
         if (!row)
@@ -1445,12 +1444,12 @@ export async function createRecord(
           );
         // Without the read scope, return the original snapshot rather than later edits.
         if (
-          !p.scopes.includes(
+          !ctx.scopes.includes(
             resource === "candidates" ? "candidates:read" : "recruitment:read",
           )
         )
           return previous as RecordDto;
-        return (await decorate(tx, p, [dto(row)]))[0];
+        return redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
       },
     );
   });
@@ -1468,26 +1467,30 @@ export async function updateRecord(
   options: { comment?: string } = {},
 ): Promise<RecordDto & { commentId?: string }> {
   const kind = kindOf(resource);
-  permission(p, resource, true);
-  id(recordId);
-  if (kind === "comment")
-    throw new ApiError(
-      405,
-      "append_only",
-      "Comments are append-only. Add a new comment instead.",
-    );
-  const patch = parse(updateRecordSchemas[kind], raw) as Partial<WriteInput> & {
-    version: number;
-  };
-  if (patch.moveToBucketId && !(kind === "bucket" && patch.archived === true))
-    throw new ApiError(
-      400,
-      "invalid_move",
-      "A destination is only valid when archiving a bucket.",
-    );
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource, action: "edit" });
+    id(recordId);
+    if (kind === "comment")
+      throw new ApiError(
+        405,
+        "append_only",
+        "Comments are append-only. Add a new comment instead.",
+      );
+    const patch = parse(
+      updateRecordSchemas[kind],
+      raw,
+    ) as Partial<WriteInput> & {
+      version: number;
+    };
+    if (patch.moveToBucketId && !(kind === "bucket" && patch.archived === true))
+      throw new ApiError(
+        400,
+        "invalid_move",
+        "A destination is only valid when archiving a bucket.",
+      );
     await lockTeam(tx, p);
-    const existing = await find(tx, p, kind, recordId, true);
+    const existing = await find(tx, ctx, kind, recordId, true);
     if (existing.version !== patch.version)
       throw new ApiError(
         409,
@@ -1499,13 +1502,19 @@ export async function updateRecord(
       ...patch.data,
     }) as Data;
     const input = { ...patch, data };
-    const imported = importedInput(p, kind, input, patch.data ?? {});
+    const imported = importedInput(
+      ctx,
+      resource,
+      kind,
+      input,
+      patch.data ?? {},
+    );
     const archived = patch.archived ?? !!existing.archivedAt;
     const restoring = !!existing.archivedAt && !archived;
     validateRelations(kind, data);
     await checkReferences(
       tx,
-      p,
+      ctx,
       kind,
       patch,
       existing,
@@ -1513,17 +1522,17 @@ export async function updateRecord(
       restoring,
     );
     const refs = refsFor(patch, existing);
-    await uniqueChecks(tx, p, kind, data, refs, existing, archived);
+    await uniqueChecks(tx, ctx, kind, data, refs, existing, archived);
     if (kind === "task")
-      await checkCustomValues(tx, p, data, existing, imported);
+      await checkCustomValues(tx, ctx, data, existing, imported);
     if (kind === "task-field")
-      await checkFieldCompatibility(tx, p, existing, data, archived);
+      await checkFieldCompatibility(tx, ctx, existing, data, archived);
     const now = new Date();
     if (kind === "bucket" && !existing.archivedAt && archived) {
       const active = await tx
         .select()
         .from(records)
-        .where(and(...owned(p, "bucket"), isNull(records.archivedAt)));
+        .where(and(...scopeFilter(ctx, "bucket"), isNull(records.archivedAt)));
       if (active.length < 2)
         throw new ApiError(
           409,
@@ -1535,7 +1544,7 @@ export async function updateRecord(
         .from(records)
         .where(
           and(
-            ...owned(p, "task"),
+            ...scopeFilter(ctx, "task"),
             eq(records.bucketId, existing.id),
             isNull(records.archivedAt),
           ),
@@ -1547,7 +1556,7 @@ export async function updateRecord(
           "Choose another active bucket.",
         );
       if (patch.moveToBucketId) {
-        const target = await find(tx, p, "bucket", patch.moveToBucketId);
+        const target = await find(tx, ctx, "bucket", patch.moveToBucketId);
         if (target.archivedAt)
           throw new ApiError(
             400,
@@ -1571,7 +1580,7 @@ export async function updateRecord(
           })
           .where(
             and(
-              ...owned(p, "task"),
+              ...scopeFilter(ctx, "task"),
               eq(records.id, task.id),
               eq(records.version, task.version),
             ),
@@ -1596,7 +1605,7 @@ export async function updateRecord(
       })
       .where(
         and(
-          ...owned(p, kind),
+          ...scopeFilter(ctx, kind),
           eq(records.id, recordId),
           eq(records.version, patch.version),
         ),
@@ -1622,11 +1631,11 @@ export async function updateRecord(
           ? { fromStatus: existing.data.status, toStatus: data.status }
           : {};
     await audit(tx, p, row, action, metadata, imported);
-    const updated = (await decorate(tx, p, [dto(row)]))[0];
+    const updated = redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
     if (options.comment === undefined) return updated;
     const comment = await createInside(
       tx,
-      p,
+      ctx,
       "comment",
       {
         parentRecordId: recordId,
@@ -1643,11 +1652,12 @@ export async function bulkApplications(
   raw: unknown,
   idempotencyKey?: string,
 ) {
-  permission(p, "applications", true);
-  permission(p, "candidates");
-  const input = parse(bulkApplicationsSchema, raw);
-  const candidateIds = [...new Set(input.candidateIds)];
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "applications", action: "create" });
+    authorize(ctx, { resource: "candidates", action: "view" });
+    const input = parse(bulkApplicationsSchema, raw);
+    const candidateIds = [...new Set(input.candidateIds)];
     await lockTeam(tx, p);
     // Expired keys re-run: existing active pairs are reported, never duplicated.
     return idempotent(
@@ -1657,7 +1667,7 @@ export async function bulkApplications(
       idempotencyKey,
       input,
       async () => {
-        const vacancy = await find(tx, p, "vacancy", input.vacancyId);
+        const vacancy = await find(tx, ctx, "vacancy", input.vacancyId);
         if (vacancy.archivedAt)
           throw new ApiError(
             400,
@@ -1669,7 +1679,7 @@ export async function bulkApplications(
           .from(records)
           .where(
             and(
-              ...owned(p, "candidate"),
+              ...scopeFilter(ctx, "candidate"),
               inArray(records.id, candidateIds),
               isNull(records.archivedAt),
             ),
@@ -1685,7 +1695,7 @@ export async function bulkApplications(
           .from(records)
           .where(
             and(
-              ...owned(p, "application"),
+              ...scopeFilter(ctx, "application"),
               eq(records.vacancyId, input.vacancyId),
               inArray(records.candidateId, candidateIds),
               isNull(records.archivedAt),
@@ -1699,7 +1709,7 @@ export async function bulkApplications(
             created.push(
               await createInside(
                 tx,
-                p,
+                ctx,
                 "application",
                 {
                   candidateId,
@@ -1715,10 +1725,14 @@ export async function bulkApplications(
               ),
             );
         return {
-          data: await decorate(tx, p, created),
+          data: (await decorate(tx, ctx, created)).map((row) =>
+            redact(ctx, row),
+          ),
           // Other users' application contents require recruitment:read; otherwise report references only.
-          existing: p.scopes.includes("recruitment:read")
-            ? await decorate(tx, p, existing.map(dto))
+          existing: ctx.scopes.includes("recruitment:read")
+            ? (await decorate(tx, ctx, existing.map(dto))).map((row) =>
+                redact(ctx, row),
+              )
             : existing.map((row) => ({
                 id: row.id,
                 kind: row.kind as RecordKind,
@@ -1740,13 +1754,14 @@ export async function bootstrapTeam(p: Principal) {
       "forbidden",
       "A team owner or admin can initialize its workflow.",
     );
-  permission(p, "buckets", true);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "buckets", action: "create" });
     await lockTeam(tx, p);
     const existing = await tx
       .select()
       .from(records)
-      .where(and(...owned(p, "bucket")));
+      .where(and(...scopeFilter(ctx, "bucket")));
     if (existing.length) return { data: existing.map(dto), created: 0 };
     const data: RecordDto[] = [];
     for (const [position, name] of [
@@ -1758,7 +1773,7 @@ export async function bootstrapTeam(p: Principal) {
       data.push(
         await createInside(
           tx,
-          p,
+          ctx,
           "bucket",
           {
             data: parse(recordDataSchemas.bucket, {
@@ -1776,10 +1791,11 @@ export async function bootstrapTeam(p: Principal) {
 }
 
 export async function getCandidateState(p: Principal, candidateId: string) {
-  permission(p, "candidates");
-  id(candidateId);
-  return withTeam(p, async (tx) => {
-    await find(tx, p, "candidate", candidateId);
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "candidates", action: "view" });
+    id(candidateId);
+    await find(tx, ctx, "candidate", candidateId);
     const [state] = await tx
       .select()
       .from(candidateStates)
@@ -1818,13 +1834,15 @@ export async function updateCandidateState(
   candidateId: string,
   raw: unknown,
 ) {
-  permission(p, "candidates", true);
-  id(candidateId);
-  const input = parse(candidateStateSchema, raw);
-  if (input.importMeta !== undefined) importPermission(p);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
+    authorize(ctx, { resource: "candidates", action: "edit" });
+    id(candidateId);
+    const input = parse(candidateStateSchema, raw);
+    if (input.importMeta !== undefined)
+      authorize(ctx, { resource: "candidates", action: "import" });
     await lockTeam(tx, p);
-    const candidate = await find(tx, p, "candidate", candidateId);
+    const candidate = await find(tx, ctx, "candidate", candidateId);
     const where = and(
       eq(candidateStates.teamId, p.teamId),
       eq(candidateStates.userId, p.userId),

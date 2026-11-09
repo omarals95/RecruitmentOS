@@ -2083,4 +2083,25 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("refuses a caller without permission before it validates the input", async () => {
+    const person = await candidate("Fictional Refusal Order Person");
+    await expect(
+      createRecord(viewer, "candidates", { data: { name: "" }, extra: true }),
+    ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    await expect(
+      getRecord(
+        { ...owner, scopes: ["recruitment:read"] },
+        "candidates",
+        "not-a-record-id",
+      ),
+    ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    await expect(
+      updateRecord(viewer, "comments", person.id, { version: 1, data: {} }),
+    ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    const reader = await seedApiToken(fixture.db, owner, ["candidates:read"]);
+    await expect(
+      updateCandidateState(reader, person.id, { version: "one", note: 42 }),
+    ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+  });
 });

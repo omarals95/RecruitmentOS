@@ -13,6 +13,7 @@ import {
 import { z } from "zod";
 import { bulkIntakeBatches, bulkIntakeItems, uploads } from "@/db/schema";
 import type { TeamTx } from "@/db";
+import { accessContext } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
@@ -183,7 +184,8 @@ export async function createBulkItem(
   requireUploads();
   // The requested batch is kept so an expired one is refused below, not recreated.
   await purgeExpired(p, batchId);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
+    const ctx = accessContext(p, access);
     await lockTeam(tx, p);
     const now = new Date();
     await tx
@@ -270,7 +272,7 @@ export async function createBulkItem(
         "bulk_review_required",
         "Review the details against the CV and the possible duplicates before importing.",
       );
-    const matches = await matchCandidateContacts(tx, p, data);
+    const matches = await matchCandidateContacts(tx, ctx, data);
     const acknowledged = new Set(input.acknowledgedDuplicateIds);
     if (matches.data.some((match) => !acknowledged.has(match.id)))
       throw new ApiError(
@@ -278,17 +280,24 @@ export async function createBulkItem(
         "bulk_duplicates_changed",
         "The possible duplicates for this candidate have changed. Check for possible duplicates again and review them before importing.",
       );
-    const candidate = await createInside(tx, p, "candidate", { data }, false, {
-      bulkIntake: {
-        batchId,
-        itemId,
-        factsReviewed: true,
-        duplicatesReviewed: true,
-        possibleDuplicates: matches.data.length,
-        limited: matches.limited,
+    const candidate = await createInside(
+      tx,
+      ctx,
+      "candidate",
+      { data },
+      false,
+      {
+        bulkIntake: {
+          batchId,
+          itemId,
+          factsReviewed: true,
+          duplicatesReviewed: true,
+          possibleDuplicates: matches.data.length,
+          limited: matches.limited,
+        },
+        ...(aiReview ? { aiReview } : {}),
       },
-      ...(aiReview ? { aiReview } : {}),
-    });
+    );
     const [updated] = await tx
       .update(bulkIntakeItems)
       .set({

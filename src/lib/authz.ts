@@ -62,7 +62,7 @@ const knownRoles: readonly string[] = ["owner", "admin", "recruiter", "viewer"];
 const known = (role: string): role is Role => knownRoles.includes(role);
 const forbidden = () =>
   new ApiError(403, "forbidden", "You do not have permission for this action.");
-// Today's importPermission() response, so call sites can swap without changing it.
+// The records service's import refusal, in the words it has always used.
 const importForbidden = () =>
   new ApiError(
     403,
@@ -233,7 +233,8 @@ function kindOf(request: AccessRequest): RecordKind | null {
 
 /**
  * The one authorization decision: the record scope and field rules for an allowed request, or a
- * 403 in today's words. Synchronous and pure; nothing calls it yet (R2a-07 to R2a-09).
+ * 403 in today's words. Synchronous and pure. The records service decides through it; insights,
+ * export columns and MCP move onto it in R2a-08 and R2a-09.
  */
 export function authorize(
   ctx: AccessContext,
@@ -270,7 +271,10 @@ export function authorize(
 const recordScopePredicates = (_ctx: AccessContext, _kind: RecordKind) =>
   [] as SQL[];
 
-/** Today's owned() predicates, unchanged, plus the record-scope step. */
+/**
+ * Team and kind, saved views for their private owner and candidate comments only with
+ * candidates:read, plus the record-scope step.
+ */
 export function scopeFilter(ctx: AccessContext, kind: RecordKind): SQL[] {
   const { principal: p } = ctx;
   return [
