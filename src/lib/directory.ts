@@ -12,6 +12,8 @@ import {
   positionInput,
   positionListQuery,
   positionMove,
+  retentionReviewQuery,
+  type EMPLOYEE_RETENTION_CLASSES,
 } from "@/domain/directory";
 import { accessContext, authorize, type AccessContext } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
@@ -42,6 +44,8 @@ export type Employee = {
   displayName: string;
   employeeNumber: string;
   status: "active" | "left";
+  /** Every response includes it; optional so rows built before R2a-15 still type-check. */
+  retentionClass?: (typeof EMPLOYEE_RETENTION_CLASSES)[number];
   source: "app" | "excel";
   userId: string | null;
   /** Left out for a role whose directory rule is basic. */
@@ -50,6 +54,16 @@ export type Employee = {
   positions: EmployeePosition[];
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
+};
+/** One row of the company owners' retention review: no contact fields, user or positions. */
+export type RetentionReviewRow = {
+  id: string;
+  displayName: string;
+  employeeNumber: string;
+  /** When the status became left; for rows that left before R2a-15, their last update. */
+  leftAt: string;
+  retentionClass: (typeof EMPLOYEE_RETENTION_CLASSES)[number];
   archivedAt: string | null;
 };
 export type HomeUnitChange = {
@@ -81,6 +95,12 @@ const ownerRequired = () =>
     403,
     "directory_owner_required",
     "Only a company owner can link an employee to a user, change a linked employee's positions, or move or archive a position a linked employee holds, because these set who can see which records.",
+  );
+const retentionReviewForbidden = () =>
+  new ApiError(
+    403,
+    "retention_review_forbidden",
+    "Only a company owner can see the retention review.",
   );
 const notFound = () =>
   new ApiError(
@@ -201,7 +221,8 @@ const positionJson = (p: Principal) =>
 // The employee's current position rows, primary first, then by title and id.
 const employeeJson =
   sql.raw(`jsonb_build_object('id', e.id, 'displayName', e.display_name, 'employeeNumber', e.employee_number,
-  'status', e.status, 'source', e.source, 'userId', e.user_id, 'workEmail', e.work_email, 'workPhone', e.work_phone,
+  'status', e.status, 'retentionClass', e.retention_class, 'source', e.source, 'userId', e.user_id,
+  'workEmail', e.work_email, 'workPhone', e.work_phone,
   'positions', coalesce((select jsonb_agg(jsonb_build_object('positionId', ep.position_id, 'title', h.title,
     'orgUnitId', h.org_unit_id, 'primary', ep."primary", 'validFrom', ep.valid_from) order by ep."primary" desc, h.title, h.id)
     from app.employee_positions ep join app.positions h on h.id = ep.position_id and h.workspace_id = ep.workspace_id
@@ -367,13 +388,23 @@ export async function archivePosition(
  * One directory page: current, non-archived employees by display name then id, in one statement.
  * unitId matches a current position in the unit or any unit below it, levelId the level of a
  * current position's unit, positionId a holder of the position; 404 for an id outside the workspace.
+ * search matches part of the display name or employee number, ignoring case; includeArchived adds
+ * archived employees.
  */
 export async function listEmployees(
   p: Principal,
   options: z.input<typeof employeeListQuery> = {},
 ): Promise<Page<Employee>> {
-  const { unitId, levelId, positionId, status, page, pageSize } =
-    employeeListQuery.parse(options);
+  const {
+    unitId,
+    levelId,
+    positionId,
+    status,
+    search,
+    includeArchived,
+    page,
+    pageSize,
+  } = employeeListQuery.parse(options);
   return inDirectory(p, directoryForbidden, async (tx, access) => {
     const ctx = requireDirectory(p, access, "view");
     const workspace = sql`${access.workspaceId}::uuid`;
@@ -402,11 +433,15 @@ export async function listEmployees(
       unitId || levelId || positionId
         ? sql`and exists (select 1 from app.employee_positions ep join app.positions h on h.id = ep.position_id and h.workspace_id = ep.workspace_id join app.org_units u on u.id = h.org_unit_id and u.workspace_id = h.workspace_id where ep.employee_id = e.id and ep.workspace_id = e.workspace_id and ep.valid_to is null and h.valid_to is null and h.archived_at is null ${unitId ? sql`and h.org_unit_id in (select c.descendant_id from app.org_unit_closure c where c.workspace_id = ${workspace} and c.ancestor_id = ${unitId}::uuid)` : sql``} ${levelId ? sql`and u.level_id = ${levelId}::uuid` : sql``} ${positionId ? sql`and ep.position_id = ${positionId}::uuid` : sql``})`
         : sql``;
+    // strpos, never a LIKE pattern built from the input.
+    const matching = search
+      ? sql`and (strpos(lower(e.display_name), lower(${search})) > 0 or strpos(lower(e.employee_number), lower(${search})) > 0)`
+      : sql``;
     const { rows } = await tx.execute<{
       found: boolean;
       employees: Employee[];
     }>(
-      sql`select ${found} as found, coalesce((select jsonb_agg(page.employee order by page.display_name, page.id) from (select ${employeeJson} as employee, e.display_name, e.id from app.employees e where e.workspace_id = ${workspace} and e.archived_at is null ${status ? sql`and e.status = ${status}` : sql``} ${holding} order by e.display_name, e.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as employees`,
+      sql`select ${found} as found, coalesce((select jsonb_agg(page.employee order by page.display_name, page.id) from (select ${employeeJson} as employee, e.display_name, e.id from app.employees e where e.workspace_id = ${workspace} ${includeArchived ? sql`` : sql`and e.archived_at is null`} ${status ? sql`and e.status = ${status}` : sql``} ${matching} ${holding} order by e.display_name, e.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as employees`,
     );
     if (!rows[0].found) throw notFound();
     return {
@@ -422,7 +457,7 @@ export async function listEmployees(
   });
 }
 
-/** Creates an employee; one already linked to a user needs a company owner. */
+/** Creates an employee; one already linked to a user needs a company owner. A left one leaves now. */
 export async function createEmployee(
   p: Principal,
   input: z.input<typeof employeeInput>,
@@ -435,12 +470,22 @@ export async function createEmployee(
       const ctx = requireDirectory(p, access, "create");
       if (body.userId !== undefined) requireOwner(p, access);
       const { rows } = await tx.execute<{ employee: Employee }>(
-        sql`insert into app.employees as e (workspace_id, display_name, employee_number, work_email, work_phone, status, user_id) values (${access.workspaceId}::uuid, ${body.displayName}, ${body.employeeNumber}, ${body.workEmail ?? null}, ${body.workPhone ?? null}, ${body.status ?? "active"}, ${body.userId ?? null}) returning ${employeeJson} as employee`,
+        sql`insert into app.employees as e (workspace_id, display_name, employee_number, work_email, work_phone, status, retention_class, left_at, user_id) values (${access.workspaceId}::uuid, ${body.displayName}, ${body.employeeNumber}, ${body.workEmail ?? null}, ${body.workPhone ?? null}, ${body.status ?? "active"}, ${body.retentionClass ?? "standard"}, ${body.status === "left" ? sql`now()` : null}, ${body.userId ?? null}) returning ${employeeJson} as employee`,
       );
       return directoryView(ctx.role, rows[0].employee);
     },
   );
 }
+
+/**
+ * When the employee left: set on becoming left, kept while left, cleared on becoming active. A left
+ * row without it (written before R2a-15) first takes its previous updated_at, so an edit never moves
+ * its review date.
+ */
+const leftAt = (status?: "active" | "left") =>
+  status === "active"
+    ? sql`left_at = null`
+    : sql`left_at = case when e.status = 'left' then coalesce(e.left_at, e.updated_at) else ${status === "left" ? sql`now()` : sql`e.left_at`} end`;
 
 const updateEmployeeRow = (
   p: Principal,
@@ -448,6 +493,7 @@ const updateEmployeeRow = (
   action: "edit" | "archive",
   ownerOnly: boolean,
   set: SQL,
+  status?: "active" | "left",
 ) => {
   const id = z.uuid().parse(employeeId);
   return inDirectory(
@@ -457,7 +503,7 @@ const updateEmployeeRow = (
       const ctx = requireDirectory(p, access, action);
       if (ownerOnly) requireOwner(p, access);
       const { rows } = await tx.execute<{ employee: Employee }>(
-        sql`update app.employees e set ${set} where e.id = ${id}::uuid and e.workspace_id = ${access.workspaceId}::uuid and e.archived_at is null returning ${employeeJson} as employee`,
+        sql`update app.employees e set ${set}, ${leftAt(status)} where e.id = ${id}::uuid and e.workspace_id = ${access.workspaceId}::uuid and e.archived_at is null returning ${employeeJson} as employee`,
       );
       const { employee } = await changed(tx, "employees", id, access, rows);
       return directoryView(ctx.role, employee);
@@ -478,6 +524,7 @@ export async function updateEmployee(
     workEmail: "work_email",
     workPhone: "work_phone",
     status: "status",
+    retentionClass: "retention_class",
   } as const;
   return updateEmployeeRow(
     p,
@@ -490,6 +537,7 @@ export async function updateEmployee(
         .map((key) => sql`${sql.raw(columns[key])} = ${body[key]}`),
       sql`, `,
     ),
+    body.status,
   );
 }
 
@@ -622,5 +670,33 @@ export async function listHomeUnitChanges(
       sql`select occurred_at as "occurredAt", action, affected_user_ids as "affectedUserIds", actor_name as "actorName" from tenant_context.home_unit_changes(${before?.toISOString() ?? null}::timestamptz, ${pageSize}::integer)`,
     );
     return rows;
+  });
+}
+
+/**
+ * Company owners only, signed in (D11): the employees whose status has been left for 12 months or
+ * more, archived ones included, oldest first, for the owner's review. Read only; nothing is erased
+ * automatically. A row that left before R2a-15 has no left_at and reads as its last update.
+ */
+export async function listRetentionReview(
+  p: Principal,
+  options: z.input<typeof retentionReviewQuery> = {},
+): Promise<Page<RetentionReviewRow>> {
+  const { page, pageSize } = retentionReviewQuery.parse(options);
+  return inDirectory(p, directoryForbidden, async (tx, access) => {
+    if (p.authType !== "session" || access.companyLevel !== "owner")
+      throw retentionReviewForbidden();
+    requireDirectory(p, access, "view");
+    const { rows } = await tx.execute<{ employees: RetentionReviewRow[] }>(
+      sql`select coalesce((select jsonb_agg(jsonb_build_object('id', page.id, 'displayName', page.display_name, 'employeeNumber', page.employee_number, 'leftAt', page.left_on, 'retentionClass', page.retention_class, 'archivedAt', page.archived_at) order by page.left_on, page.id) from (select e.id, e.display_name, e.employee_number, coalesce(e.left_at, e.updated_at) as left_on, e.retention_class, e.archived_at from app.employees e where e.workspace_id = ${access.workspaceId}::uuid and e.status = 'left' and coalesce(e.left_at, e.updated_at) <= now() - interval '12 months' order by left_on, e.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as employees`,
+    );
+    return {
+      data: rows[0].employees.slice(0, pageSize),
+      pagination: {
+        page,
+        pageSize,
+        hasMore: rows[0].employees.length > pageSize,
+      },
+    };
   });
 }

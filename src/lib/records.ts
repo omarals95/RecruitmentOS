@@ -596,7 +596,7 @@ function canonical(value: unknown): string {
  * same-payload retry runs `reconcile` (or `work` when it cannot duplicate) and
  * renews the stored result in place.
  */
-async function idempotent<T>(
+export async function idempotent<T>(
   tx: TeamTx,
   p: Principal,
   operation: string,
