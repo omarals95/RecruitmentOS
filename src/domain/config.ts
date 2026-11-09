@@ -1,12 +1,8 @@
 import { z } from "zod";
 import { cleanClientName } from "../lib/client-name";
 import { SCOPES, roleScopes, type Role } from "../lib/permissions";
-import {
-  recordDataSchemas,
-  uuidSchema,
-  type RecordKind,
-  type ResourceName,
-} from "./records";
+import { recordDataSchemas, uuidSchema } from "./record-schemas";
+import type { FieldType, RecordKind, ResourceName } from "./records";
 
 /** The object types of the versioned configuration store (drizzle/0030_config_store.sql). */
 export const CONFIG_TYPES = [
@@ -55,6 +51,114 @@ export const configBodySchemas = {
   "task-board": envelope,
 } satisfies Record<ConfigType, z.ZodType>;
 export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;
+
+/** Record kinds with a kind schema; buckets, task fields, saved views and comments have none. */
+export const CONFIGURABLE_KINDS = [
+  "candidate",
+  "job-role",
+  "vacancy",
+  "application",
+  "task",
+  "interview",
+  "offer",
+  "onboarding",
+  "checklist",
+] as const satisfies readonly RecordKind[];
+export type ConfigurableKind = (typeof CONFIGURABLE_KINDS)[number];
+export const SCREEN_ACTIONS = ["create", "edit", "view"] as const;
+
+// Keyed by FieldType, so the list can neither miss nor add a type.
+const fieldTypes = {
+  text: true,
+  textarea: true,
+  number: true,
+  date: true,
+  "datetime-local": true,
+  select: true,
+  tags: true,
+  checkbox: true,
+  json: true,
+} satisfies Record<FieldType, true>;
+const kindSchemaField = z
+  .object({
+    key: z.string(),
+    system: z.literal(true),
+    label: configLabel,
+    type: z.enum(Object.keys(fieldTypes) as [FieldType, ...FieldType[]]),
+    options: z
+      .array(configOptionValue)
+      .min(1)
+      .max(100)
+      .refine(
+        (options) => new Set(options).size === options.length,
+        "Options must be unique.",
+      )
+      .optional(),
+    required: z.boolean(),
+    readOnly: z.boolean(),
+    sensitive: z.boolean(),
+  })
+  .strict();
+const kindSchemaShape = z
+  .object({
+    kind: z.enum(CONFIGURABLE_KINDS),
+    label: configLabel,
+    singular: configLabel,
+    fields: z.array(kindSchemaField).min(1).max(150),
+    screens: z
+      .array(
+        z
+          .object({
+            action: z.enum(SCREEN_ACTIONS),
+            fields: z.array(z.string()).min(1).max(150),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(40),
+  })
+  .strict();
+function kindSchemaIssues(
+  body: z.output<typeof kindSchemaShape>,
+  ctx: z.RefinementCtx,
+) {
+  const issue = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: "custom", path, message });
+  const keys = new Set<string>();
+  body.fields.forEach((field, index) => {
+    if (!Object.hasOwn(recordDataSchemas[body.kind].shape, field.key))
+      issue(["fields", index, "key"], `Not a field of ${body.kind}.`);
+    else if (keys.has(field.key))
+      issue(["fields", index, "key"], "Field keys must be unique.");
+    keys.add(field.key);
+    if ((field.type === "select") !== (field.options !== undefined))
+      issue(
+        ["fields", index, "options"],
+        "Dropdown fields need options, and only dropdown fields have them.",
+      );
+  });
+  const actions = new Set<string>();
+  body.screens.forEach((screen, index) => {
+    if (actions.has(screen.action))
+      issue(["screens", index, "action"], "Screen actions must be unique.");
+    actions.add(screen.action);
+    const listed = new Set<string>();
+    screen.fields.forEach((key, position) => {
+      if (!keys.has(key))
+        issue(["screens", index, "fields", position], "Not a schema field.");
+      else if (listed.has(key))
+        issue(["screens", index, "fields", position], "Listed twice.");
+      listed.add(key);
+    });
+  });
+}
+/**
+ * A kind schema (architecture §1.4): the kind's system fields and one screen per action. Strict on
+ * every level, so a body cannot carry record ids, record values or default values.
+ */
+export const kindSchemaBodySchema =
+  kindSchemaShape.superRefine(kindSchemaIssues);
+export type KindSchemaBody = z.output<typeof kindSchemaBodySchema>;
 
 /** The actions a role grants per resource (architecture §3.2). */
 export const ACTIONS = [

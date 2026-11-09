@@ -7,8 +7,12 @@ import {
   configBodySchemas,
   configHelpText,
   configKey,
+  kindSchemaBodySchema,
   type ConfigType,
+  type ConfigurableKind,
+  type KindSchemaBody,
 } from "@/domain/config";
+import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import type { ConfigDocument } from "@/lib/config-cache";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
@@ -341,6 +345,32 @@ export function currentConfigBody(
         body: document.body,
       }
     : null;
+}
+
+/**
+ * The kind schema in force for a kind: the workspace's current published version, else the compiled
+ * default (version 1). It runs no statement. A published body that is not a valid kind schema of
+ * this kind throws rather than falling back to the default.
+ */
+export function kindSchemaFor(
+  access: TenantAccess,
+  kind: ConfigurableKind,
+): { versionId: string; number: number; body: KindSchemaBody } {
+  const current = currentConfigBody(access, "kind-schema", kind);
+  if (!current) {
+    const { versionId, body } = DEFAULT_KIND_SCHEMAS[kind];
+    return { versionId, number: 1, body };
+  }
+  const parsed = kindSchemaBodySchema.safeParse(current.body);
+  if (!parsed.success || parsed.data.kind !== kind)
+    throw new Error(
+      `The published ${kind} kind schema ${current.versionId} is not valid.`,
+    );
+  return {
+    versionId: current.versionId,
+    number: current.number,
+    body: parsed.data,
+  };
 }
 
 /** Company owners and admins only: config events of every team in the workspace, newest first. */

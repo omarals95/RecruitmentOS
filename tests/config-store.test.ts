@@ -19,6 +19,7 @@ import {
   createConfigDraft,
   currentConfigBody,
   getConfigObject,
+  kindSchemaFor,
   listConfigHistory,
   publishConfigVersion,
   retireConfigVersion,
@@ -1272,6 +1273,75 @@ describe("versioned configuration store under the split runtime roles", () => {
         expect(
           currentConfigBody(teamB, "task-board", "hint-board"),
         ).toMatchObject({ versionId: teamBoard.versionId });
+        expect(query).not.toHaveBeenCalled();
+        expect(exec).not.toHaveBeenCalled();
+      } finally {
+        query.mockRestore();
+        exec.mockRestore();
+      }
+    });
+  });
+
+  describe("the kind schema in force (R2b-01)", () => {
+    it("returns a published kind schema, else the compiled default, and refuses an invalid one, without a statement", async () => {
+      const empty = (access: TenantAccess): TenantAccess => ({
+        ...access,
+        versions: {},
+        documents: {},
+      });
+      const before = await harness
+        .dataDb()
+        .then((db) =>
+          withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+            installTenantContext(tx, owner, snapshot, new ConfigBodyCache()),
+          ),
+        );
+      const compiled = kindSchemaFor(empty(before), "job-role");
+      const body = structuredClone(compiled.body);
+      body.fields[1].label = "Fictional business unit";
+      // The workspace's published job-role kind schema, written by the owner as an admin writer would.
+      await harness.asOwner();
+      const objectId = (
+        await harness.client.query<{ id: string }>(
+          `INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ('${COMPANY}', 'kind-schema', 'job-role', 'cfg-owner') RETURNING id`,
+        )
+      ).rows[0].id;
+      const versionId = (
+        await harness.client.query<{ id: string }>(
+          `INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) VALUES ($1, '${COMPANY}', 'published', 1, $2::jsonb, now()) RETURNING id`,
+          [objectId, JSON.stringify(body)],
+        )
+      ).rows[0].id;
+      await harness.client.query(
+        `UPDATE app.config_objects SET current_version_id = '${versionId}' WHERE id = '${objectId}'`,
+      );
+      const access = await harness
+        .dataDb()
+        .then((db) =>
+          withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+            installTenantContext(tx, owner, snapshot, new ConfigBodyCache()),
+          ),
+        );
+      const query = vi.spyOn(harness.client, "query");
+      const exec = vi.spyOn(harness.client, "exec");
+      try {
+        const jobRole = kindSchemaFor(access, "job-role");
+        expect(jobRole).toEqual({ versionId, number: 1, body });
+        expect(jobRole.versionId).not.toBe(compiled.versionId);
+        expect(jobRole.body.fields[1]).toMatchObject({
+          key: "department",
+          label: "Fictional business unit",
+        });
+        expect(kindSchemaFor(access, "vacancy")).toEqual({
+          versionId: "00000000-0000-4000-8000-000000000203",
+          number: 1,
+          body: kindSchemaFor(empty(access), "vacancy").body,
+        });
+        // The shared harness published an envelope body for candidate, which is no kind schema.
+        expect(currentConfigBody(access, "kind-schema", "candidate")).not.toBe(
+          null,
+        );
+        expect(() => kindSchemaFor(access, "candidate")).toThrow(Error);
         expect(query).not.toHaveBeenCalled();
         expect(exec).not.toHaveBeenCalled();
       } finally {
