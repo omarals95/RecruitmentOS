@@ -148,8 +148,21 @@ const recordDto = {
       description:
         'Vacancies with an org unit only: the unit as "Name (CODE)". Left out of exports, search and MCP results.',
     },
+    parentKind: {
+      type: "string",
+      description:
+        "Tasks with a parentRecordId only: the linked record's kind. Left out when the caller may not view that kind or the record is outside their record scope.",
+    },
+    parentLabel: {
+      type: "string",
+      description:
+        'Tasks with a parentRecordId only: the linked record\'s visible name or title, or "Untitled <kind>", with " (archived)" for an archived record. Left out with parentKind.',
+    },
   },
 };
+/** The task create and update refusals of assigneeIds and parentRecordId. */
+const taskRefusals =
+  " data.assigneeIds takes up to 10 distinct user ids of members of the team; it is never stored in data but as assignments, and every task response carries the sorted ids ([] for none). 400 invalid_input for more than 10 or a repeated id; 400 invalid_assignee when an id is not a member of the team (a former member cannot be removed either); 403 self_assignment_forbidden when a caller whose task record scope is not all adds or removes themselves; 403 forbidden when the assignees of the task cannot be changed. Any refusal rolls back the whole write. parentRecordId links a job role, vacancy, bucket, task field or task the caller may view in their record scope (null unlinks); any other kind, the task itself or a missing record returns 400 invalid_reference.";
 const orgUnitInput = {
   orgUnitId: {
     type: ["string", "null"],
@@ -243,34 +256,51 @@ export function GET() {
         },
         {
           params: [
-            "page",
-            "pageSize",
-            "search",
-            "includeArchived",
-            "legacyId",
-            "candidateId",
-            "vacancyId",
-            "applicationId",
-            "onboardingId",
-            "parentRecordId",
-            "status",
-            "stage",
-            "sort",
-            "direction",
-            "skills",
-            "certifications",
-            "education",
-            "minYearsExperience",
-            "maxYearsExperience",
-            "applicationCandidateId",
-          ].map((name) => ({ name, in: "query", schema: { type: "string" } })),
+            ...[
+              "page",
+              "pageSize",
+              "search",
+              "includeArchived",
+              "legacyId",
+              "candidateId",
+              "vacancyId",
+              "applicationId",
+              "onboardingId",
+              "parentRecordId",
+              "status",
+              "stage",
+              "sort",
+              "direction",
+              "skills",
+              "certifications",
+              "education",
+              "minYearsExperience",
+              "maxYearsExperience",
+              "applicationCandidateId",
+            ].map((name) => ({
+              name,
+              in: "query",
+              schema: { type: "string" },
+            })),
+            ...(kind === "task"
+              ? [
+                  {
+                    name: "assignedToMe",
+                    in: "query",
+                    schema: { type: "string", enum: ["true", "false"] },
+                    description:
+                      "Tasks only: true keeps tasks assigned to the caller, false the rest; any other value or resource returns 400 invalid_query. A list-only filter: an export refuses it.",
+                  },
+                ]
+              : []),
+          ],
         },
       ),
       post: operation(
         [`${scope}:write`],
         {
           summary: `Create ${kind}`,
-          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.${kind === "comment" ? " A comment on a candidate also needs candidates:read and candidates:write: without candidates:read the parent is answered as 400 invalid_reference, as for a missing record; without candidates:write it returns 403." : ""}`,
+          description: `Requires ${scope}:write. References must belong to the selected team and have the expected record kind.${kind === "comment" ? " A comment on a candidate also needs candidates:read and candidates:write: without candidates:read the parent is answered as 400 invalid_reference, as for a missing record; without candidates:write it returns 403." : ""}${kind === "task" ? taskRefusals : ""}`,
           requestBody: jsonBody(input, createExamples[kind]),
         },
         {
@@ -309,7 +339,7 @@ export function GET() {
         [`${scope}:write`],
         {
           summary: `Update or archive ${kind}`,
-          description: `Requires ${scope}:write. Send the latest version and only changed data fields. Parent references for applications/interviews/offers/onboarding/checklists are immutable. Comments are append-only. Bucket archive requires moveToBucketId when tasks exist.`,
+          description: `Requires ${scope}:write. Send the latest version and only changed data fields. Parent references for applications/interviews/offers/onboarding/checklists are immutable. Comments are append-only. Bucket archive requires moveToBucketId when the bucket holds active tasks, and moves every active task of the team in it, whoever's record scope it is in (409 bucket_not_empty otherwise); a caller whose task record scope is not all gets 403 forbidden.${kind === "task" ? taskRefusals : ""}`,
           requestBody: jsonBody(
             {
               type: "object",
