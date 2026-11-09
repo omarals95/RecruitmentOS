@@ -21,7 +21,14 @@
  *   refused, and an owner asserting all eleven scopes is accepted. An unsigned cache hint naming
  *   another workspace's and another team's published versions returns neither their ids nor
  *   their bodies and changes no scope, workspace or company authority; it only drops the bodies
- *   of the context's own current versions.
+ *   of the context's own current versions. A context reads no organisation level, unit or closure
+ *   row of another workspace and cannot insert one there; the data role cannot insert, update or
+ *   delete app.org_unit_closure; a company admin with the organisation area is refused a unit's
+ *   parent change, archive and a same-code insert under a new parent, with no closure or activity
+ *   change, while a company owner session's move writes one org.unit_moved and one
+ *   scope.home_units_changed row; and two owner sessions moving A under B and B under A at once
+ *   commit at most once, the second waiting and then refused with RQ009, leaving an acyclic closure.
+ *   While such a move holds the workspace lock, an insert keyed to the workspace does not wait.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -44,13 +51,19 @@
  *   both in the same check; the data role commits one task board in fixture team B. In one more
  *   check the owner inserts the second workspace again with one published object, a published
  *   team B task board and a published company object, and removes all of them there. As the
+ *   owner it makes the team A fixture recruiter a company admin with the organisation area, writes
+ *   two fixture organisation levels at the two lowest free depths of the company workspace and
+ *   fixture units coded by the run prefix, and inserts the second workspace once more with one
+ *   level and unit, removing them in that check; the data role commits one fixture unit move under
+ *   the team A owner's context. As the
  *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
- *   locks), deletes the fixture rows and restores both before COMMIT; then the contexts, leases,
- *   stores, teams, users (with their cascaded workspace mappings and company authority) and, in
+ *   locks), deletes the fixture rows and restores both before COMMIT; then the fixture
+ *   configuration objects, organisation units (with their closure rows) and levels, the contexts,
+ *   leases, stores, teams, users (with their cascaded workspace mappings and company authority) and, in
  *   the open bootstrap variant, the setup claim it created go.
  * - It prints one JSON document of counts and static check ids, never a URL, host, port,
  *   username, password, the marker, the key, its id, a payload, a signature, row data or driver
@@ -165,6 +178,8 @@ const CONFIG_TABLES = [
   "config_versions",
   "config_layouts",
 ] as const;
+/** The organisation hierarchy (0033), under FORCE RLS with allows_workspace policies. */
+const ORG_TABLES = ["org_levels", "org_units", "org_unit_closure"] as const;
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
@@ -565,6 +580,14 @@ function fixtureTables(f: Fixtures, variant: Variant) {
       [f.pattern],
     ],
     ["app.config_objects", "key LIKE $1 OR team_id LIKE $1", [f.pattern]],
+    // Fixture units by code and levels by name; closure rows cascade from their units.
+    [
+      "app.org_unit_closure",
+      "descendant_id IN (SELECT u.id FROM app.org_units u WHERE u.code LIKE $1)",
+      [f.pattern],
+    ],
+    ["app.org_units", "code LIKE $1", [f.pattern]],
+    ["app.org_levels", "name LIKE $1", [f.pattern]],
     ["app.workspaces", "name LIKE $1", [f.pattern]],
     ["tenant_context.contexts", ...team],
     ["storage_ledger.blob_read_leases", ...store],
@@ -673,8 +696,10 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       async () => {
         for (const table of [
           // The guard lets the owner delete published versions; the second workspace goes after
-          // its objects.
+          // its objects and org rows, and units go before their levels.
           "app.config_objects",
+          "app.org_units",
+          "app.org_levels",
           "app.workspaces",
           "tenant_context.contexts",
           "storage_ledger.blob_read_leases",
@@ -697,13 +722,16 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         WHERE n.nspname = 'app' AND c.relname = ANY($1::text[]))::int AS forced,
       (SELECT t.tgenabled::text FROM pg_catalog.pg_trigger t
         WHERE t.tgrelid = 'app.activity'::regclass AND t.tgname = 'immutable_activity') AS trigger`,
-    [[...APP_TABLES, ...WORKSPACE_TABLES, ...CONFIG_TABLES]],
+    [[...APP_TABLES, ...WORKSPACE_TABLES, ...CONFIG_TABLES, ...ORG_TABLES]],
   );
   return {
     restored:
       failure === undefined &&
       rows[0].forced ===
-        APP_TABLES.length + WORKSPACE_TABLES.length + CONFIG_TABLES.length &&
+        APP_TABLES.length +
+          WORKSPACE_TABLES.length +
+          CONFIG_TABLES.length +
+          ORG_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -2832,6 +2860,386 @@ async function runChecks(run: Run) {
           [other, created],
         )) === 0,
       ])
+    );
+  });
+
+  // The organisation hierarchy (0033). The owner writes the fixture levels and units directly, with
+  // no context and so no audit: two levels at the two lowest free depths, units coded by the run
+  // prefix. The team A owner is company owner (config-forged-audit) and its recruiter becomes a
+  // company admin with the organisation area; both rows go with the users at cleanup.
+  const orgCode = (name: string) => `${f.prefix}-org-${name}`;
+  await owner.query(
+    `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES
+      ($1::uuid,$2,'owner','{}'), ($1::uuid,$3,'admin','{organisation}') ON CONFLICT DO NOTHING`,
+    [COMPANY_WORKSPACE, f.users.a1, f.users.a2],
+  );
+  const freeDepths = (
+    await owner.query(
+      "SELECT d FROM generate_series(0, 7) d WHERE NOT EXISTS (SELECT 1 FROM app.org_levels l WHERE l.workspace_id = $1::uuid AND l.depth = d) ORDER BY d DESC LIMIT 2",
+      [COMPANY_WORKSPACE],
+    )
+  ).rows.map((row) => Number(row.d));
+  const orgLevel = async (workspace: string, name: string, depth: number) =>
+    (
+      await owner.query(
+        "INSERT INTO app.org_levels(workspace_id,name,depth) VALUES($1::uuid,$2,$3) RETURNING id::text AS id",
+        [workspace, `${f.prefix}-${name}`, depth],
+      )
+    ).rows[0].id as string;
+  const orgUnit = async (
+    workspace: string,
+    level: string,
+    code: string,
+    parent: string | null = null,
+  ) =>
+    (
+      await owner.query(
+        "INSERT INTO app.org_units(workspace_id,parent_id,level_id,name,code) VALUES($1::uuid,$2::uuid,$3::uuid,'Fictional unit',$4) RETURNING id::text AS id",
+        [workspace, parent, level, code],
+      )
+    ).rows[0].id as string;
+  const upper = await orgLevel(COMPANY_WORKSPACE, "org-upper", freeDepths[1]);
+  const lower = await orgLevel(COMPANY_WORKSPACE, "org-lower", freeDepths[0]);
+  const org = {
+    p1: await orgUnit(COMPANY_WORKSPACE, upper, orgCode("p1")),
+    p2: await orgUnit(COMPANY_WORKSPACE, upper, orgCode("p2")),
+    raceA: await orgUnit(COMPANY_WORKSPACE, lower, orgCode("race-a")),
+    raceB: await orgUnit(COMPANY_WORKSPACE, upper, orgCode("race-b")),
+  };
+  const child = await orgUnit(COMPANY_WORKSPACE, lower, orgCode("x"), org.p1);
+  // An archived unit frees its code; reusing it under another parent is a scope-moving insert.
+  const freed = await orgUnit(COMPANY_WORKSPACE, lower, orgCode("y"), org.p1);
+  await owner.query(
+    "UPDATE app.org_units SET archived_at = now() WHERE id = $1::uuid",
+    [freed],
+  );
+  /** The fixture units, their closure rows and the team A org and scope activity, as one string. */
+  const orgSeen = async (db: Db) =>
+    JSON.stringify(
+      (
+        await db.query(
+          `SELECT (SELECT coalesce(json_agg(json_build_object('id', u.id, 'parent', u.parent_id, 'archived', u.archived_at IS NOT NULL) ORDER BY u.id), '[]') FROM app.org_units u WHERE u.code LIKE $1)::text AS units,
+            (SELECT coalesce(json_agg(json_build_object('a', c.ancestor_id, 'd', c.descendant_id, 'depth', c.depth) ORDER BY c.ancestor_id, c.descendant_id), '[]')
+              FROM app.org_unit_closure c JOIN app.org_units u ON u.id = c.descendant_id WHERE u.code LIKE $1)::text AS closure,
+            (SELECT count(*) FROM app.activity a WHERE a.team_id = $2 AND a.kind IN ('org', 'scope'))::int AS audits`,
+          [f.pattern, f.teams.a],
+        )
+      ).rows[0],
+    );
+  /** The same as the owner, who reads activity only with FORCE RLS lifted in a rolled-back transaction. */
+  const orgCommitted = () =>
+    transaction(owner, async () => {
+      await owner.query("ALTER TABLE app.activity NO FORCE ROW LEVEL SECURITY");
+      return orgSeen(owner);
+    });
+  const orgRows = (db: Db, workspace: string) =>
+    count(
+      db,
+      `SELECT ((SELECT count(*) FROM app.org_levels WHERE workspace_id = $1::uuid)
+        + (SELECT count(*) FROM app.org_units WHERE workspace_id = $1::uuid)
+        + (SELECT count(*) FROM app.org_unit_closure WHERE workspace_id = $1::uuid))::int AS n`,
+      [workspace],
+    );
+
+  await check("org-cross-workspace", async (probe) => {
+    probe.at("setup");
+    // A second fixture workspace briefly makes team creation fail on this database (D15).
+    const other = randomUUID();
+    await owner.query(
+      "INSERT INTO app.workspaces(id,name) VALUES($1::uuid,$2)",
+      [other, `${f.prefix}-workspace`],
+    );
+    let pass: boolean;
+    try {
+      const level = await orgLevel(other, "org-other", 0);
+      await orgUnit(other, level, orgCode("other"));
+      const seeded = await orgRows(owner, other);
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerA);
+        probe.at("outcome");
+        const read = await orgRows(data, other);
+        const plantedLevel = await attempt(
+          data,
+          "INSERT INTO app.org_levels(workspace_id,name,depth) VALUES($1::uuid,$2,1)",
+          [other, `${f.prefix}-org-planted`],
+        );
+        const plantedUnit = await attempt(
+          data,
+          "INSERT INTO app.org_units(workspace_id,level_id,name,code) VALUES($1::uuid,$2::uuid,'Planted',$3)",
+          [other, level, orgCode("planted")],
+        );
+        probe.at("positive-control");
+        return probe.all(
+          ["setup", seeded === 3],
+          ["outcome", read === 0],
+          denial(plantedLevel),
+          denial(plantedUnit),
+          [
+            "positive-control",
+            (await orgRows(data, COMPANY_WORKSPACE)) > 0 &&
+              (await count(
+                data,
+                "SELECT count(*)::int AS n FROM app.org_units WHERE id = $1::uuid",
+                [org.p1],
+              )) === 1,
+          ],
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.org_units WHERE workspace_id = $1::uuid",
+        [other],
+      );
+      await owner.query(
+        "DELETE FROM app.org_levels WHERE workspace_id = $1::uuid",
+        [other],
+      );
+      await owner.query("DELETE FROM app.workspaces WHERE id = $1::uuid", [
+        other,
+      ]);
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await orgRows(owner, other)) +
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspaces WHERE id = $1::uuid",
+            [other],
+          )) ===
+          0,
+      ])
+    );
+  });
+
+  await check("org-closure-write-denied", async (probe) => {
+    const before = await orgCommitted();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const inserted = await attempt(
+        data,
+        "INSERT INTO app.org_unit_closure(workspace_id,ancestor_id,descendant_id,depth) VALUES($1::uuid,$2::uuid,$3::uuid,1)",
+        [COMPANY_WORKSPACE, org.p2, child],
+      );
+      const updated = await attempt(
+        data,
+        "UPDATE app.org_unit_closure SET depth = depth + 1 WHERE descendant_id = $1::uuid",
+        [child],
+      );
+      const deleted = await attempt(
+        data,
+        "DELETE FROM app.org_unit_closure WHERE descendant_id = $1::uuid",
+        [child],
+      );
+      probe.at("positive-control");
+      return probe.all(denial(inserted), denial(updated), denial(deleted), [
+        "positive-control",
+        (await count(
+          data,
+          "SELECT count(*)::int AS n FROM app.org_unit_closure WHERE descendant_id = $1::uuid",
+          [child],
+        )) === 2,
+      ]);
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await orgCommitted()) === before]);
+  });
+
+  await check("org-admin-move-denied", async (probe) => {
+    const before = await orgCommitted();
+    const adminPass = await transaction(data, async () => {
+      probe.at("install");
+      // The team A recruiter, a company admin with the organisation area.
+      await installAs(data, signer, p.memberA);
+      probe.at("outcome");
+      const seen = await orgSeen(data);
+      const moved = await attempt(
+        data,
+        "UPDATE app.org_units SET parent_id = $2::uuid WHERE id = $1::uuid",
+        [child, org.p2],
+      );
+      const archived = await attempt(
+        data,
+        "UPDATE app.org_units SET archived_at = now() WHERE id = $1::uuid",
+        [child],
+      );
+      const reparented = await attempt(
+        data,
+        "INSERT INTO app.org_units(workspace_id,parent_id,level_id,name,code) VALUES($1::uuid,$2::uuid,$3::uuid,'Fictional unit',$4)",
+        [COMPANY_WORKSPACE, org.p2, lower, orgCode("y")],
+      );
+      // A planted valid_from would reorder the code's rows for the guard; it is never accepted.
+      const dated = await attempt(
+        data,
+        "INSERT INTO app.org_units(workspace_id,parent_id,level_id,name,code,valid_from) VALUES($1::uuid,$2::uuid,$3::uuid,'Fictional unit',$4,'2999-01-01')",
+        [COMPANY_WORKSPACE, org.p1, lower, orgCode("dated")],
+      );
+      const unchanged = (await orgSeen(data)) === seen;
+      probe.at("positive-control");
+      // The same admin renames the unit; rolled back with the transaction.
+      const renamed = await attempt(
+        data,
+        "UPDATE app.org_units SET name = 'Fictional renamed unit' WHERE id = $1::uuid",
+        [child],
+      );
+      return probe.all(
+        denial(moved),
+        denial(archived),
+        denial(reparented),
+        denial(dated),
+        ["outcome", unchanged],
+        outcomeIs(
+          renamed.ok && renamed.count === 1,
+          renamed,
+          "positive-control",
+        ),
+      );
+    });
+    // A company owner session's move is accepted with one org.unit_moved and one scope row.
+    probe.at("positive-control");
+    const ownerPass = await transaction(data, async () => {
+      await installAs(data, signer, p.ownerA);
+      const moved = await attempt(
+        data,
+        "UPDATE app.org_units SET parent_id = $2::uuid WHERE id = $1::uuid",
+        [child, org.p2],
+      );
+      const audits = await count(
+        data,
+        `SELECT count(*) FILTER (WHERE action = 'org.unit_moved' AND kind = 'org')::int * 10
+           + count(*) FILTER (WHERE action = 'scope.home_units_changed' AND kind = 'scope')::int AS n
+         FROM app.activity WHERE team_id = $1 AND metadata->>'unitId' = $2`,
+        [f.teams.a, child],
+      );
+      return probe.all(
+        outcomeIs(moved.ok && moved.count === 1, moved, "positive-control"),
+        ["positive-control", audits === 11],
+      );
+    });
+    probe.at("end-state");
+    return (
+      adminPass &&
+      ownerPass &&
+      probe.all(["end-state", (await orgCommitted()) === before])
+    );
+  });
+
+  // Two owner sessions move A under B and B under A at once. The workspace row lock in
+  // app.maintain_org_closure makes the second wait; it then sees A under B and is refused (RQ009).
+  await check("org-concurrent-move", async (probe) => {
+    const moveSql =
+      "UPDATE app.org_units SET parent_id = $2::uuid WHERE id = $1::uuid";
+    await data.query("BEGIN");
+    await data2.query("BEGIN");
+    let first: Outcome | undefined;
+    let second: Outcome | undefined;
+    let overlapped: boolean | undefined;
+    let backends: number[];
+    let firstEnded = false;
+    try {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      await installAs(data2, signer, p.ownerA);
+      backends = [await backendPid(data), await backendPid(data2)];
+      probe.at("outcome");
+      first = await settle(data.query(moveSql, [org.raceA, org.raceB]));
+      const pending = settle(data2.query(moveSql, [org.raceB, org.raceA]));
+      try {
+        probe.at("lock-overlap");
+        overlapped = await waitForWaiters(owner, [backends[1]], 1);
+      } finally {
+        await data.query(first.ok ? "COMMIT" : "ROLLBACK");
+        firstEnded = true;
+      }
+      probe.at("outcome");
+      second = await pending;
+    } finally {
+      if (!firstEnded) await data.query("ROLLBACK").catch(() => {});
+      // The second move must fail; it is committed only if it unexpectedly succeeded.
+      await data2.query(second?.ok ? "COMMIT" : "ROLLBACK");
+    }
+    probe.at("end-state");
+    const parents = (
+      await owner.query(
+        "SELECT id::text AS id, parent_id::text AS parent FROM app.org_units WHERE id = ANY($1::uuid[])",
+        [[org.raceA, org.raceB]],
+      )
+    ).rows;
+    // The fixture closure equals a recursive recomputation over parent_id, so it is acyclic.
+    const drift = await count(
+      owner,
+      `WITH RECURSIVE units AS (SELECT id, parent_id FROM app.org_units WHERE code LIKE $1),
+        tree AS (SELECT id AS a, id AS d, 0 AS depth FROM units
+          UNION ALL SELECT t.a, u.id, t.depth + 1 FROM tree t JOIN units u ON u.parent_id = t.d WHERE t.depth < 8),
+        closure AS (SELECT c.ancestor_id AS a, c.descendant_id AS d, c.depth FROM app.org_unit_closure c
+          JOIN units u ON u.id = c.descendant_id)
+      SELECT ((SELECT count(*) FROM (TABLE tree EXCEPT TABLE closure) x)
+        + (SELECT count(*) FROM (TABLE closure EXCEPT TABLE tree) y)
+        + (SELECT count(*) FROM closure WHERE a = d AND depth > 0))::int AS n`,
+      [f.pattern],
+    );
+    const parentOf = (id: string) =>
+      parents.find((row) => row.id === id)?.parent ?? null;
+    return probe.all(
+      ["backend-identity", distinct(backends)],
+      ["lock-overlap", overlapped === true],
+      outcomeIs(first?.ok === true && first.count === 1, first),
+      failsWith(second, "RQ009"),
+      [
+        "end-state",
+        parentOf(org.raceA) === org.raceB &&
+          parentOf(org.raceB) === null &&
+          drift === 0,
+      ],
+    );
+  });
+
+  // The org workspace lock is FOR NO KEY UPDATE: while a move holds it, an insert keyed to the
+  // workspace (its foreign-key check takes FOR KEY SHARE on the row) does not wait. Both roll back.
+  await check("org-lock-key-share", async (probe) => {
+    await data.query("BEGIN");
+    await data2.query("BEGIN");
+    let moved: Outcome | undefined;
+    let keyed: Outcome | undefined;
+    try {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      await installAs(data2, signer, p.ownerA);
+      probe.at("outcome");
+      moved = await settle(
+        data.query(
+          "UPDATE app.org_units SET parent_id = NULL WHERE id = $1::uuid",
+          [org.raceA],
+        ),
+      );
+      await data2.query("SET LOCAL lock_timeout = '2s'");
+      keyed = await settle(
+        data2.query(
+          "INSERT INTO app.config_objects(workspace_id,type,key) VALUES($1::uuid,'workflow',$2)",
+          [COMPANY_WORKSPACE, configKey("org-lock")],
+        ),
+      );
+    } finally {
+      await data2.query("ROLLBACK").catch(() => {});
+      await data.query("ROLLBACK").catch(() => {});
+    }
+    probe.at("end-state");
+    return probe.all(
+      outcomeIs(moved?.ok === true && moved.count === 1, moved),
+      outcomeIs(keyed?.ok === true && keyed.count === 1, keyed),
+      [
+        "end-state",
+        (await count(
+          owner,
+          "SELECT count(*)::int AS n FROM app.config_objects WHERE key = $1",
+          [configKey("org-lock")],
+        )) === 0,
+      ],
     );
   });
 
