@@ -388,6 +388,12 @@ export function RecordEditor({
             {resource === "vacancies" && request && (
               <fieldset
                 className="stack"
+                style={{
+                  border: "1px solid var(--border, #e2e4eb)",
+                  borderRadius: 10,
+                  padding: 16,
+                  minWidth: 0,
+                }}
                 aria-describedby={
                   unitError ? "editor-org-unit-error" : undefined
                 }
@@ -395,10 +401,8 @@ export function RecordEditor({
                 <legend>Org unit</legend>
                 <p id="editor-org-unit" style={{ margin: 0 }}>
                   {orgUnit ? orgUnit.label : "No org unit"}
-                  {unitChanged && (
-                    <span className="muted"> (saved when you save)</span>
-                  )}
                 </p>
+                {unitChanged && <small className="muted">Not saved yet.</small>}
                 <UnitPicker
                   key={pickerKey}
                   request={request}
