@@ -760,7 +760,7 @@ export function idempotencyActorKey(p: Principal) {
  * same-payload retry, or one under another role version than the response was
  * composed under, runs `reconcile` (or `work` when it cannot duplicate) and
  * renews the stored result in place. Every cached response returned passes
- * through `replay`.
+ * through `replay`, and every result is stored as `stored` shapes it.
  */
 export async function idempotent<T>(
   tx: TeamTx,
@@ -770,7 +770,8 @@ export async function idempotent<T>(
   payload: unknown,
   work: () => Promise<T>,
   reconcile?: (previous: unknown) => Promise<T>,
-  replay?: (cached: T) => T,
+  replay?: (cached: T) => T | Promise<T>,
+  stored: (result: T) => unknown = (result) => result,
 ): Promise<T> {
   if (!key) return work();
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key))
@@ -814,7 +815,7 @@ export async function idempotent<T>(
     await tx
       .update(idempotency)
       .set({
-        response: result,
+        response: stored(result),
         roleVersionId,
         expiresAt: new Date(Date.now() + 7 * 86400000),
       })
@@ -828,7 +829,7 @@ export async function idempotent<T>(
     operation,
     key,
     payloadHash,
-    response: result,
+    response: stored(result),
     roleVersionId,
     createdAt: new Date(),
     expiresAt: new Date(Date.now() + 7 * 86400000),
@@ -1711,6 +1712,36 @@ export async function createRecord(
       (raw as { data: Data }).data,
     );
     await lockTeam(tx, p);
+    // The record's current state, including archived records; never a second create.
+    const current = async (previous: unknown) => {
+      const recordId = (previous as { id?: unknown } | null)?.id;
+      const [row] = uuidSchema.safeParse(recordId).success
+        ? await tx
+            .select(readColumns(ctx))
+            .from(records)
+            .where(
+              and(
+                ...scopeFilter(ctx, kind),
+                eq(records.id, recordId as string),
+              ),
+            )
+            .limit(1)
+        : [];
+      if (!row)
+        throw new ApiError(
+          409,
+          "idempotency_expired",
+          "This Idempotency-Key has expired and its original record is no longer available. Search for the record before creating it again.",
+        );
+      // Without the read scope, return the original snapshot rather than later edits.
+      if (
+        !ctx.scopes.includes(
+          resource === "candidates" ? "candidates:read" : "recruitment:read",
+        )
+      )
+        return redact(ctx, previous as RecordDto);
+      return redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
+    };
     return idempotent(
       tx,
       ctx,
@@ -1726,37 +1757,15 @@ export async function createRecord(
             ])
           )[0],
         ),
-      async (previous) => {
-        // Return the record's current state, including archived records; never create again.
-        const recordId = (previous as { id?: unknown } | null)?.id;
-        const [row] = uuidSchema.safeParse(recordId).success
-          ? await tx
-              .select(readColumns(ctx))
-              .from(records)
-              .where(
-                and(
-                  ...scopeFilter(ctx, kind),
-                  eq(records.id, recordId as string),
-                ),
-              )
-              .limit(1)
-          : [];
-        if (!row)
-          throw new ApiError(
-            409,
-            "idempotency_expired",
-            "This Idempotency-Key has expired and its original record is no longer available. Search for the record before creating it again.",
-          );
-        // Without the read scope, return the original snapshot rather than later edits.
-        if (
-          !ctx.scopes.includes(
-            resource === "candidates" ? "candidates:read" : "recruitment:read",
-          )
-        )
-          return redact(ctx, previous as RecordDto);
-        return redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
-      },
-      (cached) => redact(ctx, cached),
+      current,
+      // A linked record's label is never kept: erasure may scrub it (a task title naming an erased
+      // candidate) with no erased id beside it in the cached response, so a replay of a linked
+      // task is recomposed from the current state instead.
+      (cached) =>
+        kind === "task" && cached.parentRecordId
+          ? current(cached)
+          : redact(ctx, cached),
+      ({ parentKind: _kind, parentLabel: _label, ...kept }) => kept,
     );
   });
 }
