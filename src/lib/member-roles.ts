@@ -16,6 +16,20 @@ export type RoleAssignment = {
   roleVersionId: string | null;
   membership: Exclude<RoleBody["membership"], "owner"> | null;
 };
+export type MemberRoles = {
+  assignments: {
+    userId: string;
+    roleObjectId: string;
+    roleName: string | null;
+    available: boolean;
+  }[];
+  roles: {
+    roleObjectId: string;
+    name: string;
+    membership: Exclude<RoleBody["membership"], "owner">;
+  }[];
+  scopedRolesHidden: boolean;
+};
 export type RoleAssignmentChange = {
   occurredAt: string;
   action: string;
@@ -89,7 +103,8 @@ export async function changeTeamRole(
  * A company owner, in a session, assigns a member of the active team a published configured role,
  * or clears it with a null roleObjectId. The row is written first; only then, when member.role
  * differs from the role's membership, is the team role changed through Better Auth. If that is
- * refused the row stays, so the narrower of the two applies. Clearing leaves member.role unchanged.
+ * refused, or fails in any other way (503 team_role_unconfirmed), the row stays, so the narrower of
+ * the two applies. Clearing leaves member.role unchanged.
  */
 export async function assignMemberRole(
   p: Principal,
@@ -168,14 +183,27 @@ export async function assignMemberRole(
       membership: null,
     };
   const { membership } = assigned.body;
-  if (
-    target.role !== membership &&
-    !(await changeTeamRole(await getAuth(), headers, {
-      organizationId: p.teamId,
-      memberId: target.id,
-      role: membership,
-    }))
-  )
+  let changed = true;
+  if (target.role !== membership)
+    try {
+      changed = await changeTeamRole(await getAuth(), headers, {
+        organizationId: p.teamId,
+        memberId: target.id,
+        role: membership,
+      });
+    } catch (error) {
+      // The row is saved; log only a safe category, as errorResponse does.
+      const category =
+        (error as { constructor?: { name?: string } } | null)?.constructor
+          ?.name || typeof error;
+      console.error(`team_role_unconfirmed category=${category}`);
+      throw new ApiError(
+        503,
+        "team_role_unconfirmed",
+        "The role was saved, but the team role could not be checked or changed, so the narrower of the two applies. Try again, or ask a team owner or admin to check the team role in Team settings.",
+      );
+    }
+  if (!changed)
     throw new ApiError(
       409,
       "team_role_unchanged",
@@ -187,6 +215,49 @@ export async function assignMemberRole(
     roleVersionId: assigned.roleVersionId,
     membership,
   };
+}
+
+/**
+ * Company owners, signed in: the configured role of each member of the active team, and the roles
+ * that can be assigned. A role can be assigned, and an assignment is available, only when its
+ * current published version is in force for this context, is a valid role and sees all records,
+ * the rule tenant_context.install applies; roleName is the last published name, else the draft's.
+ */
+export async function listMemberRoles(p: Principal): Promise<MemberRoles> {
+  return inRoles(p, async (tx, access) => {
+    if (p.authType !== "session" || access.companyLevel !== "owner")
+      throw assignmentForbidden();
+    let scopedRolesHidden = false;
+    const assignable = new Map<string, MemberRoles["roles"][number]>();
+    for (const [objectId, versionId] of Object.entries(access.versions)) {
+      const document = access.documents[versionId];
+      if (document?.type !== "role") continue;
+      const parsed = roleBodySchema.safeParse(document.body);
+      if (!parsed.success) continue;
+      const { name, membership, recordScope } = parsed.data;
+      if (Object.values(recordScope).some((scope) => scope !== "all"))
+        scopedRolesHidden = true;
+      else
+        assignable.set(objectId, { roleObjectId: objectId, name, membership });
+    }
+    const { rows } = await tx.execute<{
+      userId: string;
+      roleObjectId: string;
+      roleName: string | null;
+    }>(
+      sql`select r.user_id as "userId", r.role_object_id as "roleObjectId", coalesce(c.body->>'name', d.body->>'name') as "roleName" from app.member_roles r left join app.config_objects o on o.id = r.role_object_id left join app.config_versions c on c.id = o.current_version_id left join app.config_versions d on d.id = o.draft_version_id where r.team_id = ${p.teamId} order by r.user_id`,
+    );
+    return {
+      assignments: rows.map((row) => ({
+        ...row,
+        available: assignable.has(row.roleObjectId),
+      })),
+      roles: [...assignable.values()].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
+      scopedRolesHidden,
+    };
+  });
 }
 
 /**
