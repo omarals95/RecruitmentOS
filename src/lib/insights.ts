@@ -24,6 +24,7 @@ import {
   authorize,
   decide,
   hiddenKeys,
+  recordIdInScope,
   redact,
   scopeFilter,
   type AccessContext,
@@ -85,7 +86,17 @@ function active(ctx: AccessContext, kind: RecordKind): SQL {
   )!;
 }
 function asDto(row: typeof records.$inferSelect): RecordDto {
-  const { teamId: _teamId, createdAt, updatedAt, archivedAt, ...rest } = row;
+  // The scope columns are not part of a record's response.
+  const {
+    teamId: _teamId,
+    orgUnitId: _orgUnitId,
+    scopeVacancyId: _scopeVacancyId,
+    scopeApplicationId: _scopeApplicationId,
+    createdAt,
+    updatedAt,
+    archivedAt,
+    ...rest
+  } = row;
   return {
     ...rest,
     data: row.data as RecordDto["data"],
@@ -326,10 +337,13 @@ export async function overview(p: Principal) {
   };
 }
 
-function observedEvents(p: Principal, end: string) {
+/** Observed stage changes of applications in the caller's record scope. */
+function observedEvents(ctx: AccessContext, end: string) {
+  const { principal: p } = ctx;
+  const inScope = recordIdInScope(ctx, sql`activity.record_id`);
   return sql`select record_id,created_at,id,action,metadata->>'toStage' as to_stage,metadata->>'fromStage' as from_stage
     from ${activity} where team_id=${p.teamId} and kind='application' and actor_type<>'import' and created_at<=${end}::timestamptz
-    and jsonb_typeof(metadata->'toStage')='string'`;
+    and jsonb_typeof(metadata->'toStage')='string'${inScope ? sql` and ${inScope}` : sql``}`;
 }
 export async function analytics(p: Principal, params: URLSearchParams) {
   return withTeam(p, async (tx, access) => {
@@ -351,7 +365,7 @@ export async function analytics(p: Principal, params: URLSearchParams) {
       end = `${to}T23:59:59.999+04:00`;
     // The observed stage history is application stage data: left out when the stage is hidden.
     const history = visible(ctx, "application", "stage");
-    const observed = observedEvents(p, end);
+    const observed = observedEvents(ctx, end);
     const daily = history
       ? await tx.execute<{
           date: string;
@@ -546,6 +560,8 @@ function activityQuery(
   const unseen = RECORD_RESOURCES.filter(
     (resource) => !decide(ctx, { resource, action: "view" }),
   ).map((resource) => resourceToKind[resource]);
+  // Rows about a record outside the caller's record scope, for a limited role.
+  const inScope = recordIdInScope(ctx, sql`${activity.recordId}`);
   const filter = and(
     eq(activity.teamId, p.teamId),
     ...(recordId ? [eq(activity.recordId, recordId)] : []),
@@ -560,6 +576,7 @@ function activityQuery(
     ...(p.authType !== "session" || access.companyLevel === null
       ? [notInArray(activity.kind, COMPANY_ACTIVITY_KINDS)]
       : []),
+    ...(inScope ? [inScope] : []),
     ...searchFilter,
   );
   // Stage and status changes carry the field values in their metadata.

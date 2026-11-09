@@ -4,6 +4,7 @@ import {
   asc,
   count,
   desc,
+  DrizzleQueryError,
   eq,
   getTableColumns,
   inArray,
@@ -17,8 +18,11 @@ import { activity, candidateStates, idempotency, records } from "@/db/schema";
 import type { TeamTx } from "@/db";
 import {
   accessContext,
+  anyRecordScopeRule,
   authorize,
+  decide,
   hiddenKeys,
+  recordScopeRule,
   redact,
   scopeFilter,
   type AccessContext,
@@ -49,6 +53,8 @@ import {
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
 
 type DbRecord = typeof records.$inferSelect;
+/** A row read with its vacancy unit's label in the same statement (recordColumns). */
+type LabelledRecord = DbRecord & { orgUnitLabel?: string | null };
 type Data = Record<string, unknown>;
 type WriteInput = Partial<RecordReferences> & {
   data: Data;
@@ -57,7 +63,30 @@ type WriteInput = Partial<RecordReferences> & {
   importMeta?: Data;
   archived?: boolean;
   moveToBucketId?: string;
+  orgUnitId?: string | null;
 };
+/** Every column plus a vacancy's org unit as "Name (CODE)"; null for other kinds and no unit. */
+const recordColumns = {
+  ...getTableColumns(records),
+  orgUnitLabel: sql<
+    string | null
+  >`case when ${records.kind}='vacancy' then (select u.name || ' (' || u.code || ')' from app.org_units u where u.id=${records.orgUnitId}) end`,
+};
+/** Maps app.maintain_record_scope()'s refusal of a vacancy's unit (RQ012) to a reference error. */
+async function unitChecked<T>(statement: PromiseLike<T>): Promise<T> {
+  try {
+    return await statement;
+  } catch (error) {
+    const cause = error instanceof DrizzleQueryError ? error.cause : error;
+    if ((cause as { code?: unknown } | undefined)?.code === "RQ012")
+      throw new ApiError(
+        400,
+        "invalid_reference",
+        "orgUnitId does not reference a current unit of this company.",
+      );
+    throw error;
+  }
+}
 function kindOf(resource: ResourceName): RecordKind {
   if (!Object.hasOwn(resourceToKind, resource))
     throw new ApiError(404, "not_found", "Unknown resource.");
@@ -79,7 +108,11 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
 function id(value: unknown) {
   return parse(uuidSchema, value);
 }
-function dto(row: DbRecord): RecordDto {
+/**
+ * The response shape. A vacancy with a unit read through recordColumns adds orgUnitId and
+ * orgUnitLabel; every other row keeps exactly its earlier keys, and exports never read the label.
+ */
+function dto(row: LabelledRecord): RecordDto {
   return {
     id: row.id,
     kind: row.kind as RecordKind,
@@ -100,6 +133,11 @@ function dto(row: DbRecord): RecordDto {
     parentRecordId: row.parentRecordId,
     ...(row.importMeta && Object.keys(row.importMeta).length
       ? { importMeta: row.importMeta }
+      : {}),
+    ...(row.kind === "vacancy" &&
+    row.orgUnitId &&
+    row.orgUnitLabel !== undefined
+      ? { orgUnitId: row.orgUnitId, orgUnitLabel: row.orgUnitLabel }
       : {}),
   };
 }
@@ -253,9 +291,9 @@ async function find(
   kind: RecordKind,
   recordId: string,
   lock = false,
-): Promise<DbRecord> {
+): Promise<LabelledRecord> {
   const query = tx
-    .select()
+    .select(recordColumns)
     .from(records)
     .where(and(...scopeFilter(ctx, kind), eq(records.id, recordId)))
     .limit(1);
@@ -348,14 +386,20 @@ async function checkReferences(
         `${key} cannot be changed.`,
       );
     if (!value || (!restoring && existing && value === existing[key])) continue;
-    // A parent of a named kind is looked up in the caller's scope; any kind is matched by id.
+    // A parent of a named kind is looked up in the caller's scope; any kind is matched by id, in
+    // the caller's record scope for the kind it turns out to be.
+    const anyKind = anyRecordScopeRule(ctx, "records");
     const [parent] = await tx
       .select()
       .from(records)
       .where(
         config && config.kind !== "*"
           ? and(...scopeFilter(ctx, config.kind), eq(records.id, value))
-          : and(eq(records.teamId, p.teamId), eq(records.id, value)),
+          : and(
+              eq(records.teamId, p.teamId),
+              eq(records.id, value),
+              ...(anyKind ? [anyKind] : []),
+            ),
       )
       .limit(1);
     // A candidate the caller cannot read is answered exactly as a missing parent.
@@ -507,10 +551,13 @@ async function checkFieldCompatibility(
   archived: boolean,
 ) {
   if (archived) return;
+  // Every task of the team holds values of the field, whoever's record scope it is in.
   const tasks = await tx
     .select()
     .from(records)
-    .where(and(...scopeFilter(ctx, "task")));
+    .where(
+      and(eq(records.teamId, ctx.principal.teamId), eq(records.kind, "task")),
+    );
   const proposed = { ...existing, data } as DbRecord;
   for (const task of tasks) {
     const values = (task.data.customValues ?? {}) as Data;
@@ -535,7 +582,12 @@ async function uniqueChecks(
   existing?: DbRecord,
   archived = false,
 ) {
-  const conditions: SQL[] = [...scopeFilter(ctx, kind)];
+  // Team-wide like the unique indexes they mirror, so a conflict outside the caller's record scope
+  // is still answered as a conflict.
+  const conditions: SQL[] = [
+    eq(records.teamId, ctx.principal.teamId),
+    eq(records.kind, kind),
+  ];
   if (existing) conditions.push(sql`${records.id} <> ${existing.id}`);
   let relevant = false;
   if (kind === "application" && !archived) {
@@ -687,7 +739,8 @@ export async function getRecord(
 
 /**
  * Kind and archive state of a record the caller can see in its team, for checks before a write.
- * A candidate is visible only with candidates:read; otherwise it is answered as missing.
+ * A candidate is visible only with candidates:read, and a record outside the caller's record scope
+ * for its kind not at all; otherwise it is answered as missing.
  */
 export async function recordKindOf(
   p: Principal,
@@ -696,6 +749,7 @@ export async function recordKindOf(
   id(recordId);
   return withTeam(p, async (tx, access) => {
     const ctx = accessContext(p, access);
+    const inScope = anyRecordScopeRule(ctx, "records");
     const [row] = await tx
       .select({
         kind: records.kind,
@@ -703,7 +757,13 @@ export async function recordKindOf(
         archivedAt: records.archivedAt,
       })
       .from(records)
-      .where(and(eq(records.teamId, p.teamId), eq(records.id, recordId)))
+      .where(
+        and(
+          eq(records.teamId, p.teamId),
+          eq(records.id, recordId),
+          ...(inScope ? [inScope] : []),
+        ),
+      )
       .limit(1);
     if (
       !row ||
@@ -1150,11 +1210,29 @@ function recordQuery(
         )
       : sql`''`;
   };
+  // The application search reads a parent's facts only where the caller may view that kind and the
+  // parent is in their record scope.
+  const parentFacts = (
+    alias: string,
+    parent: "vacancy" | "candidate",
+    keys: string[],
+    reference: SQL,
+  ) => {
+    if (
+      !decide(ctx, {
+        resource: parent === "vacancy" ? "vacancies" : "candidates",
+        action: "view",
+      })
+    )
+      return sql`''`;
+    const rule = recordScopeRule(ctx, parent, alias);
+    return sql`(select ${facts(alias, parent, keys)} from ${records} ${sql.raw(alias)} where ${sql.raw(`${alias}.team_id`)}=${p.teamId} and ${sql.raw(`${alias}.kind='${parent}' and ${alias}.id`)}=${reference}${rule ? sql` and ${rule}` : sql``})`;
+  };
   const factual =
     kind === "application"
       ? sql`concat_ws(' ',${ownFacts},
-      (select ${facts("v", "vacancy", ["title", "department"])} from ${records} v where v.team_id=${p.teamId} and v.kind='vacancy' and v.id=${records.vacancyId}),
-      ${ctx.scopes.includes("candidates:read") ? sql`(select ${facts("c", "candidate", ["name", "email", "jobTitle"])} from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
+      ${parentFacts("v", "vacancy", ["title", "department"], sql`${records.vacancyId}`)},
+      ${parentFacts("c", "candidate", ["name", "email", "jobTitle"], sql`${records.candidateId}`)})`
       : ownFacts;
   for (const term of searchTerms(search)) {
     const position = sql`strpos(lower(${factual}),lower(${term.value}))`;
@@ -1214,7 +1292,7 @@ export async function listInside(
   // The page carries the matching total; only an empty page past the first needs its own count.
   const rows = await tx
     .select({
-      record: records,
+      record: recordColumns,
       total: sql<number>`count(*) over ()`.mapWith(Number),
     })
     .from(records)
@@ -1396,24 +1474,27 @@ export async function createInside(
   if (kind === "application" && !input.data.appliedDate && !imported)
     input.data.appliedDate = dubaiToday();
   const now = new Date();
-  const [row] = await tx
-    .insert(records)
-    .values({
-      id: randomUUID(),
-      teamId: p.teamId,
-      kind,
-      data: input.data,
-      ...refs,
-      version: 1,
-      legacyId: input.legacyId ?? null,
-      importMeta: input.importMeta ?? {},
-      privateOwnerId: kind === "saved-view" ? p.userId : null,
-      createdBy: p.userId,
-      createdAt: now,
-      updatedAt: now,
-      archivedAt: input.archived ? now : null,
-    })
-    .returning();
+  const [row] = await unitChecked(
+    tx
+      .insert(records)
+      .values({
+        id: randomUUID(),
+        teamId: p.teamId,
+        kind,
+        data: input.data,
+        ...refs,
+        version: 1,
+        legacyId: input.legacyId ?? null,
+        importMeta: input.importMeta ?? {},
+        privateOwnerId: kind === "saved-view" ? p.userId : null,
+        createdBy: p.userId,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: input.archived ? now : null,
+        orgUnitId: input.orgUnitId ?? null,
+      })
+      .returning(recordColumns),
+  );
   await audit(
     tx,
     p,
@@ -1471,7 +1552,7 @@ export async function createRecord(
         const recordId = (previous as { id?: unknown } | null)?.id;
         const [row] = uuidSchema.safeParse(recordId).success
           ? await tx
-              .select()
+              .select(recordColumns)
               .from(records)
               .where(
                 and(
@@ -1638,24 +1719,29 @@ export async function updateRecord(
       }
     }
     const archivedAt = archived ? (existing.archivedAt ?? now) : null;
-    const [row] = await tx
-      .update(records)
-      .set({
-        data,
-        ...refs,
-        archivedAt,
-        importMeta: patch.importMeta ?? existing.importMeta,
-        version: existing.version + 1,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          ...scopeFilter(ctx, kind),
-          eq(records.id, recordId),
-          eq(records.version, patch.version),
-        ),
-      )
-      .returning();
+    const [row] = await unitChecked(
+      tx
+        .update(records)
+        .set({
+          data,
+          ...refs,
+          archivedAt,
+          importMeta: patch.importMeta ?? existing.importMeta,
+          ...(patch.orgUnitId !== undefined
+            ? { orgUnitId: patch.orgUnitId }
+            : {}),
+          version: existing.version + 1,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            ...scopeFilter(ctx, kind),
+            eq(records.id, recordId),
+            eq(records.version, patch.version),
+          ),
+        )
+        .returning(recordColumns),
+    );
     if (!row)
       throw new ApiError(
         409,

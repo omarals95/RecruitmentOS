@@ -23,6 +23,7 @@ import {
 } from "@/db/schema";
 import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
+import { accessContext, scopeFilter, type AccessContext } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { requireScope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
@@ -207,22 +208,17 @@ function ledgerFailure(error: unknown): never {
     );
   throw error;
 }
+/** A candidate of the team in the caller's record scope; any other is answered as missing. */
 async function assertCandidate(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   id: string,
   allowArchived = false,
 ) {
   const [candidate] = await tx
     .select({ id: records.id, archivedAt: records.archivedAt })
     .from(records)
-    .where(
-      and(
-        eq(records.teamId, p.teamId),
-        eq(records.id, id),
-        eq(records.kind, "candidate"),
-      ),
-    )
+    .where(and(...scopeFilter(ctx, "candidate"), eq(records.id, id)))
     .limit(1);
   if (!candidate || (!allowArchived && candidate.archivedAt))
     throw new ApiError(
@@ -420,8 +416,8 @@ export async function listCandidateCvsPage(
       "Use a page from 1 to 1000000 and a page size from 1 to 100.",
     );
   const { page, pageSize } = parsed.data;
-  return withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId, true);
+  return withTeam(p, async (tx, access) => {
+    await assertCandidate(tx, accessContext(p, access), candidateId, true);
     const where = and(
       eq(uploads.teamId, p.teamId),
       eq(uploads.candidateId, candidateId),
@@ -456,8 +452,8 @@ export async function listCandidateCvs(
 ): Promise<CvDto[]> {
   requireCandidateRead(p);
   validId(candidateId);
-  return withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId, true);
+  return withTeam(p, async (tx, access) => {
+    await assertCandidate(tx, accessContext(p, access), candidateId, true);
     const rows = await tx
       .select()
       .from(uploads)
@@ -576,10 +572,10 @@ export async function beginCvUpload(
     )
     .digest("hex");
   // Expiry commits independently, even if the following reservation is refused or a retry conflicts.
-  const overRate = await withTeam(p, async (tx) => {
+  const overRate = await withTeam(p, async (tx, access) => {
     // Again with the scopes install stored, which a configured role may have narrowed.
     requireImport();
-    await assertCandidate(tx, p, candidateId);
+    await assertCandidate(tx, accessContext(p, access), candidateId);
     await expireCvReservations(tx, p.teamId, binding, now);
     // Early, so an over-rate request makes no provider call; the locked check below stays authoritative.
     const refusal = await uploadRateRefusal(tx, p, now);
@@ -604,8 +600,8 @@ export async function beginCvUpload(
     } catch {
       // Swallowed: the next upload or an owner's cleanup call retries.
     }
-  const row = await withTeam(p, async (tx): Promise<LiveUpload> => {
-    await assertCandidate(tx, p, candidateId);
+  const row = await withTeam(p, async (tx, access): Promise<LiveUpload> => {
+    await assertCandidate(tx, accessContext(p, access), candidateId);
     await lockAllocation(tx, binding);
     const [previous] = await tx
       .select()
@@ -793,7 +789,7 @@ export async function completeCvUpload(
   options: { readTimeoutMs?: number } = {},
 ): Promise<CvDto> {
   validId(id);
-  const initial = await withTeam(p, async (tx) => {
+  const initial = await withTeam(p, async (tx, access) => {
     const [row] = await tx
       .select()
       .from(uploads)
@@ -806,7 +802,7 @@ export async function completeCvUpload(
         "CV_NOT_FOUND",
         "This CV is not available in the selected team.",
       );
-    await assertCandidate(tx, p, row.candidateId);
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
     return row;
   });
   const binding = storageBinding(storage);
@@ -839,7 +835,7 @@ export async function completeCvUpload(
       else return storageFailure(error);
     }
   }
-  const result = await withTeam(p, async (tx) => {
+  const result = await withTeam(p, async (tx, access) => {
     await lockAllocation(tx, binding);
     const [row] = await tx
       .select()
@@ -855,7 +851,7 @@ export async function completeCvUpload(
     if (row.status === "ready") return { row, rejected: false, settled: false };
     if (row.status === "rejected")
       return { row, rejected: true, settled: false };
-    await assertCandidate(tx, p, row.candidateId);
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
     const now = new Date(),
       reject = Boolean(
         rejection ||
@@ -902,7 +898,7 @@ export async function completeCvUpload(
 export async function readyCv(p: Principal, id: string) {
   requireCandidateRead(p);
   validId(id);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
     const [cv] = await tx
       .select()
       .from(uploads)
@@ -914,7 +910,7 @@ export async function readyCv(p: Principal, id: string) {
         "CV_NOT_FOUND",
         "This CV is not available in the selected team.",
       );
-    await assertCandidate(tx, p, cv.candidateId, true);
+    await assertCandidate(tx, accessContext(p, access), cv.candidateId, true);
     return cv;
   });
 }
@@ -1023,19 +1019,18 @@ export async function getCvChunk(
 
 /**
  * Each listed candidate of the team (archived ones included) with its ready CVs, oldest completed
- * first. A candidate the team does not have is left out.
+ * first. A candidate the team does not have, or outside the caller's record scope, is left out.
  */
 export async function readyCvsOf(p: Principal, candidateIds: string[]) {
   requireCandidateRead(p);
   for (const id of candidateIds) validId(id);
-  return withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
     const found = await tx
       .select({ id: records.id })
       .from(records)
       .where(
         and(
-          eq(records.teamId, p.teamId),
-          eq(records.kind, "candidate"),
+          ...scopeFilter(accessContext(p, access), "candidate"),
           inArray(records.id, candidateIds),
         ),
       );
@@ -1126,7 +1121,7 @@ export async function putCvBytes(
   storage?: CvStorage,
 ): Promise<void> {
   validId(id);
-  const row = await withTeam(p, async (tx) => {
+  const row = await withTeam(p, async (tx, access) => {
     const [row] = await tx
       .select()
       .from(uploads)
@@ -1138,7 +1133,7 @@ export async function putCvBytes(
         "CV_NOT_FOUND",
         "This CV is not available in the selected team.",
       );
-    await assertCandidate(tx, p, row.candidateId);
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
     return row;
   });
   if (row.status !== "pending") return;
