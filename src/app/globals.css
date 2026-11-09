@@ -1063,6 +1063,16 @@ input[type="color"] {
   min-width: 42px;
   width: 42px;
 }
+/* Wide tables such as the Directory: narrower cells that wrap only between words. */
+.data-table.compact th,
+.data-table.compact td {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.data-table.compact td {
+  min-width: 0;
+  overflow-wrap: normal;
+}
 .data-table tbody tr:hover {
   background: var(--surface-subtle);
 }

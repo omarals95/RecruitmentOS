@@ -112,6 +112,20 @@ const pageLabels: Record<PageKey, string> = {
 const EDITABLE_PAGES = PAGE_KEYS.filter(
   (page) => !["approvals", "directory", "plan"].includes(page),
 );
+/** The page keys a service checks today (src/lib/insights.ts, src/lib/mcp/tools.ts). */
+const ENFORCED_PAGES: readonly PageKey[] = ["home", "analytics", "activity"];
+/** The directory actions src/lib/directory.ts checks today. */
+const ENFORCED_DIRECTORY: readonly Action[] = [
+  "view",
+  "create",
+  "edit",
+  "archive",
+];
+/** Actions no service checks yet; they are saved with the role and shown as taking effect later. */
+const takesEffectLater = (resource: ActionResource, action: Action) =>
+  resource === "teams" ||
+  resource === "two-step-reset" ||
+  (resource === "directory" && !ENFORCED_DIRECTORY.includes(action));
 const actionLabels: Record<Action, string> = {
   view: "View",
   create: "Create",
@@ -184,6 +198,7 @@ const box = {
   minWidth: 0,
 } as const;
 const checks = { display: "flex", flexWrap: "wrap", columnGap: 18 } as const;
+const laterHeading = { fontSize: 13, margin: "12px 0 0" } as const;
 // Row actions never break inside a word; a narrow table scrolls inside its .table-wrap.
 const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
 
@@ -840,6 +855,7 @@ export function RoleEditor({
 }) {
   const heading = useFocusOnOpen();
   const summary = useRef<HTMLDivElement>(null);
+  const later = useId();
   const [body, setBody] = useState<RoleBody>(() => structuredClone(initial));
   const [saved, setSaved] = useState(() => canonical(initial));
   const next: RoleBody = { ...body, recordScope: { ...ALL_RECORDS } };
@@ -888,6 +904,17 @@ export function RoleEditor({
     }
     if (await onSave(next)) setSaved(canonical(next));
   }
+  const pageCheck = (page: PageKey, describedBy?: string) => (
+    <label key={page} className="checkbox-label">
+      <input
+        type="checkbox"
+        checked={body.pages.includes(page)}
+        aria-describedby={describedBy}
+        onChange={(e) => togglePage(page, e.target.checked)}
+      />
+      {pageLabels[page]}
+    </label>
+  );
   return (
     <form className="stack" style={box} onSubmit={save} noValidate>
       <h3 ref={heading} tabIndex={-1}>
@@ -935,16 +962,21 @@ export function RoleEditor({
       </label>
       <Group legend="Pages" issues={issuesOf("pages")}>
         <div style={checks}>
-          {EDITABLE_PAGES.map((page) => (
-            <label key={page} className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={body.pages.includes(page)}
-                onChange={(e) => togglePage(page, e.target.checked)}
-              />
-              {pageLabels[page]}
-            </label>
-          ))}
+          {EDITABLE_PAGES.filter((page) => ENFORCED_PAGES.includes(page)).map(
+            (page) => pageCheck(page),
+          )}
+        </div>
+        <h4 id={`${later}-pages`} style={laterHeading}>
+          Takes effect later
+        </h4>
+        <p className="muted" style={{ margin: "4px 0 0" }}>
+          These screens do not check page rules yet. The choice is saved with
+          the role.
+        </p>
+        <div style={checks}>
+          {EDITABLE_PAGES.filter((page) => !ENFORCED_PAGES.includes(page)).map(
+            (page) => pageCheck(page, `${later}-pages`),
+          )}
         </div>
       </Group>
       <fieldset style={box}>
@@ -957,6 +989,26 @@ export function RoleEditor({
           {EDITABLE_RESOURCES.map((resource) => {
             const held = body.actions[resource] ?? [];
             const refused = issuesOf(`actions.${resource}`);
+            const actions = editableActions(resource);
+            const now = actions.filter(
+              (action) => !takesEffectLater(resource, action),
+            );
+            const deferred = actions.filter((action) =>
+              takesEffectLater(resource, action),
+            );
+            const actionCheck = (action: Action, describedBy?: string) => (
+              <label key={action} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={held.includes(action)}
+                  aria-describedby={describedBy}
+                  onChange={(e) =>
+                    toggleAction(resource, action, e.target.checked)
+                  }
+                />
+                {actionLabels[action]}
+              </label>
+            );
             return (
               <Disclosure
                 key={resource}
@@ -968,20 +1020,23 @@ export function RoleEditor({
                   issues={refused}
                   hiddenLegend
                 >
-                  <div style={checks}>
-                    {editableActions(resource).map((action) => (
-                      <label key={action} className="checkbox-label">
-                        <input
-                          type="checkbox"
-                          checked={held.includes(action)}
-                          onChange={(e) =>
-                            toggleAction(resource, action, e.target.checked)
-                          }
-                        />
-                        {actionLabels[action]}
-                      </label>
-                    ))}
-                  </div>
+                  {now.length > 0 && (
+                    <div style={checks}>
+                      {now.map((action) => actionCheck(action))}
+                    </div>
+                  )}
+                  {deferred.length > 0 && (
+                    <>
+                      <h4 id={`${later}-${resource}`} style={laterHeading}>
+                        Takes effect later
+                      </h4>
+                      <div style={checks}>
+                        {deferred.map((action) =>
+                          actionCheck(action, `${later}-${resource}`),
+                        )}
+                      </div>
+                    </>
+                  )}
                 </Group>
               </Disclosure>
             );

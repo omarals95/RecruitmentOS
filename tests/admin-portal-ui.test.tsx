@@ -43,11 +43,13 @@ import type { CompanyAuthorityHolder } from "../src/lib/company-authority";
 import {
   ERASED_NOTICE,
   EmployeeErasureDialogView,
-  EmployeeSearchPanel,
   RetentionReviewPanel,
-  type EmployeeMatch,
-} from "../src/components/settings/employees-tab";
-import type { RetentionReviewRow } from "../src/lib/directory";
+} from "../src/components/settings/employee-erasure";
+import {
+  DirectoryTable,
+  EmployeeActionsView,
+} from "../src/components/settings/directory-tab";
+import type { Employee, RetentionReviewRow } from "../src/lib/directory";
 import { formatDate } from "../src/components/workspace/helpers";
 
 // Fictional people, teams and ids only.
@@ -68,7 +70,6 @@ const COMPANY_LEVELS = ["owner", "admin", null] as const;
 const TEAM_TABS = ["members", "cv-storage", "speed", "tokens"];
 const NOT_YET = [
   "Task boards",
-  "Organisation",
   "Fields",
   "Screens",
   "Workflows",
@@ -121,14 +122,15 @@ const onlyHeadingAndNoAccess = (markup: string) => {
 };
 
 describe("admin portal tabs", () => {
-  it("defines exactly the seven tabs that exist, in order", () => {
+  it("defines exactly the eight tabs that exist, in order", () => {
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label])).toEqual([
       ["members", "Members"],
       ["cv-storage", "CV storage"],
       ["speed", "Speed"],
       ["tokens", "API tokens"],
       ["roles", "Roles & permissions"],
-      ["employees", "Employees"],
+      ["organisation", "Organisation"],
+      ["directory", "Directory"],
       ["history", "History"],
     ]);
   });
@@ -142,7 +144,7 @@ describe("admin portal tabs", () => {
         const team = teamRole === "owner" || teamRole === "admin";
         expect(keys, `${teamRole} / ${companyLevel}`).toEqual([
           ...(team ? TEAM_TABS : []),
-          ...(companyLevel === "owner" ? ["roles", "employees"] : []),
+          ...(companyLevel === "owner" ? ["roles", "organisation"] : []),
           ...(companyLevel ? ["history"] : []),
         ]);
       }
@@ -159,7 +161,7 @@ describe("admin portal", () => {
     expect(tabLinks(markup)).toEqual([
       ...TEAM_TABS,
       "roles",
-      "employees",
+      "organisation",
       "history",
     ]);
     const current = [...markup.matchAll(/<a [^>]*>/g)]
@@ -242,7 +244,7 @@ describe("admin portal", () => {
 
   it("shows the access changes panel in History only for a company owner", () => {
     const owner = render("history", access("recruiter", "owner"));
-    expect(tabLinks(owner)).toEqual(["roles", "employees", "history"]);
+    expect(tabLinks(owner)).toEqual(["roles", "organisation", "history"]);
     expect(owner).toContain("<h2>Configuration history</h2>");
     expect(owner).toContain("<h2>Recent access changes (last 7 days)</h2>");
     const admin = render("history", access("owner", "admin"));
@@ -664,6 +666,57 @@ describe("roles and permissions tab", () => {
     expect(markup).toContain("Saving sets every group to All records");
   });
 
+  // R2a-16 (job 058): checkboxes no service checks yet are labelled, never hidden.
+  it("points the page and action checkboxes that take effect later to a visible sub-heading, with their labels unchanged", () => {
+    const markup = editor(RECRUITER_ROLE.body as RoleBody);
+    const checkboxes = (group: string) =>
+      [
+        ...group.matchAll(
+          /<label class="checkbox-label"><input type="checkbox"([^>]*)\/>([^<]+)<\/label>/g,
+        ),
+      ].map((match) => ({ attributes: match[1], label: match[2] }));
+    /** The labels pointing to the group's "Takes effect later" heading. */
+    const later = (group: string) => {
+      const heading = /<h4 id="([^"]+)"[^>]*>Takes effect later<\/h4>/.exec(
+        group,
+      );
+      expect(heading).not.toBeNull();
+      return checkboxes(group)
+        .filter((box) =>
+          box.attributes.includes(`aria-describedby="${heading![1]}"`),
+        )
+        .map((box) => box.label);
+    };
+    const pages = fieldset(markup, "Pages");
+    const labels = checkboxes(pages).map((box) => box.label);
+    expect(labels).toHaveLength(15);
+    for (const label of ["Approvals", "Directory", "Plan"])
+      expect(labels).not.toContain(label);
+    expect(later(pages)).toEqual(
+      labels.filter(
+        (label) => !["Overview", "Analytics", "Activity"].includes(label),
+      ),
+    );
+    expect(later(pages)).toHaveLength(12);
+    for (const [resource, effective] of [
+      ["Teams", []],
+      ["Two-step sign-in reset", []],
+      ["Directory", ["View", "Create", "Edit", "Archive"]],
+    ] as const) {
+      const group = fieldset(markup, `Actions on ${resource}`);
+      const all = checkboxes(group).map((box) => box.label);
+      expect(later(group).length, resource).toBeGreaterThan(0);
+      expect(
+        all.filter((label) => !later(group).includes(label)),
+        resource,
+      ).toEqual(effective);
+    }
+    for (const resource of ["Candidates", "CV storage settings"])
+      expect(fieldset(markup, `Actions on ${resource}`)).not.toContain(
+        "Takes effect later",
+      );
+  });
+
   it("refuses a grant outside the membership ceiling next to its resource, with an alert summary, and sends nothing", async () => {
     const viewer = copyOf(VIEWER_ROLE.body as RoleBody, {
       actions: { ...VIEWER_ROLE.body.actions, candidates: ["view", "edit"] },
@@ -854,37 +907,41 @@ describe("company authority panel", () => {
   });
 });
 
-// R2a-15 (job 057): the Employees tab, for company owners only, until the Organisation tab.
-describe("employees tab", () => {
+// R2a-15 (job 057): employee erasure and the retention review, for company owners only, in the
+// Directory tab since R2a-16 (job 058).
+describe("directory tab erasure and retention review", () => {
   const match = (
     id: string,
     displayName: string,
-    changes: Partial<EmployeeMatch> = {},
-  ): EmployeeMatch => ({
+    changes: Partial<Employee> = {},
+  ): Employee => ({
     id,
     displayName,
     employeeNumber: `EMP-${id}`,
     status: "active",
     retentionClass: "standard",
+    source: "app",
+    userId: null,
+    positions: [],
+    createdAt: "2026-11-01T09:00:00.000Z",
+    updatedAt: "2026-11-01T09:00:00.000Z",
     archivedAt: null,
     ...changes,
   });
-  const search = (
-    props: Partial<Parameters<typeof EmployeeSearchPanel>[0]> = {},
-  ) =>
+  const table = (rows: Employee[], owner = true) =>
     renderToStaticMarkup(
-      <EmployeeSearchPanel
-        query="fictional"
-        busy={false}
-        error=""
-        result={null}
-        searched={false}
-        {...props}
+      <DirectoryTable
+        rows={rows}
+        owner={owner}
+        actions={["view", "create", "edit", "archive"]}
       />,
     );
-  const page = (data: EmployeeMatch[], hasMore = false) => ({
-    data,
-    pagination: { page: 1, pageSize: 20, hasMore },
+  const reader = (
+    teamRole: string,
+    companyLevel: MeAccess["companyLevel"],
+  ): MeAccess => ({
+    ...access(teamRole, companyLevel),
+    actions: { directory: ["view"] },
   });
   const reviewRows: RetentionReviewRow[] = [
     {
@@ -923,58 +980,39 @@ describe("employees tab", () => {
     );
   const eraseButton = /<button[^>]*>Permanently erase<\/button>/;
 
-  it("shows the tab, the search and the retention review only to a company owner, and the no-access text to everyone else", () => {
+  it("shows erasure and the retention review in the Directory tab only to a company owner, and the no-access text without directory view", () => {
     for (const teamRole of TEAM_ROLES)
       for (const companyLevel of COMPANY_LEVELS) {
-        const markup = render("employees", access(teamRole, companyLevel));
+        const markup = render("directory", reader(teamRole, companyLevel));
+        expect(tabLinks(markup)).toContain("directory");
+        expect(markup).toContain(
+          'aria-current="page" href="/app/admin/directory"',
+        );
+        expect(markup).toContain("<h2>Directory</h2>");
+        expect(markup).toContain("Name or employee number");
         if (companyLevel === "owner") {
-          expect(tabLinks(markup)).toContain("employees");
-          expect(markup).toContain(
-            'aria-current="page" href="/app/admin/employees"',
-          );
-          expect(markup).toContain("<h2>Find an employee</h2>");
           expect(markup).toContain("<h2>Retention review</h2>");
-          expect(markup).toContain("Name or employee number");
           expect(markup).toContain(
             '<p role="status">Loading the retention review…</p>',
           );
-          // No create, edit, link or position control.
-          expect(markup).not.toMatch(/Create|Edit|Link|Position/);
-        } else {
-          onlyHeadingAndNoAccess(markup);
-          expect(markup).not.toContain("Permanently erase");
-        }
+        } else expect(markup).not.toContain("Retention review");
+        // Without directory view there is no Directory tab, so no erasure either.
+        const denied = render("directory", access(teamRole, companyLevel));
+        onlyHeadingAndNoAccess(denied);
+        expect(denied).not.toContain("Permanently erase");
       }
-    // A company admin, a team owner without company authority and a recruiter.
-    for (const [teamRole, companyLevel] of [
-      ["owner", "admin"],
-      ["admin", "admin"],
-      ["owner", null],
-      ["recruiter", null],
-    ] as const)
-      onlyHeadingAndNoAccess(
-        render("employees", access(teamRole, companyLevel)),
-      );
   });
 
-  it("lists matches with status, retention class, archived and an erase button per row", () => {
-    const markup = search({
-      searched: true,
-      result: page([
-        match("1", "Fictional Kept Employee"),
-        match("2", "Fictional Former Employee", {
-          status: "left",
-          retentionClass: "extended",
-          archivedAt: "2025-01-01T00:00:00.000Z",
-        }),
-      ]),
-    });
-    expect(markup).toMatch(
-      /<form class="row"[^>]*><label class="field" for="[^"]+">Name or employee number<input id="[^"]+"/,
-    );
-    expect(markup).toContain(
-      '<button type="submit" class="button">Search</button>',
-    );
+  it("lists rows with status, retention class and archived, and an erase action per row for a company owner only", () => {
+    const rows = [
+      match("1", "Fictional Kept Employee"),
+      match("2", "Fictional Former Employee", {
+        status: "left",
+        retentionClass: "extended",
+        archivedAt: "2025-01-01T00:00:00.000Z",
+      }),
+    ];
+    const markup = table(rows);
     for (const header of [
       "Name",
       "Employee number",
@@ -990,38 +1028,31 @@ describe("employees tab", () => {
     expect(former).toContain('data-label="Status">Left<');
     expect(former).toContain('data-label="Retention class">Extended<');
     expect(former).toContain('data-label="Archived">Yes<');
-    for (const [row, name] of [
-      [kept, "Fictional Kept Employee"],
-      [former, "Fictional Former Employee"],
-    ])
+    // Each row's Actions button opens its actions; erase is one of them for a company owner only.
+    for (const [index, row] of [kept, former].entries()) {
       expect(row).toContain(
-        `<button type="button" class="button danger">Permanently erase employee<span class="sr-only">: ${name}</span></button>`,
+        `Actions<span class="sr-only">: ${rows[index].displayName}</span></button>`,
       );
-    expect(markup).not.toContain("Showing the first 20 matches");
-    expect(
-      search({ searched: true, result: page([match("1", "A")], true) }),
-    ).toContain(
-      "Showing the first 20 matches. Search with more of the name or number to narrow the list.",
-    );
+      const actions = (owner: boolean) =>
+        renderToStaticMarkup(
+          <EmployeeActionsView
+            row={rows[index]}
+            owner={owner}
+            actions={["view", "create", "edit", "archive"]}
+          />,
+        );
+      expect(actions(true)).toContain(
+        '<button type="button" class="button danger">Permanently erase employee</button>',
+      );
+      expect(actions(false)).not.toContain("Permanently erase");
+    }
+    expect(table(rows, false)).not.toContain("Permanently erase");
   });
 
-  it("shows nothing before a search, then the searching, empty and error states", () => {
-    const idle = search();
-    expect(idle).not.toMatch(/<table|role="status"|role="alert"/);
-    expect(search({ busy: true, searched: true })).toContain(
-      '<p role="status">Searching…</p>',
-    );
-    expect(search({ searched: true, result: page([]) })).toContain(
-      '<p role="status">No employees match.</p>',
-    );
-    const failed = search({
-      searched: true,
-      error: "Your role does not include this directory access.",
-    });
-    expect(failed).toContain(
-      '<p class="notice error" role="alert">Your role does not include this directory access.</p>',
-    );
-    expect(failed).not.toContain("<table");
+  it("shows the empty state", () => {
+    const empty = table([]);
+    expect(empty).toContain('<p role="status">No employees match.</p>');
+    expect(empty).not.toContain("<table");
   });
 
   it("lists the retention review with the left date, class and archived, an erase button and Show more", () => {

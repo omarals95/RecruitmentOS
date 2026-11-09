@@ -1,29 +1,15 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type FormEvent,
-  type RefObject,
-} from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import {
   ClientError,
   humanError,
   requestJson,
-  useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
-import type { Employee, RetentionReviewRow } from "@/lib/directory";
+import type { RetentionReviewRow } from "@/lib/directory";
 
-/** The fields of GET /api/v1/employees the search shows; contact fields are never shown. */
-export type EmployeeMatch = Pick<
-  Employee,
-  "id" | "displayName" | "employeeNumber" | "status" | "archivedAt"
-> & { retentionClass?: Employee["retentionClass"] };
 interface Page<T> {
   data: T[];
   pagination: { page: number; pageSize: number; hasMore: boolean };
@@ -34,13 +20,9 @@ export interface ErasureTarget {
   name: string;
 }
 
-export const SEARCH_PAGE_SIZE = 20;
 const REVIEW_PAGE_SIZE = 25;
 export const ERASED_NOTICE = "Employee permanently erased.";
-const statusLabels = { active: "Active", left: "Left" } as const;
 const classLabels = { standard: "Standard", extended: "Extended" } as const;
-const searchPath = (query: string) =>
-  `/api/v1/employees?search=${encodeURIComponent(query)}&includeArchived=true&pageSize=${SEARCH_PAGE_SIZE}`;
 const reviewPath = (page: number) =>
   `/api/v1/employees/retention-review?page=${page}&pageSize=${REVIEW_PAGE_SIZE}`;
 // Row actions never break inside a word; a narrow table scrolls inside its .table-wrap.
@@ -49,228 +31,8 @@ const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
 const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
 
-/**
- * The Employees tab, for company owners only (R2a-15): find an employee to erase, and the
- * retention review. Creating, editing, linking and placing employees arrive with the Organisation
- * tab (R2a-16).
- */
-export function EmployeesTab() {
-  const { team } = useWorkspace();
-  const teamId = team?.id ?? null;
-  const [open, setOpen] = useState<ErasureTarget | null>(null);
-  const [notice, setNotice] = useState("");
-  const [focusNotice, setFocusNotice] = useState(0);
-  const [reloads, setReloads] = useState(0);
-  const noticeRef = useRef<HTMLParagraphElement>(null);
-  // After the closed dialog has returned focus to its button, which the reload then removes.
-  useEffect(() => {
-    if (focusNotice) noticeRef.current?.focus();
-  }, [focusNotice]);
-  const start = (target: ErasureTarget) => {
-    setNotice("");
-    setOpen(target);
-  };
-  return (
-    <>
-      {notice && (
-        <p
-          ref={noticeRef}
-          tabIndex={-1}
-          className="notice success"
-          role="status"
-        >
-          {notice}
-        </p>
-      )}
-      <EmployeeSearch teamId={teamId} reloads={reloads} onErase={start} />
-      <RetentionReview teamId={teamId} reloads={reloads} onErase={start} />
-      {open && teamId && (
-        <EmployeeErasureDialog
-          key={open.id}
-          teamId={teamId}
-          target={open}
-          onCancel={() => setOpen(null)}
-          onErased={() => {
-            setOpen(null);
-            setNotice(ERASED_NOTICE);
-            setFocusNotice((count) => count + 1);
-            setReloads((count) => count + 1);
-          }}
-        />
-      )}
-    </>
-  );
-}
-
-function EmployeeSearch({
-  teamId,
-  reloads,
-  onErase,
-}: {
-  teamId: string | null;
-  reloads: number;
-  onErase: (target: ErasureTarget) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [searched, setSearched] = useState("");
-  const last = useRef("");
-  const [result, setResult] = useState<Page<EmployeeMatch> | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const run = useCallback(
-    async (text: string) => {
-      if (!teamId) return;
-      setBusy(true);
-      setError("");
-      try {
-        setResult(
-          await requestJson<Page<EmployeeMatch>>(teamId, searchPath(text)),
-        );
-      } catch (e) {
-        setResult(null);
-        setError(humanError(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [teamId],
-  );
-  // An erasure reloads the last search, so the erased row is gone.
-  useEffect(() => {
-    if (reloads && last.current) void run(last.current);
-  }, [reloads, run]);
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = query.trim();
-    if (!text) {
-      setResult(null);
-      setError("Enter part of a name or employee number.");
-      return;
-    }
-    last.current = text;
-    setSearched(text);
-    void run(text);
-  }
-  return (
-    <EmployeeSearchPanel
-      query={query}
-      busy={busy}
-      error={error}
-      result={searched ? result : null}
-      searched={!!searched}
-      onQuery={setQuery}
-      onSubmit={submit}
-      onErase={onErase}
-    />
-  );
-}
-
-export function EmployeeSearchPanel({
-  query,
-  busy,
-  error,
-  result,
-  searched,
-  onQuery = () => {},
-  onSubmit = (event) => event.preventDefault(),
-  onErase = () => {},
-}: {
-  query: string;
-  busy: boolean;
-  error: string;
-  result: Page<EmployeeMatch> | null;
-  /** Whether a search has been sent; before that no result state shows. */
-  searched: boolean;
-  onQuery?: (value: string) => void;
-  onSubmit?: (event: FormEvent) => void;
-  onErase?: (target: ErasureTarget) => void;
-}) {
-  const field = useId();
-  return (
-    <section className="panel stack">
-      <h2>Find an employee</h2>
-      <p className="muted">
-        For data-protection requests: find the employee by name or employee
-        number, archived employees included, then permanently erase them.
-      </p>
-      <form className="row" style={{ flexWrap: "wrap" }} onSubmit={onSubmit}>
-        <label className="field" htmlFor={field}>
-          Name or employee number
-          <input
-            id={field}
-            value={query}
-            maxLength={120}
-            autoComplete="off"
-            onChange={(event) => onQuery(event.target.value)}
-          />
-        </label>
-        <div>
-          <button type="submit" className="button" disabled={busy}>
-            Search
-          </button>
-        </div>
-      </form>
-      {error ? (
-        <p className="notice error" role="alert">
-          {error}
-        </p>
-      ) : busy ? (
-        <p role="status">Searching…</p>
-      ) : !searched || !result ? null : !result.data.length ? (
-        <p role="status">No employees match.</p>
-      ) : (
-        <>
-          <div className="table-wrap">
-            <table className="data-table">
-              <caption className="sr-only">Matching employees</caption>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Employee number</th>
-                  <th>Status</th>
-                  <th>Retention class</th>
-                  <th>Archived</th>
-                  <th>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.data.map((row) => (
-                  <tr key={row.id}>
-                    <td data-label="Name">{row.displayName}</td>
-                    <td data-label="Employee number">{row.employeeNumber}</td>
-                    <td data-label="Status">{statusLabels[row.status]}</td>
-                    <td data-label="Retention class">
-                      {classLabels[row.retentionClass ?? "standard"]}
-                    </td>
-                    <td data-label="Archived">
-                      {row.archivedAt ? "Yes" : "No"}
-                    </td>
-                    <td data-label="Actions">
-                      <EraseButton
-                        name={row.displayName}
-                        onClick={() =>
-                          onErase({ id: row.id, name: row.displayName })
-                        }
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {result.pagination.hasMore && (
-            <p className="muted">
-              Showing the first {SEARCH_PAGE_SIZE} matches. Search with more of
-              the name or number to narrow the list.
-            </p>
-          )}
-        </>
-      )}
-    </section>
-  );
-}
+// Employee erasure and the retention review (R2a-15), for company owners only; the Directory tab
+// (R2a-16) shows them.
 
 function EraseButton({ name, onClick }: { name: string; onClick: () => void }) {
   return (
@@ -282,7 +44,7 @@ function EraseButton({ name, onClick }: { name: string; onClick: () => void }) {
   );
 }
 
-function RetentionReview({
+export function RetentionReview({
   teamId,
   reloads,
   onErase,
@@ -543,7 +305,7 @@ export function EmployeeErasureDialogView({
  * Sends the erasure with one Idempotency-Key for this opened dialog, reused on a retry; on an
  * error the dialog stays open with the message.
  */
-function EmployeeErasureDialog({
+export function EmployeeErasureDialog({
   teamId,
   target,
   onCancel,

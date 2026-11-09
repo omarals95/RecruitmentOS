@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
@@ -20,6 +21,10 @@ import { GET as listRoute } from "@/app/api/v1/[resource]/route";
 import { GET as getRoute, PATCH } from "@/app/api/v1/[resource]/[id]/route";
 import { GET as overviewRoute } from "@/app/api/v1/overview/route";
 import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
+import { GET as listOrgUnitsRoute } from "@/app/api/v1/org-units/route";
+import { GET as listPositionsRoute } from "@/app/api/v1/positions/route";
+import { GET as listEmployeesRoute } from "@/app/api/v1/employees/route";
+import { createOrgLevel, type OrgLevel } from "@/lib/org";
 import { createTestDb, seedApiToken, seedIdentity } from "./helpers/db";
 import { listStoredTools } from "@/lib/mcp/tools";
 import { runWithServerTiming } from "@/lib/server-timing";
@@ -387,6 +392,126 @@ describe("database round trips per request", () => {
       } finally {
         signIn(owner);
       }
+    });
+  });
+
+  // R2a-16: one org chart level and one directory page on a fictional 500-unit, 6-level tree,
+  // within the "Directory page, org chart level" target of architecture section 12.
+  describe("with a 500-unit organisation on six levels", () => {
+    const COUNTS = [2, 8, 30, 80, 160, 220];
+    const tree: string[][] = [];
+    let positions: { id: string; unit: string }[];
+
+    async function timed(
+      handler: (request: Request) => Promise<Response>,
+      path: string,
+    ) {
+      const response = await handler(
+        new Request(`${ORIGIN}${path}`, {
+          headers: { origin: ORIGIN, "x-team-id": owner.teamId },
+        }),
+      );
+      expect(response.status, path).toBe(200);
+      const timing = response.headers.get("server-timing") ?? "";
+      expect(timing).toMatch(TIMING);
+      return {
+        rows: ((await response.json()) as { data: unknown[] }).data,
+        roundTrips: Number(TIMING.exec(timing)![1]),
+      };
+    }
+
+    beforeAll(async () => {
+      const levels: OrgLevel[] = [];
+      for (const depth of COUNTS.keys())
+        levels.push(
+          await createOrgLevel(owner, {
+            name: `Fictional budget level ${depth}`,
+            depth,
+          }),
+        );
+      // Each unit's parent is the previous level's unit at its index modulo that level's size.
+      for (const [depth, count] of COUNTS.entries()) {
+        const parents = depth === 0 ? [] : tree[depth - 1];
+        const parent = parents.length
+          ? sql`(${`{${parents.join(",")}}`}::uuid[])[1 + g % ${sql.raw(String(parents.length))}]`
+          : sql`null::uuid`;
+        tree.push(
+          await withTeam(owner, async (tx, access) => {
+            const { rows } = await tx.execute<{ id: string }>(sql`
+              insert into app.org_units(workspace_id, parent_id, level_id, name, code)
+              select ${access.workspaceId}::uuid, ${parent}, ${levels[depth].id}::uuid,
+                ${`Fictional budget unit ${depth}-`} || g, ${`BUDGET-${depth}-`} || g
+              from generate_series(0, ${sql.raw(String(count - 1))}) g order by g returning id`);
+            return rows.map((row) => row.id);
+          }),
+        );
+      }
+      // One position in each of 120 units across five levels, one employee in each, every seventh left.
+      const units = [
+        ...tree[5].slice(0, 80),
+        ...tree[4].slice(0, 30),
+        ...tree[2].slice(0, 8),
+        ...tree[1].slice(0, 2),
+      ];
+      positions = await withTeam(owner, async (tx, access) => {
+        const { rows: created } = await tx.execute<{
+          id: string;
+          unit: string;
+        }>(sql`
+          insert into app.positions(workspace_id, org_unit_id, title, code)
+          select ${access.workspaceId}::uuid, u, 'Fictional budget position ' || n, 'BUDGET-POS-' || n
+          from unnest(${`{${units.join(",")}}`}::uuid[]) with ordinality t(u, n) order by n
+          returning id, org_unit_id as unit`);
+        const { rows: employees } = await tx.execute<{ id: string }>(sql`
+          insert into app.employees(workspace_id, display_name, employee_number, status)
+          select ${access.workspaceId}::uuid, 'Fictional Budget Person ' || lpad(n::text, 3, '0'), 'BUDGET-EMP-' || n,
+            case when n % 7 = 0 then 'left' else 'active' end
+          from generate_series(1, ${sql.raw(String(units.length))}) n order by n
+          returning id`);
+        await tx.execute(sql`
+          insert into app.employee_positions(employee_id, position_id, workspace_id, "primary")
+          select e, p, ${access.workspaceId}::uuid, true
+          from unnest(${`{${employees.map((row) => row.id).join(",")}}`}::uuid[], ${`{${created.map((row) => row.id).join(",")}}`}::uuid[]) t(e, p)`);
+        return created;
+      });
+    });
+
+    it("reads each org chart level and a filtered directory page in at most 6 round trips", async () => {
+      expect(tree.flat()).toHaveLength(500);
+      const top = await timed(
+        listOrgUnitsRoute,
+        "/api/v1/org-units?page=1&pageSize=100",
+      );
+      expect(top.rows).toHaveLength(2);
+      expect(top.roundTrips).toBeLessThanOrEqual(6);
+
+      const middle = await timed(
+        listOrgUnitsRoute,
+        `/api/v1/org-units?parentId=${tree[2][0]}&page=1&pageSize=100`,
+      );
+      expect(middle.rows.length).toBeGreaterThan(0);
+      expect(middle.roundTrips).toBeLessThanOrEqual(6);
+
+      const unitPositions = await timed(
+        listPositionsRoute,
+        `/api/v1/positions?unitId=${positions[0].unit}&page=1&pageSize=200`,
+      );
+      expect(unitPositions.rows).toHaveLength(1);
+      expect(unitPositions.roundTrips).toBeLessThanOrEqual(6);
+
+      const holders = await timed(
+        listEmployeesRoute,
+        `/api/v1/employees?positionId=${positions[0].id}&page=1&pageSize=25`,
+      );
+      expect(holders.rows).toHaveLength(1);
+      expect(holders.roundTrips).toBeLessThanOrEqual(6);
+
+      const page = await timed(
+        listEmployeesRoute,
+        `/api/v1/employees?unitId=${tree[0][0]}&status=active&search=budget%20person&page=1&pageSize=25`,
+      );
+      expect(page.rows).toHaveLength(25);
+      expect(page.roundTrips).toBeLessThanOrEqual(6);
     });
   });
 });
