@@ -350,6 +350,26 @@ describe("speed settings", () => {
   });
 });
 
+describe("admin portal link", () => {
+  it("lists the Admin portal after the sections for owners and admins only, never as current", () => {
+    for (const role of ["owner", "admin", "recruiter", "viewer", null]) {
+      const markup = renderToStaticMarkup(
+        <SettingsNavigation active="team" role={role} />,
+      );
+      const link = /<a [^>]*href="\/app\/admin"[^>]*>Admin portal<\/a>/.exec(
+        markup,
+      );
+      expect(!!link, String(role)).toBe(role === "owner" || role === "admin");
+      if (!link) continue;
+      expect(link[0]).not.toContain("aria-current");
+      expect(link[0]).toMatch(/class="button secondary"/);
+      expect(markup.indexOf("Admin portal")).toBeGreaterThan(
+        markup.indexOf('href="/app/settings/about"'),
+      );
+    }
+  });
+});
+
 describe("about settings", () => {
   afterEach(() => vi.unstubAllEnvs());
   it("lists About in the settings navigation for every role", () => {

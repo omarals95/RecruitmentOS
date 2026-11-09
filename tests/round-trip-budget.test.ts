@@ -19,6 +19,7 @@ import type { RecordDto } from "@/domain/records";
 import { GET as listRoute } from "@/app/api/v1/[resource]/route";
 import { GET as getRoute, PATCH } from "@/app/api/v1/[resource]/[id]/route";
 import { GET as overviewRoute } from "@/app/api/v1/overview/route";
+import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
 import { createTestDb, seedIdentity } from "./helpers/db";
 
 // Fictional team and records only; the session lookup is mocked, so it is not counted.
@@ -213,6 +214,18 @@ describe("database round trips per request", () => {
       id: missing,
     });
     expect(response.status).toBe(404);
+  });
+
+  it("reads the caller's own access in at most 6 round trips", async () => {
+    const response = await meAccessRoute(
+      new Request(`${ORIGIN}/api/v1/me/access`, {
+        headers: { origin: ORIGIN, "x-team-id": owner.teamId },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const timing = response.headers.get("server-timing") ?? "";
+    expect(timing).toMatch(TIMING);
+    expect(Number(TIMING.exec(timing)![1])).toBeLessThanOrEqual(6);
   });
 
   // Configuration versions and bodies come back in the install statement (R2a-05, 0032).

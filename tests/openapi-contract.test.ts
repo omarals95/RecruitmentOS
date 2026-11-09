@@ -533,6 +533,51 @@ describe("OpenAPI contract", () => {
       expect(text).toContain(code);
   });
 
+  it("documents the Admin portal reads as session-only, with their codes and no ids", () => {
+    const access = document.paths["/api/v1/me/access"].get;
+    const history = document.paths["/api/v1/config-history"].get;
+    const changes = document.paths["/api/v1/access-changes"].get;
+    for (const operation of [access, history, changes]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(["200", "400", "401", "403", "500"]),
+      );
+      expect(JSON.stringify(operation)).toContain("session_required");
+    }
+    for (const text of [
+      "teamRole",
+      "companyLevel",
+      "role:{name, membership}",
+      "scopes",
+      "pages",
+      "actions",
+      "fields",
+      "adminAreas",
+      "no user, team, workspace, role, version or configuration object id and no configuration body",
+    ])
+      expect(JSON.stringify(access)).toContain(text);
+    for (const text of [
+      "config_forbidden",
+      "invalid_input",
+      "nextBefore",
+      "hasMore",
+      '"name":"before"',
+      '"name":"pageSize"',
+      '"maximum":100,"default":25',
+    ])
+      expect(JSON.stringify(history)).toContain(text);
+    for (const text of [
+      "role_assignment_forbidden",
+      "invalid_input",
+      "seven days",
+      "truncated",
+      "affectedUserIds",
+      "roleName",
+    ])
+      expect(JSON.stringify(changes)).toContain(text);
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],
@@ -567,6 +612,9 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/employees",
         "PATCH /api/v1/employees/{id}",
         "PUT /api/v1/employees/{id}/positions",
+        "GET /api/v1/me/access",
+        "GET /api/v1/config-history",
+        "GET /api/v1/access-changes",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {
