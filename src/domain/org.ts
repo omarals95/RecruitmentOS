@@ -27,3 +27,6 @@ export const orgUnitListQuery = z
     pageSize: z.coerce.number().int().min(1).max(200).default(100),
   })
   .strict();
+/** The content type of the raw .xlsx body the organisation import routes accept (R2a-17). */
+export const XLSX_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";

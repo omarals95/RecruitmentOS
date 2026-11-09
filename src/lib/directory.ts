@@ -90,7 +90,7 @@ const directoryForbidden = () =>
     "directory_forbidden",
     "Your role does not include this directory access.",
   );
-const ownerRequired = () =>
+export const ownerRequired = () =>
   new ApiError(
     403,
     "directory_owner_required",
@@ -108,7 +108,7 @@ const notFound = () =>
     "not_found",
     "Position, employee, unit, level, job role or user not found.",
   );
-const stateConflict = () =>
+export const stateConflict = () =>
   new ApiError(
     409,
     "directory_state_conflict",
@@ -148,7 +148,7 @@ const refusals: Record<string, () => ApiError> = {
  * One withTeam transaction; the database stays authoritative and its refusals map to API errors.
  * A 42501 is the refusal the operation's own guard gives.
  */
-async function inDirectory<T>(
+export async function inDirectory<T>(
   p: Principal,
   refused: () => ApiError,
   work: (tx: TeamTx, access: TenantAccess) => Promise<T>,
@@ -182,7 +182,7 @@ function requireOrgWrite(p: Principal, access: TenantAccess) {
 }
 
 /** directory:read to view, a session with directory:write to change (allows_directory). */
-function requireDirectory(
+export function requireDirectory(
   p: Principal,
   access: TenantAccess,
   action: Extract<Action, "view" | "create" | "edit" | "archive">,
@@ -482,7 +482,7 @@ export async function createEmployee(
  * row without it (written before R2a-15) first takes its previous updated_at, so an edit never moves
  * its review date.
  */
-const leftAt = (status?: "active" | "left") =>
+export const leftAt = (status?: "active" | "left") =>
   status === "active"
     ? sql`left_at = null`
     : sql`left_at = case when e.status = 'left' then coalesce(e.left_at, e.updated_at) else ${status === "left" ? sql`now()` : sql`e.left_at`} end`;
