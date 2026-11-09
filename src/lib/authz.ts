@@ -1,7 +1,13 @@
 import { eq, sql, type SQL } from "drizzle-orm";
 import { records } from "@/db/schema";
 import { ApiError } from "@/lib/errors";
-import { SCOPES, roleScopes, type Role, type Scope } from "@/lib/permissions";
+import {
+  ROLE_UNAVAILABLE,
+  SCOPES,
+  roleScopes,
+  type Role,
+  type Scope,
+} from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
 import {
@@ -273,8 +279,14 @@ export function authorize(
   ctx: AccessContext,
   request: AccessRequest,
 ): AccessDecision {
-  if (!allows(ctx, request))
-    throw request.action === "import" ? importForbidden() : forbidden();
+  if (!allows(ctx, request)) {
+    const refusal =
+      request.action === "import" ? importForbidden() : forbidden();
+    // An assigned role install could not use: the same refusal, in plain words.
+    if (ctx.access.roleVersionId === null)
+      throw new ApiError(refusal.status, refusal.code, ROLE_UNAVAILABLE);
+    throw refusal;
+  }
   const kind = kindOf(request);
   const group = kind && RECORD_KIND_GROUPS[kind];
   const fields: AccessDecision["fields"] = {};
