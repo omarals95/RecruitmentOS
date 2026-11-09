@@ -1230,4 +1230,230 @@ describe("record scope in the service under the split runtime roles", () => {
         );
     });
   });
+
+  // Team tasks (R2a-20, job 062): assignees put a task in a scoped member's view through the task
+  // rule, links follow the caller's record scope, and a bucket archive never leaves a task behind.
+  describe("team tasks", () => {
+    const teamTask = async (p: Principal, title: string, extra: Row = {}) =>
+      createRecord(p, "tasks", { bucketId: bucket, ...extra, data: { title } });
+    const assigneeRows = (recordId: string) =>
+      look<{ user_id: string }>(
+        "SELECT user_id FROM app.record_assignments WHERE record_id = $1 AND relation = 'assignee' ORDER BY user_id",
+        [recordId],
+      );
+
+    it("shows a scoped member a task once it is assigned to them, and refuses their self-assignment", async () => {
+      const fresh = await teamTask(owner, "Fictional team task for later");
+      await expect(
+        getRecord(assignedMember, "tasks", fresh.id),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(await listed(assignedMember, "tasks")).not.toContain(fresh.id);
+      await updateRecord(owner, "tasks", fresh.id, {
+        version: fresh.version,
+        data: { assigneeIds: [assignedMember.userId] },
+      });
+      expect(await listed(assignedMember, "tasks")).toContain(fresh.id);
+      expect(
+        (await getRecord(assignedMember, "tasks", fresh.id)).data,
+      ).toMatchObject({ assigneeIds: [assignedMember.userId] });
+
+      // Their own task: adding themselves is refused and changes nothing; so is a create.
+      const own = await teamTask(assignedMember, "Fictional own team task");
+      const self = await call(
+        "PATCH",
+        assignedMember,
+        `/api/v1/tasks/${own.id}`,
+        { resource: "tasks", id: own.id },
+        {
+          version: own.version,
+          data: {
+            title: "Fictional renamed",
+            assigneeIds: [assignedMember.userId],
+          },
+        },
+      );
+      expect(self.status).toBe(403);
+      expect(self.body.error).toMatchObject({
+        code: "self_assignment_forbidden",
+      });
+      expect(self.body.error.message).toMatch(/^assigneeIds: /);
+      expect(await getRecord(assignedMember, "tasks", own.id)).toMatchObject({
+        version: own.version,
+        data: { title: "Fictional own team task", assigneeIds: [] },
+      });
+      expect(await assigneeRows(own.id)).toEqual([]);
+      const created = await call(
+        "POST",
+        assignedMember,
+        "/api/v1/tasks",
+        { resource: "tasks" },
+        {
+          bucketId: bucket,
+          data: {
+            title: "Fictional self-assigned task",
+            assigneeIds: [assignedMember.userId],
+          },
+        },
+      );
+      expect(created.status).toBe(403);
+      expect(
+        await look(
+          "SELECT id FROM app.records WHERE kind = 'task' AND data->>'title' = 'Fictional self-assigned task'",
+        ),
+      ).toEqual([]);
+
+      // A unit member sees an assigned task that names no candidate or vacancy in their scope.
+      const unitTask = await teamTask(owner, "Fictional unit team task", {
+        vacancyId: id.vOut,
+      });
+      expect(await listed(unitMember, "tasks")).not.toContain(unitTask.id);
+      await updateRecord(owner, "tasks", unitTask.id, {
+        version: unitTask.version,
+        data: { assigneeIds: [unitMember.userId] },
+      });
+      expect(await listed(unitMember, "tasks")).toContain(unitTask.id);
+      expect(
+        (await getRecord(unitMember, "tasks", unitTask.id)).data,
+      ).toMatchObject({ assigneeIds: [unitMember.userId] });
+    });
+
+    it("links only records in the caller's scope and leaves out a link they cannot see", async () => {
+      const refused = {
+        status: 400,
+        code: "invalid_reference",
+        message:
+          "parentRecordId does not reference the expected record in this team.",
+      };
+      // vIn carries an assignment of the assigned member; vOut is outside their scope.
+      await expect(
+        teamTask(assignedMember, "Fictional out-of-scope link", {
+          parentRecordId: id.vOut,
+        }),
+      ).rejects.toMatchObject(refused);
+      expect(
+        await teamTask(assignedMember, "Fictional in-scope link", {
+          parentRecordId: id.vIn,
+        }),
+      ).toMatchObject({
+        parentRecordId: id.vIn,
+        parentKind: "vacancy",
+        parentLabel: `${WORD} vacancy in`,
+      });
+      // The owner links vOut and assigns the member: they see the task, not the linked record.
+      const linked = await teamTask(owner, "Fictional hidden link", {
+        parentRecordId: id.vOut,
+      });
+      expect(linked).toMatchObject({ parentKind: "vacancy" });
+      await updateRecord(owner, "tasks", linked.id, {
+        version: linked.version,
+        data: { assigneeIds: [assignedMember.userId] },
+      });
+      const seen = await getRecord(assignedMember, "tasks", linked.id);
+      expect(seen.parentRecordId).toBe(id.vOut);
+      expect(seen).not.toHaveProperty("parentKind");
+      expect(seen).not.toHaveProperty("parentLabel");
+    });
+
+    it("archives a bucket with every active task of the team, and refuses a member whose task scope is not all", async () => {
+      const db: AppDb = await harness.asOwner();
+      const taskAll = await seedIdentity(db, {
+        userId: "os-task-all",
+        teamId: "os-team",
+        role: "recruiter",
+      });
+      await role(
+        "os-task-all-role",
+        {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional recruiter for every task",
+          recordScope: { pipeline: "unit", candidates: "unit", tasks: "all" },
+        } as RoleBody,
+        [taskAll],
+      );
+      const from = await createRecord(owner, "buckets", {
+        data: { name: "Fictional archive from" },
+      });
+      const to = await createRecord(owner, "buckets", {
+        data: { name: "Fictional archive to" },
+      });
+      const inside = await createRecord(owner, "tasks", {
+        bucketId: from.id,
+        data: {
+          title: "Fictional task the member sees",
+          assigneeIds: [assignedMember.userId],
+        },
+      });
+      const outside = await createRecord(owner, "tasks", {
+        bucketId: from.id,
+        data: { title: "Fictional task the member cannot see" },
+      });
+      const archive = (p: Principal, moveToBucketId?: string) =>
+        call(
+          "PATCH",
+          p,
+          `/api/v1/buckets/${from.id}`,
+          { resource: "buckets", id: from.id },
+          { version: from.version, archived: true, moveToBucketId },
+        );
+      const where = () =>
+        look<{ id: string; bucket_id: string; version: number }>(
+          "SELECT id, bucket_id, version FROM app.records WHERE id = ANY($1) ORDER BY id",
+          [[inside.id, outside.id]],
+        );
+      const before = await where();
+      const silent = (body: unknown) => {
+        const text = JSON.stringify(body);
+        for (const value of [
+          inside.id,
+          outside.id,
+          "Fictional task the member",
+        ])
+          expect(text).not.toContain(value);
+      };
+
+      // Row-level security hides the outside task from the assigned member, so they are refused
+      // before any task is read, with or without a destination.
+      for (const moveTo of [to.id, undefined]) {
+        const refused = await archive(assignedMember, moveTo);
+        expect(refused.status).toBe(403);
+        expect(refused.body.error.code).toBe("forbidden");
+        silent(refused.body);
+      }
+      expect(await where()).toEqual(before);
+
+      // A member whose task scope is all but whose other scopes are limited decides on every task.
+      const full = await archive(taskAll);
+      expect(full.status).toBe(409);
+      expect(full.body.error.code).toBe("bucket_not_empty");
+      silent(full.body);
+      const moved = await archive(taskAll, to.id);
+      expect(moved.status).toBe(200);
+      expect(moved.body.data).toMatchObject({ id: from.id, kind: "bucket" });
+      expect(moved.body.data.archivedAt).not.toBeNull();
+      silent(moved.body);
+      expect(
+        (await where()).map(({ bucket_id, version }) => ({
+          bucket_id,
+          version,
+        })),
+      ).toEqual([
+        { bucket_id: to.id, version: 2 },
+        { bucket_id: to.id, version: 2 },
+      ]);
+      expect(
+        await look(
+          "SELECT id FROM app.records WHERE kind = 'task' AND bucket_id = $1 AND archived_at IS NULL",
+          [from.id],
+        ),
+      ).toEqual([]);
+      expect(
+        await look<{ record_id: string }>(
+          "SELECT record_id FROM app.activity WHERE action = 'updated' AND kind = 'task' AND metadata->>'fromBucketId' = $1 ORDER BY record_id",
+          [from.id],
+        ),
+      ).toEqual(
+        [inside.id, outside.id].sort().map((record_id) => ({ record_id })),
+      );
+    });
+  });
 });

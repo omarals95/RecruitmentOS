@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, count, eq, sql } from "drizzle-orm";
-import { activity, idempotency, records } from "@/db/schema";
+import { and, count, eq, inArray, sql } from "drizzle-orm";
+import { activity, idempotency, recordAssignments, records } from "@/db/schema";
+import { addAssignment } from "@/lib/assignments";
 import { withTeam } from "@/lib/db-team";
 import {
   bulkApplications,
@@ -20,7 +21,7 @@ import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { assignMemberRole } from "@/lib/member-roles";
 import { RECRUITER_ROLE } from "@/domain/config-defaults";
 import type { RoleBody } from "@/domain/config";
-import type { RecordDto } from "@/domain/records";
+import { TASK_LINK_KINDS, type RecordDto } from "@/domain/records";
 import { roleSnapshot } from "@/components/workspace/helpers";
 import { interviewsOnDay } from "@/components/workspace/calendar";
 import {
@@ -42,7 +43,11 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     viewer: Principal,
     bucketRace: Principal,
     rollback: Principal,
-    suggesting: Principal;
+    suggesting: Principal,
+    lead: Principal,
+    memberA: Principal,
+    memberB: Principal,
+    memberC: Principal;
   beforeAll(async () => {
     fixture = await createTestDb();
     owner = await seedIdentity(fixture.db);
@@ -67,6 +72,20 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
       userId: "suggestion-owner",
       teamId: "suggestion-team",
     });
+    // Team tasks (R2a-20): a team of its own, so no other case's custom fields or tasks apply.
+    lead = await seedIdentity(fixture.db, {
+      userId: "assignee-lead",
+      teamId: "assignee-team",
+    });
+    const teamMember = (name: string) =>
+      seedIdentity(fixture.db, {
+        userId: `assignee-member-${name}`,
+        teamId: "assignee-team",
+        role: "recruiter",
+      });
+    memberA = await teamMember("a");
+    memberB = await teamMember("b");
+    memberC = await teamMember("c");
     await fixture.client
       .exec(`CREATE FUNCTION app.records_test_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF EXISTS(SELECT 1 FROM app.records WHERE id=NEW.record_id AND data->>'name'='Fictional forced audit rejection') THEN
@@ -2179,5 +2198,413 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
     await expect(
       updateCandidateState(reader, person.id, { version: "one", note: 42 }),
     ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+  });
+
+  // Team tasks (R2a-20, job 062): assignees as assignment rows, links to the allowed kinds and the
+  // Assigned to me filter, in a team of their own.
+  describe("team tasks", () => {
+    let todo: RecordDto;
+    beforeAll(async () => {
+      [todo] = (await bootstrapTeam(lead)).data;
+    });
+    const task = (
+      data: Record<string, unknown>,
+      references: Record<string, unknown> = {},
+    ) =>
+      createRecord(lead, "tasks", { bucketId: todo.id, ...references, data });
+    const assignees = (recordId: string) =>
+      withTeam(lead, (tx) =>
+        tx
+          .select({
+            userId: recordAssignments.userId,
+            relation: recordAssignments.relation,
+          })
+          .from(recordAssignments)
+          .where(eq(recordAssignments.recordId, recordId))
+          .orderBy(recordAssignments.userId, recordAssignments.relation),
+      );
+    const stored = (ids: string[]) =>
+      withTeam(lead, (tx) =>
+        tx
+          .select()
+          .from(records)
+          .where(inArray(records.id, ids))
+          .orderBy(records.id),
+      );
+    const events = async (recordId: string) =>
+      (
+        await withTeam(lead, (tx) =>
+          tx
+            .select({ action: activity.action, metadata: activity.metadata })
+            .from(activity)
+            .where(
+              and(
+                eq(activity.recordId, recordId),
+                eq(activity.kind, "assignment"),
+              ),
+            ),
+        )
+      )
+        .map((row) => `${row.action}:${String(row.metadata.userId)}`)
+        .sort();
+    const assigned = (...people: Principal[]) =>
+      people.map((person) => ({ userId: person.userId, relation: "assignee" }));
+
+    it("leaves existing tasks, buckets and task fields untouched when they are read", async () => {
+      const field = await createRecord(lead, "task-fields", {
+        data: { name: "Fictional effort", type: "Number" },
+      });
+      // A task row as written before R2a-20, straight into the table.
+      const existingId = randomUUID();
+      await withTeam(lead, (tx) =>
+        tx.insert(records).values({
+          id: existingId,
+          teamId: lead.teamId,
+          kind: "task",
+          bucketId: todo.id,
+          data: {
+            title: "Fictional existing task",
+            context: "",
+            owner: "Fictional owner label",
+            dueDate: "",
+            priority: "Normal",
+            description: "",
+            customValues: { [field.id]: 3 },
+          },
+          createdBy: lead.userId,
+        }),
+      );
+      const ids = [existingId, todo.id, field.id];
+      const before = await stored(ids);
+      expect(before).toHaveLength(3);
+      for (const resource of ["tasks", "buckets", "task-fields"] as const)
+        await listRecords(lead, resource, new URLSearchParams());
+      const read = await getRecord(lead, "tasks", existingId);
+      expect(read.data).toMatchObject({
+        owner: "Fictional owner label",
+        customValues: { [field.id]: 3 },
+        assigneeIds: [],
+      });
+      expect(read).not.toHaveProperty("parentKind");
+      await getRecord(lead, "buckets", todo.id);
+      await getRecord(lead, "task-fields", field.id);
+      // Id, version, updated_at, data (customValues keys included) and the completed flag.
+      expect(await stored(ids)).toEqual(before);
+      for (const row of before)
+        expect(row.data).not.toHaveProperty("assigneeIds");
+    });
+
+    it("stores assignees as assignment rows, never in data, and changes only the difference", async () => {
+      const [a, b, c] = [memberA.userId, memberB.userId, memberC.userId];
+      const created = await task({
+        title: "Fictional assigned task",
+        assigneeIds: [b, a],
+      });
+      expect(created.data).toMatchObject({ assigneeIds: [a, b] });
+      expect(await assignees(created.id)).toEqual(assigned(memberA, memberB));
+      expect((await stored([created.id]))[0].data).not.toHaveProperty(
+        "assigneeIds",
+      );
+      expect((await getRecord(lead, "tasks", created.id)).data).toMatchObject({
+        assigneeIds: [a, b],
+      });
+
+      const swapped = await updateRecord(lead, "tasks", created.id, {
+        version: created.version,
+        data: { assigneeIds: [c, a] },
+      });
+      expect(swapped.data).toMatchObject({ assigneeIds: [a, c] });
+      expect(await assignees(created.id)).toEqual(assigned(memberA, memberC));
+      expect(await events(created.id)).toEqual([
+        `assignment.added:${a}`,
+        `assignment.added:${b}`,
+        `assignment.added:${c}`,
+        `assignment.removed:${b}`,
+      ]);
+
+      // Without assigneeIds, or with the same set, no assignment changes.
+      const edited = await updateRecord(lead, "tasks", created.id, {
+        version: swapped.version,
+        data: { priority: "High" },
+      });
+      expect(edited.data).toMatchObject({
+        priority: "High",
+        assigneeIds: [a, c],
+      });
+      const same = await updateRecord(lead, "tasks", created.id, {
+        version: edited.version,
+        data: { assigneeIds: [c, a] },
+      });
+      expect(await events(created.id)).toHaveLength(4);
+      expect(await assignees(created.id)).toEqual(assigned(memberA, memberC));
+
+      // Another relation is neither touched nor read as an assignee.
+      await addAssignment(lead, {
+        recordId: created.id,
+        userId: b,
+        relation: "interviewer",
+      });
+      const cleared = await updateRecord(lead, "tasks", created.id, {
+        version: same.version,
+        data: { assigneeIds: [] },
+      });
+      expect(cleared.data).toMatchObject({ assigneeIds: [] });
+      expect(await assignees(created.id)).toEqual([
+        { userId: b, relation: "interviewer" },
+      ]);
+      expect((await getRecord(lead, "tasks", created.id)).data).toMatchObject({
+        assigneeIds: [],
+      });
+      expect((await stored([created.id]))[0].data).not.toHaveProperty(
+        "assigneeIds",
+      );
+    });
+
+    it("refuses more than ten, repeated or non-member assignees and rolls back the whole write", async () => {
+      const a = memberA.userId;
+      const title = "Fictional refused task";
+      const refusedTasks = () =>
+        withTeam(lead, (tx) =>
+          tx
+            .select({ id: records.id })
+            .from(records)
+            .where(
+              and(
+                eq(records.kind, "task"),
+                sql`${records.data}->>'title' = ${title}`,
+              ),
+            ),
+        );
+      await expect(
+        task({
+          title,
+          assigneeIds: Array.from(
+            { length: 11 },
+            (_, index) => `fictional-user-${index}`,
+          ),
+        }),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
+      await expect(task({ title, assigneeIds: [a, a] })).rejects.toMatchObject({
+        status: 400,
+        code: "invalid_input",
+      });
+      await expect(
+        task({ title, assigneeIds: [a, other.userId] }),
+      ).rejects.toMatchObject({
+        status: 400,
+        code: "invalid_assignee",
+        message: "assigneeIds: choose members of this team.",
+      });
+      expect(await refusedTasks()).toEqual([]);
+
+      const kept = await task({
+        title: "Fictional kept task",
+        assigneeIds: [a],
+      });
+      await expect(
+        updateRecord(lead, "tasks", kept.id, {
+          version: kept.version,
+          data: {
+            title: "Fictional changed task",
+            assigneeIds: [a, other.userId],
+          },
+        }),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_assignee" });
+      expect(await getRecord(lead, "tasks", kept.id)).toMatchObject({
+        version: kept.version,
+        data: { title: "Fictional kept task", assigneeIds: [a] },
+      });
+      expect(await assignees(kept.id)).toEqual(assigned(memberA));
+      expect(await events(kept.id)).toEqual([`assignment.added:${a}`]);
+    });
+
+    it("links a task to each kind of TASK_LINK_KINDS and refuses every other kind with one message", async () => {
+      expect(TASK_LINK_KINDS).toEqual([
+        "job-role",
+        "vacancy",
+        "bucket",
+        "task-field",
+        "task",
+      ]);
+      const role = await createRecord(lead, "job-roles", {
+        data: { title: "Fictional linked role" },
+      });
+      const job = await vacancy("Fictional linked vacancy", lead);
+      const field = await createRecord(lead, "task-fields", {
+        data: { name: "Fictional linked field" },
+      });
+      const parent = await task({ title: "Fictional parent task" });
+      for (const [record, kind, label] of [
+        [role, "job-role", "Fictional linked role"],
+        [job, "vacancy", "Fictional linked vacancy"],
+        [todo, "bucket", "To do"],
+        [field, "task-field", "Fictional linked field"],
+        [parent, "task", "Fictional parent task"],
+      ] as const) {
+        const linked = await task(
+          { title: `Fictional task linked to a ${kind}` },
+          { parentRecordId: record.id },
+        );
+        const expected = {
+          parentRecordId: record.id,
+          parentKind: kind,
+          parentLabel: label,
+        };
+        expect(linked).toMatchObject(expected);
+        expect(await getRecord(lead, "tasks", linked.id)).toMatchObject(
+          expected,
+        );
+      }
+
+      const moving = await task({ title: "Fictional relinked task" });
+      expect(moving).not.toHaveProperty("parentKind");
+      const toRole = await updateRecord(lead, "tasks", moving.id, {
+        version: moving.version,
+        parentRecordId: role.id,
+      });
+      expect(toRole).toMatchObject({
+        parentKind: "job-role",
+        parentLabel: "Fictional linked role",
+      });
+      await updateRecord(lead, "job-roles", role.id, {
+        version: role.version,
+        archived: true,
+      });
+      expect(await getRecord(lead, "tasks", moving.id)).toMatchObject({
+        parentLabel: "Fictional linked role (archived)",
+      });
+      await expect(
+        task({ title: "Fictional archived link" }, { parentRecordId: role.id }),
+      ).rejects.toMatchObject({ status: 400, code: "archived_reference" });
+      const unlinked = await updateRecord(lead, "tasks", moving.id, {
+        version: toRole.version,
+        parentRecordId: null,
+      });
+      expect(unlinked.parentRecordId).toBeNull();
+      expect(unlinked).not.toHaveProperty("parentKind");
+      expect(unlinked).not.toHaveProperty("parentLabel");
+
+      // Saved views, comments, another team's record, the task itself, a missing record and, under
+      // option B, every kind candidate erasure deletes: one message for all.
+      const person = await candidate("Fictional Unlinkable Person", lead);
+      const application = await createRecord(lead, "applications", {
+        candidateId: person.id,
+        vacancyId: job.id,
+        data: {},
+      });
+      const interview = await createRecord(lead, "interviews", {
+        applicationId: application.id,
+        data: {
+          title: "Fictional unlinkable interview",
+          startAt: "2026-12-01T09:00:00+04:00",
+        },
+      });
+      const offer = await createRecord(lead, "offers", {
+        applicationId: application.id,
+        data: { title: "Fictional unlinkable offer" },
+      });
+      const onboarding = await createRecord(lead, "onboarding", {
+        applicationId: application.id,
+        data: {},
+      });
+      const item = await createRecord(lead, "checklist", {
+        onboardingId: onboarding.id,
+        data: { title: "Fictional unlinkable item" },
+      });
+      const view = await createRecord(lead, "views", {
+        data: {
+          name: "Fictional unlinkable view",
+          area: "applications",
+          query: {},
+        },
+      });
+      const comment = await createRecord(lead, "comments", {
+        parentRecordId: job.id,
+        data: { body: "Fictional unlinkable comment" },
+      });
+      const foreign = await vacancy("Fictional foreign link vacancy", other);
+      const refused = {
+        status: 400,
+        code: "invalid_reference",
+        message:
+          "parentRecordId does not reference the expected record in this team.",
+      };
+      for (const record of [
+        view,
+        comment,
+        foreign,
+        person,
+        application,
+        interview,
+        offer,
+        onboarding,
+        item,
+      ])
+        await expect(
+          task(
+            { title: `Fictional refused ${record.kind} link` },
+            { parentRecordId: record.id },
+          ),
+        ).rejects.toMatchObject(refused);
+      for (const parentRecordId of [unlinked.id, randomUUID()])
+        await expect(
+          updateRecord(lead, "tasks", unlinked.id, {
+            version: unlinked.version,
+            parentRecordId,
+          }),
+        ).rejects.toMatchObject(refused);
+    });
+
+    it("lists the caller's assigned tasks with assignedToMe, on the task list only", async () => {
+      const mine = await task({
+        title: "Fictional task for member A",
+        assigneeIds: [memberA.userId],
+      });
+      const theirs = await task({
+        title: "Fictional task for member B",
+        assigneeIds: [memberB.userId],
+      });
+      const page = (query: Record<string, string>) =>
+        listRecords(
+          memberA,
+          "tasks",
+          new URLSearchParams({ pageSize: "100", ...query }),
+        );
+      const all = (await page({})).data;
+      const expected = all
+        .filter((row) =>
+          (row.data as { assigneeIds: string[] }).assigneeIds.includes(
+            memberA.userId,
+          ),
+        )
+        .map((row) => row.id)
+        .sort();
+      expect(expected).toContain(mine.id);
+      const assignedToMe = await page({ assignedToMe: "true" });
+      expect(assignedToMe.data.map((row) => row.id).sort()).toEqual(expected);
+      expect(assignedToMe.pagination.total).toBe(expected.length);
+      const rest = await page({ assignedToMe: "false" });
+      expect(rest.pagination.total).toBe(all.length - expected.length);
+      expect(rest.data.map((row) => row.id)).toContain(theirs.id);
+      expect(rest.data.map((row) => row.id)).not.toContain(mine.id);
+      for (const [resource, value] of [
+        ["tasks", "maybe"],
+        ["candidates", "true"],
+      ] as const)
+        await expect(
+          listRecords(
+            memberA,
+            resource,
+            new URLSearchParams({ assignedToMe: value }),
+          ),
+        ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+      await expect(
+        exportRecords(
+          lead,
+          "tasks",
+          new URLSearchParams({ assignedToMe: "true" }),
+        ),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    });
   });
 });

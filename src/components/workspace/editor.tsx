@@ -4,6 +4,7 @@ import { Fragment, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Search } from "lucide-react";
 import {
   RESOURCE_CONFIG,
+  TASK_LINK_KINDS,
   createRecordSchemas,
   updateRecordSchemas,
   referencesByKind,
@@ -17,6 +18,8 @@ import {
 } from "@/domain/records";
 import { Dialog } from "@/components/ui/dialog";
 import { UnitPicker } from "@/components/settings/unit-picker";
+import type { ActionResource } from "@/domain/config";
+import type { AccessMap } from "@/lib/authz";
 import {
   ClientError,
   useApi,
@@ -35,12 +38,17 @@ import {
   toDubaiInput,
   fromDubaiInput,
 } from "./helpers";
-import { recordMutation, customValueDefaults } from "./mutation";
+import { assigneeInput, recordMutation, customValueDefaults } from "./mutation";
 import { startSpeedTimer } from "./speed-log";
+import { useTeamMembers, type TeamMember } from "./team-members";
 
 type Values = Record<string, unknown>;
 /** A vacancy's org unit as the editor shows it: its id and "Name (CODE)". */
 type ChosenUnit = { id: string; label: string } | null;
+/** Most assignees a task takes (recordDataSchemas.task). */
+const ASSIGNEE_LIMIT = 10;
+/** The linked record type of a task whose linked record the caller cannot see. */
+const UNAVAILABLE = "unavailable";
 const REFERENCE_LABELS: Record<ReferenceField, string> = {
   candidateId: "Candidate",
   vacancyId: "Vacancy",
@@ -125,12 +133,45 @@ export function RecordEditor({
     () => (teamId ? teamRequester(teamId) : null),
     [teamId],
   );
+  // Tasks only: the assignees as saved and as chosen, the team's members and the linked record's
+  // type, preset from parentKind; a link the caller cannot see keeps its id until they pick None.
+  const [savedAssignees] = useState<string[]>(() =>
+    record && Array.isArray(dataOf(record).assigneeIds)
+      ? (dataOf(record).assigneeIds as string[])
+      : [],
+  );
+  const [assignees, setAssignees] = useState<string[]>(savedAssignees);
+  const assigneesChanged =
+    assigneeInput(savedAssignees, assignees).assigneeIds !== undefined;
+  const members = useTeamMembers(teamId, resource === "tasks");
+  const access = useApi<{ data: AccessMap }>(
+    resource === "tasks" ? "/api/v1/me/access" : null,
+  );
+  // A role that hides assigneeIds leaves it out of the record, so the picker is left out too.
+  const assigneesShown =
+    resource === "tasks" &&
+    (record
+      ? Array.isArray(dataOf(record).assigneeIds)
+      : access.data?.data.fields.task?.assigneeIds !== "hidden");
+  const [linkKind, setLinkKind] = useState<string>(
+    () => record?.parentKind ?? (record?.parentRecordId ? UNAVAILABLE : ""),
+  );
+  const linkKinds = TASK_LINK_KINDS.filter(
+    (kind) =>
+      kind === record?.parentKind ||
+      access.data?.data.actions[
+        kindToResource[kind] as ActionResource
+      ]?.includes("view"),
+  );
   const [opened] = useState(() => JSON.stringify([values, refs]));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   useUnsavedWork(
-    saving || unitChanged || JSON.stringify([values, refs]) !== opened,
+    saving ||
+      unitChanged ||
+      assigneesChanged ||
+      JSON.stringify([values, refs]) !== opened,
   );
   const [copyingRole, setCopyingRole] = useState(false);
   const pending = saving || copyingRole;
@@ -166,11 +207,20 @@ export function RecordEditor({
             ),
           }
         : values;
+    const mutation = recordMutation(resource, submitted, refs, record);
     const input: Values = {
-      ...recordMutation(resource, submitted, refs, record),
-      // Sent only when it changed, so a save that leaves it alone never touches it.
+      ...mutation,
+      // Sent only when they changed, so a save that leaves them alone never touches them.
       ...(resource === "vacancies" && unitChanged
         ? { orgUnitId: orgUnit?.id ?? null }
+        : {}),
+      ...(resource === "tasks"
+        ? {
+            data: {
+              ...mutation.data,
+              ...assigneeInput(savedAssignees, assignees),
+            },
+          }
         : {}),
     };
     const parsed = (
@@ -287,8 +337,13 @@ export function RecordEditor({
               </p>
             )}
             <div className="form-grid">
-              {Object.entries(referencesByKind[config.kind]).map(
-                ([key, details]) => (
+              {Object.entries(referencesByKind[config.kind])
+                // A task's linked record has its own type and record pickers below.
+                .filter(
+                  ([key]) =>
+                    !(resource === "tasks" && key === "parentRecordId"),
+                )
+                .map(([key, details]) => (
                   <div key={key} className="field">
                     <ReferencePicker
                       kind={details.kind}
@@ -314,7 +369,47 @@ export function RecordEditor({
                       </button>
                     )}
                   </div>
-                ),
+                ))}
+              {resource === "tasks" && (
+                <div className="field">
+                  <label htmlFor="editor-parent-kind">Linked record type</label>
+                  <select
+                    id="editor-parent-kind"
+                    value={linkKind}
+                    onChange={(e) => {
+                      setLinkKind(e.target.value);
+                      setRefs((old) => ({ ...old, parentRecordId: "" }));
+                    }}
+                  >
+                    <option value="">None</option>
+                    {linkKind === UNAVAILABLE && (
+                      <option value={UNAVAILABLE}>Unavailable record</option>
+                    )}
+                    {linkKinds.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {RESOURCE_CONFIG[kindToResource[kind]].singular}
+                      </option>
+                    ))}
+                  </select>
+                  {fieldErrors.parentRecordId && (
+                    <span className="field-error">
+                      {fieldErrors.parentRecordId}
+                    </span>
+                  )}
+                </div>
+              )}
+              {resource === "tasks" && linkKind && linkKind !== UNAVAILABLE && (
+                <div className="field">
+                  <ReferencePicker
+                    kind={linkKind as RecordKind}
+                    label="Linked record"
+                    value={refs.parentRecordId || ""}
+                    onChange={(value) =>
+                      setRefs((old) => ({ ...old, parentRecordId: value }))
+                    }
+                    id="editor-parentRecordId"
+                  />
+                </div>
               )}
               {config.fields
                 .filter(
@@ -322,6 +417,7 @@ export function RecordEditor({
                     !field.readOnly &&
                     field.key !== "legacyAuthorLabel" &&
                     field.key !== "customValues" &&
+                    field.key !== "assigneeIds" &&
                     (advanced ||
                       ![
                         "experienceWording",
@@ -385,6 +481,15 @@ export function RecordEditor({
                   );
                 })}
             </div>
+            {assigneesShown && (
+              <AssigneePicker
+                members={members.members}
+                error={members.error}
+                selected={assignees}
+                onChange={setAssignees}
+                fieldError={fieldErrors.assigneeIds}
+              />
+            )}
             {resource === "vacancies" && request && (
               <fieldset
                 className="stack"
@@ -503,6 +608,104 @@ export function RecordEditor({
         </fieldset>
       </form>
     </Dialog>
+  );
+}
+/**
+ * A task's assignees: one native checkbox per team member by name, with a filter. At most ten; an
+ * assignee who is no longer a member shows as "Former member" and cannot be removed here, since the
+ * service refuses to change a non-member's assignment. A load failure disables only this group.
+ */
+export function AssigneePicker({
+  members,
+  error,
+  selected,
+  onChange,
+  fieldError,
+}: {
+  members: TeamMember[] | null;
+  error: string;
+  selected: string[];
+  onChange: (selected: string[]) => void;
+  fieldError?: string;
+}) {
+  const [filter, setFilter] = useState("");
+  const filterId = useId();
+  const countId = useId();
+  const known = new Set((members ?? []).map((member) => member.userId));
+  const former = members ? selected.filter((userId) => !known.has(userId)) : [];
+  const full = selected.length >= ASSIGNEE_LIMIT;
+  const wanted = filter.trim().toLocaleLowerCase();
+  const shown = (members ?? []).filter((member) =>
+    member.name.toLocaleLowerCase().includes(wanted),
+  );
+  return (
+    <fieldset
+      className="assignee-picker"
+      id="editor-assigneeIds"
+      disabled={!members || !!error}
+      aria-describedby={countId}
+    >
+      <legend>Assignees</legend>
+      {error ? (
+        <p className="field-error" role="alert">
+          Team members could not be loaded, so assignees cannot be changed:{" "}
+          {error}
+        </p>
+      ) : !members ? (
+        <p className="muted" role="status">
+          Loading team members…
+        </p>
+      ) : (
+        <>
+          <label htmlFor={filterId}>Filter members</label>
+          <input
+            id={filterId}
+            type="search"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <ul className="assignee-list">
+            {former.map((userId) => (
+              <li key={userId}>
+                <label className="checkbox-label">
+                  <input type="checkbox" checked disabled />
+                  Former member
+                </label>
+              </li>
+            ))}
+            {shown.map((member) => {
+              const checked = selected.includes(member.userId);
+              return (
+                <li key={member.userId}>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!checked && full}
+                      onChange={(e) =>
+                        onChange(
+                          e.target.checked
+                            ? [...selected, member.userId]
+                            : selected.filter((id) => id !== member.userId),
+                        )
+                      }
+                    />
+                    {member.name}
+                  </label>
+                </li>
+              );
+            })}
+            {!shown.length && (
+              <li className="muted">No member matches this filter.</li>
+            )}
+          </ul>
+        </>
+      )}
+      <p id={countId} className="small-text muted" aria-live="polite">
+        {selected.length} of {ASSIGNEE_LIMIT} selected
+      </p>
+      {fieldError && <span className="field-error">{fieldError}</span>}
+    </fieldset>
   );
 }
 function FieldInput({

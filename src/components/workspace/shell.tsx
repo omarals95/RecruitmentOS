@@ -91,7 +91,7 @@ export const navigation: {
     group: "Recruitment",
   },
   {
-    label: "Recruitment tasks",
+    label: "Team tasks",
     href: "/app/tasks",
     icon: CheckCheck,
     group: "Recruitment",

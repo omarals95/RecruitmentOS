@@ -29,11 +29,43 @@ const invalidAssignment = (message: string) =>
 const notFound = () =>
   new ApiError(404, "not_found", "Record not found in this team.");
 
-/** The helpers' refusals by SQLSTATE; database message text never reaches the client. */
-function refusal(error: unknown): never {
+const SELF_ASSIGNMENT =
+  "Your role sees only some records, so you cannot assign or unassign yourself. Ask a colleague who sees all records.";
+
+/**
+ * The helpers' refusals by SQLSTATE; database message text never reaches the client. With `field`
+ * (a task write's assigneeIds), each refusal of the write names that field.
+ */
+export function assignmentRefusal(
+  error: unknown,
+  field?: "assigneeIds",
+): never {
   if (error instanceof ApiError) throw error;
   const cause = error instanceof DrizzleQueryError ? error.cause : error;
-  switch ((cause as { code?: unknown } | undefined)?.code) {
+  const code = (cause as { code?: unknown } | undefined)?.code;
+  if (field)
+    switch (code) {
+      case "RQ013":
+        throw new ApiError(
+          400,
+          "invalid_assignee",
+          `${field}: choose members of this team.`,
+        );
+      case "RQ014":
+        throw new ApiError(
+          403,
+          "self_assignment_forbidden",
+          `${field}: ${SELF_ASSIGNMENT}`,
+        );
+      case "RQ016":
+      case "42501":
+        throw new ApiError(
+          403,
+          "forbidden",
+          `${field}: you cannot change the assignees of this task.`,
+        );
+    }
+  switch (code) {
     case "42501":
       throw new ApiError(
         403,
@@ -45,11 +77,7 @@ function refusal(error: unknown): never {
         "Choose a member of this team, a relation of recruiter, hiring manager, interviewer or assignee, and a vacancy, application, interview, offer, onboarding, checklist item or task.",
       );
     case "RQ014":
-      throw new ApiError(
-        403,
-        "self_assignment_forbidden",
-        "Your role sees only some records, so you cannot assign or unassign yourself. Ask a colleague who sees all records.",
-      );
+      throw new ApiError(403, "self_assignment_forbidden", SELF_ASSIGNMENT);
     case "RQ015":
       throw invalidAssignment(
         "Approver assignments arrive with approval requests.",
@@ -110,7 +138,7 @@ async function changeAssignment(
       return { changed: rows[0].changed };
     });
   } catch (error) {
-    return refusal(error);
+    return assignmentRefusal(error);
   }
 }
 

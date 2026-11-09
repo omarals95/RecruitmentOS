@@ -98,7 +98,7 @@ const pageLabels: Record<PageKey, string> = {
   vacancies: "Vacancies",
   "job-roles": "Job roles",
   applications: "Applications",
-  tasks: "Recruitment tasks",
+  tasks: "Team tasks",
   interviews: "Interviews",
   offers: "Offers",
   onboarding: "Onboarding",
@@ -176,7 +176,7 @@ const fieldRuleLabels: Record<FieldRule, string> = {
 const recordGroups: [RecordGroup, string][] = [
   ["pipeline", "Vacancies, applications, interviews, offers and onboarding"],
   ["candidates", "Candidates"],
-  ["tasks", "Recruitment tasks"],
+  ["tasks", "Team tasks"],
 ];
 const scopeLabels: Record<RecordScope, string> = {
   all: "All records",

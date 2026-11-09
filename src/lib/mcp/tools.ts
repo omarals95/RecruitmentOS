@@ -378,7 +378,9 @@ const archives =
       ),
     );
   };
+/** Assignees as user ids only, when the row carries them and the role shows them; never names. */
 function taskItem(ctx: AccessContext, row: RecordDto): Data {
+  const data = row.data as Data;
   return {
     id: row.id,
     ...state(row),
@@ -391,9 +393,13 @@ function taskItem(ctx: AccessContext, row: RecordDto): Data {
       "description",
       "customValues",
     ]),
+    ...(Object.hasOwn(data, "assigneeIds") && visible(ctx, row)("assigneeIds")
+      ? { assigneeIds: data.assigneeIds }
+      : {}),
     bucketId: row.bucketId,
     candidateId: row.candidateId,
     vacancyId: row.vacancyId,
+    parentRecordId: row.parentRecordId,
     updatedAt: row.updatedAt,
   };
 }
@@ -1809,7 +1815,7 @@ export const TOOLS: McpTool[] = [
     name: "list_tasks",
     title: "List tasks",
     description:
-      "List recruitment tasks with their custom field values, optionally by bucket, candidate, vacancy or priority. Pass archived: true to list only archived tasks. Each item has the version an update needs.",
+      "List team tasks with their custom field values, optionally by bucket, candidate, vacancy or priority. Pass archived: true to list only archived tasks. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
     access: [{ resource: "tasks", action: "view" }],
     effect: "read",
@@ -1836,7 +1842,7 @@ export const TOOLS: McpTool[] = [
     name: "create_task",
     title: "Create task",
     description:
-      "Create one task in a bucket, optionally linked to a candidate or vacancy, with custom field values keyed by field ID (required fields need a value). Requires an idempotencyKey: retrying with the same key and input returns the same task; the same key with different input is refused.",
+      "Create one task in a bucket. Optional: candidateId, vacancyId, parentRecordId (a job role, vacancy, bucket, task field or task), assigneeIds (up to 10 team member user IDs), customValues by field ID (required ones need one). Needs an idempotencyKey; a retry with the same key and input returns it.",
     scopes: ["recruitment:write"],
     access: [{ resource: "tasks", action: "create" }],
     effect: "create",
@@ -1846,6 +1852,7 @@ export const TOOLS: McpTool[] = [
         bucketId: z.uuid(),
         candidateId: z.uuid().optional(),
         vacancyId: z.uuid().optional(),
+        parentRecordId: z.uuid().optional(),
         ...recordDataSchemas.task.shape,
       })
       .strict(),
@@ -1855,7 +1862,7 @@ export const TOOLS: McpTool[] = [
     name: "update_task",
     title: "Update task",
     description:
-      "Change the fields you send on one task. Move it with bucketId; complete it by moving it to a completed bucket. customValues sets only the fields you send (null empties one) and also needs recruitment:read. Requires the version from list_tasks; a changed task returns version_conflict.",
+      "Change the fields you send on one task. Move it with bucketId; a completed bucket completes it. customValues sets only the fields sent (null empties one; needs recruitment:read). assigneeIds replaces the assignees; parentRecordId null unlinks. Needs the version from list_tasks, or version_conflict.",
     scopes: ["recruitment:write"],
     access: [{ resource: "tasks", action: "edit" }],
     effect: "change",
@@ -1863,6 +1870,7 @@ export const TOOLS: McpTool[] = [
       bucketId: z.uuid().optional(),
       candidateId: z.uuid().nullable().optional(),
       vacancyId: z.uuid().nullable().optional(),
+      parentRecordId: z.uuid().nullable().optional(),
     }),
     run: async (p, input, ctx) => {
       const { customValues, ...rest } = input as Data;

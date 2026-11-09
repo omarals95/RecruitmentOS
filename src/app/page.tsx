@@ -194,7 +194,7 @@ export default function Home() {
               {
                 icon: KanbanSquare,
                 title: "A workflow that fits your team",
-                text: "Customize recruitment task buckets and fields. Move applications through clear, manual stages and see what needs attention.",
+                text: "Customize team task buckets and fields. Move applications through clear, manual stages and see what needs attention.",
               },
               {
                 icon: ShieldCheck,

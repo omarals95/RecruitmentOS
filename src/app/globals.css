@@ -3871,3 +3871,36 @@ progress::-moz-progress-bar {
   opacity: 0.65;
   cursor: wait;
 }
+
+/* The task editor's assignee picker (R2a-20): a bordered group whose member list scrolls inside it. */
+.assignee-picker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 0;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+/* The legend and the filter label match the editor's other field labels. */
+.assignee-picker legend,
+.assignee-picker > label {
+  font-weight: 600;
+  font-size: 12px;
+}
+.assignee-picker legend {
+  padding: 0 4px;
+}
+.assignee-picker input[type="search"] {
+  width: 100%;
+}
+.assignee-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.assignee-list .checkbox-label {
+  overflow-wrap: anywhere;
+}

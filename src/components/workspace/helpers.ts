@@ -102,6 +102,7 @@ export function activeFilterCount(
     filters.minYears || filters.maxYears,
     filters.vacancy,
     filters.archived,
+    filters.assignedToMe,
   ].filter(Boolean).length;
 }
 /** Whether a filter tag already holds this value, ignoring case and surrounding spaces. */

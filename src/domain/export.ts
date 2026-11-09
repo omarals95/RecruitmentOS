@@ -40,6 +40,8 @@ export interface ListFilters {
   maxYears: string;
   vacancy: string;
   archived: boolean;
+  /** Tasks only; never exported, so never described. */
+  assignedToMe?: boolean;
 }
 /** A readable list of the applied filters for export labels. */
 export function describeFilters(
@@ -178,7 +180,8 @@ export function* csvChunks(
 }
 /**
  * Record ID, every field of the resource the caller may see in its order (`hidden` names the keys
- * left out), then the creation and update times.
+ * left out), then the creation and update times. A task's assignees are not stored in its data and
+ * are never exported.
  */
 export function exportTable(
   resource: ResourceName,
@@ -186,7 +189,7 @@ export function exportTable(
   hidden: ReadonlySet<string> = new Set(),
 ) {
   const fields = RESOURCE_CONFIG[resource].fields.filter(
-    (field) => !hidden.has(field.key),
+    (field) => !hidden.has(field.key) && field.key !== "assigneeIds",
   );
   return {
     headers: [

@@ -1375,6 +1375,66 @@ describe("candidate erasure", () => {
     });
   });
 
+  // R2a-20 (job 062): a task links another task, whose title may name a candidate. Erasure scrubs
+  // that title, and the linking task's cached create response holds no erased id, so the response
+  // must never keep the label (job 062 round 1 security review).
+  it("keeps no linked task's title in a cached create response, before or after erasure", async () => {
+    const name = "Fictional Linkwell Person";
+    const candidate = (
+      await createRecord(ownerA, "candidates", { data: { name } })
+    ).id;
+    const bucket = (
+      await createRecord(ownerA, "buckets", {
+        data: { name: "Fictional link erasure bucket" },
+      })
+    ).id;
+    const parent = await createRecord(ownerA, "tasks", {
+      bucketId: bucket,
+      candidateId: candidate,
+      data: { title: `Call ${name}` },
+    });
+    const input = {
+      bucketId: bucket,
+      parentRecordId: parent.id,
+      data: { title: "Fictional follow-up task" },
+    };
+    const key = `link-erasure-${randomUUID()}`;
+    const created = await createRecord(ownerA, "tasks", input, key);
+    expect(created).toMatchObject({
+      parentKind: "task",
+      parentLabel: `Call ${name}`,
+    });
+    const cached = await asOwner<{ response: string }>(
+      "SELECT response::text AS response FROM app.idempotency WHERE key = $1",
+      [key],
+    );
+    expect(cached).toHaveLength(1);
+    expect(cached[0].response).not.toContain(name);
+    expect(cached[0].response).not.toContain("parentLabel");
+    expect(cached[0].response).not.toContain("parentKind");
+    // A replay is recomposed from the current state, label included.
+    expect(await createRecord(ownerA, "tasks", input, key)).toMatchObject({
+      id: created.id,
+      parentLabel: `Call ${name}`,
+    });
+
+    await eraseCandidate(ownerA, candidate, { confirmName: name });
+    expect(
+      await asOwner(
+        "SELECT key FROM app.idempotency WHERE strpos(response::text, $1) > 0",
+        [name],
+      ),
+    ).toEqual([]);
+    const replay = await createRecord(ownerA, "tasks", input, key);
+    expect(replay).toMatchObject({
+      id: created.id,
+      parentRecordId: parent.id,
+      parentKind: "task",
+      parentLabel: "Call [erased candidate]",
+    });
+    expect(JSON.stringify(replay)).not.toContain(name);
+  });
+
   describe("saved-view clearing by name", () => {
     /** Erases a fresh candidate while other members hold views with these searches; true means cleared. */
     async function expectCleared(

@@ -533,6 +533,49 @@ describe("OpenAPI contract", () => {
     }
   });
 
+  it("documents task assignees, links and the Assigned to me filter (R2a-20)", () => {
+    const tasks = document.components.schemas.tasks as {
+      properties: Record<string, { type?: string; maxItems?: number }>;
+    };
+    expect(tasks.properties.assigneeIds).toMatchObject({
+      type: "array",
+      maxItems: 10,
+    });
+    const parameters = (path: string) =>
+      (
+        document.paths[path].get as unknown as {
+          parameters: { name: string }[];
+        }
+      ).parameters.map((parameter) => parameter.name);
+    expect(parameters("/api/v1/tasks")).toContain("assignedToMe");
+    for (const resource of Object.keys(resourceToKind).filter(
+      (name) => name !== "tasks",
+    ))
+      expect(parameters(`/api/v1/${resource}`), resource).not.toContain(
+        "assignedToMe",
+      );
+    const record = document.components.schemas.RecordDto.properties!;
+    for (const key of ["parentKind", "parentLabel"])
+      expect(JSON.stringify(record[key]), key).toContain(
+        "Tasks with a parentRecordId only",
+      );
+    for (const [path, method] of [
+      ["/api/v1/tasks", "post"],
+      ["/api/v1/tasks/{id}", "patch"],
+    ]) {
+      const text = JSON.stringify(document.paths[path][method]);
+      for (const code of [
+        "invalid_assignee",
+        "self_assignment_forbidden",
+        "invalid_reference",
+      ])
+        expect(text, `${method} ${code}`).toContain(code);
+    }
+    expect(
+      JSON.stringify(document.paths["/api/v1/buckets/{id}"].patch),
+    ).toContain("moves every active task of the team");
+  });
+
   it("documents hidden export columns and search groups left out by role (R2a-08)", () => {
     for (const resource of EXPORT_RESOURCES)
       expect(
