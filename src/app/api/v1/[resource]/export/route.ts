@@ -19,7 +19,11 @@ export async function POST(req: Request, ctx: Context) {
     // The audit row is committed before any byte is sent; a failed audit sends no file.
     const result = await exportRecords(p, (await ctx.params).resource, query);
     const now = new Date();
-    const { headers, rows } = exportTable(result.resource, result.rows);
+    const { headers, rows } = exportTable(
+      result.resource,
+      result.rows,
+      result.hidden,
+    );
     const chunks = csvChunks(
       headers,
       rows,

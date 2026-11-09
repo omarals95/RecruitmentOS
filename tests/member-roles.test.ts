@@ -39,7 +39,16 @@ import {
 import { beginCvUpload } from "@/lib/cvs";
 import { withTeam } from "@/lib/db-team";
 import { createEmployee, linkEmployeeUser } from "@/lib/directory";
-import { listActivity, overview, searchWorkspace } from "@/lib/insights";
+import { RESOURCE_CONFIG } from "@/domain/records";
+import { safeCsvCell } from "@/domain/export";
+import { extractionProvider } from "@/lib/ai-provider";
+import {
+  listActivity,
+  markNotifications,
+  notifications,
+  overview,
+  searchWorkspace,
+} from "@/lib/insights";
 import { callTool, TOOLS } from "@/lib/mcp/tools";
 import {
   assignMemberRole,
@@ -47,13 +56,21 @@ import {
 } from "@/lib/member-roles";
 import { requireScope, roleScopes, type Role } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
-import { createRecord } from "@/lib/records";
-import type { StorageGateway } from "@/lib/storage";
+import {
+  createRecord,
+  updateCandidateState,
+  updateRecord,
+} from "@/lib/records";
+import { storageConfigured, type StorageGateway } from "@/lib/storage";
 import { installTenantContext } from "@/lib/tenant-context";
 import { POST as memberRolesRoute } from "@/app/api/v1/teams/member-roles/route";
 import { GET as listRoute } from "@/app/api/v1/[resource]/route";
+import { POST as exportRoute } from "@/app/api/v1/[resource]/export/route";
 import { GET as activityRoute } from "@/app/api/v1/activity/route";
+import { GET as analyticsRoute } from "@/app/api/v1/analytics/route";
+import { GET as bulkCapabilitiesRoute } from "@/app/api/v1/cvs/bulk-capabilities/route";
 import { GET as overviewRoute } from "@/app/api/v1/overview/route";
+import { GET as searchRoute } from "@/app/api/v1/search/route";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with two fictional teams (R2a-10, 0035).
@@ -103,6 +120,7 @@ describe("configured roles and member assignment under the split runtime roles",
     lean: PublishedRole,
     noCandidates: PublishedRole,
     noRecruitment: PublishedRole;
+  let noPages: PublishedRole, redacted: PublishedRole, plain: PublishedRole;
   let hiringManager: PublishedRole,
     interviewer: PublishedRole,
     unitScoped: PublishedRole;
@@ -221,6 +239,18 @@ describe("configured roles and member assignment under the split runtime roles",
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return { status: response.status, body: (await response.json()) as any };
   }
+  /** One export through its route as a signed-in member: the status and the CSV or error text. */
+  async function exportAs(p: Principal, resource: string) {
+    signIn(p);
+    const response = await exportRoute(
+      new Request(`${ORIGIN}/api/v1/${resource}/export`, {
+        method: "POST",
+        headers: { origin: ORIGIN, "x-team-id": p.teamId },
+      }),
+      { params: Promise.resolve({ resource }) },
+    );
+    return { status: response.status, text: await response.text() };
+  }
   /** Drafts and publishes one company role as the company owner. */
   async function publishRole(
     key: string,
@@ -314,6 +344,9 @@ describe("configured roles and member assignment under the split runtime roles",
       "no-candidates",
       "no-cvs",
       "no-recruitment",
+      "no-pages",
+      "redacted",
+      "plain",
     ])
       viewers[name] = await seedIdentity(db, {
         userId: `mr-viewer-${name}`,
@@ -358,6 +391,30 @@ describe("configured roles and member assignment under the split runtime roles",
       body(VIEWER_ROLE.body as RoleBody, "Fictional candidate reader", {
         scopes: ["candidates:read", "cvs:read"],
       }),
+    );
+    noPages = await publishRole(
+      "fictional-no-pages",
+      body(recruiterBody, "Fictional pageless recruiter", {
+        pages: recruiterBody.pages.filter(
+          (page) =>
+            !["home", "analytics", "activity", "candidates"].includes(page),
+        ),
+      }),
+    );
+    redacted = await publishRole(
+      "fictional-redacted",
+      body(recruiterBody, "Fictional redacted recruiter", {
+        fields: {
+          candidate: { email: "hidden", residenceEmirate: "hidden" },
+          vacancy: { department: "hidden" },
+          application: { stage: "hidden" },
+          task: { title: "hidden" },
+        },
+      }),
+    );
+    plain = await publishRole(
+      "fictional-plain",
+      body(recruiterBody, "Fictional plain recruiter"),
     );
     hiringManager = await publishRole(
       "fictional-hiring-manager",
@@ -884,10 +941,29 @@ describe("configured roles and member assignment under the split runtime roles",
       body: { error: { code: "scope_required" } },
     });
     await harness.dataDb();
-    // Search reaches candidates through the records service, which refuses in today's words.
-    await expect(
-      searchWorkspace(fresh(pipeline), "Fictional"),
-    ).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    // Search leaves out the candidate group the stored scopes cannot view and returns the others.
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional Narrowed Vacancy", status: "Open" },
+    });
+    await harness.dataDb();
+    const found = await searchWorkspace(fresh(pipeline), "Fictional");
+    expect(found.groups.map((group) => group.type)).toEqual([
+      "vacancies",
+      "job-roles",
+      "tasks",
+      "applications",
+    ]);
+    expect(found.groups[0].results.map((row) => row.id)).toContain(vacancy.id);
+    expect(found.data.some((row) => row.kind === "candidate")).toBe(false);
+    const routed = await get(
+      searchRoute,
+      pipeline,
+      "/api/v1/search?q=Fictional",
+    );
+    expect(routed.status).toBe(200);
+    expect(
+      routed.body.groups.map((group: { type: string }) => group.type),
+    ).toEqual(["vacancies", "job-roles", "tasks", "applications"]);
     // MCP: a token of the member is narrowed by install too.
     const db = await harness.asOwner();
     const token = await seedApiToken(db, pipeline, roleScopes("recruiter"));
@@ -945,5 +1021,282 @@ describe("configured roles and member assignment under the split runtime roles",
       status: 403,
       body: { error: { code: "scope_required" } },
     });
+  });
+
+  // R2a-08: insights and exports decide on the engine, with pages, actions and field rules.
+  it("refuses the overview, analytics, activity and a candidate export to a role without their pages", async () => {
+    await assign(owner, viewers["no-pages"].userId, noPages.objectId);
+    const member = fresh(viewers["no-pages"], "recruiter");
+    for (const [handler, path] of [
+      [overviewRoute, "/api/v1/overview"],
+      [analyticsRoute, "/api/v1/analytics"],
+      [activityRoute, "/api/v1/activity"],
+    ] as const)
+      expect(await get(handler, member, path), path).toMatchObject({
+        status: 403,
+        body: {
+          error: {
+            code: "forbidden",
+            message: "You do not have permission for this action.",
+          },
+        },
+      });
+    const refusedExport = await exportAs(member, "candidates");
+    expect(refusedExport.status).toBe(403);
+    expect(JSON.parse(refusedExport.text)).toMatchObject({
+      error: { code: "forbidden" },
+    });
+    expect(
+      await look(
+        "SELECT id FROM app.activity WHERE kind = 'export' AND actor_id = $1",
+        [member.userId],
+      ),
+    ).toEqual([]);
+    // The actions the role keeps still work: a vacancy export is allowed and audited.
+    expect((await exportAs(member, "vacancies")).status).toBe(200);
+    expect(
+      await look(
+        "SELECT action FROM app.activity WHERE kind = 'export' AND actor_id = $1",
+        [member.userId],
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("leaves hidden fields out of exports, counts, labels, search, reminders and activity", async () => {
+    await assign(owner, viewers.redacted.userId, redacted.objectId);
+    const member = () => fresh(viewers.redacted, "recruiter");
+    const email = "fictional.redacted@example.test";
+    const person = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Redacted Candidate",
+        email,
+        phone: "+971 50 000 0001",
+        residenceEmirate: "Fictional Emirate",
+      },
+    });
+    const job = await createRecord(owner, "vacancies", {
+      data: {
+        title: "Fictional Redacted Vacancy",
+        status: "Open",
+        department: "Fictional Department",
+      },
+    });
+    const application = await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Sourced" },
+    });
+    await updateRecord(owner, "applications", application.id, {
+      version: application.version,
+      data: { stage: "Screening" },
+    });
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional redacted bucket" },
+    });
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: { title: "Fictional redacted task", dueDate: "2020-01-01" },
+    });
+
+    // Export: no Email or Residence emirate column, the others in today's order.
+    const fields = RESOURCE_CONFIG.candidates.fields;
+    const header = (hidden: string[]) =>
+      [
+        "Record ID",
+        ...fields
+          .filter((field) => !hidden.includes(field.key))
+          .map((field) => field.label),
+        "Created at",
+        "Updated at",
+      ]
+        .map(safeCsvCell)
+        .join(",");
+    const headerOf = (text: string) =>
+      text.split("\r\n").find((line) => line.startsWith('"Record ID"'));
+    const ownerFile = await exportAs(owner, "candidates");
+    expect(ownerFile.status).toBe(200);
+    expect(headerOf(ownerFile.text)).toBe(header([]));
+    expect(ownerFile.text).toContain(email);
+    const memberFile = await exportAs(member(), "candidates");
+    expect(memberFile.status).toBe(200);
+    expect(headerOf(memberFile.text)).toBe(
+      header(["email", "residenceEmirate"]),
+    );
+    for (const label of ["Email", "Residence emirate"])
+      expect(headerOf(memberFile.text)?.split(",")).not.toContain(
+        safeCsvCell(label),
+      );
+    expect(memberFile.text).not.toContain(email);
+    expect(memberFile.text).not.toContain("Fictional Emirate");
+    expect(memberFile.text).toContain("Fictional Redacted Candidate");
+
+    // Overview and analytics: outputs that read a hidden field are left out.
+    const home = await get(overviewRoute, member(), "/api/v1/overview");
+    expect(home.status).toBe(200);
+    expect(Object.hasOwn(home.body.coverage, "email")).toBe(false);
+    expect(home.body.coverage).toMatchObject({
+      phone: expect.any(Number),
+      total: expect.any(Number),
+    });
+    expect(home.body.departments).toEqual([]);
+    expect(home.body.stages).toEqual([]);
+    const ownerHome = await get(overviewRoute, owner, "/api/v1/overview");
+    expect(ownerHome.body.departments).not.toEqual([]);
+    expect(ownerHome.body.stages).not.toEqual([]);
+    const charts = await get(analyticsRoute, member(), "/api/v1/analytics");
+    expect(charts.status).toBe(200);
+    for (const key of [
+      "emirates",
+      "departments",
+      "stages",
+      "series",
+      "stageDurations",
+      "conversions",
+    ])
+      expect(charts.body[key], key).toEqual([]);
+    for (const key of ["hiresCount", "timeToHireDays", "timeToHireSample"])
+      expect(Object.hasOwn(charts.body, key), key).toBe(false);
+    expect(charts.body.categories).not.toEqual([]);
+    const ownerCharts = await get(analyticsRoute, owner, "/api/v1/analytics");
+    expect(ownerCharts.body.emirates).not.toEqual([]);
+    expect(ownerCharts.body.series).not.toEqual([]);
+
+    // Search never matches a hidden value, and titles come from visible fields only.
+    const ids = (result: Awaited<ReturnType<typeof searchWorkspace>>) =>
+      result.data.map((row) => row.id);
+    await harness.dataDb();
+    expect(ids(await searchWorkspace(fresh(owner), email))).toEqual(
+      expect.arrayContaining([person.id, application.id]),
+    );
+    await harness.dataDb();
+    const byEmail = await searchWorkspace(member(), email);
+    expect(byEmail.total).toBe(0);
+    expect(
+      byEmail.groups.find((group) => group.type === "candidates")?.results,
+    ).toEqual([]);
+    await harness.dataDb();
+    const byName = await searchWorkspace(
+      member(),
+      "Fictional Redacted Candidate",
+    );
+    expect(ids(byName)).toEqual(
+      expect.arrayContaining([person.id, application.id]),
+    );
+    expect(byName.data.find((row) => row.id === application.id)?.title).toBe(
+      "Application",
+    );
+
+    // Reminders: the task's title is hidden, so only its label is shown.
+    await harness.dataDb();
+    const reminder = (await notifications(member())).data.find((row) =>
+      row.key.startsWith(`task:${task.id}:`),
+    );
+    expect(reminder?.title).toBe("Task due");
+    await harness.dataDb();
+    expect(
+      (await notifications(fresh(owner))).data.find((row) =>
+        row.key.startsWith(`task:${task.id}:`),
+      )?.title,
+    ).toBe("Task due: Fictional redacted task");
+
+    // Activity: the stage change keeps its row without the stage values.
+    const history = async (p: Principal) => {
+      await harness.dataDb();
+      return (
+        await listActivity(
+          p,
+          new URLSearchParams({ recordId: application.id, pageSize: "100" }),
+        )
+      ).data;
+    };
+    const ownerRows = await history(fresh(owner));
+    expect(ownerRows.some((row) => row.metadata.toStage === "Screening")).toBe(
+      true,
+    );
+    const memberRows = await history(member());
+    expect(memberRows.map((row) => row.id)).toEqual(
+      ownerRows.map((row) => row.id),
+    );
+    for (const row of memberRows) {
+      expect(Object.hasOwn(row.metadata, "fromStage")).toBe(false);
+      expect(Object.hasOwn(row.metadata, "toStage")).toBe(false);
+    }
+  });
+
+  it("binds bulk capabilities to the stored scopes", async () => {
+    // The narrowed recruiter role of the case above lacks cvs:write.
+    expect(
+      await get(
+        bulkCapabilitiesRoute,
+        fresh(viewers["no-cvs"], "recruiter"),
+        "/api/v1/cvs/bulk-capabilities",
+      ),
+    ).toMatchObject({
+      status: 403,
+      body: { error: { code: "scope_required" } },
+    });
+    await assign(owner, viewers.plain.userId, plain.objectId);
+    const configured = storageConfigured();
+    expect(
+      await get(
+        bulkCapabilitiesRoute,
+        fresh(viewers.plain, "recruiter"),
+        "/api/v1/cvs/bulk-capabilities",
+      ),
+    ).toEqual({
+      status: 200,
+      body: {
+        data: {
+          uploadsAvailable: configured,
+          aiAvailable: extractionProvider() !== null,
+          storageConfigured: configured,
+        },
+      },
+    });
+  });
+
+  it("keeps shortlists and read markers private to each member under a configured role", async () => {
+    // The member of the case above, holding an assigned configured role.
+    const member = () => fresh(viewers.plain, "recruiter");
+    const shortlisted = async (p: Principal) => {
+      await harness.dataDb();
+      return (await overview(p)).counts.shortlisted;
+    };
+    const ownerBefore = await shortlisted(fresh(owner));
+    const memberBefore = await shortlisted(member());
+    await harness.dataDb();
+    await updateCandidateState(owner, candidate, {
+      version: 0,
+      shortlisted: true,
+    });
+    expect(await shortlisted(fresh(owner))).toBe(ownerBefore + 1);
+    expect(await shortlisted(member())).toBe(memberBefore);
+
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional private bucket" },
+    });
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: { title: "Fictional private reminder", dueDate: "2020-01-02" },
+    });
+    const find = async (p: Principal) => {
+      await harness.dataDb();
+      return (await notifications(p)).data.find((row) =>
+        row.key.startsWith(`task:${task.id}:`),
+      );
+    };
+    const reminder = await find(fresh(owner));
+    expect(reminder?.read).toBe(false);
+    await harness.dataDb();
+    expect(await markNotifications(fresh(owner), [reminder!.key])).toEqual({
+      updated: 1,
+    });
+    expect((await find(fresh(owner)))?.read).toBe(true);
+    expect((await find(member()))?.read).toBe(false);
+    expect(
+      await look("SELECT user_id FROM app.notification_reads WHERE key = $1", [
+        reminder!.key,
+      ]),
+    ).toEqual([{ user_id: owner.userId }]);
   });
 });

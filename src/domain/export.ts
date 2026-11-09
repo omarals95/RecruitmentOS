@@ -176,9 +176,18 @@ export function* csvChunks(
   for (let start = 0; start < rows.length; start += size)
     yield "\r\n" + csvLines(rows.slice(start, start + size));
 }
-/** Record ID, every field of the resource, then the creation and update times. */
-export function exportTable(resource: ResourceName, records: RecordDto[]) {
-  const fields = RESOURCE_CONFIG[resource].fields;
+/**
+ * Record ID, every field of the resource the caller may see in its order (`hidden` names the keys
+ * left out), then the creation and update times.
+ */
+export function exportTable(
+  resource: ResourceName,
+  records: RecordDto[],
+  hidden: ReadonlySet<string> = new Set(),
+) {
+  const fields = RESOURCE_CONFIG[resource].fields.filter(
+    (field) => !hidden.has(field.key),
+  );
   return {
     headers: [
       "Record ID",

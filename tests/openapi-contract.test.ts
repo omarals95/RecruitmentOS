@@ -505,6 +505,19 @@ describe("OpenAPI contract", () => {
     expect(JSON.stringify(record.vacancyLabel)).toContain("Untitled vacancy");
   });
 
+  it("documents hidden export columns and search groups left out by role (R2a-08)", () => {
+    for (const resource of EXPORT_RESOURCES)
+      expect(
+        JSON.stringify(document.paths[`/api/v1/${resource}/export`].post),
+        resource,
+      ).toContain(
+        "Columns for fields the caller's role hides are left out and the rest keep their order.",
+      );
+    expect(JSON.stringify(document.paths["/api/v1/search"].get)).toContain(
+      "each group is included only when the caller's role and scopes allow viewing it (candidates:read or recruitment:read); a group the caller cannot view is left out rather than refused.",
+    );
+  });
+
   it("documents candidate erasure as session-only, owner-only and typed", () => {
     const erasure = document.paths["/api/v1/candidates/{id}/erasure"].post;
     expect(erasure["x-session-only"]).toBe(true);

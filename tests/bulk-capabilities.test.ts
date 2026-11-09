@@ -5,6 +5,15 @@ vi.mock("@/lib/principal", () => ({
     scopes: ["candidates:write", "cvs:write"],
   })),
 }));
+// The route binds to the stored scopes; here install stores the principal's own (no database).
+vi.mock("@/lib/db-team", () => ({
+  withTeam: vi.fn(
+    async (
+      principal: { scopes: string[] },
+      work: (tx: unknown, access: { scopes: string[] }) => Promise<unknown>,
+    ) => work({}, { scopes: principal.scopes }),
+  ),
+}));
 // The real provider module is used unless a test switches the fictional provider on.
 const ai = vi.hoisted(() => ({ fake: false }));
 vi.mock("@/lib/ai-provider", async (importOriginal) => {

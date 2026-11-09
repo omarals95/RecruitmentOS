@@ -35,10 +35,13 @@ import {
   type RecordKind,
   type ResourceName,
 } from "@/domain/records";
+import { EXPORT_RESOURCES, exportTable } from "@/domain/export";
 import { effectiveTokenScopes } from "@/lib/api-token-policy";
 import {
   accessContext,
   authorize,
+  decide,
+  hiddenKeys,
   redact,
   scopeFilter,
   type AccessContext,
@@ -1073,6 +1076,199 @@ describe("the role the access state names (R2a-10)", () => {
         label,
       ).toThrow(ApiError);
       expect(() => redact(ctx, {} as RecordDto), label).toThrow(ApiError);
+    }
+  });
+});
+
+// Insights, search, notifications and exports leave out what redact leaves out (R2a-08).
+describe("outputs on the engine (R2a-08)", () => {
+  const CUSTOM = "a1000000-0000-4000-8000-0000000000a1";
+  const withRules = body({
+    name: "Fictional redacted recruiter",
+    fields: {
+      candidate: {
+        email: "hidden",
+        residenceEmirate: "hidden-unless-approver",
+        phone: "read",
+      },
+      task: { title: "hidden", [CUSTOM]: "hidden" },
+      application: { stage: "hidden", candidateLabel: "hidden" },
+    },
+  }) as RoleBody;
+  const contexts = (): AccessContext[] => [
+    ...ROLES.map((role) => contextOf(session(role))),
+    ...ROLES.map((role) => contextOf(session(role), { channel: "mcp" })),
+    contextOf(session("recruiter"), { role: withRules }),
+    contextOf(session("recruiter"), { role: withRules, channel: "mcp" }),
+    contextOf(session("recruiter"), { role: HIRING_MANAGER_ROLE.body }),
+    contextOf(token("recruiter", ["recruitment:read"])),
+  ];
+  const record = (kind: RecordKind, data: Record<string, unknown>) =>
+    ({
+      id: "b1000000-0000-4000-8000-0000000000b1",
+      kind,
+      data,
+      version: 1,
+      legacyId: "fictional-legacy",
+      createdAt: "2026-11-01T08:00:00.000Z",
+      updatedAt: "2026-11-02T08:00:00.000Z",
+      archivedAt: null,
+      createdBy: USER,
+      privateOwnerId: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+      label: "Fictional label",
+      candidateLabel: "Fictional Candidate",
+    }) as RecordDto;
+  /** Every schema key of the kind with a fictional value, plus a custom value for tasks. */
+  const full = (kind: RecordKind) =>
+    record(kind, {
+      ...Object.fromEntries(
+        Object.keys(recordDataSchemas[kind].shape).map((key) => [
+          key,
+          `Fictional ${key}`,
+        ]),
+      ),
+      customValues: { [CUSTOM]: "Fictional secret", other: 1 },
+    });
+
+  it("hides nothing for the four team roles and only the sensitive candidate fields over MCP", () => {
+    for (const role of ROLES)
+      for (const kind of KINDS) {
+        expect(hiddenKeys(contextOf(session(role)), kind), kind).toEqual(
+          new Set(),
+        );
+        expect(
+          hiddenKeys(contextOf(session(role), { channel: "mcp" }), kind),
+          kind,
+        ).toEqual(
+          kind === "candidate"
+            ? new Set(SENSITIVE_CANDIDATE_FIELDS)
+            : new Set(),
+        );
+      }
+  });
+
+  it("returns the hidden and hidden-unless-approver keys of a role body", () => {
+    expect(roleBodySchema.safeParse(withRules).success).toBe(true);
+    const ctx = contextOf(session("recruiter"), { role: withRules });
+    expect(hiddenKeys(ctx, "candidate")).toEqual(
+      new Set(["email", "residenceEmirate"]),
+    );
+    expect(hiddenKeys(ctx, "task")).toEqual(new Set(["title", CUSTOM]));
+    expect(hiddenKeys(ctx, "application")).toEqual(
+      new Set(["stage", "candidateLabel"]),
+    );
+    expect(hiddenKeys(ctx, "vacancy")).toEqual(new Set());
+    expect(
+      hiddenKeys(
+        contextOf(session("recruiter"), { role: withRules, channel: "mcp" }),
+        "candidate",
+      ),
+    ).toEqual(
+      new Set(["email", "residenceEmirate", ...SENSITIVE_CANDIDATE_FIELDS]),
+    );
+    expect(() => hiddenKeys(contextOf(session(FORGED)), "candidate")).toThrow(
+      ApiError,
+    );
+  });
+
+  it("agrees with redact on data, custom values and top-level keys", () => {
+    for (const ctx of contexts())
+      for (const kind of KINDS) {
+        const input = full(kind);
+        const hidden = hiddenKeys(ctx, kind);
+        const output = redact(ctx, input);
+        const label = `${ctx.role?.name} ${ctx.channel} ${kind}`;
+        for (const key of Object.keys(input.data))
+          expect(Object.hasOwn(output.data, key), `${label} ${key}`).toBe(
+            !hidden.has(key),
+          );
+        expect(
+          Object.hasOwn(
+            (output.data as { customValues: object }).customValues,
+            CUSTOM,
+          ),
+          label,
+        ).toBe(!hidden.has(CUSTOM));
+        for (const key of ["legacyId", "label", "candidateLabel"])
+          expect(Object.hasOwn(output, key), `${label} ${key}`).toBe(
+            !hidden.has(key),
+          );
+      }
+  });
+
+  it("decides as authorize does, with null for a refusal", () => {
+    for (const ctx of [
+      ...contexts(),
+      contextOf(session(FORGED)),
+      contextOf(session("viewer"), { role: INTERVIEWER_ROLE.body }),
+    ])
+      for (const resource of ACTION_RESOURCES)
+        for (const action of ACTIONS)
+          for (const page of [undefined, "home", "candidates"] as const) {
+            const request: AccessRequest = { page, resource, action };
+            let expected: unknown = null;
+            try {
+              expected = authorize(ctx, request);
+            } catch (error) {
+              expect(error).toBeInstanceOf(ApiError);
+              expect((error as ApiError).status).toBe(403);
+            }
+            expect(
+              decide(ctx, request),
+              `${ctx.role?.name} ${resource} ${action} ${page}`,
+            ).toEqual(expected);
+          }
+  });
+
+  // A frozen copy of exportTable() before R2a-08 limited its columns.
+  function todayTable(resource: ResourceName, rows: RecordDto[]) {
+    const fields = RESOURCE_CONFIG[resource].fields;
+    return {
+      headers: [
+        "Record ID",
+        ...fields.map((field) => field.label),
+        "Created at",
+        "Updated at",
+      ],
+      rows: rows.map((row) => [
+        row.id,
+        ...fields.map(
+          (field) => (row.data as Record<string, unknown>)[field.key],
+        ),
+        row.createdAt,
+        row.updatedAt,
+      ]),
+    };
+  }
+
+  it("keeps today's export table without hidden keys and leaves out exactly the hidden columns", () => {
+    for (const resource of EXPORT_RESOURCES) {
+      const rows = [full(resourceToKind[resource])];
+      const today = todayTable(resource, rows);
+      expect(exportTable(resource, rows), resource).toEqual(today);
+      expect(exportTable(resource, rows, new Set()), resource).toEqual(today);
+      const fields = RESOURCE_CONFIG[resource].fields;
+      const hidden = new Set(
+        [fields[0], fields[fields.length - 1]].map((field) => field.key),
+      );
+      const kept = (_: unknown, index: number) =>
+        index === 0 ||
+        index > fields.length ||
+        !hidden.has(fields[index - 1].key);
+      const table = exportTable(resource, rows, hidden);
+      expect(table.headers, resource).toEqual(today.headers.filter(kept));
+      expect(table.rows, resource).toEqual(
+        today.rows.map((row) => row.filter(kept)),
+      );
+      expect(hidden.size, resource).toBe(2);
+      expect(table.headers.length, resource).toBe(today.headers.length - 2);
     }
   });
 });

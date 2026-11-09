@@ -18,6 +18,7 @@ import type { TeamTx } from "@/db";
 import {
   accessContext,
   authorize,
+  hiddenKeys,
   redact,
   scopeFilter,
   type AccessContext,
@@ -1118,20 +1119,42 @@ function recordQuery(
         );
     }
   // jsonpath extracts scalar values only. JSON property names are never searchable candidate facts.
-  // Top-level keys in omitFromSearch are removed first, so words neither match nor exclude on them.
-  const omitted = options.omitFromSearch ?? [];
-  const searched = omitted.length
+  // Top-level keys in omitFromSearch and the keys the caller may not see are removed first, so words
+  // neither match nor exclude on them; a hidden custom field id removes its customValues entry.
+  const hidden = [...hiddenKeys(ctx, kind)];
+  const hiddenCustom = hidden.filter(
+    (key) => uuidSchema.safeParse(key).success,
+  );
+  const omitted = [
+    ...new Set([
+      ...(options.omitFromSearch ?? []),
+      ...hidden.filter((key) => !hiddenCustom.includes(key)),
+    ]),
+  ];
+  let searched: SQL = omitted.length
     ? sql`(${records.data} - array[${sql.join(
         omitted.map((key) => sql`${key}`),
         sql`, `,
       )}]::text[])`
-    : records.data;
+    : sql`${records.data}`;
+  for (const key of hiddenCustom)
+    searched = sql`(${searched} #- ${`{customValues,${key}}`}::text[])`;
   const ownFacts = sql`jsonb_path_query_array(${searched}, '$.** ? (@.type() == "string" || @.type() == "number" || @.type() == "boolean")')::text`;
+  // A parent's facts are only the fields of its kind the caller may see.
+  const facts = (alias: string, parent: RecordKind, keys: string[]) => {
+    const parentHidden = hiddenKeys(ctx, parent);
+    const visible = keys.filter((key) => !parentHidden.has(key));
+    return visible.length
+      ? sql.raw(
+          `concat_ws(' ',${visible.map((key) => `${alias}.data->>'${key}'`).join(",")})`,
+        )
+      : sql`''`;
+  };
   const factual =
     kind === "application"
       ? sql`concat_ws(' ',${ownFacts},
-      (select concat_ws(' ',v.data->>'title',v.data->>'department') from ${records} v where v.team_id=${p.teamId} and v.kind='vacancy' and v.id=${records.vacancyId}),
-      ${ctx.scopes.includes("candidates:read") ? sql`(select concat_ws(' ',c.data->>'name',c.data->>'email',c.data->>'jobTitle') from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
+      (select ${facts("v", "vacancy", ["title", "department"])} from ${records} v where v.team_id=${p.teamId} and v.kind='vacancy' and v.id=${records.vacancyId}),
+      ${ctx.scopes.includes("candidates:read") ? sql`(select ${facts("c", "candidate", ["name", "email", "jobTitle"])} from ${records} c where c.team_id=${p.teamId} and c.kind='candidate' and c.id=${records.candidateId})` : sql`''`})`
       : ownFacts;
   for (const term of searchTerms(search)) {
     const position = sql`strpos(lower(${factual}),lower(${term.value}))`;
@@ -1157,59 +1180,69 @@ export async function listRecords(
   query: URLSearchParams,
   options: { omitFromSearch?: readonly string[] } = {},
 ) {
+  kindOf(resource);
+  return withTeam(p, (tx, access) =>
+    listInside(tx, accessContext(p, access), resource, query, options),
+  );
+}
+
+/** One list page inside the caller's transaction, so several lists can share it (search). */
+export async function listInside(
+  tx: TeamTx,
+  ctx: AccessContext,
+  resource: ResourceName,
+  query: URLSearchParams,
+  options: { omitFromSearch?: readonly string[] } = {},
+) {
   const kind = kindOf(resource);
-  return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
-    authorize(ctx, { resource, action: "view" });
-    const { condition, orderBy } = recordQuery(
-      ctx,
-      kind,
-      query,
-      LIST_QUERY_KEYS,
-      options,
-    );
-    const page = parse(
-      z.coerce.number().int().min(1).max(1000000),
-      query.get("page") || 1,
-    );
-    const pageSize = parse(
-      z.coerce.number().int().min(1).max(100),
-      query.get("pageSize") || 30,
-    );
-    // The page carries the matching total; only an empty page past the first needs its own count.
-    const rows = await tx
-      .select({
-        record: records,
-        total: sql<number>`count(*) over ()`.mapWith(Number),
-      })
-      .from(records)
-      .where(condition)
-      .orderBy(...orderBy)
-      .limit(pageSize)
-      .offset((page - 1) * pageSize);
-    const total =
-      rows[0]?.total ??
-      (page > 1
-        ? (
-            await tx.select({ total: count() }).from(records).where(condition)
-          )[0].total
-        : 0);
-    return {
-      data: (
-        await decorate(
-          tx,
-          ctx,
-          rows.map((row) => dto(row.record)),
-        )
-      ).map((row) => redact(ctx, row)),
-      pagination: {
-        page,
-        pageSize,
-        total,
-        totalPages: Math.ceil(total / pageSize),
-      },
-    };
-  });
+  authorize(ctx, { resource, action: "view" });
+  const { condition, orderBy } = recordQuery(
+    ctx,
+    kind,
+    query,
+    LIST_QUERY_KEYS,
+    options,
+  );
+  const page = parse(
+    z.coerce.number().int().min(1).max(1000000),
+    query.get("page") || 1,
+  );
+  const pageSize = parse(
+    z.coerce.number().int().min(1).max(100),
+    query.get("pageSize") || 30,
+  );
+  // The page carries the matching total; only an empty page past the first needs its own count.
+  const rows = await tx
+    .select({
+      record: records,
+      total: sql<number>`count(*) over ()`.mapWith(Number),
+    })
+    .from(records)
+    .where(condition)
+    .orderBy(...orderBy)
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+  const total =
+    rows[0]?.total ??
+    (page > 1
+      ? (await tx.select({ total: count() }).from(records).where(condition))[0]
+          .total
+      : 0);
+  return {
+    data: (
+      await decorate(
+        tx,
+        ctx,
+        rows.map((row) => dto(row.record)),
+      )
+    ).map((row) => redact(ctx, row)),
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    },
+  };
 }
 
 /**
@@ -1217,12 +1250,19 @@ export async function listRecords(
  * refuses an oversized match before any row is loaded. Rows and total then come from one statement,
  * so the file and its Rows count agree; its recheck catches rows added between the two statements.
  * The audit names applied filter keys, never values, and leaves out PRIVATE_EXPORT_FILTER_KEYS.
+ * Rows are redacted, and `hidden` names the keys of the kind the caller may not see, so the file
+ * leaves out their columns.
  */
 export async function exportRecords(
   p: Principal,
   resource: string,
   query: URLSearchParams,
-): Promise<{ resource: ExportResource; rows: RecordDto[]; total: number }> {
+): Promise<{
+  resource: ExportResource;
+  rows: RecordDto[];
+  total: number;
+  hidden: Set<string>;
+}> {
   if (!(EXPORT_RESOURCES as readonly string[]).includes(resource))
     throw new ApiError(404, "not_found", "Unknown resource.");
   const name = resource as ExportResource;
@@ -1246,7 +1286,7 @@ export async function exportRecords(
     );
   return withTeam(p, async (tx, access) => {
     const ctx = accessContext(p, access);
-    authorize(ctx, { resource: name, action: "export" });
+    authorize(ctx, { page: name, resource: name, action: "export" });
     if (query.has("page") || query.has("pageSize"))
       throw new ApiError(
         400,
@@ -1284,7 +1324,12 @@ export async function exportRecords(
         sql`, `,
       )}]::text[])`,
     );
-    return { resource: name, rows: rows.map((row) => dto(row.record)), total };
+    return {
+      resource: name,
+      rows: rows.map((row) => redact(ctx, dto(row.record))),
+      total,
+      hidden: hiddenKeys(ctx, kind),
+    };
   });
 }
 
