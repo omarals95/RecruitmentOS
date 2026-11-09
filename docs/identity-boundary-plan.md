@@ -147,7 +147,7 @@ Expiry is at most 60 seconds after the database `clock_timestamp()` read by the 
 
 ### Coarse write gate
 
-Database writes need any one of `candidates:write`, `recruitment:write`, `cvs:write` or `imports:write`. Per-kind gating would break existing cross-kind `SELECT … FOR UPDATE` locks, for example an application locking its candidate. Viewers and read-only tokens are still denied every write except their own notification read markers. The application's `permission()` and `requireScope()` checks enforce the exact per-resource scopes.
+Database writes need any one of `candidates:write`, `recruitment:write`, `cvs:write` or `imports:write`. Per-kind gating would break existing cross-kind `SELECT … FOR UPDATE` locks, for example an application locking its candidate. Viewers and read-only tokens are still denied every write except their own notification read markers. The application's `authorize()` (`src/lib/authz.ts`) and `requireScope()` checks enforce the exact per-resource scopes.
 
 ### Token audit
 
