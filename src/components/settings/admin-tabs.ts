@@ -1,9 +1,11 @@
+import type { AccessMap } from "@/lib/authz";
+
 /**
  * The Admin portal tabs that exist today, in order. Team tabs follow the team role; History follows
- * company authority, and Roles & permissions and Employees the company owner level only (D1), so a
- * team role never yields any of them and company authority never yields a team tab. A tab is added
- * here only when its feature exists; Employees holds employee erasure and the retention review
- * until the Organisation tab (R2a-16) takes them.
+ * company authority, Roles & permissions the company owner level only (D1), Organisation a company
+ * owner or a company admin with the organisation area, and Directory the role's directory view
+ * action, so a team role never yields any of them and company authority never yields a team tab. A
+ * tab is added here only when its feature exists.
  */
 export const ADMIN_TABS = [
   { key: "members", label: "Members", level: "team" },
@@ -11,7 +13,8 @@ export const ADMIN_TABS = [
   { key: "speed", label: "Speed", level: "team" },
   { key: "tokens", label: "API tokens", level: "team" },
   { key: "roles", label: "Roles & permissions", level: "owner" },
-  { key: "employees", label: "Employees", level: "owner" },
+  { key: "organisation", label: "Organisation", level: "organisation" },
+  { key: "directory", label: "Directory", level: "directory" },
   { key: "history", label: "History", level: "company" },
 ] as const;
 export type AdminTab = (typeof ADMIN_TABS)[number];
@@ -21,21 +24,31 @@ export function isAdminTab(key: string): key is AdminTabKey {
   return ADMIN_TABS.some((tab) => tab.key === key);
 }
 
-/** The tabs the caller may open, from GET /api/v1/me/access's teamRole and companyLevel only. */
+/**
+ * The tabs the caller may open, from GET /api/v1/me/access: teamRole, companyLevel, and the company
+ * areas and directory actions of the access state (never member.role).
+ */
 export function adminTabs({
   teamRole,
   companyLevel,
+  adminAreas = [],
+  actions = {},
 }: {
   teamRole: string | null;
   companyLevel: string | null;
+  adminAreas?: AccessMap["adminAreas"];
+  actions?: AccessMap["actions"];
 }): AdminTab[] {
   const team = teamRole === "owner" || teamRole === "admin";
   const company = companyLevel === "owner" || companyLevel === "admin";
-  return ADMIN_TABS.filter((tab) =>
-    tab.level === "team"
-      ? team
-      : tab.level === "owner"
-        ? companyLevel === "owner"
-        : company,
-  );
+  const shown: Record<AdminTab["level"], boolean> = {
+    team,
+    owner: companyLevel === "owner",
+    organisation:
+      companyLevel === "owner" ||
+      (companyLevel === "admin" && adminAreas.includes("organisation")),
+    directory: !!actions.directory?.includes("view"),
+    company,
+  };
+  return ADMIN_TABS.filter((tab) => shown[tab.level]);
 }

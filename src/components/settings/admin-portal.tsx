@@ -14,7 +14,8 @@ import {
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { adminTabs, type AdminTabKey } from "./admin-tabs";
-import { EmployeesTab } from "./employees-tab";
+import { DirectoryTab } from "./directory-tab";
+import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
 
 /** GET /api/v1/me/access. */
@@ -74,7 +75,10 @@ const accessActions: Record<string, string> = {
 };
 const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
-type TeamTabKey = Exclude<AdminTabKey, "roles" | "employees" | "history">;
+type TeamTabKey = Exclude<
+  AdminTabKey,
+  "roles" | "organisation" | "directory" | "history"
+>;
 const teamPanels: Record<
   TeamTabKey,
   { title: string; text: string; href: string; link: string }
@@ -197,8 +201,10 @@ export function AdminPortalView({
             </>
           ) : current.key === "roles" ? (
             <RolesTab onAccessChanged={onAccessChanged} />
-          ) : current.key === "employees" ? (
-            <EmployeesTab />
+          ) : current.key === "organisation" ? (
+            <OrganisationTab access={access} />
+          ) : current.key === "directory" ? (
+            <DirectoryTab access={access} />
           ) : (
             <TeamPanel tab={current.key} />
           )}
