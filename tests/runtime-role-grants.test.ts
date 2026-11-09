@@ -118,8 +118,8 @@ const authTables = [
   "api_tokens",
   "api_rate_limits",
 ];
-/** Owner-only app tables: neither runtime role holds any privilege on them (0021). */
-const ownerOnlyAppTables = ["app.candidate_erasures"];
+/** Owner-only app tables: neither runtime role holds any privilege on them (0021, 0036). */
+const ownerOnlyAppTables = ["app.candidate_erasures", "app.employee_erasures"];
 /** Read-only for the data role and closed to the identity role (0028). */
 const workspaceTables = ["workspaces", "workspace_teams", "workspace_admins"];
 const workspaceWrites = [
@@ -410,6 +410,7 @@ describe("split runtime role template", () => {
         "tenant_context.config_history(uuid,timestamp with time zone,integer)",
         "tenant_context.purge_bulk_intake(uuid)",
         "tenant_context.erase_candidate(uuid,text,text)",
+        "tenant_context.erase_employee(uuid,text,text)",
         "tenant_context.set_mcp_cv_text_access(boolean)",
         "tenant_context.audit_mcp_cv_read(text,uuid)",
         "tenant_context.set_workspace_authority(text,text,text[],boolean)",
@@ -555,6 +556,8 @@ describe("split runtime role template", () => {
       "SELECT * FROM app.candidate_erasures",
       "INSERT INTO app.candidate_erasures(id,team_id,candidate_id,erased_by,erased_at) VALUES (gen_random_uuid(),'t',gen_random_uuid(),'u',now())",
       "TRUNCATE app.candidate_erasures",
+      "SELECT * FROM app.employee_erasures",
+      "TRUNCATE app.employee_erasures",
       "DELETE FROM app.records",
       "DELETE FROM app.activity",
       "SELECT tenant_context.audit_token('fictional','token.created')",
@@ -583,6 +586,7 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.claim_blob_reconciliation('store_fictional0001')",
       "SELECT tenant_context.purge_bulk_intake(NULL)",
       "SELECT tenant_context.erase_candidate(gen_random_uuid(), 'Fictional', 'app')",
+      "SELECT tenant_context.erase_employee(gen_random_uuid(), 'Fictional', 'app')",
       "SELECT tenant_context.set_mcp_cv_text_access(false)",
       "SELECT tenant_context.audit_mcp_cv_read('get_cv_text', gen_random_uuid())",
       "SELECT tenant_context.set_workspace_authority('fictional', 'admin', '{fields}', true)",
@@ -598,6 +602,8 @@ describe("split runtime role template", () => {
         `DELETE FROM app.${table}`,
       ]),
       "SELECT * FROM app.candidate_erasures",
+      "SELECT * FROM app.employee_erasures",
+      "TRUNCATE app.employee_erasures",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",
       "DELETE FROM auth.initial_admin_claim",
@@ -947,6 +953,96 @@ describe("split runtime role template", () => {
         path: true,
       })),
     );
+  });
+
+  it("grants the data role the employee erasure helper only, no tombstone write, and refuses forged erasure activity (0036)", async () => {
+    const writes = [
+      "INSERT INTO app.employee_erasures(id,workspace_id,employee_id,erased_by,erased_at,erasure_source) VALUES (gen_random_uuid(),'00000000-0000-4000-a000-000000000001',gen_random_uuid(),'fictional',now(),'app')",
+      "UPDATE app.employee_erasures SET erased_at = now()",
+      "DELETE FROM app.employee_erasures",
+      "TRUNCATE app.employee_erasures",
+    ];
+    for (const role of ["dataDb", "identityDb"] as const) {
+      await harness[role]();
+      await expectDenied(writes);
+    }
+    // The same fictional company owner as the cases above; seeding is idempotent.
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    const forged = (kind: string, action: string, pointer: string) =>
+      `INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary,metadata,employee_erasure_id) VALUES ('${owner.teamId}','${owner.userId}','session','${action}','${kind}','Forged','{}',${pointer})`;
+    for (const statement of [
+      forged("employee-erasure", "employee.erased", "NULL"),
+      forged("employee-erasure", "employee.erased", "gen_random_uuid()"),
+      forged("record", "record.updated", "gen_random_uuid()"),
+      forged("directory", "directory.employee_updated", "gen_random_uuid()"),
+    ])
+      await expect(
+        harness.dataDb().then((db) =>
+          withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+            await installTenantContext(tx, owner, snapshot);
+            return tx.execute(sql.raw(statement));
+          }),
+        ),
+        statement,
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+    await harness.asSuperuser();
+    const helper = "tenant_context.erase_employee(uuid,text,text)";
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    expect(await execute(splitRoles.data, helper)).toBe(true);
+    expect(await execute(splitRoles.identity, helper)).toBe(false);
+    expect(await execute("public", helper)).toBe(false);
+    for (const fn of [
+      "app.audit_directory_change()",
+      "app.prevent_activity_mutation()",
+    ])
+      for (const grantee of [...roles, "public"])
+        expect(await execute(grantee, fn), `${grantee} ${fn}`).toBe(false);
+    // Owner-owned with the fixed search_path; the helper and the audit are security definers, the
+    // activity guard runs as the caller, so its owner check sees who changes the row.
+    expect(
+      (
+        await harness.client.query<{
+          fn: string;
+          owned: boolean;
+          definer: boolean;
+          path: boolean;
+        }>(
+          `SELECT p.oid::regprocedure::text AS fn, p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) AS path
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[]) ORDER BY 1`,
+          [
+            [
+              helper,
+              "app.audit_directory_change()",
+              "app.prevent_activity_mutation()",
+            ],
+          ],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        fn: "app.audit_directory_change()",
+        owned: true,
+        definer: true,
+        path: true,
+      },
+      {
+        fn: "app.prevent_activity_mutation()",
+        owned: true,
+        definer: false,
+        path: true,
+      },
+      { fn: helper, owned: true, definer: true, path: true },
+    ]);
   });
 });
 

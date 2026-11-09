@@ -1573,3 +1573,194 @@ describe("upgrade from 0034 to configured member roles", () => {
     expect({ rows: await rows(), install: await install() }).toEqual(settled);
   });
 });
+
+// An employee and its audit row written by the 0035 schema, upgraded through 0036: every row stays,
+// the employee gains the standard retention class and no left date, app.employee_erasures arrives
+// empty under FORCE RLS, the helper is owner-owned with PUBLIC EXECUTE revoked, the two replaced
+// functions keep their owner, grants and settings, the re-created insert policy still takes a
+// directory audit row, and a second run changes nothing.
+describe("upgrade from 0035 to employee erasure", () => {
+  const pg = new PGlite();
+  const owner = "employee_erasure_upgrade_owner";
+  const company = "00000000-0000-4000-a000-000000000001";
+  const companyOwner = principal(
+    "employee-erasure-upgrade-owner",
+    "employee-erasure-upgrade-team",
+    "owner",
+  );
+  const tables = [
+    "app.workspaces",
+    "app.workspace_teams",
+    "app.workspace_admins",
+    "app.activity",
+    "app.employees",
+    "auth.member",
+  ];
+  const rows = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    return Object.fromEntries(
+      await Promise.all(
+        tables.map(async (table) => [
+          table,
+          (
+            await pg.query<Record<string, unknown>>(
+              `SELECT * FROM ${table} ORDER BY 1, 2`,
+            )
+          ).rows,
+        ]),
+      ),
+    );
+  };
+  const functions = async () =>
+    (
+      await pg.query<{ proname: string; source: string }>(
+        `SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proacl::text AS acl,
+           p.proconfig AS config, p.prosrc AS source
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'app' AND p.proname IN ('prevent_activity_mutation', 'audit_directory_change')
+         ORDER BY p.proname`,
+      )
+    ).rows;
+  let before: Awaited<ReturnType<typeof rows>>;
+  let beforeFunctions: Awaited<ReturnType<typeof functions>>;
+  const insertEmployee = (number: string) =>
+    withDeadlinesAndSnapshot(
+      drizzle(pg, { schema }) as unknown as AppDb,
+      async (tx, snapshot) => {
+        await installTenantContext(tx, companyOwner, snapshot);
+        await tx.execute(
+          sql`insert into app.employees(workspace_id, display_name, employee_number, work_email) values (${company}::uuid, 'Fictional Upgrade Employee', ${number}, 'upgrade.employee@example.test')`,
+        );
+      },
+    );
+
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0035_member_roles.sql");
+    await installTenantContextKey(pg);
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('employee-erasure-upgrade-owner','Fictional Upgrade Owner','employee-erasure-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('employee-erasure-upgrade-team','Fictional Upgrade Team','employee-erasure-upgrade-team','employee-erasure-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('employee-erasure-upgrade-mo','employee-erasure-upgrade-team','employee-erasure-upgrade-owner','owner');`);
+    // One employee written and audited through the 0035 triggers by the company owner.
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await insertEmployee("UP-EMP-1");
+    before = await rows();
+    beforeFunctions = await functions();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every existing row, gives the employee the standard class and no left date, and sets storage schema 15", async () => {
+    expect(before["app.employees"]).toHaveLength(1);
+    expect(before["app.activity"]).toHaveLength(1);
+    const after = await rows();
+    expect({
+      ...after,
+      "app.activity": after["app.activity"].map(earlierColumns),
+      "app.employees": after["app.employees"].map(
+        ({ retention_class: _class, left_at: _left, ...kept }) => kept,
+      ),
+    }).toEqual(before);
+    expect(
+      after["app.employees"].map(({ retention_class, left_at }) => ({
+        retention_class,
+        left_at,
+      })),
+    ).toEqual([{ retention_class: "standard", left_at: null }]);
+    expect(
+      after["app.activity"].map(
+        ({ employee_erasure_id }) => employee_erasure_id,
+      ),
+    ).toEqual([null]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 15 }]);
+  });
+
+  it("adds app.employee_erasures empty, under ENABLE and FORCE RLS", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          `SELECT c.relrowsecurity, c.relforcerowsecurity, pg_get_userbyid(c.relowner) AS owner
+           FROM pg_class c WHERE c.oid = 'app.employee_erasures'::regclass`,
+        )
+      ).rows,
+    ).toEqual([{ relrowsecurity: true, relforcerowsecurity: true, owner }]);
+    expect(
+      (await pg.query("SELECT count(*)::int AS n FROM app.employee_erasures"))
+        .rows,
+    ).toEqual([{ n: 0 }]);
+  });
+
+  it("adds the helper owner-owned, security definer, with the fixed search_path and PUBLIC EXECUTE revoked", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          `SELECT pg_get_userbyid(p.proowner) = (SELECT pg_get_userbyid(n.nspowner) FROM pg_namespace n WHERE n.nspname = 'tenant_context') AS owned,
+             pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config,
+             has_function_privilege('public', p.oid, 'EXECUTE') AS public
+           FROM pg_proc p WHERE p.oid = 'tenant_context.erase_employee(uuid,text,text)'::regprocedure`,
+        )
+      ).rows,
+    ).toEqual([
+      {
+        owned: true,
+        owner,
+        definer: true,
+        config: ["search_path=pg_catalog, pg_temp"],
+        public: false,
+      },
+    ]);
+  });
+
+  it("replaces the activity guard and the directory audit in place, with the same owner, grants and settings", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const after = await functions();
+    expect(after.map((row) => row.proname)).toEqual(
+      beforeFunctions.map((row) => row.proname),
+    );
+    for (const [index, row] of after.entries()) {
+      const { source, ...kept } = row;
+      const { source: was, ...earlier } = beforeFunctions[index];
+      expect(kept, row.proname).toEqual(earlier);
+      expect(was, row.proname).not.toContain("employee_erasure");
+      expect(source, row.proname).toContain("employee_erasure");
+    }
+  });
+
+  it("still audits an employee created through the re-created insert policy, and a second run changes nothing", async () => {
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await insertEmployee("UP-EMP-2");
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          "SELECT team_id, actor_id, kind, action, employee_erasure_id FROM app.activity ORDER BY created_at, id",
+        )
+      ).rows,
+    ).toEqual(
+      [1, 2].map(() => ({
+        team_id: "employee-erasure-upgrade-team",
+        actor_id: "employee-erasure-upgrade-owner",
+        kind: "directory",
+        action: "directory.employee_created",
+        employee_erasure_id: null,
+      })),
+    );
+    const settled = { rows: await rows(), functions: await functions() };
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+    expect({ rows: await rows(), functions: await functions() }).toEqual(
+      settled,
+    );
+  });
+});
