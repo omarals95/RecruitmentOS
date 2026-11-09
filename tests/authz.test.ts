@@ -1347,9 +1347,11 @@ describe("MCP tools on the engine (R2a-09)", () => {
   });
 
   it("names only record resources and no company area or directory, plan or admin page", () => {
-    const requests = [
+    const requests: AccessRequest[] = [
       ...TOOLS.flatMap((definition) => definition.access.flat()),
-      ...Object.values(INPUT_CHECKS).flatMap((check) => check.requests),
+      ...Object.values(INPUT_CHECKS).flatMap(
+        (check): AccessRequest[] => check.requests,
+      ),
     ];
     expect(requests.length).toBeGreaterThan(0);
     for (const request of requests) {
