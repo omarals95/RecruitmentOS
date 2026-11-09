@@ -10,7 +10,6 @@ import {
   type FormEvent,
   type RefObject,
 } from "react";
-import { authClient } from "@/lib/auth-client";
 import type { Action } from "@/domain/config";
 import type { ConfirmOptions } from "@/components/ui/confirm-dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -22,6 +21,10 @@ import {
   useWorkspace,
 } from "@/components/workspace/client";
 import type { Requester } from "@/components/workspace/optimistic";
+import {
+  useTeamMembers,
+  type TeamMember,
+} from "@/components/workspace/team-members";
 import type { Employee, Position } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
@@ -46,10 +49,6 @@ export interface DirectoryFilters {
   positionId: string;
   status: "" | Employee["status"];
   includeArchived: boolean;
-}
-export interface TeamMember {
-  userId: string;
-  name: string;
 }
 export interface DirectoryRowHandlers {
   edit: (row: Employee) => void;
@@ -120,39 +119,6 @@ const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
 // Row actions never break inside a word; a narrow table scrolls inside its .table-wrap.
 const actionRow = { flexWrap: "wrap", overflowWrap: "normal", gap: 8 } as const;
-
-/** The current team's members by name, from Better Auth, as the History tab names them. */
-function useTeamMembers(teamId: string | null, enabled: boolean) {
-  const [members, setMembers] = useState<TeamMember[] | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    if (!teamId || !enabled) return;
-    let active = true;
-    authClient.organization
-      .getFullOrganization({ query: { organizationId: teamId } })
-      .then((result) => {
-        if (result.error)
-          throw new Error(
-            result.error.message || "The team's members could not be loaded.",
-          );
-        const list = (result.data?.members ?? []) as {
-          userId: string;
-          user: { name: string };
-        }[];
-        if (active)
-          setMembers(
-            list.map((item) => ({ userId: item.userId, name: item.user.name })),
-          );
-      })
-      .catch((e) => {
-        if (active) setError(humanError(e));
-      });
-    return () => {
-      active = false;
-    };
-  }, [teamId, enabled]);
-  return { members, error };
-}
 
 /**
  * The Directory tab (R2a-16), for contexts holding directory:read: search and filter employees
