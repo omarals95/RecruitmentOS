@@ -1,6 +1,6 @@
-# Candidate erasure runbook
+# Candidate and employee erasure runbook
 
-How a team owner handles a request to permanently erase a candidate's data (P1-21, owner decision DEC-08). It describes what RecruitmentOS does and does not remove. It makes no claim that following it meets any law or regulation; the owner decides that.
+How a team owner handles a request to permanently erase a candidate's data (P1-21, owner decision DEC-08), and how a company owner handles one for an employee of the company directory ([Erase an employee](#erase-an-employee), R2a-15). It describes what RecruitmentOS does and does not remove. It makes no claim that following it meets any law or regulation; the owner decides that.
 
 ## When to use it
 
@@ -106,3 +106,71 @@ Keep a log outside the app, with no personal data, one line per erasure:
 | ------------- | ----------- | ---- | ------------ | ---------- |
 
 It is the list to rerun after a database restore and the evidence that each request was handled. After a restore, take the name for `--confirm-name` from the restored record (open its profile as an owner), never from the log.
+
+## Erase an employee
+
+How a company owner permanently erases one employee of the company directory (R2a-15, owner decisions D1 and D11). The steps mirror candidate erasure; the differences are noted.
+
+### When to use it
+
+- Use it only for data-protection requests, for example a former employee asking for their directory entry to be deleted, or after the retention review (below) when you have decided the data is no longer needed.
+- For routine cases, set the employee's status to Left or archive them instead. Both keep the history; archiving cannot be undone but is never presented as erasure.
+- Only a company owner can erase an employee, and only while signed in to the app. Company admins (with or without the organisation area), team owners and admins without company authority, members with directory:write, API tokens, OAuth grants and the MCP endpoint cannot. There is no script for employees.
+- Nothing is ever erased automatically. **Admin portal > Employees > Retention review** lists, for company owners only, the employees whose status has been Left for 12 months or more, oldest first, archived ones included. The retention class (Standard or Extended) is shown there but enforces nothing yet.
+
+### Before erasing
+
+1. **Verify the requester** outside the app, through a channel you already trust. The app does not verify identity for you.
+2. **Find every match.** In **Admin portal > Employees**, search by part of the name and by the employee number; archived employees are included. Note each employee id from the response of `GET /api/v1/employees?search=...&includeArchived=true` or from your directory export, and erase each match separately.
+3. **Check for a legal hold.** None is implemented in the app, so the owner decides whether any reason requires keeping the data, and records that decision outside the app.
+
+### Erase in the app
+
+1. Sign in as a company owner whose team role has directory:read (a team owner or admin), and open **Admin portal > Employees**.
+2. Search for the employee, or find them in the retention review, and choose **Permanently erase employee** on their row.
+3. Read what is removed, kept and not covered.
+4. Type the employee's name exactly as shown (case matters; spaces at either end are ignored). **Permanently erase** stays disabled until it matches.
+5. Choose **Permanently erase**. The page shows "Employee permanently erased." and both lists reload without the employee.
+6. Record the erasure in the owner's request log (below). The erasure id is in the response of `POST /api/v1/employees/{id}/erasure`.
+
+A second erasure of the same employee is safe: it returns the earlier erasure (`alreadyErased: true`, the same erasure id, time and counts) and writes nothing.
+
+### Verify
+
+1. Search **Admin portal > Employees** for the name and the employee number: nothing is found.
+2. Activity, for members with company authority, shows "Permanently erased an employee" by the erasing owner, and the earlier directory entries about the employee read "Details removed by employee erasure" in every team of the company.
+3. Optionally, the owner runs this read-only SQL in psql as the migration owner (the owner of schema `tenant_context`, whose owner-only policies let it read these rows) over a direct connection. It prints counts and ids only:
+
+   ```sql
+   -- psql: replace both values; the results never show personal data.
+   \set workspace '<workspace id>'
+   \set employee '<employee id>'
+   SELECT
+     (SELECT count(*) FROM app.employees WHERE workspace_id = :'workspace' AND id = :'employee') AS employee_rows,
+     (SELECT count(*) FROM app.employee_positions WHERE workspace_id = :'workspace' AND employee_id = :'employee') AS position_rows;
+   SELECT e.id AS erasure_id, e.erased_at, e.erased_by, e.erasure_source,
+     (SELECT count(*) FROM app.activity a WHERE a.employee_erasure_id = e.id) AS activity_rows
+   FROM app.employee_erasures e WHERE e.workspace_id = :'workspace' AND e.employee_id = :'employee';
+   ```
+
+   Both counts in the first result are 0. The second result has exactly one row; `activity_rows` is the redacted rows plus the one `employee.erased` row.
+
+### What remains and why
+
+- **The tombstone** in `app.employee_erasures`: the erasure id, company, employee id, erasing owner, time and source. It is the audit record and makes a retry return the earlier erasure. No name, email, phone or employee number.
+- **Redacted activity rows**: the type, time and actor of each directory and home-unit event about the employee, with a fixed summary, empty details and a pointer to the tombstone.
+- **The `employee.erased` row** with counts only (position rows, redacted activity rows, user links).
+- **One home-unit change row** naming the user id that was linked to the employee, when there was one: removing the link changes that member's home units, so company owners see it under recent access changes. It holds the user id, never the employee.
+- **The user's account, team memberships, configured role and company authority**: erasure removes only the directory entry and the link. Remove the account or memberships separately if the request covers them.
+- **Positions and units**: they are company structure, not personal data, and stay.
+- **Neon backups and point-in-time history** until their retention window passes. After any restore to a point before an erasure, erase each employee in the owner's request log again through the app: search for the employee id's current name in the restored directory and type it exactly as shown.
+- **Import spreadsheets and other copies outside the app**, such as the files the directory was imported from. Remove the person from those sources before any re-import, because a re-import would create the employee again.
+
+### The owner's request log
+
+Keep a log outside the app, with no personal data, one line per erasure:
+
+| Date received | Date erased | Employee id | Erasure id |
+| ------------- | ----------- | ----------- | ---------- |
+
+It is the list to rerun after a database restore and the evidence that each request was handled. After a restore, rerun each line through **Admin portal > Employees**, taking the name to type from the restored directory, never from the log.
