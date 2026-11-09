@@ -28,6 +28,7 @@
  *   change, while a company owner session's move writes one org.unit_moved and one
  *   scope.home_units_changed row; and two owner sessions moving A under B and B under A at once
  *   commit at most once, the second waiting and then refused with RQ009, leaving an acyclic closure.
+ *   While such a move holds the workspace lock, an insert keyed to the workspace does not wait.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -3072,6 +3073,12 @@ async function runChecks(run: Run) {
         "INSERT INTO app.org_units(workspace_id,parent_id,level_id,name,code) VALUES($1::uuid,$2::uuid,$3::uuid,'Fictional unit',$4)",
         [COMPANY_WORKSPACE, org.p2, lower, orgCode("y")],
       );
+      // A planted valid_from would reorder the code's rows for the guard; it is never accepted.
+      const dated = await attempt(
+        data,
+        "INSERT INTO app.org_units(workspace_id,parent_id,level_id,name,code,valid_from) VALUES($1::uuid,$2::uuid,$3::uuid,'Fictional unit',$4,'2999-01-01')",
+        [COMPANY_WORKSPACE, org.p1, lower, orgCode("dated")],
+      );
       const unchanged = (await orgSeen(data)) === seen;
       probe.at("positive-control");
       // The same admin renames the unit; rolled back with the transaction.
@@ -3084,6 +3091,7 @@ async function runChecks(run: Run) {
         denial(moved),
         denial(archived),
         denial(reparented),
+        denial(dated),
         ["outcome", unchanged],
         outcomeIs(
           renamed.ok && renamed.count === 1,
@@ -3187,6 +3195,50 @@ async function runChecks(run: Run) {
         parentOf(org.raceA) === org.raceB &&
           parentOf(org.raceB) === null &&
           drift === 0,
+      ],
+    );
+  });
+
+  // The org workspace lock is FOR NO KEY UPDATE: while a move holds it, an insert keyed to the
+  // workspace (its foreign-key check takes FOR KEY SHARE on the row) does not wait. Both roll back.
+  await check("org-lock-key-share", async (probe) => {
+    await data.query("BEGIN");
+    await data2.query("BEGIN");
+    let moved: Outcome | undefined;
+    let keyed: Outcome | undefined;
+    try {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      await installAs(data2, signer, p.ownerA);
+      probe.at("outcome");
+      moved = await settle(
+        data.query(
+          "UPDATE app.org_units SET parent_id = NULL WHERE id = $1::uuid",
+          [org.raceA],
+        ),
+      );
+      await data2.query("SET LOCAL lock_timeout = '2s'");
+      keyed = await settle(
+        data2.query(
+          "INSERT INTO app.config_objects(workspace_id,type,key) VALUES($1::uuid,'workflow',$2)",
+          [COMPANY_WORKSPACE, configKey("org-lock")],
+        ),
+      );
+    } finally {
+      await data2.query("ROLLBACK").catch(() => {});
+      await data.query("ROLLBACK").catch(() => {});
+    }
+    probe.at("end-state");
+    return probe.all(
+      outcomeIs(moved?.ok === true && moved.count === 1, moved),
+      outcomeIs(keyed?.ok === true && keyed.count === 1, keyed),
+      [
+        "end-state",
+        (await count(
+          owner,
+          "SELECT count(*)::int AS n FROM app.config_objects WHERE key = $1",
+          [configKey("org-lock")],
+        )) === 0,
       ],
     );
   });
