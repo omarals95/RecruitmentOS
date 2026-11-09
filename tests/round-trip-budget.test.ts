@@ -687,4 +687,67 @@ describe("database round trips per request", () => {
       }
     });
   });
+
+  // R2a-20 (job 062): a task's assignees and linked record come back in the statements that read
+  // and write it; only an assignee change adds a statement, the one that calls the helpers.
+  it("keeps a task page with assignees and links at 6, a linked write at 11 and an assignee swap at 12", async () => {
+    const colleague = await seedIdentity(fixture.db, {
+      userId: "budget-colleague",
+      teamId: owner.teamId,
+      role: "recruiter",
+    });
+    const linked = await createRecord(owner, "tasks", {
+      bucketId: buckets[0].id,
+      parentRecordId: vacancy.id,
+      data: {
+        title: "Fictional budget linked task",
+        assigneeIds: [owner.userId],
+      },
+    });
+    const read = await call("GET", "/api/v1/tasks?page=1&pageSize=25", {
+      resource: "tasks",
+    });
+    expect(read.status).toBe(200);
+    expect(
+      (read.body.data as unknown as RecordDto[]).find(
+        (row) => row.id === linked.id,
+      ),
+    ).toMatchObject({
+      parentKind: "vacancy",
+      parentLabel: "Fictional budget vacancy",
+      data: { assigneeIds: [owner.userId] },
+    });
+    expect(read.roundTrips).toBe(6);
+
+    const relinked = await call(
+      "PATCH",
+      `/api/v1/tasks/${linked.id}`,
+      { resource: "tasks", id: linked.id },
+      { version: linked.version, parentRecordId: buckets[2].id },
+    );
+    expect(relinked.status).toBe(200);
+    expect(relinked.body.data).toMatchObject({
+      parentKind: "bucket",
+      data: { assigneeIds: [owner.userId] },
+    });
+    expect(relinked.roundTrips).toBe(11);
+
+    const swapped = await call(
+      "PATCH",
+      `/api/v1/tasks/${linked.id}`,
+      { resource: "tasks", id: linked.id },
+      {
+        version: relinked.body.data.version,
+        bucketId: buckets[1].id,
+        data: { assigneeIds: [colleague.userId] },
+      },
+    );
+    expect(swapped.status).toBe(200);
+    expect(swapped.body.data).toMatchObject({
+      bucketId: buckets[1].id,
+      data: { assigneeIds: [colleague.userId] },
+    });
+    // The move of the simple write (11) plus one statement for the added and the removed assignee.
+    expect(swapped.roundTrips).toBe(12);
+  });
 });
