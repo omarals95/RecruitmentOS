@@ -234,6 +234,8 @@ export const idempotency = appSchema.table(
     response: jsonb("response").notNull(),
     expiresAt: time("expires_at").notNull(),
     createdAt: time("created_at").notNull().defaultNow(),
+    /** The role version the response was composed under; a replay under another is recomposed. */
+    roleVersionId: uuid("role_version_id"),
   },
   (t) => [primaryKey({ columns: [t.teamId, t.actorKey, t.operation, t.key] })],
 );
