@@ -139,6 +139,32 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/offers" \
   --data '{"applicationId":"9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","data":{"title":"Fictional Payroll Analyst offer","amount":"15000.00","currency":"AED","payPeriod":"Monthly","expiryDate":"2026-12-01"}}'
 ```
 
+## Create and assign a team task
+
+`POST /api/v1/tasks` needs `recruitment:write`. `data.assigneeIds` takes up to 10 distinct user IDs of members of the token's team; they are stored as assignments, not in the task's data, and every task response returns them sorted (`[]` for none). `parentRecordId` links one job role, vacancy, bucket, task field or other task you may see. The free-text `data.owner` label is separate from the assignees.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/tasks" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: task-fictional-1" \
+  --data '{"bucketId":"4a1b2c3d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","parentRecordId":"7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b","data":{"title":"Fictional reference check","priority":"High","assigneeIds":["fictional-user-1","fictional-user-2"]}}'
+```
+
+The response carries `data.assigneeIds` and, for a linked record you may see, `parentKind` (here `vacancy`) and `parentLabel` (its title, with " (archived)" when archived). Change the assignees with `PATCH /api/v1/tasks/{id}`, the task's `version` and the full new list, for example `{"version":1,"data":{"assigneeIds":["fictional-user-2"]}}`: only the members added or removed change, and a `PATCH` without `assigneeIds` leaves them as they are. `{"version":2,"parentRecordId":null}` removes the link.
+
+List the tasks assigned to you with `GET /api/v1/tasks?assignedToMe=true` (`false` lists the others); `pagination.total` counts only the matching tasks. The filter is list-only: `GET /api/v1/tasks/export?assignedToMe=true` and any other value answer 400 `invalid_query`.
+
+Refusals roll back the whole write:
+
+| Response                        | When                                                                                                                                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400 `invalid_input`             | more than 10 assignees, or the same user ID twice                                                                                                                                                         |
+| 400 `invalid_assignee`          | a user ID that is not a member of the team, including removing a former member                                                                                                                            |
+| 403 `self_assignment_forbidden` | a member whose role shows only some tasks adds or removes themselves                                                                                                                                      |
+| 403 `forbidden`                 | the assignees of the task cannot be changed                                                                                                                                                               |
+| 400 `invalid_reference`         | a link to a saved view, comment, candidate, application, interview, offer, onboarding or checklist item, to the task itself, or to a record that is missing, in another team or outside your record scope |
+
 ## Upload a CV
 
 CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private storage.

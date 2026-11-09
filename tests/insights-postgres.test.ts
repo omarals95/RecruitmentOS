@@ -197,7 +197,7 @@ describe("bounded, factual PostgreSQL reporting", () => {
     expect((await overview(fresh)).overdueTasks.map((row) => row.id)).toEqual([
       openTask.id,
     ]);
-    // "Recruitment tasks" counts only tasks outside completed buckets.
+    // "Team tasks" counts only tasks outside completed buckets.
     expect((await overview(fresh)).counts.tasks).toBe(1);
     expect((await analytics(fresh, range)).counts.tasks).toBe(1);
     const before = await notifications(fresh);
