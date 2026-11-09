@@ -1684,6 +1684,52 @@ describe("positions and employees under the split runtime roles", () => {
       );
     });
 
+    it("links a job role of the writer's own team only, and shows it to that team only", async () => {
+      const [{ id: jobRole }] = await sqlAs(
+        owner,
+        `INSERT INTO app.records(team_id, kind, data, created_by) VALUES ('dir-team-a', 'job-role', '{"title":"Fictional Payroll Role"}', 'dir-owner') RETURNING id`,
+      );
+      const [{ id: archivedRole }] = await sqlAs(
+        owner,
+        `INSERT INTO app.records(team_id, kind, data, created_by, archived_at) VALUES ('dir-team-a', 'job-role', '{"title":"Fictional Old Role"}', 'dir-owner', now()) RETURNING id`,
+      );
+      const made = await createPosition(owner, {
+        title: "Fictional Role Desk",
+        code: "POS-ROLE",
+        orgUnitId: unitA,
+        jobRoleId: jobRole as string,
+      });
+      expect(made.jobRoleId).toBe(jobRole);
+      expect(
+        await look(
+          "SELECT job_role_team_id, job_role_id FROM app.positions WHERE id = $1",
+          [made.id],
+        ),
+      ).toEqual([{ job_role_team_id: "dir-team-a", job_role_id: jobRole }]);
+      const seen = (p: Principal) =>
+        listPositions(p, { unitId: unitA }).then(
+          (page) => page.data.find((row) => row.id === made.id)?.jobRoleId,
+        );
+      expect(await seen(teamAdminA)).toBe(jobRole);
+      expect(await seen(orgAdmin)).toBeNull();
+      // Another team's or an archived job role is not found; null clears the link.
+      for (const id of [jobRole, archivedRole])
+        await refusedApi(
+          () => updatePosition(orgAdmin, made.id, { jobRoleId: id as string }),
+          404,
+          "not_found",
+        );
+      await refusedApi(
+        () =>
+          updatePosition(owner, made.id, { jobRoleId: archivedRole as string }),
+        404,
+        "not_found",
+      );
+      expect(
+        (await updatePosition(owner, made.id, { jobRoleId: null })).jobRoleId,
+      ).toBeNull();
+    });
+
     it("refuses position writes to a fields-only company admin and to team roles", async () => {
       const target = (await listPositions(owner)).data[0];
       for (const p of [fieldsAdmin, teamAdminA, teamOwnerB, recruiter])
