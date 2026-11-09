@@ -266,8 +266,8 @@ function kindOf(request: AccessRequest): RecordKind | null {
 
 /**
  * The one authorization decision: the record scope and field rules for an allowed request, or a
- * 403 in today's words. Synchronous and pure. The records service decides through it; insights,
- * export columns and MCP move onto it in R2a-08 and R2a-09.
+ * 403 in today's words. Synchronous and pure. The records service, insights and exports decide
+ * through it; MCP moves onto it in R2a-09.
  */
 export function authorize(
   ctx: AccessContext,
@@ -299,6 +299,19 @@ export function authorize(
   };
 }
 
+/** authorize() without the throw: the decision, or null where authorize() refuses with a 403. */
+export function decide(
+  ctx: AccessContext,
+  request: AccessRequest,
+): AccessDecision | null {
+  try {
+    return authorize(ctx, request);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403) return null;
+    throw error;
+  }
+}
+
 /** The caller's own answers for the UI (GET /api/v1/me/access). */
 export type AccessMap = {
   role: Pick<RoleBody, "name" | "membership"> | null;
@@ -316,22 +329,16 @@ export type AccessMap = {
  * company areas.
  */
 export function accessMap(ctx: AccessContext): AccessMap {
-  const decide = (request: AccessRequest) => {
-    try {
-      return authorize(ctx, request);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 403) return null;
-      throw error;
-    }
-  };
   const actions: AccessMap["actions"] = {};
   for (const resource of ACTION_RESOURCES) {
-    const allowed = ACTIONS.filter((action) => decide({ resource, action }));
+    const allowed = ACTIONS.filter((action) =>
+      decide(ctx, { resource, action }),
+    );
     if (allowed.length) actions[resource] = allowed;
   }
   const fields: AccessMap["fields"] = {};
   for (const resource of RECORD_RESOURCES) {
-    const decision = decide({ resource, action: "view" });
+    const decision = decide(ctx, { resource, action: "view" });
     if (decision) fields[resourceToKind[resource]] = decision.fields;
   }
   const { role } = ctx;
@@ -342,7 +349,7 @@ export function accessMap(ctx: AccessContext): AccessMap {
     actions,
     fields,
     adminAreas: ADMIN_AREAS.filter((adminArea) =>
-      decide({ action: "admin", adminArea }),
+      decide(ctx, { action: "admin", adminArea }),
     ),
   };
 }
@@ -373,6 +380,31 @@ export function scopeFilter(ctx: AccessContext, kind: RecordKind): SQL[] {
   ];
 }
 
+function fieldRules(role: RoleBody, kind: RecordKind): Record<string, string> {
+  return kind === "saved-view"
+    ? {}
+    : (role.fields[kind as keyof RoleBody["fields"]] ?? {});
+}
+
+/**
+ * The keys of one kind the caller may not see: data keys, custom field ids and top-level keys whose
+ * rule is hidden or hidden-unless-approver, plus SENSITIVE_CANDIDATE_FIELDS for an MCP candidate.
+ * Every output that leaves fields out, redact() included, takes them from here.
+ */
+export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
+  if (!ctx.role) throw forbidden();
+  const rules = fieldRules(ctx.role, kind);
+  const hidden = new Set(
+    Object.keys(rules).filter(
+      (key) =>
+        rules[key] === "hidden" || rules[key] === "hidden-unless-approver",
+    ),
+  );
+  if (ctx.channel === "mcp" && kind === "candidate")
+    for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
+  return hidden;
+}
+
 /**
  * A copy of the row without the fields the caller may not see, in data and data.customValues, and
  * without hidden top-level keys (importMeta, legacyId and the decorated labels); with explicit read
@@ -384,18 +416,8 @@ export function redact<T extends RecordDto>(
   row: T,
 ): T & { readOnlyFields?: string[] } {
   if (!ctx.role) throw forbidden();
-  const rules: Record<string, string> =
-    row.kind === "saved-view"
-      ? {}
-      : (ctx.role.fields[row.kind as keyof RoleBody["fields"]] ?? {});
-  const hidden = new Set(
-    Object.keys(rules).filter(
-      (key) =>
-        rules[key] === "hidden" || rules[key] === "hidden-unless-approver",
-    ),
-  );
-  if (ctx.channel === "mcp" && row.kind === "candidate")
-    for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
+  const rules = fieldRules(ctx.role, row.kind);
+  const hidden = hiddenKeys(ctx, row.kind);
   const readOnly = Object.keys(rules).filter((key) => rules[key] === "read");
   const data: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(row.data))

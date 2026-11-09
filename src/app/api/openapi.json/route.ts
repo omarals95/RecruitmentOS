@@ -329,7 +329,7 @@ export function GET() {
           [`${scope}:read`],
           {
             summary: `Export ${resource} as CSV`,
-            description: `Requires ${scope}:read. Send no body. The query takes the list filters plus sort and direction; page and pageSize are refused because an export covers every matching record. Rows and their count come from one snapshot. 400 invalid_query for an unsupported, repeated or page filter; 400 export_too_large when more than 100,000 records match; 404 for a resource that cannot be exported. Each export writes one activity row (kind export) with the list, row count and applied filter keys, never filter values; the exporter's private shortlisted filter, and on candidates the personal status filter, still apply but are left out of that row; if that row cannot be written, no file is sent.`,
+            description: `Requires ${scope}:read. Send no body. The query takes the list filters plus sort and direction; page and pageSize are refused because an export covers every matching record. Rows and their count come from one snapshot. Columns for fields the caller's role hides are left out and the rest keep their order. 400 invalid_query for an unsupported, repeated or page filter; 400 export_too_large when more than 100,000 records match; 404 for a resource that cannot be exported. Each export writes one activity row (kind export) with the list, row count and applied filter keys, never filter values; the exporter's private shortlisted filter, and on candidates the personal status filter, still apply but are left out of that row; if that row cannot be written, no file is sent.`,
           },
           {
             "200": {
@@ -2035,7 +2035,7 @@ export function GET() {
       {
         summary: "Search the workspace",
         description:
-          "No fixed scope: each group is included only when the caller can read it (candidates:read or recruitment:read).",
+          "No fixed scope: each group is included only when the caller's role and scopes allow viewing it (candidates:read or recruitment:read); a group the caller cannot view is left out rather than refused.",
       },
       { "200": { description: "{groups, total, limited, data}." } },
       { params: [{ name: "q", in: "query", schema: { type: "string" } }] },
