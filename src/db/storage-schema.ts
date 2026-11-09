@@ -4,10 +4,10 @@ import { ApiError } from "../lib/errors";
  * The storage reference, ledger, Blob read-lease, team limit, Blob charge release, PUT ticket count,
  * cleanup cooldown, candidate erasure, MCP CV text setting, company workspace, three-argument
  * tenant context, versioned configuration store, explicit scope ceiling, configuration versions
- * through install, organisation hierarchy and positions and employees schema this code was written
- * for (`0034_positions_employees.sql`).
+ * through install, organisation hierarchy, positions and employees, and configured member roles
+ * schema this code was written for (`0035_member_roles.sql`).
  */
-export const STORAGE_SCHEMA_VERSION = 13;
+export const STORAGE_SCHEMA_VERSION = 14;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {

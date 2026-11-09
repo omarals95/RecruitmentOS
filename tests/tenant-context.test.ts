@@ -34,7 +34,9 @@ import {
 } from "@/db/deadlines";
 import { withTeam } from "@/lib/db-team";
 import { installTenantContext } from "@/lib/tenant-context";
-import { SCOPES } from "@/lib/permissions";
+import { SCOPES, roleScopes } from "@/lib/permissions";
+import { ADMIN_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import {
   authenticateApiToken,
   createToken,
@@ -190,6 +192,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
     companyAreas: [],
     versions: {},
     documents: {},
+    roleVersionId: "00000000-0000-4000-8000-000000000101",
   };
 
   beforeAll(async () => {
@@ -916,6 +919,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
     companyAreas: [],
     versions: {},
     documents: {},
+    roleVersionId: "00000000-0000-4000-8000-000000000103",
   });
 
   it("passes the access state install derived to withTeam's work", async () => {
@@ -1763,6 +1767,187 @@ describe("signed tenant context under separate nonowner data and identity roles"
           }),
         ),
       ).rejects.toMatchObject(denied);
+    });
+  });
+
+  // Configured roles (R2a-10, 0035): install narrows the asserted scopes to the assigned role's,
+  // never widens them, and keeps every existing rejection above.
+  describe("narrowing to an assigned configured role", () => {
+    let assigned: Principal, plain: Principal, mismatched: Principal;
+    let moved: Principal;
+    let narrowRole: { objectId: string; versionId: string };
+    let adminRole: { objectId: string; versionId: string };
+    const OTHER = "00000000-0000-4000-a000-000000000002";
+    const narrowScopes = roleScopes("recruiter").filter(
+      (scope) => scope !== "cvs:write",
+    );
+    async function publish(key: string, body: unknown) {
+      const { objectId, versionId } = await createConfigDraft(ownerA, {
+        type: "role",
+        key,
+        body,
+      });
+      await publishConfigVersion(ownerA, versionId);
+      return { objectId, versionId };
+    }
+    /** The company owner's own session writes the row, as the service does. */
+    const assign = (p: Principal, objectId: string) =>
+      withTeam({ ...ownerA, teamId: p.teamId }, (tx) =>
+        tx.execute(
+          sql`INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES (${p.teamId}, ${p.userId}, ${objectId}::uuid)`,
+        ),
+      );
+    /** A committed direct install; returns its result and the stored row. */
+    async function direct(p: Principal, overrides: Partial<Claim> = {}) {
+      const client = await asData();
+      await client.exec("BEGIN");
+      let result: unknown, xid: string;
+      try {
+        const claim = await claimFor(p, overrides);
+        xid = claim.xid;
+        result = await installed(claim, "{}");
+        await client.exec("COMMIT");
+      } catch (error) {
+        await client.exec("ROLLBACK");
+        throw error;
+      }
+      await harness.asSuperuser();
+      const { rows } = await harness.client.query(
+        "SELECT scopes, role_version_id FROM tenant_context.contexts WHERE xid::text = $1",
+        [xid],
+      );
+      return { result: result as Record<string, unknown>, stored: rows[0] };
+    }
+
+    beforeAll(async () => {
+      const db = await harness.asOwner();
+      const seed = (userId: string, teamId = "ctx-a") =>
+        seedIdentity(db, { userId, teamId, role: "recruiter" });
+      assigned = await seed("ctx-role-assigned");
+      plain = await seed("ctx-role-plain");
+      mismatched = await seed("ctx-role-mismatch");
+      // A team of its own, which a case moves to another workspace.
+      moved = await seed("ctx-role-moved", "ctx-role-team");
+      await seedIdentity(db, {
+        userId: ownerA.userId,
+        teamId: "ctx-role-team",
+        role: "admin",
+      });
+      narrowRole = await publish("ctx-narrow", {
+        ...structuredClone(RECRUITER_ROLE.body),
+        name: "Fictional narrowed recruiter",
+        scopes: narrowScopes,
+      });
+      // An admin-membership role holds scopes above the recruiter ceiling.
+      adminRole = await publish("ctx-admin", {
+        ...structuredClone(ADMIN_ROLE.body),
+        name: "Fictional admin role",
+      });
+      await assign(assigned, narrowRole.objectId);
+      await assign(mismatched, adminRole.objectId);
+      await assign(moved, narrowRole.objectId);
+    });
+
+    it("stores and returns the asserted scopes intersected with the role's, and its version", async () => {
+      const { result, stored } = await direct(assigned);
+      expect(result).toMatchObject({
+        scopes: narrowScopes,
+        memberRole: "recruiter",
+        roleVersionId: narrowRole.versionId,
+      });
+      expect(stored).toEqual({
+        scopes: narrowScopes,
+        role_version_id: narrowRole.versionId,
+      });
+      // A token of the member is narrowed the same way.
+      const token = await seedApiToken(await harness.asOwner(), assigned);
+      expect(
+        await withTeam(token, (tx, access) => Promise.resolve(access)),
+      ).toMatchObject({
+        scopes: narrowScopes,
+        roleVersionId: narrowRole.versionId,
+      });
+    });
+
+    it("keeps a member without a row on the asserted scopes and the built-in version", async () => {
+      const { result, stored } = await direct(plain);
+      expect(result).toMatchObject({
+        scopes: roleScopes("recruiter"),
+        roleVersionId: RECRUITER_ROLE.versionId,
+      });
+      expect(stored).toEqual({
+        scopes: roleScopes("recruiter"),
+        role_version_id: RECRUITER_ROLE.versionId,
+      });
+    });
+
+    it("stores a context asserting a scope the role lacks without it, and never widens", async () => {
+      const { result, stored } = await direct(assigned, {
+        scopes: ["candidates:read", "cvs:write"],
+      });
+      expect(result).toMatchObject({ scopes: ["candidates:read"] });
+      expect(stored).toMatchObject({ scopes: ["candidates:read"] });
+      // A role above the recruiter ceiling adds nothing: the stored scopes stay the asserted ones.
+      const mismatch = await direct(mismatched);
+      expect(mismatch.result).toMatchObject({
+        scopes: roleScopes("recruiter"),
+        roleVersionId: adminRole.versionId,
+      });
+      expect(mismatch.stored).toMatchObject({
+        scopes: roleScopes("recruiter"),
+      });
+      // A scope outside the membership ceiling is still rejected, as before.
+      for (const scope of ["imports:write", "directory:read"] as const) {
+        await dataTransaction(async () => {
+          await expect(
+            install(
+              await claimFor(mismatched, {
+                scopes: SCOPES.filter(
+                  (known) =>
+                    known === scope || roleScopes("recruiter").includes(known),
+                ),
+              }),
+            ),
+            scope,
+          ).rejects.toMatchObject(denied);
+        });
+      }
+      await expect(
+        withTeam({ ...mismatched, scopes: [...SCOPES] }, () =>
+          Promise.resolve(),
+        ),
+      ).rejects.toMatchObject({ status: 403, code: "tenant_context_denied" });
+    });
+
+    it("fails closed for a role of another workspace than the context's", async () => {
+      const db = await harness.asOwner();
+      await db.execute(
+        sql`INSERT INTO app.workspaces(id, name) VALUES (${OTHER}::uuid, 'Fictional Other Company')`,
+      );
+      await db.execute(
+        sql`UPDATE app.workspace_teams SET workspace_id = ${OTHER}::uuid WHERE team_id = ${moved.teamId}`,
+      );
+      try {
+        const { result, stored } = await direct(moved);
+        expect(result).toMatchObject({
+          scopes: [],
+          workspaceId: OTHER,
+          roleVersionId: null,
+        });
+        expect(stored).toEqual({ scopes: [], role_version_id: null });
+      } finally {
+        const owner = await harness.asOwner();
+        await owner.execute(
+          sql`UPDATE app.workspace_teams SET workspace_id = ${COMPANY}::uuid WHERE team_id = ${moved.teamId}`,
+        );
+        await owner.execute(
+          sql`DELETE FROM app.workspaces WHERE id = ${OTHER}::uuid`,
+        );
+      }
+      expect((await direct(moved)).stored).toEqual({
+        scopes: narrowScopes,
+        role_version_id: narrowRole.versionId,
+      });
     });
   });
 });

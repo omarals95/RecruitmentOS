@@ -61,6 +61,9 @@ export async function installTenantContextKey(client: {
  * workspace, team role and company authority it derived from database rows, never from the payload.
  * versions maps each configuration object of the workspace (company objects and this team's task
  * boards) to its current published version id; documents holds exactly those versions, verified.
+ * scopes are already narrowed to the member's configured role, whose version roleVersionId names:
+ * a built-in template's fixed id without an assigned role, null for an assigned role install could
+ * not use (no scopes are then stored).
  */
 export type TenantAccess = {
   scopes: Scope[];
@@ -70,6 +73,7 @@ export type TenantAccess = {
   companyAreas: string[];
   versions: Record<string, string>;
   documents: Record<string, ConfigDocument>;
+  roleVersionId: string | null;
 };
 type InstallResult = Omit<TenantAccess, "documents"> & {
   documents: ConfigDocumentRow[];

@@ -428,6 +428,7 @@ describe("built-in default kind schemas (R2b-01)", () => {
       companyAreas: [],
       versions: {},
       documents: {},
+      roleVersionId: null,
     };
     for (const kind of CONFIGURABLE_KINDS)
       expect(kindSchemaFor(access, kind)).toEqual({

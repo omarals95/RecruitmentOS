@@ -298,7 +298,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -458,7 +458,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -588,7 +588,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -667,6 +667,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
         ["company_level", "text", "YES", null],
         ["company_areas", "ARRAY", "NO", "'{}'::text[]"],
         ["plan_access", "boolean", "NO", "false"],
+        ["role_version_id", "uuid", "YES", null],
       ].map(([column_name, data_type, is_nullable, column_default]) => ({
         column_name,
         data_type,
@@ -704,7 +705,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -724,6 +725,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
       companyAreas: ["boards", "templates"],
       versions: {},
       documents: {},
+      roleVersionId: "00000000-0000-4000-8000-000000000103",
     });
     expect(
       (
@@ -805,7 +807,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -934,7 +936,7 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
@@ -1020,7 +1022,7 @@ describe("upgrade from 0031 to configuration versions through install", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("returns the published object in versions and its body in documents", async () => {
@@ -1135,11 +1137,11 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 13", async () => {
+  it("keeps every existing row and sets storage schema 14", async () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("adds the three organisation tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1308,13 +1310,13 @@ describe("upgrade from 0033 to positions and employees", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 13", async () => {
+  it("keeps every existing row and sets storage schema 14", async () => {
     expect(before["app.org_unit_closure"]).toHaveLength(3);
     expect(before["app.activity"]).toHaveLength(4);
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 13 }]);
+    ).toEqual([{ version: 14 }]);
   });
 
   it("adds the three directory tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1395,5 +1397,165 @@ describe("upgrade from 0033 to positions and employees", () => {
     expect({ rows: await rows(), functions: await functions() }).toEqual(
       settled,
     );
+  });
+});
+
+// A team with members, a published role and its audit rows written by the 0034 schema, upgraded
+// through 0035: every row stays, app.member_roles arrives empty under FORCE RLS, install keeps its
+// owner, grants and settings and gains the role step, a member without a row keeps the built-in
+// template, and a second run changes nothing.
+describe("upgrade from 0034 to configured member roles", () => {
+  const pg = new PGlite();
+  const owner = "member_roles_upgrade_owner";
+  const company = "00000000-0000-4000-a000-000000000001";
+  const companyOwner = principal(
+    "member-roles-upgrade-owner",
+    "member-roles-upgrade-team",
+    "owner",
+  );
+  const recruiter = principal(
+    "member-roles-upgrade-recruiter",
+    "member-roles-upgrade-team",
+    "recruiter",
+  );
+  const tables = [
+    "app.workspaces",
+    "app.workspace_teams",
+    "app.workspace_admins",
+    "app.activity",
+    "app.config_objects",
+    "app.config_versions",
+    "auth.member",
+  ];
+  const rows = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    return Object.fromEntries(
+      await Promise.all(
+        tables.map(async (table) => [
+          table,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+        ]),
+      ),
+    );
+  };
+  const install = async () =>
+    (
+      await pg.query<{ source: string }>(
+        `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proacl::text AS acl,
+           p.proconfig AS config, oidvectortypes(p.proargtypes) AS args, p.prorettype::regtype::text AS returns,
+           p.prosrc AS source
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'tenant_context' AND p.proname = 'install'`,
+      )
+    ).rows;
+  let before: Awaited<ReturnType<typeof rows>>;
+  let beforeInstall: Awaited<ReturnType<typeof install>>;
+
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0034_positions_employees.sql");
+    await installTenantContextKey(pg);
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('member-roles-upgrade-owner','Fictional Upgrade Owner','member-roles-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('member-roles-upgrade-team','Fictional Upgrade Team','member-roles-upgrade-team','member-roles-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('member-roles-upgrade-mo','member-roles-upgrade-team','member-roles-upgrade-owner','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('member-roles-upgrade-recruiter','Fictional Upgrade Recruiter','member-roles-upgrade-recruiter@example.test',true,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('member-roles-upgrade-mr','member-roles-upgrade-team','member-roles-upgrade-recruiter','recruiter');`);
+    // A role drafted, published and audited through the 0034 helpers by the company owner.
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+      await installTenantContext(tx, companyOwner, snapshot);
+      const [object] = (
+        await tx.execute<{ id: string }>(
+          sql`insert into app.config_objects(workspace_id, type, key) values (${company}::uuid, 'role', 'upgrade-role') returning id`,
+        )
+      ).rows;
+      const [version] = (
+        await tx.execute<{ id: string }>(
+          sql`insert into app.config_versions(object_id, workspace_id, body) values (${object.id}::uuid, ${company}::uuid, '{"name":"Fictional upgrade role"}'::jsonb) returning id`,
+        )
+      ).rows;
+      await tx.execute(
+        sql`update app.config_objects set draft_version_id = ${version.id}::uuid where id = ${object.id}::uuid`,
+      );
+      await tx.execute(
+        sql`select tenant_context.audit_config(${version.id}::uuid, 'config.draft_created')`,
+      );
+      await tx.execute(
+        sql`select tenant_context.publish_config_version(${version.id}::uuid)`,
+      );
+    });
+    before = await rows();
+    beforeInstall = await install();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every existing row and sets storage schema 14", async () => {
+    expect(before["app.config_versions"]).toHaveLength(1);
+    expect(before["app.activity"]).toHaveLength(2);
+    expect(await rows()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 14 }]);
+  });
+
+  it("adds app.member_roles empty, under ENABLE and FORCE RLS, and the context column", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          `SELECT c.relrowsecurity, c.relforcerowsecurity, pg_get_userbyid(c.relowner) AS owner
+           FROM pg_class c WHERE c.oid = 'app.member_roles'::regclass`,
+        )
+      ).rows,
+    ).toEqual([{ relrowsecurity: true, relforcerowsecurity: true, owner }]);
+    expect(
+      (await pg.query("SELECT count(*)::int AS n FROM app.member_roles")).rows,
+    ).toEqual([{ n: 0 }]);
+    expect(
+      (
+        await pg.query(
+          "SELECT data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'tenant_context' AND table_name = 'contexts' AND column_name = 'role_version_id'",
+        )
+      ).rows,
+    ).toEqual([{ data_type: "uuid", is_nullable: "YES" }]);
+  });
+
+  it("replaces install in place with the same owner, grants and settings, plus the role step", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const [after] = await install();
+    const { source, ...kept } = after;
+    const { source: was, ...earlier } = beforeInstall[0];
+    expect(beforeInstall).toHaveLength(1);
+    expect(kept).toEqual(earlier);
+    expect(was).not.toContain("member_roles");
+    expect(source).toContain("app.member_roles");
+  });
+
+  it("gives an upgraded member without a row the built-in template, and a second run changes nothing", async () => {
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    const access = await withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+      installTenantContext(tx, recruiter, snapshot),
+    );
+    expect(access).toMatchObject({
+      scopes: recruiter.scopes,
+      memberRole: "recruiter",
+      roleVersionId: "00000000-0000-4000-8000-000000000103",
+    });
+    const settled = { rows: await rows(), install: await install() };
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+    expect({ rows: await rows(), install: await install() }).toEqual(settled);
   });
 });

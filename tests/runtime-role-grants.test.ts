@@ -182,6 +182,8 @@ const expectedData = {
         ["INSERT", "SELECT", "UPDATE"],
       ]),
     ),
+    // Configured member roles, written only under company owner sessions (0035).
+    "app.member_roles": ["DELETE", "INSERT", "SELECT", "UPDATE"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -535,6 +537,7 @@ describe("split runtime role template", () => {
         ...configTables,
         ...orgTables,
         ...directoryTables,
+        "member_roles",
       ].map((table) => `TRUNCATE app.${table}`),
       ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
@@ -892,6 +895,58 @@ describe("split runtime role template", () => {
         )
       ).rows.map((row) => row.owned && row.path),
     ).toEqual([...helpers, ...triggers].map(() => true));
+  });
+
+  it("grants the data role the member-role table and the owner-only read, the identity role nothing, and no trigger EXECUTE (0035)", async () => {
+    await harness.dataDb();
+    await expectDenied(["TRUNCATE app.member_roles"]);
+    await harness.identityDb();
+    await expectDenied([
+      "SELECT * FROM app.member_roles",
+      "INSERT INTO app.member_roles DEFAULT VALUES",
+      "UPDATE app.member_roles SET user_id = user_id",
+      "DELETE FROM app.member_roles",
+      "SELECT * FROM tenant_context.role_assignment_changes(NULL, 50)",
+    ]);
+    await harness.asSuperuser();
+    const helper =
+      "tenant_context.role_assignment_changes(timestamp with time zone,integer)";
+    const install = "tenant_context.install(text,text,text[])";
+    const triggers = ["app.guard_member_role()", "app.audit_member_role()"];
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    expect(await execute(splitRoles.data, helper)).toBe(true);
+    expect(await execute(splitRoles.identity, helper)).toBe(false);
+    expect(await execute("public", helper)).toBe(false);
+    for (const fn of triggers)
+      for (const grantee of [...roles, "public"])
+        expect(await execute(grantee, fn), `${grantee} ${fn}`).toBe(false);
+    // Owner-owned, security definer, with the fixed search_path, for every new or replaced function.
+    expect(
+      (
+        await harness.client.query<{
+          owned: boolean;
+          definer: boolean;
+          path: boolean;
+        }>(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) AS path
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[]) ORDER BY p.oid::regprocedure::text`,
+          [[helper, install, ...triggers]],
+        )
+      ).rows,
+    ).toEqual(
+      [helper, install, ...triggers].map(() => ({
+        owned: true,
+        definer: true,
+        path: true,
+      })),
+    );
   });
 });
 
