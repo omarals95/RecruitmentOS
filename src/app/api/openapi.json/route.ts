@@ -1112,6 +1112,60 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  // The Admin portal's reads (R2a-11): session only, no MCP tool and no API token access.
+  const meAccessShape =
+    "{data:{teamRole, companyLevel, role:{name, membership}|null, scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit}}, adminAreas}}";
+  paths["/api/v1/me/access"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read your own access",
+        description: `Session only: any signed-in member of the team; Bearer tokens get 403 session_required. Returns only your own access in the active team, as the server decides it: teamRole (your team role), companyLevel (owner, admin or null), role (the name and membership of your role: the built-in template of your team role or the configured role assigned to you; null when no role applies, and then pages, actions and fields are empty), scopes (your effective scopes), pages, actions (the allowed actions per resource; a resource with none is left out), fields (the field rules of each record kind you may view) and adminAreas (the company areas you hold). It holds no user, team, workspace, role, version or configuration object id and no configuration body. Nothing is audited. Returns ${meAccessShape}.`,
+      },
+      { "200": { description: meAccessShape } },
+      { sessionOnly: true },
+    ),
+  };
+  const configHistoryShape =
+    "{data:[{occurredAt, action, objectType, objectKey, versionNumber, fromVersionNumber, actorName}], pagination:{pageSize, hasMore, nextBefore}}";
+  paths["/api/v1/config-history"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the company configuration history",
+        description: `Session only: a signed-in company owner or company admin; Bearer tokens get 403 session_required, and anyone else, team owners and admins without company authority included, gets 403 config_forbidden. Lists the configuration events (config.draft_created, config.published, config.retired, config.archived, config.layout_changed) of every team in the workspace, newest first: time, action, object type and key, version numbers and the actor's display name only, never a team, user, record, object or version id or a body. pageSize is 1 to 100 (default 25); before (an ISO date-time) lists events older than it. hasMore is true when the page is full, and nextBefore is then the last event's time, to send as before for the next page (millisecond precision, so events sharing that millisecond may be skipped). Any other query key or value returns 400 invalid_input. Returns ${configHistoryShape}.`,
+      },
+      { "200": { description: configHistoryShape } },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "before",
+            in: "query",
+            schema: { type: "string", format: "date-time" },
+          },
+          {
+            name: "pageSize",
+            in: "query",
+            schema: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+          },
+        ],
+      },
+    ),
+  };
+  const accessChangesShape =
+    '{data:[{occurredAt, kind:"role-assignment"|"home-units", action, affectedUserIds, roleName, actorName}], truncated}';
+  paths["/api/v1/access-changes"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the access changes of the last seven days",
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 role_assignment_forbidden. Lists the role assignments and clears (role.assigned, role.cleared) and the home-unit changes (scope.home_units_changed) of every team in the workspace from the last seven days, newest first: time, kind, action, the affected user ids, the role name (null for home-unit changes) and the actor's display name only. At most the latest 100 of each kind are read; truncated is true when 100 of a kind were read and the oldest of them is still inside the seven days. It takes no query parameters: any query key returns 400 invalid_input. Returns ${accessChangesShape}.`,
+      },
+      { "200": { description: accessChangesShape } },
+      { sessionOnly: true },
+    ),
+  };
   // Organisation levels and units (0033): session only, no MCP tool (D13).
   const orgText = { type: "string", minLength: 1, maxLength: 120 };
   const orgTextRule =
