@@ -480,6 +480,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "role-assignment",
   "workspace-authority",
   "employee-erasure",
+  "org-import",
 ];
 
 /**

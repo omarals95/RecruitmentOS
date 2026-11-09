@@ -23,6 +23,7 @@ import type { Requester } from "@/components/workspace/optimistic";
 import type { Employee, Position } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
+import { OrgImportPanel } from "./org-import-panel";
 import { UnitPicker } from "./unit-picker";
 
 export interface Page<T> {
@@ -232,6 +233,17 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
       ],
     });
 
+  /** After an import: the levels and the top level again, with every unit collapsed. */
+  async function reloadChart() {
+    if (!request) return;
+    try {
+      const [found, top] = await loadChart(request);
+      setLevels(found.data);
+      setChart({ ...EMPTY_CHART, lists: { "": unitList(top) } });
+    } catch (e) {
+      setLoadError(humanError(e));
+    }
+  }
   async function reloadLevels() {
     if (!request) return;
     setLevels((await request<{ data: OrgLevel[] }>(LEVELS_PATH)).data);
@@ -540,6 +552,11 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         owner={owner}
         directoryView={directoryView}
         on={handlers}
+      />
+      <OrgImportPanel
+        request={request}
+        owner={owner}
+        onApplied={() => void reloadChart()}
       />
       {form && request && (
         <OrgFormDialog

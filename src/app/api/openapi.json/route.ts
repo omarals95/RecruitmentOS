@@ -7,6 +7,7 @@ import {
   type RecordKind,
 } from "@/domain/records";
 import { EXPORT_RESOURCES } from "@/domain/export";
+import { XLSX_TYPE } from "@/domain/org";
 import { MCP_SCOPES, type Scope } from "@/lib/permissions";
 import { CANDIDATE_SUGGESTION_LIMIT, EXPORT_FILTER_KEYS } from "@/lib/records";
 import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
@@ -1853,6 +1854,65 @@ export function GET() {
         },
       },
       { sessionOnly: true, params: pageParams },
+    ),
+  };
+  // The body is the raw workbook, not JSON, so it is described by x-request-body rather than requestBody.
+  const importBody = {
+    required: true,
+    content: { [XLSX_TYPE]: { schema: { type: "string", format: "binary" } } },
+  };
+  const importRule = `Session only; Bearer tokens, including MCP OAuth tokens, get 403 session_required. Needs a company owner, or a company admin with the organisation area (403 org_forbidden), and when the Employees sheet has rows, a role with directory create and edit (403 directory_forbidden); the caller is checked before the body is read. The body is the raw .xlsx workbook with Content-Type ${XLSX_TYPE} (415 xlsx_required otherwise). Before parsing, a body over 5 MiB returns 413 import_too_large; a zip without a valid central directory, with ZIP64 or encrypted entries, with an empty, absolute, backslash, drive-letter or .. entry name, with a local entry that does not match the central directory or inflates past its declared size, or with bytes outside its entries, directory and end record returns 422 import_unreadable; more than 2,000 entries or 50 MiB declared uncompressed returns 422 import_archive_too_large. After parsing, more than 20,000 rows below the headers returns 422 import_too_many_rows, a file read-excel-file cannot read 422 import_unreadable, a present sheet without one of its columns 422 import_columns_missing, and a workbook with no rows 422 import_empty. Sheets, matched by name ignoring case: Units (Code, Name, Level, Parent code), Positions (Code, Title, Unit code, Manager) and Employees (Employee number, Name, Work email, Work phone, Position codes, Primary position). Levels match a current level by name; Position codes are separated by commas or semicolons; Manager is yes, no, true or false; a blank cell leaves the stored value unchanged. Cell values are text facts: formulas are never evaluated, and a value starting with =, +, -, @, tab or CR is stored as text and listed in flagged. Rows that would move a unit, move a position an employee linked to a user holds, or change such an employee's positions are listed in needsOwner. Each list holds at most 500 entries; truncated is true when one was cut, and the counts are always complete.`;
+  const importShape =
+    "{data:{sha256, sheets:{units, positions, employees}, rejected:[{sheet, row, reason}], needsOwner:[{sheet, row, reason}], flagged:[{sheet, row, column}], truncated}} with each sheet's {create, update, unchanged, reject, needsOwner}";
+  const importErrors = {
+    "422": errorResponse(
+      "The workbook is unreadable, too large once unpacked, has too many rows, misses columns or has no rows.",
+    ),
+  };
+  paths["/api/v1/org-import/dry-run"] = {
+    post: operation(
+      [],
+      {
+        summary: "Check an organisation workbook without writing",
+        description: `${importRule} Runs in one read-only transaction and writes nothing. Returns ${importShape}, where sha256 is the SHA-256 of the body to send to apply.`,
+        "x-request-body": importBody,
+      },
+      { "200": { description: `${importShape}.` }, ...importErrors },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/org-import/apply"] = {
+    post: operation(
+      [],
+      {
+        summary: "Apply an organisation workbook",
+        description: `${importRule} Send the same file the dry run checked, with sha256 set to the dry run's sha256: a missing or malformed sha256, a group other than owner, or any other query key returns 400 invalid_input, and a different file returns 409 import_file_changed before it is parsed. The plan is made again against the data as it is now. Without group, apply writes the create and update rows and never a needsOwner row; with group=owner a company owner writes only the needsOwner rows (403 org_owner_required for anyone else), and a row whose unit, parent or position does not exist yet is rejected. Apply also needs a role with candidates:write, recruitment:write, cvs:write or imports:write, so the import can be audited (403 org_import_forbidden). Writes run in one transaction per sheet, units, then positions, then employees; if a later sheet fails, the message names the sheets already applied, and applying the same file again is safe: rows already written are unchanged. New employees get source excel; the import never sets, changes or clears a user link. Each sheet that wrote rows adds one org-import activity row (org-import.applied) with counts only, shown only to sessions with company authority. Returns ${importShape} plus group, where create and update count the rows written.`,
+        "x-request-body": importBody,
+      },
+      {
+        "200": { description: `${importShape} plus group.` },
+        ...importErrors,
+      },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "sha256",
+            in: "query",
+            required: true,
+            schema: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            description: "The sha256 the dry run of this file returned.",
+          },
+          {
+            name: "group",
+            in: "query",
+            required: false,
+            schema: { type: "string", enum: ["owner"] },
+            description:
+              "owner applies only the rows that need a company owner; company owners only.",
+          },
+        ],
+      },
     ),
   };
   paths["/api/v1/cvs/storage-reconciliation"] = {

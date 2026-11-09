@@ -36,7 +36,7 @@ const forbidden = () =>
     "org_forbidden",
     "Changing the organisation needs a company owner, or a company admin with the organisation area, signed in.",
   );
-const ownerRequired = () =>
+export const ownerRequired = () =>
   new ApiError(
     403,
     "org_owner_required",
@@ -87,7 +87,11 @@ const refusals: Record<string, () => ApiError> = {
  * install returned: a session with company owner authority or the organisation area. Moves and
  * archives of units also need a company owner, as app.guard_scope_sources does.
  */
-function requireWrite(p: Principal, access: TenantAccess, ownerOnly = false) {
+export function requireWrite(
+  p: Principal,
+  access: TenantAccess,
+  ownerOnly = false,
+) {
   if (
     p.authType !== "session" ||
     (access.companyLevel !== "owner" &&
@@ -98,7 +102,7 @@ function requireWrite(p: Principal, access: TenantAccess, ownerOnly = false) {
 }
 
 /** One withTeam transaction; the database stays authoritative and its refusals map to API errors. */
-async function inOrg<T>(
+export async function inOrg<T>(
   p: Principal,
   work: (tx: TeamTx, access: TenantAccess) => Promise<T>,
 ): Promise<T> {
