@@ -559,6 +559,13 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/org-units/levels",
         "POST /api/v1/org-units/levels",
         "PATCH /api/v1/org-units/levels/{id}",
+        "GET /api/v1/positions",
+        "POST /api/v1/positions",
+        "PATCH /api/v1/positions/{id}",
+        "GET /api/v1/employees",
+        "POST /api/v1/employees",
+        "PATCH /api/v1/employees/{id}",
+        "PUT /api/v1/employees/{id}/positions",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {

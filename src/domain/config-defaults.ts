@@ -62,6 +62,7 @@ function todaysRole(membership: Role, name: string): RoleBody {
     actions,
     fields: {},
     recordScope: everyGroup("all"),
+    ...(manager ? { directoryRule: "full" as const } : {}),
   };
 }
 

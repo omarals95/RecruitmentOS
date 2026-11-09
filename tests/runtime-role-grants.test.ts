@@ -137,6 +137,8 @@ const workspaceWrites = [
 const configTables = ["config_objects", "config_versions", "config_layouts"];
 /** Levels and units under allows_workspace; closure rows only from the owner's trigger (0033). */
 const orgTables = ["org_levels", "org_units", "org_unit_closure"];
+/** Positions, employees and their positions; no runtime delete (0034). */
+const directoryTables = ["positions", "employees", "employee_positions"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -173,6 +175,13 @@ const expectedData = {
     "app.org_levels": ["INSERT", "SELECT", "UPDATE"],
     "app.org_units": ["INSERT", "SELECT", "UPDATE"],
     "app.org_unit_closure": ["SELECT"],
+    // Positions, employees and their positions: no runtime delete (0034).
+    ...Object.fromEntries(
+      directoryTables.map((table) => [
+        `app.${table}`,
+        ["INSERT", "SELECT", "UPDATE"],
+      ]),
+    ),
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -525,6 +534,7 @@ describe("split runtime role template", () => {
         ...workspaceTables,
         ...configTables,
         ...orgTables,
+        ...directoryTables,
       ].map((table) => `TRUNCATE app.${table}`),
       ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
@@ -818,6 +828,70 @@ describe("split runtime role template", () => {
     expect(await closure()).toEqual([
       { ancestor_id: unit, descendant_id: unit, depth: 0 },
     ]);
+  });
+
+  it("grants the data role no directory DELETE or TRUNCATE and the identity role nothing on them (0034)", async () => {
+    await harness.dataDb();
+    await expectDenied(
+      directoryTables.flatMap((table) => [
+        `DELETE FROM app.${table}`,
+        `TRUNCATE app.${table}`,
+      ]),
+    );
+    await harness.identityDb();
+    await expectDenied([
+      ...directoryTables.flatMap((table) => [
+        `SELECT * FROM app.${table}`,
+        `INSERT INTO app.${table} DEFAULT VALUES`,
+        `UPDATE app.${table} SET workspace_id = workspace_id`,
+        `DELETE FROM app.${table}`,
+      ]),
+      "SELECT tenant_context.allows_directory(gen_random_uuid(), 'read')",
+      "SELECT * FROM tenant_context.home_unit_changes(NULL, 50)",
+    ]);
+    await harness.asSuperuser();
+    const helpers = [
+      "tenant_context.allows_directory(uuid,text)",
+      "tenant_context.home_unit_changes(timestamp with time zone,integer)",
+    ];
+    const triggers = [
+      "app.guard_directory_row()",
+      "app.guard_position_job_role()",
+      "app.audit_directory_change()",
+      "app.guard_scope_sources()",
+      "app.maintain_org_closure()",
+      "app.guard_org_archive()",
+    ];
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    for (const fn of helpers) {
+      expect(await execute(splitRoles.data, fn), fn).toBe(true);
+      expect(await execute(splitRoles.identity, fn), fn).toBe(false);
+      expect(await execute("public", fn), fn).toBe(false);
+    }
+    for (const fn of triggers)
+      for (const grantee of [...roles, "public"])
+        expect(await execute(grantee, fn), `${grantee} ${fn}`).toBe(false);
+    // Owner-owned, with the fixed search_path, for every new or replaced function.
+    expect(
+      (
+        await harness.client.query<{
+          fn: string;
+          owned: boolean;
+          path: boolean;
+        }>(
+          `SELECT p.oid::regprocedure::text AS fn, p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) AS path
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[]) ORDER BY 1`,
+          [[...helpers, ...triggers]],
+        )
+      ).rows.map((row) => row.owned && row.path),
+    ).toEqual([...helpers, ...triggers].map(() => true));
   });
 });
 

@@ -29,6 +29,13 @@
  *   scope.home_units_changed row; and two owner sessions moving A under B and B under A at once
  *   commit at most once, the second waiting and then refused with RQ009, leaving an acyclic closure.
  *   While such a move holds the workspace lock, an insert keyed to the workspace does not wait.
+ *   A context without directory:read reads no employee or position row; a context reads no
+ *   position, employee or position row of another workspace and writes none there; a team owner
+ *   without company authority cannot change their own employee row's user link or positions, nor
+ *   link another employee; a company admin with the organisation area cannot change a linked
+ *   employee's positions or move or archive the position they hold, but places unlinked employees;
+ *   a token context, even one holding the directory scopes, writes no directory row; and a
+ *   position names only a current job role of the writer's own team.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -55,14 +62,19 @@
  *   two fixture organisation levels at the two lowest free depths of the company workspace and
  *   fixture units coded by the run prefix, and inserts the second workspace once more with one
  *   level and unit, removing them in that check; the data role commits one fixture unit move under
- *   the team A owner's context. As the
+ *   the team A owner's context. As the owner it writes fixture positions, employees (one linked to
+ *   the team B owner) and position rows keyed by the run prefix, inserts the second workspace a
+ *   last time with one of each, removing them in that check, briefly makes the team C owner a
+ *   company admin with the organisation area, and briefly adds an API token holding every scope
+ *   for the team A owner, removing both in their checks. As the
  *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the fixture
- *   configuration objects, organisation units (with their closure rows) and levels, the contexts,
+ *   configuration objects, position rows, employees, positions, organisation units (with their
+ *   closure rows) and levels, the contexts,
  *   leases, stores, teams, users (with their cascaded workspace mappings and company authority) and, in
  *   the open bootstrap variant, the setup claim it created go.
  * - It prints one JSON document of counts and static check ids, never a URL, host, port,
@@ -180,6 +192,12 @@ const CONFIG_TABLES = [
 ] as const;
 /** The organisation hierarchy (0033), under FORCE RLS with allows_workspace policies. */
 const ORG_TABLES = ["org_levels", "org_units", "org_unit_closure"] as const;
+/** Positions and employees (0034), under FORCE RLS with allows_workspace and allows_directory. */
+const DIRECTORY_TABLES = [
+  "positions",
+  "employees",
+  "employee_positions",
+] as const;
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
@@ -580,6 +598,14 @@ function fixtureTables(f: Fixtures, variant: Variant) {
       [f.pattern],
     ],
     ["app.config_objects", "key LIKE $1 OR team_id LIKE $1", [f.pattern]],
+    // Fixture position rows by their employee, employees by number and positions by code.
+    [
+      "app.employee_positions",
+      "employee_id IN (SELECT e.id FROM app.employees e WHERE e.employee_number LIKE $1)",
+      [f.pattern],
+    ],
+    ["app.employees", "employee_number LIKE $1", [f.pattern]],
+    ["app.positions", "code LIKE $1", [f.pattern]],
     // Fixture units by code and levels by name; closure rows cascade from their units.
     [
       "app.org_unit_closure",
@@ -696,8 +722,12 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
       async () => {
         for (const table of [
           // The guard lets the owner delete published versions; the second workspace goes after
-          // its objects and org rows, and units go before their levels.
+          // its objects and org rows, position rows before employees and positions, positions
+          // before their units, units before their levels, and employees before their users.
           "app.config_objects",
+          "app.employee_positions",
+          "app.employees",
+          "app.positions",
           "app.org_units",
           "app.org_levels",
           "app.workspaces",
@@ -722,7 +752,15 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         WHERE n.nspname = 'app' AND c.relname = ANY($1::text[]))::int AS forced,
       (SELECT t.tgenabled::text FROM pg_catalog.pg_trigger t
         WHERE t.tgrelid = 'app.activity'::regclass AND t.tgname = 'immutable_activity') AS trigger`,
-    [[...APP_TABLES, ...WORKSPACE_TABLES, ...CONFIG_TABLES, ...ORG_TABLES]],
+    [
+      [
+        ...APP_TABLES,
+        ...WORKSPACE_TABLES,
+        ...CONFIG_TABLES,
+        ...ORG_TABLES,
+        ...DIRECTORY_TABLES,
+      ],
+    ],
   );
   return {
     restored:
@@ -731,7 +769,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         APP_TABLES.length +
           WORKSPACE_TABLES.length +
           CONFIG_TABLES.length +
-          ORG_TABLES.length &&
+          ORG_TABLES.length +
+          DIRECTORY_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -3241,6 +3280,507 @@ async function runChecks(run: Run) {
         )) === 0,
       ],
     );
+  });
+
+  // Positions and employees (0034). The owner writes the fixture positions, employees and position
+  // rows directly, with no context and so no audit: two positions in the fixture unit p1, an
+  // employee linked to the team B owner holding one of them, and an unlinked employee. Positions go
+  // by code and employees by employee number, both under the run prefix.
+  const dirCode = (name: string) => `${f.prefix}-dir-${name}`;
+  const dirPosition = async (workspace: string, unit: string, name: string) =>
+    (
+      await owner.query(
+        "INSERT INTO app.positions(workspace_id,org_unit_id,title,code) VALUES($1::uuid,$2::uuid,'Fictional position',$3) RETURNING id::text AS id",
+        [workspace, unit, dirCode(name)],
+      )
+    ).rows[0].id as string;
+  const dirEmployee = async (
+    workspace: string,
+    name: string,
+    userId: string | null = null,
+  ) =>
+    (
+      await owner.query(
+        "INSERT INTO app.employees(workspace_id,display_name,employee_number,user_id) VALUES($1::uuid,'Fictional employee',$2,$3) RETURNING id::text AS id",
+        [workspace, dirCode(name), userId],
+      )
+    ).rows[0].id as string;
+  const dirHold = (workspace: string, employeeId: string, positionId: string) =>
+    owner.query(
+      `INSERT INTO app.employee_positions(employee_id,position_id,workspace_id,"primary") VALUES($1::uuid,$2::uuid,$3::uuid,true)`,
+      [employeeId, positionId, workspace],
+    );
+  const dir = {
+    held: await dirPosition(COMPANY_WORKSPACE, org.p1, "held"),
+    free: await dirPosition(COMPANY_WORKSPACE, org.p1, "free"),
+    linked: await dirEmployee(COMPANY_WORKSPACE, "linked", f.users.b1),
+    unlinked: await dirEmployee(COMPANY_WORKSPACE, "unlinked"),
+  };
+  await dirHold(COMPANY_WORKSPACE, dir.linked, dir.held);
+  /** The fixture directory rows and the fixture teams' directory, org and scope activity, as one string. */
+  const dirSeen = async (db: Db) =>
+    JSON.stringify(
+      (
+        await db.query(
+          `SELECT (SELECT coalesce(json_agg(json_build_object('id', p.id, 'unit', p.org_unit_id, 'title', p.title, 'archived', p.archived_at IS NOT NULL) ORDER BY p.id), '[]') FROM app.positions p WHERE p.code LIKE $1)::text AS positions,
+            (SELECT coalesce(json_agg(json_build_object('id', e.id, 'user', e.user_id, 'name', e.display_name) ORDER BY e.id), '[]') FROM app.employees e WHERE e.employee_number LIKE $1)::text AS employees,
+            (SELECT coalesce(json_agg(json_build_object('e', ep.employee_id, 'p', ep.position_id, 'primary', ep."primary", 'ended', ep.valid_to IS NOT NULL) ORDER BY ep.employee_id, ep.position_id), '[]')
+              FROM app.employee_positions ep JOIN app.employees e ON e.id = ep.employee_id WHERE e.employee_number LIKE $1)::text AS held,
+            (SELECT count(*) FROM app.activity a WHERE a.team_id LIKE $1 AND a.kind IN ('directory', 'org', 'scope'))::int AS audits`,
+          [f.pattern],
+        )
+      ).rows[0],
+    );
+  /** The same as the owner, who reads activity only with FORCE RLS lifted in a rolled-back transaction. */
+  const dirCommitted = () =>
+    transaction(owner, async () => {
+      await owner.query("ALTER TABLE app.activity NO FORCE ROW LEVEL SECURITY");
+      return dirSeen(owner);
+    });
+  const dirRows = (db: Db, workspace: string) =>
+    count(
+      db,
+      `SELECT ((SELECT count(*) FROM app.positions WHERE workspace_id = $1::uuid)
+        + (SELECT count(*) FROM app.employees WHERE workspace_id = $1::uuid)
+        + (SELECT count(*) FROM app.employee_positions WHERE workspace_id = $1::uuid))::int AS n`,
+      [workspace],
+    );
+  const people = (db: Db) =>
+    count(
+      db,
+      "SELECT ((SELECT count(*) FROM app.employees WHERE employee_number LIKE $1) + (SELECT count(*) FROM app.employee_positions ep JOIN app.employees e ON e.id = ep.employee_id WHERE e.employee_number LIKE $1))::int AS n",
+      [f.pattern],
+    );
+
+  // A context without directory:read reads no employee or position row and writes none; positions
+  // stay readable, as company structure.
+  await check("directory-scope", async (probe) => {
+    const before = await dirCommitted();
+    const seeded = await people(owner);
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      // The team A recruiter: a company admin with the organisation area, but no directory scope.
+      await installAs(data, signer, p.memberA);
+      probe.at("outcome");
+      const read = await people(data);
+      const inserted = await attempt(
+        data,
+        "INSERT INTO app.employees(workspace_id,display_name,employee_number) VALUES($1::uuid,'Fictional employee',$2)",
+        [COMPANY_WORKSPACE, dirCode("scope")],
+      );
+      const updated = await attempt(
+        data,
+        "UPDATE app.employees SET display_name = 'Denied' WHERE id = $1::uuid",
+        [dir.unlinked],
+      );
+      probe.at("positive-control");
+      const positions = await count(
+        data,
+        "SELECT count(*)::int AS n FROM app.positions WHERE code LIKE $1",
+        [f.pattern],
+      );
+      return probe.all(
+        ["setup", seeded === 3],
+        ["outcome", read === 0],
+        denial(inserted),
+        leftAlone(updated),
+        ["positive-control", positions === 2],
+      );
+    });
+    probe.at("positive-control");
+    const owned = await transaction(data, async () => {
+      await installAs(data, signer, p.ownerA);
+      return people(data);
+    });
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all(
+        ["positive-control", owned === seeded],
+        ["end-state", (await dirCommitted()) === before],
+      )
+    );
+  });
+
+  // A context reads no position, employee or position row of another workspace and writes none there.
+  await check("directory-cross-workspace", async (probe) => {
+    probe.at("setup");
+    // A second fixture workspace briefly makes team creation fail on this database (D15).
+    const other = randomUUID();
+    await owner.query(
+      "INSERT INTO app.workspaces(id,name) VALUES($1::uuid,$2)",
+      [other, `${f.prefix}-directory-workspace`],
+    );
+    let pass: boolean;
+    try {
+      const level = await orgLevel(other, "dir-other", 0);
+      const unit = await orgUnit(other, level, orgCode("dir-other"));
+      const position = await dirPosition(other, unit, "other");
+      const person = await dirEmployee(other, "other");
+      await dirHold(other, person, position);
+      const seeded = await dirRows(owner, other);
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerA);
+        probe.at("outcome");
+        const read = await dirRows(data, other);
+        const plantedEmployee = await attempt(
+          data,
+          "INSERT INTO app.employees(workspace_id,display_name,employee_number) VALUES($1::uuid,'Planted',$2)",
+          [other, dirCode("planted")],
+        );
+        const plantedHold = await attempt(
+          data,
+          "INSERT INTO app.employee_positions(employee_id,position_id,workspace_id) VALUES($1::uuid,$2::uuid,$3::uuid)",
+          [person, position, other],
+        );
+        const renamed = await attempt(
+          data,
+          "UPDATE app.employees SET display_name = 'Denied' WHERE id = $1::uuid",
+          [person],
+        );
+        probe.at("positive-control");
+        return probe.all(
+          ["setup", seeded === 3],
+          ["outcome", read === 0],
+          denial(plantedEmployee),
+          denial(plantedHold),
+          leftAlone(renamed),
+          [
+            "positive-control",
+            (await dirRows(data, COMPANY_WORKSPACE)) > 0 &&
+              (await people(data)) === 3,
+          ],
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.employee_positions WHERE workspace_id = $1::uuid",
+        [other],
+      );
+      for (const table of ["employees", "positions", "org_units", "org_levels"])
+        await owner.query(
+          `DELETE FROM app.${table} WHERE workspace_id = $1::uuid`,
+          [other],
+        );
+      await owner.query("DELETE FROM app.workspaces WHERE id = $1::uuid", [
+        other,
+      ]);
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await dirRows(owner, other)) +
+          (await orgRows(owner, other)) +
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspaces WHERE id = $1::uuid",
+            [other],
+          )) ===
+          0,
+      ])
+    );
+  });
+
+  // The team B owner holds directory:write but no company authority: their own employee row's link
+  // and positions, and any other link, are refused; a fact change of an unlinked employee is not.
+  await check("directory-self-link-denied", async (probe) => {
+    const before = await dirCommitted();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerB);
+      probe.at("outcome");
+      const seen = await dirSeen(data);
+      const unlinked = await attempt(
+        data,
+        "UPDATE app.employees SET user_id = NULL WHERE id = $1::uuid",
+        [dir.linked],
+      );
+      const linked = await attempt(
+        data,
+        "UPDATE app.employees SET user_id = $2 WHERE id = $1::uuid",
+        [dir.unlinked, f.users.b2],
+      );
+      const created = await attempt(
+        data,
+        "INSERT INTO app.employees(workspace_id,display_name,employee_number,user_id) VALUES($1::uuid,'Fictional employee',$2,$3)",
+        [COMPANY_WORKSPACE, dirCode("self"), f.users.b2],
+      );
+      const added = await attempt(
+        data,
+        "INSERT INTO app.employee_positions(employee_id,position_id,workspace_id) VALUES($1::uuid,$2::uuid,$3::uuid)",
+        [dir.linked, dir.free, COMPANY_WORKSPACE],
+      );
+      const ended = await attempt(
+        data,
+        "UPDATE app.employee_positions SET valid_to = now() WHERE employee_id = $1::uuid",
+        [dir.linked],
+      );
+      const unchanged = (await dirSeen(data)) === seen;
+      probe.at("positive-control");
+      const renamed = await attempt(
+        data,
+        "UPDATE app.employees SET display_name = 'Fictional renamed employee' WHERE id = $1::uuid",
+        [dir.unlinked],
+      );
+      return probe.all(
+        denial(unlinked),
+        denial(linked),
+        denial(created),
+        denial(added),
+        denial(ended),
+        ["outcome", unchanged],
+        outcomeIs(
+          renamed.ok && renamed.count === 1,
+          renamed,
+          "positive-control",
+        ),
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await dirCommitted()) === before]);
+  });
+
+  // The team C owner, made a company admin with the organisation area for this check only, may
+  // place unlinked employees and rename positions, but not change the linked employee's positions
+  // or move or archive the position they hold.
+  await check("directory-admin-linked-positions-denied", async (probe) => {
+    const before = await dirCommitted();
+    probe.at("setup");
+    const granted = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{organisation}')",
+      [COMPANY_WORKSPACE, f.users.c1],
+    );
+    let pass: boolean;
+    try {
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.ownerC);
+        probe.at("outcome");
+        const seen = await dirSeen(data);
+        const added = await attempt(
+          data,
+          "INSERT INTO app.employee_positions(employee_id,position_id,workspace_id) VALUES($1::uuid,$2::uuid,$3::uuid)",
+          [dir.linked, dir.free, COMPANY_WORKSPACE],
+        );
+        const demoted = await attempt(
+          data,
+          `UPDATE app.employee_positions SET "primary" = false WHERE employee_id = $1::uuid`,
+          [dir.linked],
+        );
+        const ended = await attempt(
+          data,
+          "UPDATE app.employee_positions SET valid_to = now() WHERE employee_id = $1::uuid",
+          [dir.linked],
+        );
+        const moved = await attempt(
+          data,
+          "UPDATE app.positions SET org_unit_id = $2::uuid WHERE id = $1::uuid",
+          [dir.held, org.p2],
+        );
+        const archived = await attempt(
+          data,
+          "UPDATE app.positions SET archived_at = now() WHERE id = $1::uuid",
+          [dir.held],
+        );
+        const unchanged = (await dirSeen(data)) === seen;
+        probe.at("positive-control");
+        // Rolled back with the transaction.
+        const placed = await attempt(
+          data,
+          "INSERT INTO app.employee_positions(employee_id,position_id,workspace_id) VALUES($1::uuid,$2::uuid,$3::uuid)",
+          [dir.unlinked, dir.free, COMPANY_WORKSPACE],
+        );
+        const renamed = await attempt(
+          data,
+          "UPDATE app.positions SET title = 'Fictional renamed position' WHERE id = $1::uuid",
+          [dir.held],
+        );
+        return probe.all(
+          [
+            "setup",
+            access.companyLevel === "admin" &&
+              access.companyAreas.includes("organisation"),
+          ],
+          denial(added),
+          denial(demoted),
+          denial(ended),
+          denial(moved),
+          denial(archived),
+          ["outcome", unchanged],
+          outcomeIs(
+            placed.ok && placed.count === 1,
+            placed,
+            "positive-control",
+          ),
+          outcomeIs(
+            renamed.ok && renamed.count === 1,
+            renamed,
+            "positive-control",
+          ),
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.c1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all(
+        ["setup", granted.rowCount === 1],
+        [
+          "end-state",
+          (await dirCommitted()) === before &&
+            (await count(
+              owner,
+              "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+              [f.users.c1],
+            )) === 0,
+        ],
+      )
+    );
+  });
+
+  // A token context, here one whose stored scopes include the directory ones the app never grants
+  // a token, reads the directory but writes no position, employee or position row.
+  await check("directory-token-write-denied", async (probe) => {
+    const before = await dirCommitted();
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-directory`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    const token: Principal = {
+      team: f.teams.a,
+      actor: f.users.a1,
+      auth: "token",
+      token: tokenId,
+      scopes: ALL_SCOPES,
+    };
+    let pass: boolean;
+    try {
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, token);
+        probe.at("outcome");
+        const read = await people(data);
+        const created = await attempt(
+          data,
+          "INSERT INTO app.employees(workspace_id,display_name,employee_number) VALUES($1::uuid,'Fictional employee',$2)",
+          [COMPANY_WORKSPACE, dirCode("token")],
+        );
+        const renamed = await attempt(
+          data,
+          "UPDATE app.employees SET display_name = 'Denied' WHERE id = $1::uuid",
+          [dir.unlinked],
+        );
+        const linked = await attempt(
+          data,
+          "UPDATE app.employees SET user_id = $2 WHERE id = $1::uuid",
+          [dir.unlinked, f.users.b2],
+        );
+        const added = await attempt(
+          data,
+          "INSERT INTO app.employee_positions(employee_id,position_id,workspace_id) VALUES($1::uuid,$2::uuid,$3::uuid)",
+          [dir.unlinked, dir.free, COMPANY_WORKSPACE],
+        );
+        const retitled = await attempt(
+          data,
+          "UPDATE app.positions SET title = 'Denied' WHERE id = $1::uuid",
+          [dir.free],
+        );
+        const position = await attempt(
+          data,
+          "INSERT INTO app.positions(workspace_id,org_unit_id,title,code) VALUES($1::uuid,$2::uuid,'Denied',$3)",
+          [COMPANY_WORKSPACE, org.p1, dirCode("token")],
+        );
+        return probe.all(
+          [
+            "setup",
+            stored.rowCount === 1 &&
+              access.scopes.includes("directory:write") &&
+              access.companyLevel === "owner",
+          ],
+          ["outcome", read === 3],
+          denial(created),
+          denial(renamed),
+          denial(linked),
+          denial(added),
+          denial(retitled),
+          denial(position),
+        );
+      });
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+    }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await dirCommitted()) === before]);
+  });
+
+  // A position names only a current job role of the writer's own team: not another team's record,
+  // not a record of another kind (here a candidate, which erasure deletes), not an archived job role.
+  await check("directory-job-role-denied", async (probe) => {
+    const before = await dirCommitted();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      // The team A recruiter, a company admin with the organisation area; rolled back at the end.
+      await installAs(data, signer, p.memberA);
+      probe.at("setup");
+      const jobRole = async (archived: boolean) =>
+        (
+          await data.query(
+            `INSERT INTO app.records(team_id,kind,data,created_by,archived_at) VALUES($1,'job-role',$2::jsonb,$3,${archived ? "now()" : "NULL"}) RETURNING id::text AS id`,
+            [
+              f.teams.a,
+              JSON.stringify({ title: `Fictional job role ${f.prefix}` }),
+              f.users.a2,
+            ],
+          )
+        ).rows[0].id as string;
+      const current = await jobRole(false);
+      const archived = await jobRole(true);
+      const position = (team: string, record: string, name: string) =>
+        attempt(
+          data,
+          "INSERT INTO app.positions(workspace_id,org_unit_id,title,code,job_role_team_id,job_role_id) VALUES($1::uuid,$2::uuid,'Fictional position',$3,$4,$5::uuid)",
+          [COMPANY_WORKSPACE, org.p1, dirCode(name), team, record],
+        );
+      probe.at("outcome");
+      const otherTeam = await position(f.teams.b, b.vacancy, "role-b");
+      const otherKind = await position(f.teams.a, a.candidate, "role-kind");
+      const old = await position(f.teams.a, archived, "role-old");
+      const relinked = await attempt(
+        data,
+        "UPDATE app.positions SET job_role_team_id = $2, job_role_id = $3::uuid WHERE id = $1::uuid",
+        [dir.free, f.teams.a, a.candidate],
+      );
+      probe.at("positive-control");
+      const own = await position(f.teams.a, current, "role-own");
+      return probe.all(
+        denial(otherTeam),
+        denial(otherKind),
+        denial(old),
+        denial(relinked),
+        outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await dirCommitted()) === before]);
   });
 
   // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock

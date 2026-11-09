@@ -1254,6 +1254,281 @@ export function GET() {
       { sessionOnly: true, params: [idParameter] },
     ),
   };
+  // Positions and employees (0034): session only, no MCP tool and no API token access (D13).
+  const directoryText = { type: "string", minLength: 1, maxLength: 120 };
+  const directoryTextRule =
+    "Titles, codes, display names and employee numbers are stored as text facts: control, format, bidi and zero-width characters are removed, then they are trimmed and must be 1 to 120 characters.";
+  const positionWriteRule =
+    "Session only; Bearer tokens, including MCP OAuth tokens, get 403 session_required. Writes need a company owner, or a company admin with the organisation area; anyone else gets 403 org_forbidden.";
+  const employeeRule =
+    "Session only; Bearer tokens, including MCP OAuth tokens, get 403 session_required. Reading needs a role with directory:read (team owners and admins) and writing directory:write; anyone else gets 403 directory_forbidden.";
+  const homeUnitRule =
+    "An employee's user link and the positions of a linked employee set that member's home units, so only a company owner links or unlinks a user, creates an employee with a userId or changes a linked employee's positions; anyone else gets 403 directory_owner_required.";
+  const contactRule =
+    "workEmail and workPhone are left out of every employee for a role whose directory rule is basic; the owner and admin roles are full.";
+  const positionShape =
+    "{id, orgUnitId, title, code, isManager, jobRoleId, validFrom, archivedAt}";
+  const employeeShape =
+    "{id, displayName, employeeNumber, status, source, userId, workEmail, workPhone, positions:[{positionId, title, orgUnitId, primary, validFrom}], createdAt, updatedAt, archivedAt}";
+  const positionAudit =
+    "Each change writes one org activity row to your team with ids and field names only, never a value.";
+  const employeeAudit =
+    "Each change writes one directory activity row to your team with ids and field names only, never a value; each change that sets home units also writes one scope.home_units_changed row naming the affected user ids.";
+  const workEmailSchema = {
+    type: ["string", "null"],
+    format: "email",
+    maxLength: 320,
+  };
+  const workPhoneSchema = {
+    type: ["string", "null"],
+    maxLength: 100,
+    description: "Trimmed; an empty value is stored as null.",
+  };
+  const employeeStatus = { type: "string", enum: ["active", "left"] };
+  const pageParams = [
+    {
+      name: "page",
+      in: "query",
+      schema: { type: "integer", minimum: 1, default: 1 },
+    },
+    {
+      name: "pageSize",
+      in: "query",
+      schema: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+    },
+  ];
+  const uuidQuery = (name: string) => ({
+    name,
+    in: "query",
+    schema: { type: "string", format: "uuid" },
+  });
+  paths["/api/v1/positions"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the current positions",
+        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens get 403 session_required. Returns the current, non-archived positions of your company, or of one unit with unitId, ordered by title then id. jobRoleId is shown only to members of the team that owns the job role and is null otherwise. A unitId that is not a unit of your company returns 404 not_found; any other query key or value returns 400 invalid_input. Returns {data:[${positionShape}], pagination:{page, pageSize, hasMore}}.`,
+      },
+      {
+        "200": {
+          description: `{data:[${positionShape}], pagination:{page, pageSize, hasMore}}.`,
+        },
+      },
+      { sessionOnly: true, params: [uuidQuery("unitId"), ...pageParams] },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a position",
+        description: `${positionWriteRule} Send {title, code, orgUnitId} and optionally isManager and jobRoleId. ${directoryTextRule} A jobRoleId must be a job role of your team that is not archived (404 not_found otherwise). A unit that is archived or closed returns 409 directory_state_conflict, and one outside your company 404 not_found; a code another current position uses returns 409 position_code_exists. Reusing the code of an archived position that an employee linked to a user still holds, in another unit, moves that member's home unit, so it needs a company owner (403 directory_owner_required). An unknown key returns 400 invalid_input. ${positionAudit} Returns {data:${positionShape}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["title", "code", "orgUnitId"],
+            additionalProperties: false,
+            properties: {
+              title: directoryText,
+              code: directoryText,
+              orgUnitId: { type: "string", format: "uuid" },
+              isManager: { type: "boolean" },
+              jobRoleId: { type: "string", format: "uuid" },
+            },
+          },
+          {
+            title: "Fictional Payroll Lead",
+            code: "FIN-PAY-1",
+            orgUnitId: "00000000-0000-4000-a000-0000000000b1",
+            isManager: true,
+          },
+        ),
+      },
+      { "201": { description: `{data:${positionShape}}.` } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/positions/{id}"] = {
+    patch: operation(
+      [],
+      {
+        summary: "Update, move or archive a position",
+        description: `${positionWriteRule} Send exactly one of a facts update with one or more of {title, isManager, jobRoleId} (jobRoleId null clears it), {orgUnitId} (move) or {archived: true} (archive); any other shape, including two operations or a code, returns 400 invalid_input. Moving or archiving a position that an employee linked to a user holds changes that member's home unit, so it needs a company owner: a company admin gets 403 directory_owner_required. An archived position, or a target unit that is archived or closed, returns 409 directory_state_conflict; an unknown position, unit or job role returns 404 not_found. ${positionAudit} A move or archive of a held position also writes one scope.home_units_changed row. Archiving is permanent. Returns {data:${positionShape}}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                minProperties: 1,
+                additionalProperties: false,
+                properties: {
+                  title: directoryText,
+                  isManager: { type: "boolean" },
+                  jobRoleId: { type: ["string", "null"], format: "uuid" },
+                },
+              },
+              {
+                type: "object",
+                required: ["orgUnitId"],
+                additionalProperties: false,
+                properties: { orgUnitId: { type: "string", format: "uuid" } },
+              },
+              {
+                type: "object",
+                required: ["archived"],
+                additionalProperties: false,
+                properties: { archived: { const: true } },
+              },
+            ],
+          },
+          { title: "Fictional Payroll Manager" },
+        ),
+      },
+      { "200": { description: `{data:${positionShape}}.` } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/employees"] = {
+    get: operation(
+      [],
+      {
+        summary: "List one page of the directory",
+        description: `${employeeRule} Returns the current, non-archived employees of your company by display name then id. unitId matches employees holding a current position in that unit or any unit below it, levelId the level of a current position's unit, positionId the holders of that position and status the employee status; filters combine on the same position. A unitId, levelId or positionId outside your company returns 404 not_found; any other query key or value returns 400 invalid_input. ${contactRule} Returns {data:[${employeeShape}], pagination:{page, pageSize, hasMore}}.`,
+      },
+      {
+        "200": {
+          description: `{data:[${employeeShape}], pagination:{page, pageSize, hasMore}}.`,
+        },
+      },
+      {
+        sessionOnly: true,
+        params: [
+          uuidQuery("unitId"),
+          uuidQuery("levelId"),
+          uuidQuery("positionId"),
+          { name: "status", in: "query", schema: employeeStatus },
+          ...pageParams,
+        ],
+      },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create an employee",
+        description: `${employeeRule} Send {displayName, employeeNumber} and optionally workEmail, workPhone, status (active or left, default active) and userId. Employees hold work contact facts only. ${directoryTextRule} ${homeUnitRule} A number another employee of your company has returns 409 employee_number_exists; a user already linked to an employee returns 409 employee_user_linked; an unknown user returns 404 not_found; an unknown key returns 400 invalid_input. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["displayName", "employeeNumber"],
+            additionalProperties: false,
+            properties: {
+              displayName: directoryText,
+              employeeNumber: directoryText,
+              workEmail: workEmailSchema,
+              workPhone: workPhoneSchema,
+              status: employeeStatus,
+              userId: { type: "string", minLength: 1, maxLength: 128 },
+            },
+          },
+          {
+            displayName: "Fictional Dana Sample",
+            employeeNumber: "EMP-0001",
+            workEmail: "dana.sample@example.test",
+            workPhone: "+971 50 000 0001",
+          },
+        ),
+      },
+      { "201": { description: `{data:${employeeShape}}.` } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/employees/{id}"] = {
+    patch: operation(
+      [],
+      {
+        summary: "Update, link or archive an employee",
+        description: `${employeeRule} Send exactly one of a facts update with one or more of {displayName, employeeNumber, workEmail, workPhone, status}, {userId} (link; null unlinks) or {archived: true} (archive); any other shape returns 400 invalid_input. ${homeUnitRule} An archived employee returns 409 directory_state_conflict; a duplicate number 409 employee_number_exists; a user already linked to another employee 409 employee_user_linked; an unknown employee or user 404 not_found. Archiving keeps the user link and position rows. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                minProperties: 1,
+                additionalProperties: false,
+                properties: {
+                  displayName: directoryText,
+                  employeeNumber: directoryText,
+                  workEmail: workEmailSchema,
+                  workPhone: workPhoneSchema,
+                  status: employeeStatus,
+                },
+              },
+              {
+                type: "object",
+                required: ["userId"],
+                additionalProperties: false,
+                properties: {
+                  userId: {
+                    type: ["string", "null"],
+                    minLength: 1,
+                    maxLength: 128,
+                  },
+                },
+              },
+              {
+                type: "object",
+                required: ["archived"],
+                additionalProperties: false,
+                properties: { archived: { const: true } },
+              },
+            ],
+          },
+          { status: "left" },
+        ),
+      },
+      { "200": { description: `{data:${employeeShape}}.` } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/employees/{id}/positions"] = {
+    put: operation(
+      [],
+      {
+        summary: "Set an employee's current positions",
+        description: `${employeeRule} Send the full set {positions:[{positionId, primary}]}: at most 20 distinct positions, at most one primary (400 invalid_input otherwise). In one transaction, positions left out end now, primary flags change in place and new positions start now; ended rows stay as history. ${homeUnitRule} A position that is archived or closed, or an archived employee, returns 409 directory_state_conflict; an unknown employee or position returns 404 not_found. ${contactRule} Each changed position row writes one directory activity row with ids and field names only, and for a linked employee one scope.home_units_changed row. Returns {data:${employeeShape}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["positions"],
+            additionalProperties: false,
+            properties: {
+              positions: {
+                type: "array",
+                maxItems: 20,
+                items: {
+                  type: "object",
+                  required: ["positionId", "primary"],
+                  additionalProperties: false,
+                  properties: {
+                    positionId: { type: "string", format: "uuid" },
+                    primary: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          {
+            positions: [
+              {
+                positionId: "00000000-0000-4000-a000-0000000000c1",
+                primary: true,
+              },
+            ],
+          },
+        ),
+      },
+      { "200": { description: `{data:${employeeShape}}.` } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
   paths["/api/v1/cvs/storage-reconciliation"] = {
     post: operation(
       ["cvs:write"],

@@ -298,7 +298,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -458,7 +458,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -588,7 +588,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -704,7 +704,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -805,7 +805,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -934,7 +934,7 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
@@ -1020,7 +1020,7 @@ describe("upgrade from 0031 to configuration versions through install", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("returns the published object in versions and its body in documents", async () => {
@@ -1135,11 +1135,11 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 12", async () => {
+  it("keeps every existing row and sets storage schema 13", async () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 12 }]);
+    ).toEqual([{ version: 13 }]);
   });
 
   it("adds the three organisation tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1215,5 +1215,185 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
         areas: ["fields", "organisation"],
       },
     ]);
+  });
+});
+
+// A team, org levels and units with their closure and audit rows written by the 0033 schema,
+// upgraded through 0034: every row stays, the three directory tables arrive empty under FORCE RLS,
+// the replaced org functions keep their owner and grants and add the read committed check, the org
+// audit still inserts through the re-created policy, and a second run changes nothing.
+describe("upgrade from 0033 to positions and employees", () => {
+  const pg = new PGlite();
+  const owner = "directory_upgrade_owner";
+  const company = "00000000-0000-4000-a000-000000000001";
+  const companyOwner = principal(
+    "directory-upgrade-owner",
+    "directory-upgrade-team",
+    "owner",
+  );
+  const tables = [
+    "app.workspaces",
+    "app.workspace_teams",
+    "app.workspace_admins",
+    "app.activity",
+    "app.org_levels",
+    "app.org_units",
+    "app.org_unit_closure",
+    "auth.member",
+  ];
+  const rows = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    return Object.fromEntries(
+      await Promise.all(
+        tables.map(async (table) => [
+          table,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+        ]),
+      ),
+    );
+  };
+  const functions = async () =>
+    (
+      await pg.query<{ proname: string; isolation: boolean }>(
+        `SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proacl::text AS acl,
+           p.proconfig AS config, position('transaction_isolation' in p.prosrc) > 0 AS isolation
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'app' AND p.proname IN ('guard_scope_sources', 'maintain_org_closure', 'guard_org_archive', 'audit_org_change', 'guard_org_row')
+         ORDER BY p.proname`,
+      )
+    ).rows;
+  let before: Awaited<ReturnType<typeof rows>>;
+  let beforeFunctions: Awaited<ReturnType<typeof functions>>;
+  let unit: string;
+
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0033_org_levels_units.sql");
+    await installTenantContextKey(pg);
+    // Fixture rows as the bootstrap superuser, which bypasses RLS; the triggers still run.
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('directory-upgrade-owner','Fictional Upgrade Owner','directory-upgrade-owner@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('directory-upgrade-team','Fictional Upgrade Team','directory-upgrade-team','directory-upgrade-owner');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('directory-upgrade-mo','directory-upgrade-team','directory-upgrade-owner','owner');`);
+    // Levels and units through the 0033 triggers, under the company owner's context, so closure and
+    // audit rows exist before the upgrade.
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    unit = await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+      await installTenantContext(tx, companyOwner, snapshot);
+      const insert = async (statement: ReturnType<typeof sql>) =>
+        (await tx.execute<{ id: string }>(statement)).rows[0].id;
+      const top = await insert(
+        sql`insert into app.org_levels(workspace_id, name, depth) values (${company}::uuid, 'Fictional Upgrade Level', 0) returning id`,
+      );
+      const lower = await insert(
+        sql`insert into app.org_levels(workspace_id, name, depth) values (${company}::uuid, 'Fictional Upgrade Section', 1) returning id`,
+      );
+      const holdings = await insert(
+        sql`insert into app.org_units(workspace_id, level_id, name, code) values (${company}::uuid, ${top}::uuid, 'Fictional Upgrade Holdings', 'UP-1') returning id`,
+      );
+      return insert(
+        sql`insert into app.org_units(workspace_id, level_id, parent_id, name, code) values (${company}::uuid, ${lower}::uuid, ${holdings}::uuid, 'Fictional Upgrade Section', 'UP-2') returning id`,
+      );
+    });
+    before = await rows();
+    beforeFunctions = await functions();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every existing row and sets storage schema 13", async () => {
+    expect(before["app.org_unit_closure"]).toHaveLength(3);
+    expect(before["app.activity"]).toHaveLength(4);
+    expect(await rows()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 13 }]);
+  });
+
+  it("adds the three directory tables empty, under ENABLE and FORCE RLS", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const added = ["employee_positions", "employees", "positions"];
+    expect(
+      (
+        await pg.query(
+          `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, pg_get_userbyid(c.relowner) AS owner
+           FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace
+           WHERE s.nspname = 'app' AND c.relkind = 'r' AND c.relname = ANY($1::text[]) ORDER BY c.relname`,
+          [added],
+        )
+      ).rows,
+    ).toEqual(
+      added.map((relname) => ({
+        relname,
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        owner,
+      })),
+    );
+    for (const table of added)
+      expect(
+        (await pg.query(`SELECT count(*)::int AS n FROM app.${table}`)).rows,
+        table,
+      ).toEqual([{ n: 0 }]);
+  });
+
+  it("replaces the org functions in place with the read committed check, owner and grants kept", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const after = await functions();
+    expect(after.map((row) => row.proname)).toEqual(
+      beforeFunctions.map((row) => row.proname),
+    );
+    for (const [index, row] of after.entries()) {
+      const { isolation, ...kept } = row;
+      const { isolation: was, ...earlier } = beforeFunctions[index];
+      expect(kept, row.proname).toEqual(earlier);
+      expect(was, row.proname).toBe(false);
+      expect(isolation, row.proname).toBe(
+        [
+          "guard_scope_sources",
+          "maintain_org_closure",
+          "guard_org_archive",
+        ].includes(row.proname),
+      );
+    }
+  });
+
+  it("still audits an org change through the re-created insert policy, and a second run changes nothing", async () => {
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    const db = drizzle(pg, { schema }) as unknown as AppDb;
+    await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+      await installTenantContext(tx, companyOwner, snapshot);
+      await tx.execute(
+        sql`update app.org_units set name = 'Fictional Upgrade Renamed' where id = ${unit}::uuid`,
+      );
+    });
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          "SELECT team_id, actor_id, kind, action FROM app.activity WHERE action = 'org.unit_renamed'",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        team_id: "directory-upgrade-team",
+        actor_id: "directory-upgrade-owner",
+        kind: "org",
+        action: "org.unit_renamed",
+      },
+    ]);
+    const settled = { rows: await rows(), functions: await functions() };
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+    expect({ rows: await rows(), functions: await functions() }).toEqual(
+      settled,
+    );
   });
 });

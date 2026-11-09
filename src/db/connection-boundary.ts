@@ -33,6 +33,8 @@ export const dataRoleHelpers = [
   "tenant_context.retire_config_version(uuid)",
   "tenant_context.audit_config(uuid,text)",
   "tenant_context.config_history(uuid,timestamp with time zone,integer)",
+  "tenant_context.allows_directory(uuid,text)",
+  "tenant_context.home_unit_changes(timestamp with time zone,integer)",
 ];
 export const identityRoleHelpers = [
   "tenant_context.install(text,text,text[])",
