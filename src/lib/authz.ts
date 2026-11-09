@@ -5,9 +5,13 @@ import { SCOPES, roleScopes, type Role, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
 import {
+  ACTION_RESOURCES,
+  ACTIONS,
   ADMIN_AREAS,
   GRANTABLE_ADMIN_AREAS,
+  PAGE_KEYS,
   READ_ACTIONS,
+  RECORD_RESOURCES,
   TEAM_ADMIN_RESOURCES,
   TOP_LEVEL_FIELD_KEYS,
   roleBodySchema,
@@ -292,6 +296,54 @@ export function authorize(
   return {
     scope: { recordScope: group ? ctx.role!.recordScope[group] : "all" },
     fields,
+  };
+}
+
+/** The caller's own answers for the UI (GET /api/v1/me/access). */
+export type AccessMap = {
+  role: Pick<RoleBody, "name" | "membership"> | null;
+  scopes: Scope[];
+  pages: PageKey[];
+  actions: Partial<Record<ActionResource, Action[]>>;
+  fields: Partial<Record<RecordKind, AccessDecision["fields"]>>;
+  adminAreas: AdminArea[];
+};
+
+/**
+ * Every answer of authorize() the screens need to hide what the server would refuse, with no
+ * statement, no id and no configuration body: the role's name, membership and pages, the scopes,
+ * the allowed actions per resource, the field rules of each record kind the caller may view and the
+ * company areas.
+ */
+export function accessMap(ctx: AccessContext): AccessMap {
+  const decide = (request: AccessRequest) => {
+    try {
+      return authorize(ctx, request);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) return null;
+      throw error;
+    }
+  };
+  const actions: AccessMap["actions"] = {};
+  for (const resource of ACTION_RESOURCES) {
+    const allowed = ACTIONS.filter((action) => decide({ resource, action }));
+    if (allowed.length) actions[resource] = allowed;
+  }
+  const fields: AccessMap["fields"] = {};
+  for (const resource of RECORD_RESOURCES) {
+    const decision = decide({ resource, action: "view" });
+    if (decision) fields[resourceToKind[resource]] = decision.fields;
+  }
+  const { role } = ctx;
+  return {
+    role: role ? { name: role.name, membership: role.membership } : null,
+    scopes: ctx.scopes,
+    pages: role ? PAGE_KEYS.filter((page) => role.pages.includes(page)) : [],
+    actions,
+    fields,
+    adminAreas: ADMIN_AREAS.filter((adminArea) =>
+      decide({ action: "admin", adminArea }),
+    ),
   };
 }
 
