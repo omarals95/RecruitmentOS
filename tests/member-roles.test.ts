@@ -30,6 +30,7 @@ import {
   builtInRoleFor,
 } from "@/domain/config-defaults";
 import { accessContext } from "@/lib/authz";
+import { authorize } from "@/lib/authz";
 import { getVerifiedSession } from "@/lib/auth-session";
 import {
   archiveConfigObject,
@@ -53,9 +54,11 @@ import { callTool, TOOLS } from "@/lib/mcp/tools";
 import { listStoredTools } from "@/lib/mcp/tools";
 import {
   assignMemberRole,
+  listMemberRoles,
   listRoleAssignmentChanges,
 } from "@/lib/member-roles";
 import { requireScope, roleScopes, type Role } from "@/lib/permissions";
+import { ROLE_UNAVAILABLE } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import {
   createRecord,
@@ -65,6 +68,7 @@ import {
 import { storageConfigured, type StorageGateway } from "@/lib/storage";
 import { installTenantContext } from "@/lib/tenant-context";
 import { POST as memberRolesRoute } from "@/app/api/v1/teams/member-roles/route";
+import { GET as memberRolesListRoute } from "@/app/api/v1/teams/member-roles/route";
 import { GET as listRoute } from "@/app/api/v1/[resource]/route";
 import { POST as exportRoute } from "@/app/api/v1/[resource]/export/route";
 import { GET as activityRoute } from "@/app/api/v1/activity/route";
@@ -1551,5 +1555,246 @@ describe("configured roles and member assignment under the split runtime roles",
       timezone: "Asia/Dubai",
       hasMeetingUrl: true,
     });
+  });
+
+  // R2a-12 (job 056): the picker, failed-closed roles and an unconfirmed team role.
+  it("lists member roles for a company owner, leaving out roles limited to a unit or to assigned records", async () => {
+    const { status, body: listed } = await get(
+      memberRolesListRoute,
+      owner,
+      "/api/v1/teams/member-roles",
+    );
+    expect(status).toBe(200);
+    const { assignments, roles, scopedRolesHidden } = listed.data as {
+      assignments: {
+        userId: string;
+        roleObjectId: string;
+        roleName: string | null;
+        available: boolean;
+      }[];
+      roles: { roleObjectId: string; name: string; membership: string }[];
+      scopedRolesHidden: boolean;
+    };
+    expect(scopedRolesHidden).toBe(true);
+    const offered = roles.map((role) => role.roleObjectId);
+    for (const role of [hiringManager, interviewer, unitScoped, later])
+      expect(offered).not.toContain(role.objectId);
+    expect(offered).not.toContain(archived.objectId);
+    expect(offered).not.toContain(unpublished.objectId);
+    expect(roles).toContainEqual({
+      roleObjectId: narrow.objectId,
+      name: "Fictional narrowed recruiter",
+      membership: "recruiter",
+    });
+    const names = roles.map((role) => role.name);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
+    // Only team A's rows, each with its role's name.
+    const rowsA = (await rows()).filter((row) => row.team_id === owner.teamId);
+    expect(assignments.map((row) => row.userId).sort()).toEqual(
+      rowsA.map((row) => row.user_id).sort(),
+    );
+    expect(assignments).toContainEqual({
+      userId: viewers.assigned.userId,
+      roleObjectId: narrow.objectId,
+      roleName: "Fictional narrowed recruiter",
+      available: true,
+    });
+    expect(
+      assignments.find((row) => row.userId === viewerB.userId),
+    ).toBeUndefined();
+  });
+
+  it("reports archived and unit-republished roles as no longer available, and reassigns and clears them", async () => {
+    const assignmentOf = async (userId: string) =>
+      (
+        await get(memberRolesListRoute, owner, "/api/v1/teams/member-roles")
+      ).body.data.assignments.find(
+        (row: { userId: string }) => row.userId === userId,
+      );
+    expect(await assignmentOf(viewers.later.userId)).toEqual({
+      userId: viewers.later.userId,
+      roleObjectId: later.objectId,
+      roleName: "Fictional later recruiter",
+      available: false,
+    });
+    expect(await assignmentOf(viewers.archived.userId)).toEqual({
+      userId: viewers.archived.userId,
+      roleObjectId: archived.objectId,
+      roleName: "Fictional archived recruiter",
+      available: false,
+    });
+    expect(
+      await route(owner, {
+        userId: viewers.later.userId,
+        roleObjectId: plain.objectId,
+      }),
+    ).toMatchObject({
+      status: 200,
+      body: { data: { membership: "recruiter" } },
+    });
+    expect(await assignmentOf(viewers.later.userId)).toMatchObject({
+      roleObjectId: plain.objectId,
+      available: true,
+    });
+    expect((await installed(viewers.later)).stored).toEqual({
+      scopes: roleScopes("recruiter"),
+      role_version_id: plain.versionId,
+    });
+    expect(
+      await route(owner, {
+        userId: viewers.archived.userId,
+        roleObjectId: null,
+      }),
+    ).toMatchObject({ status: 200, body: { data: { roleObjectId: null } } });
+    expect(await assignmentOf(viewers.archived.userId)).toBeUndefined();
+  });
+
+  it("refuses a failed-closed member in plain words, with the same statuses and codes", async () => {
+    const member = await seedIdentity(await harness.asOwner(), {
+      userId: "mr-viewer-failed",
+      teamId: "mr-team-a",
+      role: "viewer",
+    });
+    const gone = await publishRole(
+      "fictional-gone",
+      body(RECRUITER_ROLE.body as RoleBody, "Fictional gone recruiter"),
+    );
+    await assign(owner, member.userId, gone.objectId);
+    await harness.dataDb();
+    await archiveConfigObject(owner, gone.objectId);
+    const failed = fresh(member, "recruiter");
+    for (const [handler, path, params, code] of [
+      // The overview checks its scope first; the list decides on the engine.
+      [overviewRoute, "/api/v1/overview", {}, "scope_required"],
+      [
+        listRoute,
+        "/api/v1/candidates",
+        { resource: "candidates" },
+        "forbidden",
+      ],
+    ] as const)
+      expect(await get(handler, failed, path, params), path).toEqual({
+        status: 403,
+        body: {
+          error: {
+            code,
+            message: ROLE_UNAVAILABLE,
+            correlationId: expect.any(String),
+          },
+        },
+      });
+    expect(ROLE_UNAVAILABLE).toBe(
+      "Your role is no longer available. Ask a company owner to choose a role for you.",
+    );
+    // A check after the context, and the engine's refusals, say the same.
+    const principal = fresh(member, "recruiter");
+    await harness.dataDb();
+    const ctx = await withTeam(principal, async (_tx, access) =>
+      accessContext(principal, access),
+    );
+    expect(() => requireScope(principal, "candidates:read")).toThrow(
+      expect.objectContaining({
+        status: 403,
+        code: "scope_required",
+        message: ROLE_UNAVAILABLE,
+      }),
+    );
+    for (const [action, code] of [
+      ["view", "forbidden"],
+      ["import", "import_forbidden"],
+    ] as const)
+      expect(() => authorize(ctx, { resource: "candidates", action })).toThrow(
+        expect.objectContaining({
+          status: 403,
+          code,
+          message: ROLE_UNAVAILABLE,
+        }),
+      );
+    // Any other member keeps today's words.
+    const viewer = await seedIdentity(await harness.asOwner(), {
+      userId: "mr-viewer-unchanged",
+      teamId: "mr-team-a",
+      role: "viewer",
+    });
+    await harness.dataDb();
+    const plainCtx = await withTeam(fresh(viewer), async (_tx, access) =>
+      accessContext(fresh(viewer), access),
+    );
+    expect(() =>
+      authorize(plainCtx, { resource: "candidates", action: "edit" }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "forbidden",
+        message: "You do not have permission for this action.",
+      }),
+    );
+  });
+
+  it("answers 503 team_role_unconfirmed, keeping the row, when Better Auth fails with something other than an APIError", async () => {
+    const member = await seedIdentity(await harness.asOwner(), {
+      userId: "mr-viewer-unconfirmed",
+      teamId: "mr-team-a",
+      role: "viewer",
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    authApi.updateMemberRole.mockRejectedValueOnce(
+      new TypeError("Fictional network failure"),
+    );
+    try {
+      expect(
+        await route(owner, {
+          userId: member.userId,
+          roleObjectId: plain.objectId,
+        }),
+      ).toEqual({
+        status: 503,
+        body: {
+          error: {
+            code: "team_role_unconfirmed",
+            message:
+              "The role was saved, but the team role could not be checked or changed, so the narrower of the two applies. Try again, or ask a team owner or admin to check the team role in Team settings.",
+            correlationId: expect.any(String),
+          },
+        },
+      });
+      expect(logged.mock.calls.map((call) => call.join(" "))).toEqual([
+        "team_role_unconfirmed category=TypeError",
+      ]);
+    } finally {
+      logged.mockRestore();
+    }
+    expect(
+      (await rows()).filter((row) => row.user_id === member.userId),
+    ).toMatchObject([{ role_object_id: plain.objectId }]);
+    expect(await teamRole(member)).toBe("viewer");
+  });
+
+  it("refuses the member-roles list to anyone but a company owner session", async () => {
+    for (const p of [companyAdmin, teamOwnerB, teamAdminA, recruiter]) {
+      const { status, body: refusal } = await get(
+        memberRolesListRoute,
+        fresh(p),
+        "/api/v1/teams/member-roles",
+      );
+      expect(status, p.userId).toBe(403);
+      expect(refusal.error.code, p.userId).toBe("role_assignment_forbidden");
+    }
+    for (const p of [ownerToken, ownerOauth]) {
+      await harness.dataDb();
+      await expect(listMemberRoles(fresh(p))).rejects.toMatchObject({
+        status: 403,
+        code: "role_assignment_forbidden",
+      });
+    }
+    const bearer = await memberRolesListRoute(
+      new Request(`${ORIGIN}/api/v1/teams/member-roles`, {
+        headers: {
+          origin: ORIGIN,
+          authorization: "Bearer fictional-member-roles-token",
+        },
+      }),
+    );
+    expect(bearer.status).toBe(403);
+    expect((await bearer.json()).error.code).toBe("session_required");
   });
 });
