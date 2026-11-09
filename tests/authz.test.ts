@@ -53,7 +53,8 @@ import {
   type Role,
 } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
-import { importPermission, owned, permission } from "@/lib/records";
+import { eq, sql } from "drizzle-orm";
+import { records } from "@/db/schema";
 
 // Fictional ids only.
 const TEAM = "10000000-0000-4000-8000-000000000001";
@@ -126,6 +127,47 @@ const allowed = (ctx: AccessContext, request: AccessRequest) =>
   outcome(() => authorize(ctx, request)) === "allowed";
 const forbidden = () =>
   new ApiError(403, "forbidden", "You do not have permission for this action.");
+
+// Frozen oracles: verbatim copies of permission(), importPermission() and owned() as
+// src/lib/records.ts had them before R2a-07 moved the records service onto the engine.
+const knownRoles = new Set(["owner", "admin", "recruiter", "viewer"]);
+function permission(p: Principal, resource: ResourceName, write = false) {
+  const scope = `${resource === "candidates" ? "candidates" : "recruitment"}:${write ? "write" : "read"}`;
+  if (
+    !knownRoles.has(p.role) ||
+    (write && p.role === "viewer") ||
+    !p.scopes.includes(scope as Principal["scopes"][number])
+  )
+    throw new ApiError(
+      403,
+      "forbidden",
+      "You do not have permission for this action.",
+    );
+}
+function importPermission(p: Principal) {
+  if (
+    !["owner", "admin"].includes(p.role) ||
+    !p.scopes.includes("imports:write")
+  )
+    throw new ApiError(
+      403,
+      "import_forbidden",
+      "Legacy source fields require an owner or admin import token.",
+    );
+}
+function owned(p: Principal, kind: RecordKind): SQL[] {
+  return [
+    eq(records.teamId, p.teamId),
+    eq(records.kind, kind),
+    ...(kind === "saved-view" ? [eq(records.privateOwnerId, p.userId)] : []),
+    // Without candidates:read, comments on candidates do not exist for the caller.
+    ...(kind === "comment" && !p.scopes.includes("candidates:read")
+      ? [
+          sql`exists(select 1 from ${records} parent where parent.team_id=${p.teamId} and parent.id=${records.parentRecordId} and parent.kind<>'candidate')`,
+        ]
+      : []),
+  ];
+}
 
 /** Today's answer for one resource and action, from the functions records.ts uses now. */
 function today(p: Principal, resource: ResourceName, action: Action) {

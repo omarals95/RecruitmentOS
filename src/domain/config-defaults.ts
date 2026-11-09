@@ -47,8 +47,8 @@ const everyGroup = (scope: RoleBody["recordScope"]["pipeline"]) => ({
   tasks: scope,
 });
 
-// Today's effect of each team role: its scopes, every page and field, record scope all. Imports
-// are allowed on every record resource, as importPermission() is; erasure, two-step reset and team
+// Today's effect of each team role: its scopes, every page and field, record scope all. Owner and
+// admin import on every record resource with imports:write; erasure, two-step reset and team
 // creation stay owner-only and storage settings owner-or-admin, in code and mirrored here.
 function todaysRole(membership: Role, name: string): RoleBody {
   const writes = membership !== "viewer";
