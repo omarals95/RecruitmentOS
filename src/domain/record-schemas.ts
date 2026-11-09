@@ -243,6 +243,15 @@ export const recordDataSchemas = {
       title: requiredText(),
       context: text(2000),
       owner: text(),
+      // Never stored in data: each id is an app.record_assignments row with relation assignee.
+      assigneeIds: z
+        .array(z.string().min(1).max(128))
+        .max(10)
+        .refine(
+          (ids) => new Set(ids).size === ids.length,
+          "Each assignee may appear only once",
+        )
+        .optional(),
       dueDate: optionalDay,
       priority: z.enum(["Low", "Normal", "High", "Urgent"]).default("Normal"),
       description: notes(),

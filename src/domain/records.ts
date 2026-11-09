@@ -88,7 +88,22 @@ export interface RecordDto<
   /** Vacancies with an org unit only: the unit and its "Name (CODE)". */
   orgUnitId?: string;
   orgUnitLabel?: string | null;
+  /** Tasks linked to a record the caller may see only: its kind and label. */
+  parentKind?: RecordKind;
+  parentLabel?: string;
 }
+/**
+ * The record kinds a task may link to through parentRecordId. An allowlist, so a new kind is refused
+ * until it is added. Candidate erasure never deletes these kinds; linking the kinds it deletes waits
+ * for an erasure change (R2a-20, owner decision A1, option B).
+ */
+export const TASK_LINK_KINDS: readonly RecordKind[] = [
+  "job-role",
+  "vacancy",
+  "bucket",
+  "task-field",
+  "task",
+];
 export const referencesByKind: Record<
   RecordKind,
   Partial<
@@ -111,6 +126,7 @@ export const referencesByKind: Record<
     bucketId: { kind: "bucket", required: true },
     candidateId: { kind: "candidate" },
     vacancyId: { kind: "vacancy" },
+    parentRecordId: { kind: "*" },
   },
   interview: {
     applicationId: { kind: "application", required: true, immutable: true },

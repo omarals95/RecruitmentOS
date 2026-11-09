@@ -180,7 +180,7 @@ export function builtInRoleFor(role: Role): RoleTemplate {
   return BUILT_IN_ROLES[role];
 }
 
-/** Plural and singular labels per kind; "Recruitment tasks" and "Task" stay until R2a-20. */
+/** Plural and singular labels per kind; tasks are team tasks since R2a-20. */
 export const KIND_LABELS: Record<RecordKind, [string, string]> = {
   candidate: ["Candidates", "Candidate"],
   "job-role": ["Job roles", "Job role"],
@@ -188,7 +188,7 @@ export const KIND_LABELS: Record<RecordKind, [string, string]> = {
   application: ["Applications", "Application"],
   bucket: ["Workflow buckets", "Bucket"],
   "task-field": ["Custom task fields", "Custom field"],
-  task: ["Recruitment tasks", "Task"],
+  task: ["Team tasks", "Task"],
   interview: ["Interviews", "Interview"],
   offer: ["Offers", "Offer"],
   onboarding: ["Onboarding", "Onboarding"],
@@ -232,12 +232,20 @@ const fieldLabels: Record<string, string> = {
   meetingUrl: "Meeting URL",
   privateOwnerId: "Owner",
   completed: "Counts as completed",
+  assigneeIds: "Assignees",
 };
 // The field type by key, checked in this order after the dropdowns; any other key is text.
 const typedKeys: [FieldType, string[]][] = [
   [
     "tags",
-    ["skills", "certifications", "languages", "folderCategories", "options"],
+    [
+      "skills",
+      "certifications",
+      "languages",
+      "folderCategories",
+      "options",
+      "assigneeIds",
+    ],
   ],
   ["json", ["rawSource", "evidence", "sourceReviews", "query", "customValues"]],
   ["checkbox", ["required", "completed"]],

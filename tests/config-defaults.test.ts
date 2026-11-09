@@ -21,7 +21,8 @@ import { kindSchemaFor } from "@/lib/config-store";
 import type { TenantAccess } from "@/lib/tenant-context";
 
 // Today's derivation, copied verbatim from src/domain/records.ts at 75de073 (lines 581-707), with
-// the enum constants it reads; the snapshot RESOURCE_CONFIG must keep reproducing.
+// the enum constants it reads; the snapshot RESOURCE_CONFIG must keep reproducing. R2a-20 (job 062)
+// renamed the task label to "Team tasks" and added the task's assigneeIds, a tags field "Assignees".
 const APPLICATION_STAGES = [
   "Sourced",
   "Screening",
@@ -46,7 +47,7 @@ const labels: Record<RecordKind, [string, string]> = {
   application: ["Applications", "Application"],
   bucket: ["Workflow buckets", "Bucket"],
   "task-field": ["Custom task fields", "Custom field"],
-  task: ["Recruitment tasks", "Task"],
+  task: ["Team tasks", "Task"],
   interview: ["Interviews", "Interview"],
   offer: ["Offers", "Offer"],
   onboarding: ["Onboarding", "Onboarding"],
@@ -90,6 +91,7 @@ const fieldLabels: Record<string, string> = {
   meetingUrl: "Meeting URL",
   privateOwnerId: "Owner",
   completed: "Counts as completed",
+  assigneeIds: "Assignees",
 };
 const TODAY = Object.fromEntries(
   Object.entries(resourceToKind).map(([resource, kind]) => [
@@ -108,6 +110,7 @@ const TODAY = Object.fromEntries(
                 "languages",
                 "folderCategories",
                 "options",
+                "assigneeIds",
               ].includes(key)
             ? "tags"
             : [
@@ -303,14 +306,28 @@ describe("built-in default kind schemas (R2b-01)", () => {
     });
   });
 
-  it("keeps today's labels, with Recruitment tasks and Task", () => {
+  it("keeps today's labels, with Team tasks and Task", () => {
     for (const kind of CONFIGURABLE_KINDS) {
       const { label, singular } = DEFAULT_KIND_SCHEMAS[kind].body;
       expect([label, singular]).toEqual(labels[kind]);
     }
+    expect(DEFAULT_KIND_SCHEMAS.task.body.label).toBe("Team tasks");
     expect(DEFAULT_KIND_SCHEMAS.task.body).toMatchObject({
-      label: "Recruitment tasks",
+      label: "Team tasks",
       singular: "Task",
+    });
+    expect(
+      DEFAULT_KIND_SCHEMAS.task.body.fields.find(
+        (field) => field.key === "assigneeIds",
+      ),
+    ).toEqual({
+      key: "assigneeIds",
+      system: true,
+      label: "Assignees",
+      type: "tags",
+      required: false,
+      readOnly: false,
+      sensitive: false,
     });
   });
 

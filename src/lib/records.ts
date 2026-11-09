@@ -14,7 +14,13 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { z } from "zod";
-import { activity, candidateStates, idempotency, records } from "@/db/schema";
+import {
+  activity,
+  candidateStates,
+  idempotency,
+  recordAssignments,
+  records,
+} from "@/db/schema";
 import type { TeamTx } from "@/db";
 import {
   accessContext,
@@ -27,17 +33,20 @@ import {
   scopeFilter,
   type AccessContext,
 } from "@/lib/authz";
+import { assignmentRefusal } from "@/lib/assignments";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
 import {
   CANDIDATE_DUPLICATE_LIMIT,
   REVIEW_STATUSES,
+  TASK_LINK_KINDS,
   bulkApplicationsSchema,
   candidateStateSchema,
   createRecordSchemas,
   daySchema,
   dubaiToday,
+  kindToResource,
   recordDataSchemas,
   referenceFields,
   referencesByKind,
@@ -53,8 +62,17 @@ import {
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
 
 type DbRecord = typeof records.$inferSelect;
-/** A row read with its vacancy unit's label in the same statement (recordColumns). */
-type LabelledRecord = DbRecord & { orgUnitLabel?: string | null };
+/** A task's linked record as the caller may see it (parentLink). */
+type ParentLink = { kind: RecordKind; label: string };
+/**
+ * A row read with its vacancy unit's label, a task's assignees and a task's linked record in the same
+ * statement (recordColumns, readColumns).
+ */
+type LabelledRecord = DbRecord & {
+  orgUnitLabel?: string | null;
+  assigneeIds?: string[] | null;
+  parentLink?: ParentLink | null;
+};
 type Data = Record<string, unknown>;
 type WriteInput = Partial<RecordReferences> & {
   data: Data;
@@ -65,13 +83,69 @@ type WriteInput = Partial<RecordReferences> & {
   moveToBucketId?: string;
   orgUnitId?: string | null;
 };
-/** Every column plus a vacancy's org unit as "Name (CODE)"; null for other kinds and no unit. */
+/**
+ * A column of the row a statement returns, qualified: an insert's or update's RETURNING names its
+ * columns without the table, which a subquery over another records row would otherwise shadow.
+ */
+const outer = (column: string) => sql.raw(`"records".${column}`);
+/**
+ * Every column plus a vacancy's org unit as "Name (CODE)", null for other kinds and no unit, and a
+ * task's assignees: the user ids of its assignee rows in code-point order, null for other kinds.
+ */
 const recordColumns = {
   ...getTableColumns(records),
   orgUnitLabel: sql<
     string | null
   >`case when ${records.kind}='vacancy' then (select u.name || ' (' || u.code || ')' from app.org_units u where u.id=${records.orgUnitId}) end`,
+  assigneeIds: sql<
+    string[] | null
+  >`case when ${records.kind}='task' then coalesce((select jsonb_agg(a.user_id order by a.user_id collate "C") from ${recordAssignments} a where a.team_id=${outer("team_id")} and a.record_id=${outer("id")} and a.relation='assignee'), '[]'::jsonb) end`,
 };
+/**
+ * A task's linked record as the caller may see it, or null: a kind of TASK_LINK_KINDS the caller may
+ * view, in their record scope, labelled as decorate() labels references, from its name or title
+ * unless the role hides that field on the parent's kind.
+ */
+function parentLink(ctx: AccessContext): SQL<ParentLink | null> {
+  const branches = TASK_LINK_KINDS.filter((kind) =>
+    decide(ctx, { resource: kindToResource[kind], action: "view" }),
+  ).map((kind) => {
+    const hidden = hiddenKeys(ctx, kind);
+    const names = ["name", "title"]
+      .filter(
+        (key) =>
+          Object.hasOwn(recordDataSchemas[kind].shape, key) && !hidden.has(key),
+      )
+      .map(
+        (key) =>
+          `nullif(case when jsonb_typeof(parent.data->'${key}')='string' then parent.data->>'${key}' end, '')`,
+      );
+    return {
+      kind,
+      rule: recordScopeRule(ctx, kind, "parent"),
+      label: sql.raw(
+        `coalesce(${[...names, `'Untitled ${kind}'`].join(", ")})`,
+      ),
+    };
+  });
+  if (!branches.length) return sql`null`;
+  return sql`case when ${records.kind}='task' and ${records.parentRecordId} is not null then (select jsonb_build_object('kind', parent.kind, 'label', (case ${sql.join(
+    branches.map(
+      (branch) => sql`when parent.kind=${branch.kind} then ${branch.label}`,
+    ),
+    sql` `,
+  )} end) || case when parent.archived_at is not null then ' (archived)' else '' end) from ${records} parent where parent.team_id=${outer("team_id")} and parent.id=${outer("parent_record_id")} and (${sql.join(
+    branches.map(
+      (branch) =>
+        sql`(parent.kind=${branch.kind}${branch.rule ? sql` and ${branch.rule}` : sql``})`,
+    ),
+    sql` or `,
+  )})) end`;
+}
+/** recordColumns plus a task's linked record, for every statement that returns records. */
+function readColumns(ctx: AccessContext) {
+  return { ...recordColumns, parentLink: parentLink(ctx) };
+}
 /**
  * Maps app.maintain_record_scope()'s refusal of a vacancy's unit (RQ012) to a reference error, and
  * the record-scope policy's refusal of a row outside the caller's scope (42501, 0038) to a plain 403
@@ -125,13 +199,17 @@ function id(value: unknown) {
 }
 /**
  * The response shape. A vacancy with a unit read through recordColumns adds orgUnitId and
- * orgUnitLabel; every other row keeps exactly its earlier keys, and exports never read the label.
+ * orgUnitLabel, and a task read through it adds data.assigneeIds and, with a visible linked record,
+ * parentKind and parentLabel; every other row keeps exactly its earlier keys, and exports never read
+ * them.
  */
 function dto(row: LabelledRecord): RecordDto {
   return {
     id: row.id,
     kind: row.kind as RecordKind,
-    data: row.data as RecordDto["data"],
+    data: (row.kind === "task" && row.assigneeIds !== undefined
+      ? { ...row.data, assigneeIds: row.assigneeIds ?? [] }
+      : row.data) as RecordDto["data"],
     version: row.version,
     legacyId: row.legacyId,
     createdBy: row.createdBy,
@@ -153,6 +231,9 @@ function dto(row: LabelledRecord): RecordDto {
     row.orgUnitId &&
     row.orgUnitLabel !== undefined
       ? { orgUnitId: row.orgUnitId, orgUnitLabel: row.orgUnitLabel }
+      : {}),
+    ...(row.kind === "task" && row.parentLink
+      ? { parentKind: row.parentLink.kind, parentLabel: row.parentLink.label }
       : {}),
   };
 }
@@ -308,7 +389,7 @@ async function find(
   lock = false,
 ): Promise<LabelledRecord> {
   const query = tx
-    .select(recordColumns)
+    .select(readColumns(ctx))
     .from(records)
     .where(and(...scopeFilter(ctx, kind), eq(records.id, recordId)))
     .limit(1);
@@ -419,11 +500,20 @@ async function checkReferences(
       .limit(1);
     // A candidate the caller cannot read is answered exactly as a missing parent.
     const candidateComment = kind === "comment" && parent?.kind === "candidate";
+    // So is a task's link to a kind outside TASK_LINK_KINDS, a kind the caller may not view, or itself.
+    const taskLink = kind === "task" && key === "parentRecordId";
     if (
       !parent ||
       (config?.kind !== "*" && parent.kind !== config?.kind) ||
       (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId) ||
-      (candidateComment && !ctx.scopes.includes("candidates:read"))
+      (candidateComment && !ctx.scopes.includes("candidates:read")) ||
+      (taskLink &&
+        (!TASK_LINK_KINDS.includes(parent.kind as RecordKind) ||
+          parent.id === existing?.id ||
+          !decide(ctx, {
+            resource: kindToResource[parent.kind as RecordKind],
+            action: "view",
+          })))
     )
       throw new ApiError(
         400,
@@ -959,10 +1049,15 @@ const LIST_QUERY_KEYS = [
   "employmentType",
   "workMode",
   "area",
+  "assignedToMe",
 ] as const;
-/** Keep in step with the key list in tenant_context.audit_export (drizzle/0013_export_audit.sql). */
+/**
+ * Keep in step with the key list in tenant_context.audit_export (drizzle/0013_export_audit.sql).
+ * assignedToMe is list-only, so an export refuses it as an unsupported filter.
+ */
 export const EXPORT_FILTER_KEYS: readonly string[] = LIST_QUERY_KEYS.filter(
-  (key) => !["page", "pageSize", "sort", "direction"].includes(key),
+  (key) =>
+    !["page", "pageSize", "sort", "direction", "assignedToMe"].includes(key),
 );
 /**
  * Filters on the exporter's own private state, left out of the team-visible export audit so it
@@ -1085,6 +1180,17 @@ function recordQuery(
       parse(z.enum(["true", "false"]), query.get("shortlisted")) === "true";
     const matching = sql`exists (select 1 from ${candidateStates} where ${candidateStates.teamId} = ${p.teamId} and ${candidateStates.userId} = ${p.userId} and ${candidateStates.candidateId} = ${records.id} and ${candidateStates.shortlisted} = true)`;
     where.push(selected ? matching : sql`not (${matching})`);
+  }
+  if (query.has("assignedToMe")) {
+    const value = query.get("assignedToMe");
+    if (kind !== "task" || (value !== "true" && value !== "false"))
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "assignedToMe applies only to tasks and takes true or false.",
+      );
+    const assigned = sql`exists (select 1 from ${recordAssignments} where ${recordAssignments.teamId} = ${p.teamId} and ${recordAssignments.recordId} = ${records.id} and ${recordAssignments.userId} = ${p.userId} and ${recordAssignments.relation} = 'assignee')`;
+    where.push(value === "true" ? assigned : sql`not (${assigned})`);
   }
   if (query.has("needsReview")) {
     if (kind !== "candidate")
@@ -1329,7 +1435,7 @@ export async function listInside(
   // The page carries the matching total; only an empty page past the first needs its own count.
   const rows = await tx
     .select({
-      record: recordColumns,
+      record: readColumns(ctx),
       total: sql<number>`count(*) over ()`.mapWith(Number),
     })
     .from(records)
@@ -1448,6 +1554,38 @@ export async function exportRecords(
   });
 }
 
+/** A task's assigneeIds apart from the data it stores, which never holds the key. */
+function withoutAssignees(input: Data): {
+  data: Data;
+  assigneeIds?: string[];
+} {
+  const { assigneeIds, ...data } = input;
+  return { data, assigneeIds: assigneeIds as string[] | undefined };
+}
+/**
+ * Applies a task's assignee changes in one statement through the job 060 helpers, which check the
+ * write context, the record scope, team membership and self-assignment again and write one activity
+ * row per change. Only the assignee relation is touched; a refusal rolls back the whole write and
+ * names assigneeIds.
+ */
+async function changeAssignees(
+  tx: TeamTx,
+  recordId: string,
+  before: string[],
+  after: string[],
+) {
+  const removed = before.filter((userId) => !after.includes(userId));
+  const added = after.filter((userId) => !before.includes(userId));
+  if (!removed.length && !added.length) return;
+  try {
+    await tx.execute(
+      sql`select tenant_context.remove_assignment(${recordId}::uuid, u, 'assignee') from unnest(${sql.param(removed)}::text[]) u union all select tenant_context.add_assignment(${recordId}::uuid, u, 'assignee') from unnest(${sql.param(added)}::text[]) u`,
+    );
+  } catch (error) {
+    assignmentRefusal(error, "assigneeIds");
+  }
+}
+
 /** `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review. */
 export async function createInside(
   tx: TeamTx,
@@ -1510,6 +1648,7 @@ export async function createInside(
     );
   if (kind === "application" && !input.data.appliedDate && !imported)
     input.data.appliedDate = dubaiToday();
+  const { data, assigneeIds } = withoutAssignees(input.data);
   const now = new Date();
   const [row] = await unitChecked(
     ctx,
@@ -1519,7 +1658,7 @@ export async function createInside(
         id: randomUUID(),
         teamId: p.teamId,
         kind,
-        data: input.data,
+        data,
         ...refs,
         version: 1,
         legacyId: input.legacyId ?? null,
@@ -1531,7 +1670,7 @@ export async function createInside(
         archivedAt: input.archived ? now : null,
         orgUnitId: input.orgUnitId ?? null,
       })
-      .returning(recordColumns),
+      .returning(readColumns(ctx)),
   );
   await audit(
     tx,
@@ -1548,7 +1687,9 @@ export async function createInside(
     },
     imported,
   );
-  return dto(row);
+  if (assigneeIds === undefined) return dto(row);
+  await changeAssignees(tx, row.id, [], assigneeIds);
+  return dto({ ...row, assigneeIds: [...assigneeIds].sort() });
 }
 
 export async function createRecord(
@@ -1590,7 +1731,7 @@ export async function createRecord(
         const recordId = (previous as { id?: unknown } | null)?.id;
         const [row] = uuidSchema.safeParse(recordId).success
           ? await tx
-              .select(recordColumns)
+              .select(readColumns(ctx))
               .from(records)
               .where(
                 and(
@@ -1694,6 +1835,15 @@ export async function updateRecord(
       await checkFieldCompatibility(tx, ctx, existing, data, archived);
     const now = new Date();
     if (kind === "bucket" && !existing.archivedAt && archived) {
+      // Row-level security (0038) hides other members' tasks from a caller whose task scope is not
+      // all, so such a caller could leave tasks it cannot see in the archived bucket. It is refused
+      // before any task is read, so the refusal says nothing about the bucket's tasks.
+      if (recordScopeRule(ctx, "task", "records"))
+        throw new ApiError(
+          403,
+          "forbidden",
+          "Your role sees only some tasks, so you cannot archive a bucket. Ask a colleague who sees all tasks.",
+        );
       const active = await tx
         .select()
         .from(records)
@@ -1704,12 +1854,14 @@ export async function updateRecord(
           "last_bucket",
           "Keep at least one active workflow bucket.",
         );
+      // Team-wide like uniqueChecks: every active task of the bucket moves, whoever's it is.
       const tasks = await tx
         .select()
         .from(records)
         .where(
           and(
-            ...scopeFilter(ctx, "task"),
+            eq(records.teamId, p.teamId),
+            eq(records.kind, "task"),
             eq(records.bucketId, existing.id),
             isNull(records.archivedAt),
           ),
@@ -1745,7 +1897,8 @@ export async function updateRecord(
           })
           .where(
             and(
-              ...scopeFilter(ctx, "task"),
+              eq(records.teamId, p.teamId),
+              eq(records.kind, "task"),
               eq(records.id, task.id),
               eq(records.version, task.version),
             ),
@@ -1758,12 +1911,13 @@ export async function updateRecord(
       }
     }
     const archivedAt = archived ? (existing.archivedAt ?? now) : null;
+    const { data: stored, assigneeIds } = withoutAssignees(data);
     const [row] = await unitChecked(
       ctx,
       tx
         .update(records)
         .set({
-          data,
+          data: stored,
           ...refs,
           archivedAt,
           importMeta: patch.importMeta ?? existing.importMeta,
@@ -1780,7 +1934,7 @@ export async function updateRecord(
             eq(records.version, patch.version),
           ),
         )
-        .returning(recordColumns),
+        .returning(readColumns(ctx)),
     );
     if (!row)
       throw new ApiError(
@@ -1802,6 +1956,16 @@ export async function updateRecord(
           ? { fromStatus: existing.data.status, toStatus: data.status }
           : {};
     await audit(tx, p, row, action, metadata, imported);
+    // The response's assignees are the ones find read plus the changes applied here.
+    if (assigneeIds !== undefined) {
+      await changeAssignees(
+        tx,
+        recordId,
+        existing.assigneeIds ?? [],
+        assigneeIds,
+      );
+      row.assigneeIds = [...assigneeIds].sort();
+    }
     const updated = redact(ctx, (await decorate(tx, ctx, [dto(row)]))[0]);
     if (options.comment === undefined) return updated;
     const comment = await createInside(
