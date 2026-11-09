@@ -208,9 +208,10 @@ describe("authorize equivalence with today's checks", () => {
         expect(allowed(ctx, { resource: "teams", action: "admin" })).toBe(
           p.role === "owner" && isSession,
         );
+        // The storage-settings routes are humanOnly: owner or admin sessions only.
         expect(
           allowed(ctx, { resource: "storage-settings", action: "admin" }),
-        ).toBe(p.role === "owner" || p.role === "admin");
+        ).toBe((p.role === "owner" || p.role === "admin") && isSession);
         expect(allowed(ctx, { resource: "candidates", action: "erase" })).toBe(
           p.role === "owner" && isSession,
         );
@@ -430,6 +431,34 @@ describe("escalation guards (architecture §11.6)", () => {
       false,
     );
   });
+
+  it("refuses a company request that also names a resource or record", () => {
+    const fieldsAdmin = contextOf(
+      session("owner"),
+      {},
+      { companyLevel: "admin", companyAreas: ["fields"] },
+    );
+    const companyOwner = contextOf(
+      session("owner"),
+      {},
+      { companyLevel: "owner" },
+    );
+    for (const ctx of [fieldsAdmin, companyOwner]) {
+      expect(allowed(ctx, { adminArea: "fields", action: "edit" })).toBe(true);
+      for (const action of ACTIONS) {
+        expect(
+          allowed(ctx, { adminArea: "fields", resource: "candidates", action }),
+        ).toBe(false);
+        expect(
+          allowed(ctx, {
+            adminArea: "fields",
+            record: { kind: "candidate", typeId: null },
+            action,
+          }),
+        ).toBe(false);
+      }
+    }
+  });
 });
 
 describe("private per-user state", () => {
@@ -513,6 +542,26 @@ describe("private per-user state", () => {
 });
 
 describe("built-in role templates", () => {
+  it("freezes every template, so no caller can widen one in place", () => {
+    const frozen = (value: unknown): boolean =>
+      !value ||
+      typeof value !== "object" ||
+      (Object.isFrozen(value) && Object.values(value).every(frozen));
+    for (const template of ROLE_TEMPLATES) expect(frozen(template)).toBe(true);
+    const ctx = contextOf(session("recruiter"));
+    expect(() => ctx.role!.scopes.push("imports:write")).toThrow(TypeError);
+    expect(() => {
+      ctx.role!.actions.candidates!.push("import");
+    }).toThrow(TypeError);
+    expect(() => {
+      (ctx.role!.actions as Record<string, string[]>).directory = ["edit"];
+    }).toThrow(TypeError);
+    expect(RECRUITER_ROLE.body.scopes).toEqual(roleScopes("recruiter"));
+    expect(contextOf(session("recruiter")).scopes).toEqual(
+      roleScopes("recruiter"),
+    );
+  });
+
   it("has six fixed keys and version ids", () => {
     expect(
       ROLE_TEMPLATES.map(({ key, versionId, version }) => [

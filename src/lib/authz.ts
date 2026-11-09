@@ -143,7 +143,13 @@ function allows(ctx: AccessContext, request: AccessRequest): boolean {
   if (!role || !known(principal.role) || !known(access.memberRole))
     return false;
   if (page !== undefined && !role.pages.includes(page)) return false;
-  if (adminArea !== undefined) return companyAllows(ctx, adminArea);
+  // A company request names only its area: a resource or record with it would skip their rules.
+  if (adminArea !== undefined)
+    return (
+      resource === undefined &&
+      request.record === undefined &&
+      companyAllows(ctx, adminArea)
+    );
   if (resource === undefined) return false;
   // Private saved views keep today's rule only: no role body can name them.
   if (
@@ -198,12 +204,14 @@ function allows(ctx: AccessContext, request: AccessRequest): boolean {
         return false;
     }
   }
+  // Session only, as the routes are today (humanOnly): no token or OAuth grant manages the team.
   if ((TEAM_ADMIN_RESOURCES as readonly string[]).includes(resource))
     return (
       action === "admin" &&
+      session &&
       (resource === "storage-settings"
         ? principal.role === "owner" || principal.role === "admin"
-        : principal.role === "owner" && session)
+        : principal.role === "owner")
     );
   if (resource === "directory")
     return write ? has("directory:write") && session : has("directory:read");
