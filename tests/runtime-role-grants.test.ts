@@ -1127,6 +1127,72 @@ describe("split runtime role template", () => {
       })),
     );
   });
+
+  it("grants the data role EXECUTE on the five record-scope helpers, the identity role and PUBLIC none, with the table grants unchanged (0038)", async () => {
+    await harness.asSuperuser();
+    const helpers = [
+      "tenant_context.scope_is_all()",
+      "tenant_context.in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+      "tenant_context.record_in_scope(text,uuid)",
+      "tenant_context.candidate_in_scope(text,uuid)",
+      "tenant_context.context_actor_key()",
+    ];
+    expect(dataRoleHelpers).toEqual(expect.arrayContaining(helpers));
+    expect(identityRoleHelpers).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/scope|actor_key/)]),
+    );
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    for (const fn of helpers) {
+      expect(await execute(splitRoles.data, fn), fn).toBe(true);
+      expect(await execute(splitRoles.identity, fn), fn).toBe(false);
+      expect(await execute("public", fn), fn).toBe(false);
+    }
+    expect(
+      (
+        await harness.client.query(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, p.provolatile AS volatility, p.proconfig AS config
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[])`,
+          [helpers],
+        )
+      ).rows,
+    ).toEqual(
+      helpers.map(() => ({
+        owned: true,
+        definer: true,
+        volatility: "s",
+        config: ["search_path=pg_catalog, pg_temp"],
+      })),
+    );
+    // The five tables the new policies limit keep exactly their earlier grants.
+    const tables = [
+      "app.records",
+      "app.activity",
+      "app.uploads",
+      "app.record_assignments",
+      "app.idempotency",
+    ];
+    for (const table of tables) {
+      const granted = async (grantee: string) =>
+        (
+          await harness.client.query<{ privilege: string }>(
+            `SELECT privilege_type AS privilege FROM information_schema.role_table_grants
+             WHERE grantee = $1 AND table_schema || '.' || table_name = $2 ORDER BY 1`,
+            [grantee, table],
+          )
+        ).rows.map((row) => row.privilege);
+      expect(await granted(splitRoles.data), table).toEqual(
+        (expectedData.tablePrivileges as Record<string, string[]>)[table],
+      );
+      expect(await granted(splitRoles.identity), table).toEqual([]);
+    }
+  });
 });
 
 describe("split runtime role template refusals", () => {

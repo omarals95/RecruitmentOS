@@ -926,9 +926,11 @@ describe("record scope in the service under the split runtime roles", () => {
       await expect(
         listCandidateCvsPage(unitMember, id.cOut),
       ).rejects.toMatchObject(missing);
-      await expect(readyCv(unitMember, cv)).rejects.toMatchObject(missing);
+      // The upload row itself is out of scope in the database (R2a-19): the same 404 as a missing CV.
+      const missingCv = { status: 404, code: "CV_NOT_FOUND" };
+      await expect(readyCv(unitMember, cv)).rejects.toMatchObject(missingCv);
       await expect(getCvDownload(unitMember, cv)).rejects.toMatchObject(
-        missing,
+        missingCv,
       );
       expect([
         ...(await readyCvsOf(unitMember, [id.cOut, id.cIn])).keys(),
@@ -963,7 +965,16 @@ describe("record scope in the service under the split runtime roles", () => {
         await expect(sqlAs(owner, statement), statement).rejects.toMatchObject({
           cause: { code: "42501" },
         });
-      // Members read their team's assignments.
+      // A scope-all member reads their team's assignments.
+      expect(
+        (
+          await sqlAs(
+            owner,
+            `SELECT count(*)::int AS n FROM app.record_assignments WHERE team_id = '${owner.teamId}'`,
+          )
+        )[0].n,
+      ).toBe(7);
+      // A unit member only those on records in their scope (R2a-19): not iOut's or aOut's.
       expect(
         (
           await sqlAs(
@@ -971,7 +982,7 @@ describe("record scope in the service under the split runtime roles", () => {
             `SELECT count(*)::int AS n FROM app.record_assignments WHERE team_id = '${owner.teamId}'`,
           )
         )[0].n,
-      ).toBe(7);
+      ).toBe(5);
     });
 
     it("refuses out-of-scope records, outsiders, self-assignment by limited callers and the approver relation, in the helper and the service", async () => {
