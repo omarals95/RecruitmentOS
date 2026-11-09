@@ -65,12 +65,21 @@ function todaysRole(membership: Role, name: string): RoleBody {
   };
 }
 
-const template = (key: string, id: number, body: RoleBody): RoleTemplate => ({
-  key,
-  versionId: `00000000-0000-4000-8000-000000000${id}`,
-  version: 1,
-  body,
-});
+// Templates are shared by every context of the process, so no caller can widen one in place.
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+const template = (key: string, id: number, body: RoleBody): RoleTemplate =>
+  deepFreeze({
+    key,
+    versionId: `00000000-0000-4000-8000-000000000${id}`,
+    version: 1,
+    body,
+  });
 
 export const OWNER_ROLE = template("owner", 101, todaysRole("owner", "Owner"));
 export const ADMIN_ROLE = template("admin", 102, todaysRole("admin", "Admin"));
