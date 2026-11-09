@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 import { sql, type SQL } from "drizzle-orm";
 import readXlsx from "read-excel-file/node";
 import type { TeamTx } from "@/db";
@@ -33,6 +34,7 @@ const LIST_LIMIT = 500;
 /** Rows per write statement. */
 const CHUNK = 1_000;
 /** The activity insert policy (tenant_context.allows_event) needs one of these in the context. */
+const DATA_DESCRIPTOR = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
 const AUDIT_SCOPES = [
   "candidates:write",
   "recruitment:write",
@@ -194,8 +196,9 @@ export function requireSameFile(bytes: Uint8Array, sha256: string) {
  * Reads the zip central directory before any parser expands the workbook (following
  * validateWorkbookZip in scripts/legacy/files.ts): a missing or invalid directory, ZIP64, several
  * disks or encryption are unreadable; more than 2,000 entries or 50 MiB declared uncompressed are
- * too large; an empty, absolute, backslash, NUL, drive-letter or `..` entry name is unreadable. The
- * declared sizes are trusted; the parser enforces what it reads.
+ * too large; an empty, absolute, backslash, NUL, drive-letter or `..` entry name is unreadable.
+ * read-excel-file streams the local headers instead (unzipper), so each local entry must then
+ * match its directory entry and inflate to exactly its declared size; anything else is unreadable.
  */
 export function checkWorkbookArchive(bytes: Buffer) {
   let eocd = -1;
@@ -220,6 +223,14 @@ export function checkWorkbookArchive(bytes: Buffer) {
   )
     throw unreadable();
   const names: string[] = [];
+  const records: {
+    flags: number;
+    method: number;
+    compressed: number;
+    expanded: number;
+    name: Buffer;
+    local: number;
+  }[] = [];
   let pointer = offset,
     total = 0;
   for (let i = 0; i < entries; i++) {
@@ -247,6 +258,14 @@ export function checkWorkbookArchive(bytes: Buffer) {
     )
       throw unreadable();
     names.push(bytes.toString("utf8", pointer + 46, pointer + 46 + nameLength));
+    records.push({
+      flags: bytes.readUInt16LE(pointer + 8),
+      method: bytes.readUInt16LE(pointer + 10),
+      compressed,
+      expanded,
+      name: bytes.subarray(pointer + 46, pointer + 46 + nameLength),
+      local: bytes.readUInt32LE(pointer + 42),
+    });
     total += expanded;
     pointer = end;
   }
@@ -262,6 +281,63 @@ export function checkWorkbookArchive(bytes: Buffer) {
     )
   )
     throw unreadable();
+  // The local entries, in order from the start of the file to the directory, as unzipper reads
+  // them: sizes from the local header, or, for a bit 3 entry without them, the bytes up to the
+  // first data descriptor signature and then a 16-byte descriptor.
+  let local = 0;
+  for (const record of records) {
+    if (
+      record.local !== local ||
+      local + 30 > offset ||
+      bytes.readUInt32LE(local) !== 0x04034b50
+    )
+      throw unreadable();
+    const flags = bytes.readUInt16LE(local + 6),
+      method = bytes.readUInt16LE(local + 8),
+      compressed = bytes.readUInt32LE(local + 18),
+      nameLength = bytes.readUInt16LE(local + 26),
+      start = local + 30 + nameLength + bytes.readUInt16LE(local + 28),
+      end = start + record.compressed;
+    if (
+      flags !== record.flags ||
+      method !== record.method ||
+      (method !== 0 && method !== 8) ||
+      !bytes
+        .subarray(local + 30, local + 30 + nameLength)
+        .equals(record.name) ||
+      end > offset
+    )
+      throw unreadable();
+    if (flags & 0x08 && compressed === 0) {
+      if (
+        bytes.indexOf(DATA_DESCRIPTOR, start) !== end ||
+        end + 16 > offset ||
+        bytes.readUInt32LE(end + 8) !== record.compressed ||
+        bytes.readUInt32LE(end + 12) !== record.expanded
+      )
+        throw unreadable();
+      local = end + 16;
+    } else {
+      if (
+        compressed !== record.compressed ||
+        bytes.readUInt32LE(local + 22) !== record.expanded
+      )
+        throw unreadable();
+      local = end;
+    }
+    // Inflating stops past the declared size, so the whole check stays within the 50 MiB.
+    let expanded = end - start;
+    if (method === 8)
+      try {
+        expanded = inflateRawSync(bytes.subarray(start, end), {
+          maxOutputLength: Math.max(1, record.expanded),
+        }).length;
+      } catch {
+        throw unreadable();
+      }
+    if (expanded !== record.expanded) throw unreadable();
+  }
+  if (local !== offset) throw unreadable();
 }
 
 type CellValue = string | number | boolean | Date | null;
@@ -746,12 +822,14 @@ function planUnits(book: Workbook, state: State, group: ImportGroup) {
   const done = new Set<string>();
   for (const start of rows) {
     const path: string[] = [];
+    const onPath = new Set<string>();
     let code: string | null = start.code;
-    while (code !== null && !done.has(code) && !path.includes(code)) {
+    while (code !== null && !done.has(code) && !onPath.has(code)) {
       path.push(code);
+      onPath.add(code);
       code = parentOf.get(code) ?? null;
     }
-    if (code !== null && path.includes(code))
+    if (code !== null && onPath.has(code))
       for (const member of path.slice(path.indexOf(code))) cyclic.add(member);
     for (const member of path) done.add(member);
   }
@@ -1345,10 +1423,35 @@ export async function applyImportSheet(
 }
 
 /**
- * The checks every import transaction makes before reading any row: a session of a company owner
- * or of a company admin with the organisation area (org_forbidden), directory create and edit
- * when there are employee rows (directory_forbidden), a company owner for the owner step
- * (org_owner_required), and for apply a scope the activity policy accepts (org_import_forbidden).
+ * The caller checks: a session of a company owner or of a company admin with the organisation
+ * area (org_forbidden), a company owner for the owner step (org_owner_required), and for apply a
+ * scope the activity policy accepts (org_import_forbidden).
+ */
+function requireCaller(
+  p: Principal,
+  access: TenantAccess,
+  step: "dry-run" | ImportGroup,
+) {
+  requireWrite(p, access);
+  if (step === "owner") requireWrite(p, access, true);
+  if (
+    step !== "dry-run" &&
+    !access.scopes.some((scope) => AUDIT_SCOPES.includes(scope))
+  )
+    throw importForbidden();
+}
+
+/** Before the body is read or parsed: the caller checks in a transaction that reads no row. */
+export async function requireImportCaller(
+  p: Principal,
+  step: "dry-run" | ImportGroup,
+) {
+  await inOrg(p, async (_tx, access) => requireCaller(p, access, step));
+}
+
+/**
+ * The checks every import transaction makes again before reading any row: the caller checks, and
+ * directory create and edit when there are employee rows (directory_forbidden).
  */
 function requireImport(
   p: Principal,
@@ -1356,17 +1459,11 @@ function requireImport(
   book: Workbook,
   step: "dry-run" | ImportGroup,
 ) {
-  requireWrite(p, access);
+  requireCaller(p, access, step);
   if (book.employees.length) {
     requireDirectory(p, access, "create");
     requireDirectory(p, access, "edit");
   }
-  if (step === "owner") requireWrite(p, access, true);
-  if (
-    step !== "dry-run" &&
-    !access.scopes.some((scope) => AUDIT_SCOPES.includes(scope))
-  )
-    throw importForbidden();
 }
 
 function report(

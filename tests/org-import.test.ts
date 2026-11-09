@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { deflateRawSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // Requests pick the pool by role, as on a split-role deployment: the identity role reads the
@@ -33,6 +34,7 @@ import { XLSX_TYPE } from "@/domain/org";
 import { createOrgLevel, createOrgUnit, type OrgLevel } from "@/lib/org";
 import {
   applyImportSheet,
+  checkWorkbookArchive,
   parseWorkbook,
   type ImportSheet,
 } from "@/lib/org-import";
@@ -107,6 +109,67 @@ function centralDirectory(entries: { name: string; size: number }[]) {
   end.writeUInt32LE(directory.length, 12);
   end.writeUInt32LE(0, 16);
   return Buffer.concat([directory, end]);
+}
+/**
+ * A zip with local headers, data and a central directory. local overrides the sizes the local
+ * header declares; streamed writes bit 3 with zero local sizes and a data descriptor after the data.
+ */
+function zip(
+  entries: {
+    name: string;
+    data: Buffer;
+    method: 0 | 8;
+    expanded: number;
+    local?: { compressed: number; expanded: number };
+    streamed?: boolean;
+  }[],
+) {
+  const parts: Buffer[] = [];
+  const records: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name);
+    const flags = entry.streamed ? 0x08 : 0;
+    const header = Buffer.alloc(30 + name.length);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(flags, 6);
+    header.writeUInt16LE(entry.method, 8);
+    if (!entry.streamed) {
+      header.writeUInt32LE(entry.local?.compressed ?? entry.data.length, 18);
+      header.writeUInt32LE(entry.local?.expanded ?? entry.expanded, 22);
+    }
+    header.writeUInt16LE(name.length, 26);
+    name.copy(header, 30);
+    const descriptor = Buffer.alloc(entry.streamed ? 16 : 0);
+    if (entry.streamed) {
+      descriptor.writeUInt32LE(0x08074b50, 0);
+      descriptor.writeUInt32LE(entry.data.length, 8);
+      descriptor.writeUInt32LE(entry.expanded, 12);
+    }
+    const record = Buffer.alloc(46 + name.length);
+    record.writeUInt32LE(0x02014b50, 0);
+    record.writeUInt16LE(20, 4);
+    record.writeUInt16LE(20, 6);
+    record.writeUInt16LE(flags, 8);
+    record.writeUInt16LE(entry.method, 10);
+    record.writeUInt32LE(entry.data.length, 20);
+    record.writeUInt32LE(entry.expanded, 24);
+    record.writeUInt16LE(name.length, 28);
+    record.writeUInt32LE(offset, 42);
+    name.copy(record, 46);
+    parts.push(header, entry.data, descriptor);
+    records.push(record);
+    offset += header.length + entry.data.length + descriptor.length;
+  }
+  const directory = Buffer.concat(records);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, directory, end]);
 }
 const sha = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
@@ -824,11 +887,24 @@ describe("organisation import from Excel", () => {
     expect(await state()).toEqual(after);
   });
 
-  it("refuses oversized bodies, too many rows and unsafe archives before parsing, with no transaction", async () => {
+  it("refuses oversized bodies, too many rows and unsafe archives before parsing, after only the authority check", async () => {
     const parsed = vi.mocked(readXlsx);
+    const sheet = Buffer.alloc(1_000, " ");
+    // Inflates to 20 MiB, far past the 1,000 bytes its directory and descriptor declare.
+    const bomb = deflateRawSync(Buffer.alloc(20 * 1024 * 1024, " "));
+    const plain = {
+      name: "xl/sheet.xml",
+      data: deflateRawSync(sheet),
+      method: 8,
+      expanded: 1_000,
+    } as const;
+    const streamed = { ...plain, name: "xl/streamed.xml", streamed: true };
+    // The same shapes, honestly sized, pass the archive check.
+    expect(() => checkWorkbookArchive(zip([plain, streamed]))).not.toThrow();
     const big = Buffer.alloc(5 * 1024 * 1024 + 1);
-    const archives: [Buffer, string][] = [
+    const archives: [string, Buffer, string][] = [
       [
+        "2,001 entries",
         centralDirectory(
           Array.from({ length: 2_001 }, (_, i) => ({
             name: `xl/fictional-${i}.xml`,
@@ -838,31 +914,87 @@ describe("organisation import from Excel", () => {
         "import_archive_too_large",
       ],
       [
+        "50 MiB declared",
         centralDirectory([
           { name: "xl/fictional.xml", size: 50 * 1024 * 1024 + 1 },
         ]),
         "import_archive_too_large",
       ],
-      [centralDirectory([{ name: "../x.xml", size: 10 }]), "import_unreadable"],
-      [Buffer.from("not a workbook"), "import_unreadable"],
+      [
+        "../x.xml",
+        centralDirectory([{ name: "../x.xml", size: 10 }]),
+        "import_unreadable",
+      ],
+      ["not a zip", Buffer.from("not a workbook"), "import_unreadable"],
+      [
+        "a local header declaring 300 MiB",
+        zip([
+          {
+            ...plain,
+            local: {
+              compressed: plain.data.length,
+              expanded: 300 * 1024 * 1024,
+            },
+          },
+        ]),
+        "import_unreadable",
+      ],
+      [
+        "a bit 3 entry inflating past its size",
+        zip([{ ...streamed, data: bomb }]),
+        "import_unreadable",
+      ],
+      [
+        "a deflated entry inflating past its size",
+        zip([{ ...plain, data: bomb }]),
+        "import_unreadable",
+      ],
+      [
+        "a descriptor signature inside bit 3 data",
+        zip([
+          {
+            name: "xl/hidden.xml",
+            data: Buffer.concat([
+              Buffer.from([0x50, 0x4b, 0x07, 0x08]),
+              Buffer.alloc(60),
+            ]),
+            method: 0,
+            expanded: 64,
+            streamed: true,
+          },
+        ]),
+        "import_unreadable",
+      ],
     ];
-    for (const route of ["dry-run", "apply"] as const) {
+    /** One refused request: the parser never runs, and the only transaction is the authority check. */
+    const limited = async (
+      route: "dry-run" | "apply",
+      file: Buffer,
+      status: number,
+      code: string,
+      as = owner,
+    ) => {
       parsed.mockClear();
       pools.data.mockClear();
-      const tooLarge = await refused(
-        () => post(route, big, { as: owner, query: `?sha256=${sha(big)}` }),
-        413,
-        "import_too_large",
+      const response = await refused(
+        () => post(route, file, { as, query: `?sha256=${sha(file)}` }),
+        status,
+        code,
       );
+      expect(parsed, code).not.toHaveBeenCalled();
+      expect(pools.data, code).toHaveBeenCalledTimes(1);
+      return response;
+    };
+    for (const route of ["dry-run", "apply"] as const) {
+      const tooLarge = await limited(route, big, 413, "import_too_large");
       expect(tooLarge.body.error.message).toContain("5 MiB");
-      for (const [file, code] of archives)
-        await refused(
-          () => post(route, file, { as: owner, query: `?sha256=${sha(file)}` }),
-          422,
-          code,
-        );
-      expect(parsed).not.toHaveBeenCalled();
-      expect(pools.data).not.toHaveBeenCalled();
+      for (const [label, file, code] of archives) {
+        expect(() => checkWorkbookArchive(file), label).toThrow();
+        await limited(route, file, 422, code);
+      }
+      // A caller who may not import is refused before the body is read at all.
+      for (const file of [big, archives[5][1]])
+        await limited(route, file, 403, "org_forbidden", teamOwnerB);
     }
     const rows = await workbook({
       Units: [
@@ -883,7 +1015,7 @@ describe("organisation import from Excel", () => {
         "import_too_many_rows",
       );
       expect(response.body.error.message).toContain("20,000");
-      expect(pools.data).not.toHaveBeenCalled();
+      expect(pools.data).toHaveBeenCalledTimes(1);
     }
   });
 });

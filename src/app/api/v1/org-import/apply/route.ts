@@ -4,6 +4,7 @@ import {
   applyQuery,
   parseWorkbook,
   readWorkbookBytes,
+  requireImportCaller,
   requireSameFile,
 } from "@/lib/org-import";
 
@@ -14,6 +15,7 @@ export async function POST(request: Request) {
     undefined,
     async (p) => {
       const { sha256, group } = applyQuery(new URL(request.url).searchParams);
+      await requireImportCaller(p, group);
       const bytes = await readWorkbookBytes(request);
       requireSameFile(bytes, sha256);
       return json({
