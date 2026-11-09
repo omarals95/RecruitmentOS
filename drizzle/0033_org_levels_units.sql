@@ -80,6 +80,9 @@ END $org_rls$;
 -- Row rules for a runtime role. A security invoker function, like app.guard_config_object, so
 -- current_user is the caller. After insert only a unit's name, parent and archive time and a level's
 -- name and archive time change; a runtime insert is never archived or closed. Archiving is one-way.
+-- valid_from is the key app.guard_scope_sources orders a code's rows by, so a runtime insert takes
+-- the column default only, and the time the row is written replaces it: rows of one code then
+-- order as they were inserted, even across overlapping transactions.
 CREATE FUNCTION app.guard_org_row() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -97,9 +100,10 @@ BEGIN
       RAISE EXCEPTION 'Organisation row rejected' USING ERRCODE = '42501';
     END IF;
     IF TG_TABLE_NAME = 'org_units' THEN
-      IF NEW.valid_to IS NOT NULL THEN
+      IF NEW.valid_to IS NOT NULL OR NEW.valid_from IS DISTINCT FROM now() THEN
         RAISE EXCEPTION 'Organisation row rejected' USING ERRCODE = '42501';
       END IF;
+      NEW.valid_from := clock_timestamp();
     END IF;
   ELSIF TG_TABLE_NAME = 'org_levels' THEN
     IF (NEW.id, NEW.workspace_id, NEW.depth) IS DISTINCT FROM (OLD.id, OLD.workspace_id, OLD.depth) THEN
@@ -158,7 +162,10 @@ CREATE TRIGGER org_units_scope BEFORE INSERT OR UPDATE ON app.org_units
 -- RQ008 for a parent whose level is not above the unit's, RQ010 for a parent that is archived or
 -- closed, or an insert on an archived level. One insert or move at a time per workspace: the
 -- workspace row lock is taken before any ancestry is read and held to the end of the transaction,
--- so concurrent moves cannot make a cycle and an insert cannot copy stale ancestry. A security
+-- so concurrent moves cannot make a cycle and an insert cannot copy stale ancestry. FOR NO KEY
+-- UPDATE serialises org work without conflicting with the FOR KEY SHARE that foreign-key checks
+-- take on the workspace row, so concurrent unit inserts cannot deadlock and no insert into another
+-- workspace-keyed table waits for org work. A security
 -- definer function, so no runtime role needs a write grant on the closure table.
 CREATE FUNCTION app.maintain_org_closure() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -167,7 +174,7 @@ DECLARE
   parent_depth integer;
   parent_current boolean;
 BEGIN
-  PERFORM 1 FROM app.workspaces w WHERE w.id = NEW.workspace_id FOR UPDATE;
+  PERFORM 1 FROM app.workspaces w WHERE w.id = NEW.workspace_id FOR NO KEY UPDATE;
   IF NEW.parent_id IS NOT NULL AND (NEW.parent_id = NEW.id OR EXISTS (SELECT 1 FROM app.org_unit_closure c
        WHERE c.workspace_id = NEW.workspace_id AND c.ancestor_id = NEW.id AND c.descendant_id = NEW.parent_id)) THEN
     RAISE EXCEPTION 'A unit cannot be moved under itself or a unit below it' USING ERRCODE = 'RQ009';
@@ -220,7 +227,7 @@ CREATE TRIGGER org_units_closure_move AFTER UPDATE OF parent_id ON app.org_units
 CREATE FUNCTION app.guard_org_archive() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  PERFORM 1 FROM app.workspaces w WHERE w.id = NEW.workspace_id FOR UPDATE;
+  PERFORM 1 FROM app.workspaces w WHERE w.id = NEW.workspace_id FOR NO KEY UPDATE;
   IF EXISTS (SELECT 1 FROM app.org_units u
       WHERE u.workspace_id = NEW.workspace_id AND u.archived_at IS NULL AND u.valid_to IS NULL
         AND CASE TG_TABLE_NAME WHEN 'org_units' THEN u.parent_id = NEW.id ELSE u.level_id = NEW.id END) THEN

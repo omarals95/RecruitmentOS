@@ -1083,6 +1083,55 @@ describe("organisation levels and units under the split runtime roles", () => {
       expect(again.map((row) => row.action)).toEqual(["org.unit_created"]);
     });
 
+    it("keeps valid_from server-set for runtime inserts, so a planted date cannot hide a re-parent", async () => {
+      const parentC = await unit(owner, "Fictional Authority C", "AU-C3", 0);
+      const insertAs = (p: Principal, parent: string, validFrom?: string) =>
+        sqlAs(
+          p,
+          `INSERT INTO app.org_units(workspace_id, parent_id, level_id, name, code${validFrom ? ", valid_from" : ""}) VALUES ('${COMPANY}', '${parent}', '${levels[1].id}', 'Fictional Dated Unit', 'AU-V'${validFrom ? `, '${validFrom}'` : ""}) RETURNING id`,
+        ) as Promise<{ id: string }[]>;
+      // The latest row for the code is an archived one under parent B.
+      const first = await unit(
+        owner,
+        "Fictional Dated Unit",
+        "AU-V",
+        1,
+        parentB.id,
+      );
+      await archiveOrgUnit(owner, first.id);
+      // (a) A runtime insert with its own valid_from, past or future, is refused for anyone.
+      for (const p of [orgAdmin, owner])
+        for (const date of ["2999-01-01T00:00:00Z", "2000-01-01T00:00:00Z"])
+          await refused(() => insertAs(p, parentB.id, date), "42501");
+      // The default is allowed under the same parent, and the row gets the time it was written.
+      const before = (await look<{ now: Date }>("SELECT now() AS now"))[0].now;
+      const [planted] = await insertAs(orgAdmin, parentB.id);
+      const stored = (
+        await look<{ valid_from: Date }>(
+          "SELECT valid_from FROM app.org_units WHERE id = $1",
+          [planted.id],
+        )
+      )[0].valid_from;
+      expect(stored.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      // (b) The owner archives it and gives the code a new parent through an effective-dated row.
+      await archiveOrgUnit(owner, planted.id);
+      const moved = await audited(() =>
+        unit(owner, "Fictional Dated Unit", "AU-V", 1, parentC.id),
+      );
+      expect(moved.map((row) => row.action).sort()).toEqual([
+        "org.unit_created",
+        "scope.home_units_changed",
+      ]);
+      await archiveOrgUnit(owner, moved[0].metadata.unitId as string);
+      // (c) Back under parent B is a re-parent again, which only a company owner may make.
+      await refused(() => insertAs(orgAdmin, parentB.id), "42501");
+      await refusedApi(
+        () => unit(orgAdmin, "Fictional Dated Unit", "AU-V", 1, parentB.id),
+        403,
+        "org_forbidden",
+      );
+    });
+
     it("lets a company owner move and archive through the service and by direct SQL, each with one scope row", async () => {
       const scopeRow = (unitId: string) => ({
         kind: "scope",
