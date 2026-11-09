@@ -65,15 +65,30 @@ The response is `{data, existing, created, skipped}`. `data` lists the applicati
 
 ## Create a vacancy
 
-`POST /api/v1/vacancies` needs `recruitment:write`. `status` defaults to `Draft`; send `Open` to open the vacancy at once. `jobRoleId` is optional and must name an active job role in the team.
+`POST /api/v1/vacancies` needs `recruitment:write`. `status` defaults to `Draft`; send `Open` to open the vacancy at once. `jobRoleId` is optional and must name an active job role in the team. `orgUnitId` is optional too: a current, non-archived org unit of the company (see [Organisation levels and units](#organisation-levels-and-units)), whose applications, interviews, offers, onboarding, checklist items and comments then follow it. Any other id answers 400 `invalid_reference` with "orgUnitId does not reference a current unit of this company.", and every resource but vacancies refuses the key with 400 `invalid_input`.
 
 ```bash
 curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
   -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: vacancy-fictional-payroll-1" \
-  --data '{"jobRoleId":"5a1d7e3c-2b9f-4c6a-8d0e-1f2a3b4c5d6e","data":{"title":"Fictional Payroll Analyst","department":"Finance","location":"Dubai","openings":2,"status":"Open"}}'
+  --data '{"jobRoleId":"5a1d7e3c-2b9f-4c6a-8d0e-1f2a3b4c5d6e","orgUnitId":"0b6f2c1e-7a4d-4e9b-9c3a-2d5e8f1a6b7c","data":{"title":"Fictional Payroll Analyst","department":"Finance","location":"Dubai","openings":2,"status":"Open"}}'
 ```
+
+A vacancy with a unit comes back with `orgUnitId` and `orgUnitLabel`, the unit as "Name (CODE)"; a vacancy without one, and every other record, has neither key. Exports, search results and MCP tool results never carry them. Shortened:
+
+```json
+{
+  "data": {
+    "id": "7b2e9c41-5d3a-4f8e-a6b1-0c9d8e7f6a5b",
+    "kind": "vacancy",
+    "orgUnitId": "0b6f2c1e-7a4d-4e9b-9c3a-2d5e8f1a6b7c",
+    "orgUnitLabel": "Sample Finance (FIN)"
+  }
+}
+```
+
+`PATCH /api/v1/vacancies/{id}` takes `orgUnitId` the same way with the vacancy's `version`; `"orgUnitId": null` removes the unit.
 
 ## Add a candidate to a vacancy
 
@@ -612,13 +627,12 @@ It returns 201 `{"data":{"objectId":"…","versionId":"…"}}`. The strict role 
         "name": "Fictional reader",
         "membership": "viewer"
       }
-    ],
-    "scopedRolesHidden": true
+    ]
   }
 }
 ```
 
-`available` is `false` when the assigned role is archived, has no published version or was republished limited to a unit or to assigned records; that member is refused everything with "Your role is no longer available. Ask a company owner to choose a role for you." until the role is reassigned or cleared with `POST /api/v1/teams/member-roles` and `{"userId":"fictional-member-id","roleObjectId":null}`. `roles` leaves out roles limited to a unit or to assigned records, and `scopedRolesHidden` says one was left out. If the role is saved but the team role could not be checked or changed for another reason than a refusal, the POST answers 503 `team_role_unconfirmed`; the role stays saved and the request can be retried.
+`available` is `false` when the assigned role is archived or has no published version; that member is refused everything with "Your role is no longer available. Ask a company owner to choose a role for you." until the role is reassigned or cleared with `POST /api/v1/teams/member-roles` and `{"userId":"fictional-member-id","roleObjectId":null}`. `roles` lists every assignable published role, including roles limited to the member's org unit or to assigned records. If the role is saved but the team role could not be checked or changed for another reason than a refusal, the POST answers 503 `team_role_unconfirmed`; the role stays saved and the request can be retried.
 
 ### Company authority
 
