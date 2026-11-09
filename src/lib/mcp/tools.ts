@@ -2093,9 +2093,11 @@ export async function callTool(
   definition: McpTool,
   args: unknown,
 ): Promise<CallToolResult> {
-  const decision = allowed(p, definition) ? "allowed" : "denied";
+  let decision: "allowed" | "denied" = "denied";
   try {
     await withTeam(p, async (tx) => {
+      // After install, so the decision uses the scopes it stored for this principal.
+      decision = allowed(p, definition) ? "allowed" : "denied";
       await tx.execute(
         sql`select tenant_context.audit_mcp_call(${definition.name}, ${decision})`,
       );

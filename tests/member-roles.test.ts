@@ -900,6 +900,13 @@ describe("configured roles and member assignment under the split runtime roles",
     expect(searched.structuredContent).toMatchObject({
       error: { code: "scope_required" },
     });
+    // The audit row records the decision under the stored scopes.
+    expect(
+      await look(
+        "SELECT action FROM app.activity WHERE kind = 'mcp-tool' AND token_id = $1",
+        [token.tokenId],
+      ),
+    ).toEqual([{ action: "mcp.tool_denied" }]);
     // CVs: the reservation needs cvs:write, which the narrowed recruiter role lacks.
     const uploader = fresh(viewers["no-cvs"], "recruiter");
     requireScope(uploader, "cvs:write");
