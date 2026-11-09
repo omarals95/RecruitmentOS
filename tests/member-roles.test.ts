@@ -50,6 +50,7 @@ import {
   searchWorkspace,
 } from "@/lib/insights";
 import { callTool, TOOLS } from "@/lib/mcp/tools";
+import { listStoredTools } from "@/lib/mcp/tools";
 import {
   assignMemberRole,
   listRoleAssignmentChanges,
@@ -1298,5 +1299,257 @@ describe("configured roles and member assignment under the split runtime roles",
         reminder!.key,
       ]),
     ).toEqual([{ user_id: owner.userId }]);
+  });
+
+  // R2a-09: the MCP tool list and every call follow the stored scopes and the assigned role.
+  /** A fictional member of team A assigned the role, with an API token asserting recruiter scopes. */
+  async function mcpMember(name: string, role: PublishedRole) {
+    const member = await seedIdentity(await harness.asOwner(), {
+      userId: `mr-mcp-${name}`,
+      teamId: "mr-team-a",
+      role: "viewer",
+    });
+    await assign(owner, member.userId, role.objectId);
+    return seedApiToken(
+      await harness.asOwner(),
+      fresh(member, "recruiter"),
+      roleScopes("recruiter"),
+    );
+  }
+  /** tools/list as the endpoint answers it, for a fresh request of the token. */
+  const toolNames = async (p: Principal) => {
+    await harness.dataDb();
+    return (await listStoredTools(fresh(p))).map((item) => item.name);
+  };
+  const mcpCall = async (p: Principal, name: string, args: unknown) => {
+    await harness.dataDb();
+    return callTool(
+      fresh(p),
+      TOOLS.find((item) => item.name === name)!,
+      args,
+    );
+  };
+  const mcpAudits = (p: Principal) =>
+    look(
+      "SELECT action FROM app.activity WHERE kind = 'mcp-tool' AND token_id = $1 ORDER BY created_at, id",
+      [p.tokenId],
+    );
+  /** The items of a list tool's result, or the record of a get tool's. */
+  const mcpData = <T>(result: Awaited<ReturnType<typeof callTool>>) => {
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    return (result.structuredContent as { data: T }).data;
+  };
+  const CV_UPLOAD_TOOLS = [
+    "upload_cv",
+    "create_cv_upload_link",
+    "complete_cv_upload",
+    "start_bulk_import",
+    "add_bulk_import_item",
+    "list_bulk_import_items",
+    "open_bulk_import_page",
+  ];
+
+  it("leaves the CV upload tools out of a narrowed member's tool list and refuses upload_cv", async () => {
+    const token = await mcpMember("narrow", narrow);
+    // The token asserts cvs:write; the role install stored lacks it.
+    expect(token.scopes).toContain("cvs:write");
+    const names = await toolNames(token);
+    expect(names).toEqual(
+      expect.arrayContaining(["search_candidates", "create_candidate"]),
+    );
+    for (const name of CV_UPLOAD_TOOLS) expect(names).not.toContain(name);
+    const result = await mcpCall(token, "upload_cv", {
+      idempotencyKey: `fictional-${randomUUID()}`,
+      candidateId: candidate,
+      originalName: "fictional.pdf",
+      mimeType: "application/pdf",
+      contentBase64: Buffer.from("%PDF-1.4 fictional").toString("base64"),
+    });
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: "scope_required",
+        message: "This tool requires cvs:write.",
+      },
+    });
+    expect(await mcpAudits(token)).toEqual([{ action: "mcp.tool_denied" }]);
+    expect(
+      await look("SELECT id FROM app.uploads WHERE created_by = $1", [
+        token.userId,
+      ]),
+    ).toEqual([]);
+  });
+
+  it("lists and runs only the vacancy tools a view-only vacancy role allows", async () => {
+    const recruiterBody = RECRUITER_ROLE.body as RoleBody;
+    const vacancyViewer = await publishRole(
+      "fictional-vacancy-viewer",
+      body(recruiterBody, "Fictional vacancy viewer", {
+        actions: { ...recruiterBody.actions, vacancies: ["view", "export"] },
+      }),
+    );
+    const token = await mcpMember("vacancy-viewer", vacancyViewer);
+    const names = await toolNames(token);
+    expect(names).toContain("list_vacancies");
+    expect(names).toContain("get_vacancy");
+    expect(names).not.toContain("create_vacancy");
+    expect(names).not.toContain("update_vacancy");
+    mcpData<unknown[]>(await mcpCall(token, "list_vacancies", {}));
+    const title = "Fictional refused MCP vacancy";
+    const refusedCall = await mcpCall(token, "create_vacancy", {
+      idempotencyKey: `fictional-${randomUUID()}`,
+      title,
+    });
+    expect(refusedCall.structuredContent).toEqual({
+      error: {
+        code: "scope_required",
+        message: "This tool requires recruitment:write.",
+      },
+    });
+    expect(await mcpAudits(token)).toEqual([
+      { action: "mcp.tool_called" },
+      { action: "mcp.tool_denied" },
+    ]);
+    expect(
+      await look(
+        "SELECT id FROM app.records WHERE kind = 'vacancy' AND data->>'title' = $1",
+        [title],
+      ),
+    ).toEqual([]);
+  });
+
+  it("leaves the overview, analytics and activity tools out for a role without their pages", async () => {
+    const token = await mcpMember("no-pages", noPages);
+    const names = await toolNames(token);
+    for (const name of ["get_overview", "get_analytics", "list_activity"])
+      expect(names).not.toContain(name);
+    expect(names).toContain("list_notifications");
+    expect(
+      (await mcpCall(token, "get_overview", {})).structuredContent,
+    ).toMatchObject({ error: { code: "scope_required" } });
+  });
+
+  it("leaves hidden fields out of MCP results instead of returning them as null", async () => {
+    const token = await mcpMember("redacted", redacted);
+    await harness.dataDb();
+    const person = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional MCP Redacted Candidate",
+        email: "fictional.mcp.redacted@example.test",
+        residenceEmirate: "Fictional MCP Emirate",
+      },
+    });
+    const job = await createRecord(owner, "vacancies", {
+      data: {
+        title: "Fictional MCP Redacted Vacancy",
+        status: "Open",
+        department: "Fictional MCP Department",
+      },
+    });
+    await createRecord(owner, "applications", {
+      candidateId: person.id,
+      vacancyId: job.id,
+      data: { stage: "Screening" },
+    });
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional MCP redacted bucket" },
+    });
+    await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: { title: "Fictional MCP redacted task" },
+    });
+    const absent = (row: Record<string, unknown>, key: string) =>
+      expect(Object.hasOwn(row, key), `${key} in ${JSON.stringify(row)}`).toBe(
+        false,
+      );
+
+    const found = mcpData<Record<string, unknown>[]>(
+      await mcpCall(token, "search_candidates", {
+        query: "Fictional MCP Redacted Candidate",
+      }),
+    );
+    expect(found.map((row) => row.id)).toContain(person.id);
+    for (const row of found) {
+      absent(row, "residenceEmirate");
+      expect(row).toHaveProperty("name");
+    }
+    const facts = mcpData<{ facts: Record<string, unknown> }>(
+      await mcpCall(token, "get_candidate", { id: person.id }),
+    ).facts;
+    absent(facts, "email");
+    absent(facts, "residenceEmirate");
+    expect(facts.name).toBe("Fictional MCP Redacted Candidate");
+    const vacancies = mcpData<Record<string, unknown>[]>(
+      await mcpCall(token, "list_vacancies", {
+        query: "Fictional MCP Redacted Vacancy",
+      }),
+    );
+    expect(vacancies.map((row) => row.id)).toEqual([job.id]);
+    for (const row of vacancies) absent(row, "department");
+    const applications = mcpData<Record<string, unknown>[]>(
+      await mcpCall(token, "list_applications", { vacancyId: job.id }),
+    );
+    expect(applications).toHaveLength(1);
+    for (const row of applications) absent(row, "stage");
+    const tasks = mcpData<Record<string, unknown>[]>(
+      await mcpCall(token, "list_tasks", { bucketId: bucket.id }),
+    );
+    expect(tasks).toHaveLength(1);
+    for (const row of tasks) absent(row, "title");
+
+    // The owner's token still gets every one of them.
+    const ownerFacts = mcpData<{ facts: Record<string, unknown> }>(
+      await mcpCall(ownerToken, "get_candidate", { id: person.id }),
+    ).facts;
+    expect(ownerFacts.email).toBe("fictional.mcp.redacted@example.test");
+    const ownerTasks = mcpData<Record<string, unknown>[]>(
+      await mcpCall(ownerToken, "list_tasks", { bucketId: bucket.id }),
+    );
+    expect(ownerTasks[0].title).toBe("Fictional MCP redacted task");
+  });
+
+  it("derives no interview time or meeting-link flag from hidden fields", async () => {
+    const hiddenTimes = await publishRole(
+      "fictional-hidden-times",
+      body(RECRUITER_ROLE.body as RoleBody, "Fictional hidden times", {
+        fields: { interview: { startAt: "hidden", meetingUrl: "hidden" } },
+      }),
+    );
+    const token = await mcpMember("hidden-times", hiddenTimes);
+    await harness.dataDb();
+    const job = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional MCP interview vacancy" },
+    });
+    const application = await createRecord(owner, "applications", {
+      candidateId: candidate,
+      vacancyId: job.id,
+      data: { stage: "Interview" },
+    });
+    await createRecord(owner, "interviews", {
+      applicationId: application.id,
+      data: {
+        title: "Fictional MCP interview",
+        startAt: new Date(Date.now() + 86_400_000).toISOString(),
+        meetingUrl: "https://meet.example.test/fictional",
+      },
+    });
+    const [item] = mcpData<Record<string, unknown>[]>(
+      await mcpCall(token, "list_interviews", {
+        applicationId: application.id,
+      }),
+    );
+    expect(item.title).toBe("Fictional MCP interview");
+    for (const key of ["startAt", "startAtDubai", "timezone", "hasMeetingUrl"])
+      expect(Object.hasOwn(item, key), key).toBe(false);
+    const [ownerItem] = mcpData<Record<string, unknown>[]>(
+      await mcpCall(ownerToken, "list_interviews", {
+        applicationId: application.id,
+      }),
+    );
+    expect(ownerItem).toMatchObject({
+      startAt: expect.any(String),
+      startAtDubai: expect.any(String),
+      timezone: "Asia/Dubai",
+      hasMeetingUrl: true,
+    });
   });
 });
