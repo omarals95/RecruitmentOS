@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   useEffect,
   useId,
   useMemo,
@@ -13,6 +14,7 @@ import { authClient } from "@/lib/auth-client";
 import type { Action } from "@/domain/config";
 import type { ConfirmOptions } from "@/components/ui/confirm-dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { Dialog } from "@/components/ui/dialog";
 import {
   ClientError,
   humanError,
@@ -57,6 +59,7 @@ export interface DirectoryRowHandlers {
   archive: (row: Employee) => void;
   erase: (target: ErasureTarget) => void;
 }
+type RowAction = "edit" | "positions" | "link" | "unlink" | "archive" | "erase";
 type EmployeeForm =
   | { kind: "add" }
   | { kind: "edit"; row: Employee }
@@ -89,6 +92,29 @@ export function directoryPath(filters: DirectoryFilters, page: number) {
 const statusLabels = { active: "Active", left: "Left" } as const;
 const classLabels = { standard: "Standard", extended: "Extended" } as const;
 const MAX_POSITIONS = 20;
+const actionLabels: Record<RowAction, string> = {
+  edit: "Edit",
+  positions: "Positions",
+  link: "Link to user",
+  unlink: "Unlink user",
+  archive: "Archive",
+  erase: "Permanently erase employee",
+};
+// The Actions button keeps its column as narrow as the button.
+const actionCell = { width: "1%", whiteSpace: "nowrap" } as const;
+/** An email may wrap after its local part, never inside a word. */
+const breakAtSign = (email: string) => {
+  const at = email.lastIndexOf("@");
+  return at > 0 ? (
+    <>
+      {email.slice(0, at)}
+      <wbr />
+      {email.slice(at)}
+    </>
+  ) : (
+    email
+  );
+};
 /** Only the API's own message: humanError adds draft advice to a 409 that does not fit here. */
 const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
@@ -162,6 +188,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
   const [unitPositions, setUnitPositions] = useState<Position[] | null>(null);
   const [filterError, setFilterError] = useState("");
   const [form, setForm] = useState<EmployeeForm | null>(null);
+  const [menu, setMenu] = useState<Employee | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [erasing, setErasing] = useState<ErasureTarget | null>(null);
   const [notice, setNotice] = useState("");
@@ -297,6 +324,16 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
       setErasing(target);
     },
   };
+  // Choosing an action closes the row's actions dialog in the same update, so the next dialog or
+  // confirmation returns focus to the row's Actions button.
+  const afterMenu: DirectoryRowHandlers = {
+    edit: (row) => (setMenu(null), handlers.edit(row)),
+    positions: (row) => (setMenu(null), handlers.positions(row)),
+    link: (row) => (setMenu(null), handlers.link(row)),
+    unlink: (row) => (setMenu(null), handlers.unlink(row)),
+    archive: (row) => (setMenu(null), handlers.archive(row)),
+    erase: (target) => (setMenu(null), handlers.erase(target)),
+  };
   /** Sends one employee write; a refusal throws, so the dialog shows it. */
   async function write(path: string, method: string, body: unknown) {
     if (!request) return;
@@ -360,7 +397,7 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
               owner={owner}
               actions={actions}
               errors={rowErrors}
-              on={handlers}
+              onActions={setMenu}
             />
             <DirectoryPaging
               page={result.data.pagination.page}
@@ -377,6 +414,15 @@ export function DirectoryTab({ access }: { access: MeAccess }) {
           teamId={teamId}
           reloads={reloads}
           onErase={handlers.erase}
+        />
+      )}
+      {menu && (
+        <EmployeeActionsDialog
+          row={menu}
+          owner={owner}
+          actions={actions}
+          on={afterMenu}
+          onClose={() => setMenu(null)}
         />
       )}
       {form && request && (
@@ -526,30 +572,52 @@ export function DirectoryFilterForm({
   );
 }
 
+/** The row's actions the caller may take, from their directory actions and company level. */
+export function rowActions(
+  row: Employee,
+  owner: boolean,
+  actions: readonly Action[],
+): RowAction[] {
+  const current = !row.archivedAt;
+  const linked = row.userId !== null;
+  const edit = current && actions.includes("edit");
+  const list: (RowAction | false)[] = [
+    edit && "edit",
+    // A linked employee's positions set home units, so they need a company owner.
+    edit && (!linked || owner) && "positions",
+    edit && owner && !linked && "link",
+    edit && owner && linked && "unlink",
+    current && actions.includes("archive") && "archive",
+    owner && "erase",
+  ];
+  return list.filter((item): item is RowAction => !!item);
+}
+
 /**
  * One page of employees. Work email and phone columns exist only when the rows carry those keys,
- * so under the basic rule there is no contact header, cell or value.
+ * so under the basic rule there is no contact header, cell or value. Each row has one Actions
+ * button, so a row stays one line high; a refusal shows in a row of its own below it.
  */
 export function DirectoryTable({
   rows,
   owner,
   actions,
   errors = {},
-  on = {},
+  onActions = () => {},
 }: {
   rows: Employee[];
   owner: boolean;
   actions: readonly Action[];
   errors?: Record<string, string>;
-  on?: Partial<DirectoryRowHandlers>;
+  onActions?: (row: Employee) => void;
 }) {
   if (!rows.length) return <p role="status">No employees match.</p>;
   const email = rows.some((row) => Object.hasOwn(row, "workEmail"));
   const phone = rows.some((row) => Object.hasOwn(row, "workPhone"));
-  const edit = actions.includes("edit");
+  const columns = 8 + (email ? 1 : 0) + (phone ? 1 : 0);
   return (
     <div className="table-wrap">
-      <table className="data-table">
+      <table className="data-table compact">
         <caption className="sr-only">Employees</caption>
         <thead>
           <tr>
@@ -568,11 +636,9 @@ export function DirectoryTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
-            const current = !row.archivedAt;
-            const linked = row.userId !== null;
-            return (
-              <tr key={row.id}>
+          {rows.map((row) => (
+            <Fragment key={row.id}>
+              <tr>
                 <td data-label="Name">{row.displayName}</td>
                 <td data-label="Employee number">{row.employeeNumber}</td>
                 <td data-label="Positions">
@@ -585,95 +651,125 @@ export function DirectoryTable({
                   {classLabels[row.retentionClass ?? "standard"]}
                 </td>
                 <td data-label="User account">
-                  {linked ? "Linked" : "Not linked"}
+                  {row.userId !== null ? "Linked" : "Not linked"}
                 </td>
                 <td data-label="Archived">{row.archivedAt ? "Yes" : "No"}</td>
                 {email && (
                   <td data-label="Work email">
-                    {row.workEmail || "Not recorded"}
+                    {row.workEmail
+                      ? breakAtSign(row.workEmail)
+                      : "Not recorded"}
                   </td>
                 )}
                 {phone && (
-                  <td data-label="Work phone">
+                  <td data-label="Work phone" style={{ whiteSpace: "nowrap" }}>
                     {row.workPhone || "Not recorded"}
                   </td>
                 )}
-                <td data-label="Actions">
-                  <div className="row" style={actionRow}>
-                    {current && edit && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        onClick={() => on.edit?.(row)}
-                      >
-                        Edit<span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                    {current && edit && (!linked || owner) && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        onClick={() => on.positions?.(row)}
-                      >
-                        Positions
-                        <span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                    {current && edit && owner && !linked && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        onClick={() => on.link?.(row)}
-                      >
-                        Link to user
-                        <span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                    {current && edit && owner && linked && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        onClick={() => on.unlink?.(row)}
-                      >
-                        Unlink user
-                        <span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                    {current && actions.includes("archive") && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        onClick={() => on.archive?.(row)}
-                      >
-                        Archive
-                        <span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                    {owner && (
-                      <button
-                        type="button"
-                        className="button danger small"
-                        onClick={() =>
-                          on.erase?.({ id: row.id, name: row.displayName })
-                        }
-                      >
-                        Permanently erase employee
-                        <span className="sr-only">: {row.displayName}</span>
-                      </button>
-                    )}
-                  </div>
-                  {errors[row.id] && (
-                    <p className="notice error" role="alert">
-                      {errors[row.id]}
-                    </p>
+                <td data-label="Actions" style={actionCell}>
+                  {rowActions(row, owner, actions).length > 0 && (
+                    <button
+                      type="button"
+                      className="button secondary small"
+                      aria-haspopup="dialog"
+                      onClick={() => onActions(row)}
+                    >
+                      Actions
+                      <span className="sr-only">: {row.displayName}</span>
+                    </button>
                   )}
                 </td>
               </tr>
-            );
-          })}
+              {errors[row.id] && (
+                <tr>
+                  <td colSpan={columns}>
+                    <p className="notice error" role="alert">
+                      {errors[row.id]}
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** The buttons of one row's actions, in the order of rowActions. */
+export function EmployeeActionsView({
+  row,
+  owner,
+  actions,
+  firstRef,
+  on = {},
+}: {
+  row: Employee;
+  owner: boolean;
+  actions: readonly Action[];
+  firstRef?: RefObject<HTMLButtonElement | null>;
+  on?: Partial<DirectoryRowHandlers>;
+}) {
+  const run: Record<RowAction, () => void> = {
+    edit: () => on.edit?.(row),
+    positions: () => on.positions?.(row),
+    link: () => on.link?.(row),
+    unlink: () => on.unlink?.(row),
+    archive: () => on.archive?.(row),
+    erase: () => on.erase?.({ id: row.id, name: row.displayName }),
+  };
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {rowActions(row, owner, actions).map((action, index) => (
+        <button
+          key={action}
+          ref={index === 0 ? firstRef : undefined}
+          type="button"
+          className={action === "erase" ? "button danger" : "button secondary"}
+          onClick={run[action]}
+        >
+          {actionLabels[action]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** One row's actions in a dialog; choosing one closes it and opens that action's own step. */
+function EmployeeActionsDialog({
+  row,
+  owner,
+  actions,
+  on,
+  onClose,
+}: {
+  row: Employee;
+  owner: boolean;
+  actions: readonly Action[];
+  on: DirectoryRowHandlers;
+  onClose: () => void;
+}) {
+  const first = useRef<HTMLButtonElement>(null);
+  // Runs after Dialog has opened, so focus lands on the first action inside the modal.
+  useEffect(() => first.current?.focus(), []);
+  return (
+    <Dialog title={`Actions for ${row.displayName}`} onClose={onClose}>
+      <div className="dialog-body">
+        <EmployeeActionsView
+          row={row}
+          owner={owner}
+          actions={actions}
+          firstRef={first}
+          on={on}
+        />
+      </div>
+      <footer className="dialog-footer">
+        <button type="button" className="button secondary" onClick={onClose}>
+          Cancel
+        </button>
+      </footer>
+    </Dialog>
   );
 }
 

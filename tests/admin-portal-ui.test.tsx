@@ -45,7 +45,10 @@ import {
   EmployeeErasureDialogView,
   RetentionReviewPanel,
 } from "../src/components/settings/employee-erasure";
-import { DirectoryTable } from "../src/components/settings/directory-tab";
+import {
+  DirectoryTable,
+  EmployeeActionsView,
+} from "../src/components/settings/directory-tab";
 import type { Employee, RetentionReviewRow } from "../src/lib/directory";
 import { formatDate } from "../src/components/workspace/helpers";
 
@@ -1000,7 +1003,7 @@ describe("directory tab erasure and retention review", () => {
       }
   });
 
-  it("lists rows with status, retention class, archived and an erase button per row for a company owner only", () => {
+  it("lists rows with status, retention class and archived, and an erase action per row for a company owner only", () => {
     const rows = [
       match("1", "Fictional Kept Employee"),
       match("2", "Fictional Former Employee", {
@@ -1025,13 +1028,24 @@ describe("directory tab erasure and retention review", () => {
     expect(former).toContain('data-label="Status">Left<');
     expect(former).toContain('data-label="Retention class">Extended<');
     expect(former).toContain('data-label="Archived">Yes<');
-    for (const [row, name] of [
-      [kept, "Fictional Kept Employee"],
-      [former, "Fictional Former Employee"],
-    ])
+    // Each row's Actions button opens its actions; erase is one of them for a company owner only.
+    for (const [index, row] of [kept, former].entries()) {
       expect(row).toContain(
-        `<button type="button" class="button danger small">Permanently erase employee<span class="sr-only">: ${name}</span></button>`,
+        `Actions<span class="sr-only">: ${rows[index].displayName}</span></button>`,
       );
+      const actions = (owner: boolean) =>
+        renderToStaticMarkup(
+          <EmployeeActionsView
+            row={rows[index]}
+            owner={owner}
+            actions={["view", "create", "edit", "archive"]}
+          />,
+        );
+      expect(actions(true)).toContain(
+        '<button type="button" class="button danger">Permanently erase employee</button>',
+      );
+      expect(actions(false)).not.toContain("Permanently erase");
+    }
     expect(table(rows, false)).not.toContain("Permanently erase");
   });
 

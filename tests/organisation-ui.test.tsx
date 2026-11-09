@@ -31,8 +31,10 @@ import {
   DirectoryFilterForm,
   DirectoryPaging,
   DirectoryTable,
+  EmployeeActionsView,
   NO_FILTERS,
   directoryPath,
+  rowActions,
 } from "../src/components/settings/directory-tab";
 import {
   UnitPickerView,
@@ -523,8 +525,23 @@ describe("org chart", () => {
         }}
       />,
     );
+    // The refusal sits in its own full-width row right below the level's row.
     expect(level).toContain(
-      'Archive<span class="sr-only">: Fictional Company</span></button></div><p class="notice error" role="alert">The level or unit is archived',
+      'Archive<span class="sr-only">: Fictional Company</span></button></div></td></tr><tr><td colSpan="4"><p class="notice error" role="alert">The level or unit is archived',
+    );
+    const directoryRefusal = renderToStaticMarkup(
+      <DirectoryTable
+        rows={[employee(42, "Fictional Refused Person")]}
+        owner={false}
+        actions={ALL_DIRECTORY}
+        errors={{
+          [id(42)]:
+            "Only a company owner can link an employee to a user, change a linked employee's positions, or move or archive a position a linked employee holds, because these set who can see which records.",
+        }}
+      />,
+    );
+    expect(directoryRefusal).toContain(
+      `Actions<span class="sr-only">: Fictional Refused Person</span></button></td></tr><tr><td colSpan="8"><p class="notice error" role="alert">${positionRefusal}</p>`,
     );
   });
 });
@@ -689,38 +706,71 @@ describe("directory", () => {
     );
     expect(full).toContain("<th>Work email</th>");
     expect(full).toContain("<th>Work phone</th>");
-    expect(full).toContain('data-label="Work email">unlinked@example.test<');
-    expect(full).toContain('data-label="Work phone">+00 1111 1111<');
+    // An email wraps only after its local part.
+    expect(full).toContain(
+      'data-label="Work email">unlinked<wbr/>@example.test<',
+    );
+    expect(full).toContain(
+      'data-label="Work phone" style="white-space:nowrap">+00 1111 1111<',
+    );
     expect(full).toContain('data-label="Work email">Not recorded<');
   });
 
+  it("gives each row one Actions button, only when the row has an action", () => {
+    for (const markup of [table(rows, true), table(rows, false)])
+      for (const [index, row] of rowsOf(markup).entries()) {
+        expect(row.match(/<button/g)).toHaveLength(1);
+        expect(row).toContain(
+          `<td data-label="Actions" style="width:1%;white-space:nowrap"><button type="button" class="button secondary small" aria-haspopup="dialog">${button("Actions", rows[index].displayName)}`,
+        );
+      }
+    expect(table(rows, true)).toContain('<table class="data-table compact">');
+    for (const row of rowsOf(table(rows, false, ["view"])))
+      expect(row).not.toMatch(/<button/);
+  });
+
   it("offers erase, link, unlink and a linked row's positions only to a company owner", () => {
-    const owner = rowsOf(table(rows, true));
-    const admin = rowsOf(table(rows, false));
-    const [unlinked, linked] = rows.map((row) => row.displayName);
-    expect(owner[0]).toContain(button("Permanently erase employee", unlinked));
-    expect(owner[1]).toContain(button("Permanently erase employee", linked));
-    expect(owner[0]).toContain(button("Link to user", unlinked));
-    expect(owner[0]).not.toContain("Unlink user");
-    expect(owner[1]).toContain(button("Unlink user", linked));
-    expect(owner[1]).not.toContain(">Link to user");
-    expect(owner[1]).toContain(button("Positions", linked));
-    for (const row of admin) {
-      expect(row).not.toContain("Permanently erase");
-      expect(row).not.toContain("Link to user");
-      expect(row).not.toContain("Unlink user");
-    }
-    expect(admin[1]).not.toContain(">Positions");
-    // An unlinked row's positions need directory edit only.
-    expect(admin[0]).toContain(button("Positions", unlinked));
-    expect(admin[0]).toContain(button("Edit", unlinked));
-    expect(admin[0]).toContain(button("Archive", unlinked));
-    const viewOnly = rowsOf(table(rows, false, ["view"]));
-    for (const row of viewOnly) expect(row).not.toMatch(/<button/);
+    const view = (row: Employee, owner: boolean, actions = ALL_DIRECTORY) =>
+      renderToStaticMarkup(
+        <EmployeeActionsView row={row} owner={owner} actions={actions} />,
+      );
+    const labels = (markup: string) =>
+      [...markup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map(
+        (match) => match[1],
+      );
+    expect(labels(view(rows[0], true))).toEqual([
+      "Edit",
+      "Positions",
+      "Link to user",
+      "Archive",
+      "Permanently erase employee",
+    ]);
+    expect(labels(view(rows[1], true))).toEqual([
+      "Edit",
+      "Positions",
+      "Unlink user",
+      "Archive",
+      "Permanently erase employee",
+    ]);
+    expect(view(rows[0], true)).toContain(
+      '<button type="button" class="button danger">Permanently erase employee</button>',
+    );
+    // An unlinked row's positions need directory edit only; a linked row's need a company owner.
+    expect(labels(view(rows[0], false))).toEqual([
+      "Edit",
+      "Positions",
+      "Archive",
+    ]);
+    expect(labels(view(rows[1], false))).toEqual(["Edit", "Archive"]);
+    expect(labels(view(rows[0], false, ["view"]))).toEqual([]);
     // A company owner without directory edit cannot link or place.
-    const ownerView = rowsOf(table(rows, true, ["view"]));
-    expect(ownerView[0]).not.toMatch(/>(Link to user|Positions|Edit)<span/);
-    expect(ownerView[0]).toContain("Permanently erase employee");
+    expect(labels(view(rows[0], true, ["view"]))).toEqual([
+      "Permanently erase employee",
+    ]);
+    expect(rowActions(rows[1], false, ALL_DIRECTORY)).toEqual([
+      "edit",
+      "archive",
+    ]);
   });
 
   it("shows the retention review only to a company owner", () => {

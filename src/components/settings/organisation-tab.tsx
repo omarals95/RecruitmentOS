@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   useEffect,
   useId,
   useMemo,
@@ -137,6 +138,8 @@ const send = (
 ) => request(path, { method, body: JSON.stringify(body) });
 // Row actions never break inside a word.
 const actionRow = { flexWrap: "wrap", overflowWrap: "normal", gap: 8 } as const;
+// A table's actions stay on one line; the column is as narrow as its buttons.
+const actionCell = { width: "1%", whiteSpace: "nowrap" } as const;
 const treeList = (nested: boolean) =>
   ({
     listStyle: "none",
@@ -593,40 +596,51 @@ export function LevelsPanel({
             </thead>
             <tbody>
               {levels.map((level) => (
-                <tr key={level.id}>
-                  <td data-label="Name">{level.name}</td>
-                  <td data-label="Depth">
-                    {level.depth === 0 ? "0 (top)" : level.depth}
-                  </td>
-                  <td data-label="Status">
-                    {level.archivedAt ? "Archived" : "Current"}
-                  </td>
-                  <td data-label="Actions">
-                    {!level.archivedAt && (
-                      <div className="row" style={actionRow}>
-                        <button
-                          type="button"
-                          className="button secondary small"
-                          onClick={() => onRename(level)}
+                <Fragment key={level.id}>
+                  <tr>
+                    <td data-label="Name">{level.name}</td>
+                    <td data-label="Depth">
+                      {level.depth === 0 ? "0 (top)" : level.depth}
+                    </td>
+                    <td data-label="Status">
+                      {level.archivedAt ? "Archived" : "Current"}
+                    </td>
+                    <td data-label="Actions" style={actionCell}>
+                      {!level.archivedAt && (
+                        <div
+                          className="row"
+                          style={{ ...actionRow, flexWrap: "nowrap" }}
                         >
-                          Rename<span className="sr-only">: {level.name}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="button secondary small"
-                          onClick={() => onArchive(level)}
-                        >
-                          Archive<span className="sr-only">: {level.name}</span>
-                        </button>
-                      </div>
-                    )}
-                    {errors[`level:${level.id}`] && (
-                      <p className="notice error" role="alert">
-                        {errors[`level:${level.id}`]}
-                      </p>
-                    )}
-                  </td>
-                </tr>
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            onClick={() => onRename(level)}
+                          >
+                            Rename
+                            <span className="sr-only">: {level.name}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            onClick={() => onArchive(level)}
+                          >
+                            Archive
+                            <span className="sr-only">: {level.name}</span>
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                  {errors[`level:${level.id}`] && (
+                    <tr>
+                      <td colSpan={4}>
+                        <p className="notice error" role="alert">
+                          {errors[`level:${level.id}`]}
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
