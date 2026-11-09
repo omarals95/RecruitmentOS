@@ -1515,7 +1515,7 @@ export function GET() {
   const positionShape =
     "{id, orgUnitId, title, code, isManager, jobRoleId, validFrom, archivedAt}";
   const employeeShape =
-    "{id, displayName, employeeNumber, status, source, userId, workEmail, workPhone, positions:[{positionId, title, orgUnitId, primary, validFrom}], createdAt, updatedAt, archivedAt}";
+    "{id, displayName, employeeNumber, status, retentionClass, source, userId, workEmail, workPhone, positions:[{positionId, title, orgUnitId, primary, validFrom}], createdAt, updatedAt, archivedAt}";
   const positionAudit =
     "Each change writes one org activity row to your team with ids and field names only, never a value.";
   const employeeAudit =
@@ -1531,6 +1531,12 @@ export function GET() {
     description: "Trimmed; an empty value is stored as null.",
   };
   const employeeStatus = { type: "string", enum: ["active", "left"] };
+  const retentionClass = {
+    type: "string",
+    enum: ["standard", "extended"],
+    description:
+      "Shown for the company owners' retention review only; nothing is enforced or erased automatically. Default standard.",
+  };
   const pageParams = [
     {
       name: "page",
@@ -1637,7 +1643,7 @@ export function GET() {
       [],
       {
         summary: "List one page of the directory",
-        description: `${employeeRule} Returns the current, non-archived employees of your company by display name then id. unitId matches employees holding a current position in that unit or any unit below it, levelId the level of a current position's unit, positionId the holders of that position and status the employee status; filters combine on the same position. A unitId, levelId or positionId outside your company returns 404 not_found; any other query key or value returns 400 invalid_input. ${contactRule} Returns {data:[${employeeShape}], pagination:{page, pageSize, hasMore}}.`,
+        description: `${employeeRule} Returns the current, non-archived employees of your company by display name then id. unitId matches employees holding a current position in that unit or any unit below it, levelId the level of a current position's unit, positionId the holders of that position and status the employee status; filters combine on the same position. search (1 to 120 characters) matches part of the display name or employee number, ignoring case; the text is matched literally, never as a pattern. includeArchived=true also returns archived employees (default false). A unitId, levelId or positionId outside your company returns 404 not_found; any other query key or value returns 400 invalid_input. ${contactRule} Returns {data:[${employeeShape}], pagination:{page, pageSize, hasMore}}.`,
       },
       {
         "200": {
@@ -1651,6 +1657,20 @@ export function GET() {
           uuidQuery("levelId"),
           uuidQuery("positionId"),
           { name: "status", in: "query", schema: employeeStatus },
+          {
+            name: "search",
+            in: "query",
+            schema: { type: "string", minLength: 1, maxLength: 120 },
+          },
+          {
+            name: "includeArchived",
+            in: "query",
+            schema: {
+              type: "string",
+              enum: ["true", "false"],
+              default: "false",
+            },
+          },
           ...pageParams,
         ],
       },
@@ -1659,7 +1679,7 @@ export function GET() {
       [],
       {
         summary: "Create an employee",
-        description: `${employeeRule} Send {displayName, employeeNumber} and optionally workEmail, workPhone, status (active or left, default active) and userId. Employees hold work contact facts only. ${directoryTextRule} ${homeUnitRule} A number another employee of your company has returns 409 employee_number_exists; a user already linked to an employee returns 409 employee_user_linked; an unknown user returns 404 not_found; an unknown key returns 400 invalid_input. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
+        description: `${employeeRule} Send {displayName, employeeNumber} and optionally workEmail, workPhone, status (active or left, default active), retentionClass (standard or extended, default standard) and userId. Employees hold work contact facts only. ${directoryTextRule} ${homeUnitRule} A number another employee of your company has returns 409 employee_number_exists; a user already linked to an employee returns 409 employee_user_linked; an unknown user returns 404 not_found; an unknown key returns 400 invalid_input. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
         requestBody: jsonBody(
           {
             type: "object",
@@ -1671,6 +1691,7 @@ export function GET() {
               workEmail: workEmailSchema,
               workPhone: workPhoneSchema,
               status: employeeStatus,
+              retentionClass,
               userId: { type: "string", minLength: 1, maxLength: 128 },
             },
           },
@@ -1691,7 +1712,7 @@ export function GET() {
       [],
       {
         summary: "Update, link or archive an employee",
-        description: `${employeeRule} Send exactly one of a facts update with one or more of {displayName, employeeNumber, workEmail, workPhone, status}, {userId} (link; null unlinks) or {archived: true} (archive); any other shape returns 400 invalid_input. ${homeUnitRule} An archived employee returns 409 directory_state_conflict; a duplicate number 409 employee_number_exists; a user already linked to another employee 409 employee_user_linked; an unknown employee or user 404 not_found. Archiving keeps the user link and position rows. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
+        description: `${employeeRule} Send exactly one of a facts update with one or more of {displayName, employeeNumber, workEmail, workPhone, status, retentionClass}, {userId} (link; null unlinks) or {archived: true} (archive); any other shape returns 400 invalid_input. ${homeUnitRule} An archived employee returns 409 directory_state_conflict; a duplicate number 409 employee_number_exists; a user already linked to another employee 409 employee_user_linked; an unknown employee or user 404 not_found. Archiving keeps the user link and position rows. ${contactRule} ${employeeAudit} Returns {data:${employeeShape}}.`,
         requestBody: jsonBody(
           {
             oneOf: [
@@ -1705,6 +1726,7 @@ export function GET() {
                   workEmail: workEmailSchema,
                   workPhone: workPhoneSchema,
                   status: employeeStatus,
+                  retentionClass,
                 },
               },
               {
@@ -1773,6 +1795,64 @@ export function GET() {
       },
       { "200": { description: `{data:${employeeShape}}.` } },
       { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/employees/{id}/erasure"] = {
+    post: operation(
+      [],
+      {
+        summary: "Permanently erase an employee",
+        description:
+          "Session only, for data-protection requests: a signed-in company owner. Company admins, team owners and admins without company authority and members with directory:write get 403 employee_erasure_forbidden, before the body is checked; Bearer tokens, including MCP OAuth tokens, get 403 session_required. There is no MCP tool. Send {confirmName} with the employee's display name exactly as shown (1 to 300 characters, compared after trimming spaces, case-sensitive); a different name returns 409 erasure_confirmation_mismatch and erases nothing, and an invalid id or body returns 400 invalid_input. An employee that is not in your company returns 404 not_found. In one transaction it deletes the employee and every position row, current and ended, which removes the user link and writes one scope.home_units_changed row naming the previously linked user; redacts every activity row about the employee, in every team of the company, to its type, time and actor; and records a tombstone with only the employee id, company, owner, time and source, and one employee.erased activity row with counts. Positions, units, candidates, records, the user's account and team memberships are not touched. A retry for an erased employee returns 200 with alreadyErased true and the same erasureId, erasedAt and counts, writing nothing. Returns {data:{erasureId, alreadyErased, erasedAt, removed:{positionRows, activityRedacted, userLinks}}}; no name, email, phone or employee number.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["confirmName"],
+            additionalProperties: false,
+            properties: {
+              confirmName: { type: "string", minLength: 1, maxLength: 300 },
+            },
+          },
+          { confirmName: "Fictional Dana Sample" },
+        ),
+      },
+      {
+        "200": {
+          description:
+            "{data:{erasureId, alreadyErased, erasedAt, removed:{positionRows, activityRedacted, userLinks}}}.",
+        },
+      },
+      {
+        sessionOnly: true,
+        params: [
+          idParameter,
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            schema: { type: "string", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+            description:
+              "Reuse the same key after an uncertain result to get the identical response; the same key for another employee returns 409 idempotency_mismatch and an invalid key 400 invalid_idempotency_key. Keys are retained for 7 days; the typed name is never stored.",
+          },
+        ],
+      },
+    ),
+  };
+  paths["/api/v1/employees/retention-review"] = {
+    get: operation(
+      [],
+      {
+        summary: "List employees due for retention review",
+        description:
+          "Session only, read only: a signed-in company owner whose team role has directory:read. Company admins, team owners without company authority and every other member get 403 retention_review_forbidden, a company owner without directory:read 403 directory_forbidden, and Bearer tokens 403 session_required. Returns the employees of your company, archived ones included, whose status has been left for 12 months or more, oldest first: leftAt is when the status became left, or the last update for employees who left before that date was recorded. Nothing is erased automatically; erase an employee only after reviewing. Any other query key or value returns 400 invalid_input. Returns {data:[{id, displayName, employeeNumber, leftAt, retentionClass, archivedAt}], pagination:{page, pageSize, hasMore}}; no contact fields, user or positions.",
+      },
+      {
+        "200": {
+          description:
+            "{data:[{id, displayName, employeeNumber, leftAt, retentionClass, archivedAt}], pagination:{page, pageSize, hasMore}}.",
+        },
+      },
+      { sessionOnly: true, params: pageParams },
     ),
   };
   paths["/api/v1/cvs/storage-reconciliation"] = {
