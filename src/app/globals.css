@@ -3882,9 +3882,14 @@ progress::-moz-progress-bar {
   display: grid;
   gap: 8px;
 }
+/* The legend and the filter label match the editor's other field labels. */
+.assignee-picker legend,
+.assignee-picker > label {
+  font-weight: 600;
+  font-size: 12px;
+}
 .assignee-picker legend {
   padding: 0 4px;
-  font-weight: 600;
 }
 .assignee-picker input[type="search"] {
   width: 100%;
