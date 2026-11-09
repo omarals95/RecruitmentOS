@@ -21,12 +21,26 @@ import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
   ApplicationReference,
+  ExportControl,
   FilterTags,
   Kanban,
   Loading,
+  RecordDetail,
   RecordsScreen,
   withoutImportLink,
 } from "../src/components/workspace/records-screen";
+import {
+  AssigneePicker,
+  RecordEditor,
+} from "../src/components/workspace/editor";
+import {
+  assigneeInput,
+  recordMutation,
+} from "../src/components/workspace/mutation";
+import {
+  defaultListQuery,
+  listSearchParams,
+} from "../src/components/workspace/tab-requests";
 import { addFilterTag } from "../src/components/workspace/helpers";
 import WorkspaceLoading from "../src/app/app/loading";
 import {
@@ -946,5 +960,242 @@ describe("Import CVs", () => {
       expect(rows(small)).toHaveLength(10);
       expect(small).not.toContain("<nav");
     });
+  });
+});
+
+// Team tasks (R2a-20, job 062): assignees by name and the linked record on the card and profile,
+// the editor's assignee picker, and the Assigned to me filter. Fictional members and ids only.
+describe("team tasks", () => {
+  const members = [
+    { userId: "fictional-member-alex", name: "Alex Example" },
+    { userId: "fictional-member-sam", name: "Sam Sample" },
+  ];
+  const FORMER = "fictional-former-member";
+  const bucket = "00000000-0000-4000-8000-000000000401";
+  const task = (
+    index: number,
+    data: Record<string, unknown>,
+    links: Partial<RecordDto> = {},
+  ): RecordDto =>
+    ({
+      id: `00000000-0000-4000-8000-00000000050${index}`,
+      kind: "task",
+      data: {
+        title: `Fictional team task ${index}`,
+        priority: "Normal",
+        ...data,
+      },
+      version: 1,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-08T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: bucket,
+      jobRoleId: null,
+      parentRecordId: null,
+      ...links,
+    }) as RecordDto;
+  const linked = task(
+    1,
+    { assigneeIds: ["fictional-member-alex", FORMER] },
+    {
+      parentRecordId: "00000000-0000-4000-8000-000000000301",
+      parentKind: "vacancy",
+      parentLabel: "Fictional Engineer",
+    },
+  );
+  const hidden = task(
+    2,
+    { assigneeIds: [] },
+    { parentRecordId: "00000000-0000-4000-8000-000000000302" },
+  );
+
+  it("names assignees and the linked record on the task card and profile, never by id", () => {
+    const board = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <Kanban
+          resource="tasks"
+          records={[linked, hidden]}
+          buckets={[
+            {
+              ...task(9, {}),
+              id: bucket,
+              kind: "bucket",
+              data: { name: "Fictional to do", color: "#4338CA" },
+            } as RecordDto,
+          ]}
+          onOpen={() => {}}
+          onMove={() => {}}
+          canWrite
+          members={members}
+        />
+      </WorkspaceProvider>,
+    );
+    expect(board).toContain('aria-label="Team task board"');
+    const cards = [
+      ...board.matchAll(/<article class="kanban-card"[\s\S]*?<\/article>/g),
+    ].map((match) => match[0]);
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toContain("Assigned: Alex Example, Former member");
+    expect(cards[0]).toContain("Linked record: Vacancy · Fictional Engineer");
+    expect(cards[1]).not.toContain("Assigned:");
+    expect(cards[1]).toContain("Linked record: Unavailable record");
+    expect(board).not.toContain(FORMER);
+    expect(board).not.toContain("fictional-member-alex");
+
+    const profile = (record: RecordDto) =>
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <RecordDetail
+            record={record}
+            inline
+            members={members}
+            onClose={() => {}}
+            onEdit={() => {}}
+            onRefresh={() => {}}
+            onCreate={() => {}}
+            onUpdated={() => {}}
+          />
+        </WorkspaceProvider>,
+      );
+    const shown = profile(linked);
+    expect(shown).toContain("Assigned: Alex Example, Former member");
+    expect(shown).toContain("Linked record: Vacancy · Fictional Engineer");
+    // No raw id chips and no generic parent reference; the owner line stays.
+    expect(shown).not.toContain(FORMER);
+    expect(shown).not.toContain("fictional-member-alex");
+    expect(shown).not.toContain("<dt>Assignees</dt>");
+    expect(shown).not.toContain("<dt> Parent Record</dt>");
+    expect(shown).toContain("<dt>Owner</dt>");
+    expect(profile(hidden)).toContain("Linked record: Unavailable record");
+  });
+
+  it("offers members as checkboxes, at most ten, keeps a former member and sends no untouched selection", () => {
+    const picker = (selected: string[], list = members) =>
+      renderToStaticMarkup(
+        <AssigneePicker
+          members={list}
+          error=""
+          selected={selected}
+          onChange={() => {}}
+        />,
+      );
+    const two = picker(["fictional-member-alex", FORMER]);
+    expect(two).toMatch(/<fieldset[^>]*class="assignee-picker"/);
+    expect(two).toContain("<legend>Assignees</legend>");
+    expect(two).toContain("Filter members");
+    expect(two).toContain("2 of 10 selected");
+    const boxes = [
+      ...two.matchAll(/<label class="checkbox-label">([\s\S]*?)<\/label>/g),
+    ].map((match) => match[1]);
+    expect(boxes).toHaveLength(3);
+    // The former member: checked, with no control to remove them.
+    expect(boxes[0]).toMatch(/^<input type="checkbox"[^>]*\/>Former member$/);
+    expect(boxes[0]).toContain('checked=""');
+    expect(boxes[0]).toContain('disabled=""');
+    expect(boxes[1]).toMatch(/checked=""[^>]*\/>Alex Example/);
+    expect(boxes[2]).not.toContain("checked");
+    expect(boxes[2]).not.toContain("disabled");
+    expect(two).not.toContain(FORMER);
+    // At ten, every unchecked box is disabled.
+    const many = Array.from({ length: 11 }, (_, index) => ({
+      userId: `fictional-member-${index}`,
+      name: `Fictional Member ${index}`,
+    }));
+    const full = picker(
+      many.slice(0, 10).map((member) => member.userId),
+      many,
+    );
+    expect(full).toContain("10 of 10 selected");
+    expect(full).toMatch(
+      /<input type="checkbox" disabled=""\/>Fictional Member 10/,
+    );
+    // A load failure disables only the picker and says so.
+    const failed = renderToStaticMarkup(
+      <AssigneePicker
+        members={null}
+        error="Network unavailable"
+        selected={[]}
+        onChange={() => {}}
+      />,
+    );
+    expect(failed).toMatch(/<fieldset[^>]*disabled=""/);
+    expect(failed).toContain("Network unavailable");
+
+    // The editor shows the picker for a task, and a save sends assigneeIds only when changed.
+    const editor = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordEditor
+          resource="tasks"
+          record={linked}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+    expect(editor).toContain("<legend>Assignees</legend>");
+    expect(editor).toContain("Linked record type");
+    // Not the generic comma-separated tags input.
+    expect(editor).not.toContain('for="editor-assigneeIds"');
+    const body = recordMutation(
+      "tasks",
+      { ...linked.data },
+      { bucketId: bucket },
+      linked,
+    );
+    expect(body.data).not.toHaveProperty("assigneeIds");
+    const saved = ["fictional-member-alex", FORMER];
+    expect(assigneeInput(saved, [FORMER, "fictional-member-alex"])).toEqual({});
+    expect(assigneeInput(saved, [...saved, "fictional-member-sam"])).toEqual({
+      assigneeIds: [...saved, "fictional-member-sam"],
+    });
+    expect(assigneeInput(saved, [FORMER])).toEqual({ assigneeIds: [FORMER] });
+  });
+
+  it("filters the Tasks screen by Assigned to me and then disables the export", () => {
+    const screen = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordsScreen section="tasks" />
+      </WorkspaceProvider>,
+    );
+    expect(screen).toContain("<h1>Team tasks");
+    expect(screen).toMatch(
+      /<label class="checkbox-label"><input type="checkbox"\/>Assigned to me<\/label>/,
+    );
+    expect(
+      listSearchParams("tasks", {
+        ...defaultListQuery("tasks"),
+        assignedToMe: true,
+      }).get("assignedToMe"),
+    ).toBe("true");
+    expect(
+      listSearchParams("tasks", defaultListQuery("tasks")).has("assignedToMe"),
+    ).toBe(false);
+    const control = (assignedToMe: boolean) =>
+      renderToStaticMarkup(
+        <ExportControl
+          exporting={false}
+          loading={false}
+          assignedToMe={assignedToMe}
+          onExport={() => {}}
+        />,
+      );
+    const off = control(true);
+    expect(off).toMatch(
+      /<button[^>]*disabled=""[^>]*aria-describedby="([^"]+)"/,
+    );
+    const note = /aria-describedby="([^"]+)"/.exec(off)![1];
+    expect(off).toContain(
+      `<small id="${note}" class="muted">Turn off Assigned to me to export.</small>`,
+    );
+    const on = control(false);
+    expect(on).not.toContain("disabled");
+    expect(on).not.toContain("Turn off Assigned to me");
   });
 });

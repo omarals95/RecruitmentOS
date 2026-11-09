@@ -84,6 +84,8 @@ export interface ListQuery {
   education: string;
   minYears: string;
   maxYears: string;
+  /** Tasks only: the caller's assigned tasks (a list-only filter; exports refuse it). */
+  assignedToMe?: boolean;
 }
 export function defaultListQuery(section: string): ListQuery {
   const resource = screenDefinitions[section].resource;
@@ -137,6 +139,7 @@ export function listSearchParams(
   if (q.education.trim()) p.set("education", q.education.trim());
   if (q.minYears) p.set("minYearsExperience", q.minYears);
   if (q.maxYears) p.set("maxYearsExperience", q.maxYears);
+  if (resource === "tasks" && q.assignedToMe) p.set("assignedToMe", "true");
   if (section === "source-review") p.set("needsReview", "true");
   return p;
 }

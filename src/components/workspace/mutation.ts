@@ -6,7 +6,10 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 
-/** Validate separately, then send only user-editable properties. Zod defaults must not add importer-owned source fields. */
+/**
+ * Validate separately, then send only user-editable properties. Zod defaults must not add
+ * importer-owned source fields. A task's assigneeIds is left out: assigneeInput adds it.
+ */
 export function recordMutation(
   resource: ResourceName,
   values: Record<string, unknown>,
@@ -16,7 +19,12 @@ export function recordMutation(
   const config = RESOURCE_CONFIG[resource];
   const data: Record<string, unknown> = {};
   for (const field of config.fields) {
-    if (field.readOnly || field.key === "legacyAuthorLabel") continue;
+    if (
+      field.readOnly ||
+      field.key === "legacyAuthorLabel" ||
+      field.key === "assigneeIds"
+    )
+      continue;
     let value = values[field.key];
     if (field.type === "tags" && typeof value === "string")
       value = value
@@ -35,6 +43,19 @@ export function recordMutation(
   return record
     ? { version: record.version, data, ...references }
     : { data, ...references };
+}
+/**
+ * A task's assignees for its save: sent only when the selection changed, as a vacancy's org unit,
+ * so a save never clears assignees the editor did not load.
+ */
+export function assigneeInput(
+  saved: readonly string[],
+  selected: readonly string[],
+): { assigneeIds?: string[] } {
+  const changed =
+    saved.length !== selected.length ||
+    selected.some((userId) => !saved.includes(userId));
+  return changed ? { assigneeIds: [...selected] } : {};
 }
 export function personalStateMutation(state: {
   version: number;

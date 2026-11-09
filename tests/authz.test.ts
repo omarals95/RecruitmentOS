@@ -1253,9 +1253,15 @@ describe("outputs on the engine (R2a-08)", () => {
           }
   });
 
+  // A task's assignees are a field but never a column (R2a-20), so task export headers stay as
+  // they were.
+  const exportFields = (resource: ResourceName) =>
+    RESOURCE_CONFIG[resource].fields.filter(
+      (field) => field.key !== "assigneeIds",
+    );
   // A frozen copy of exportTable() before R2a-08 limited its columns.
   function todayTable(resource: ResourceName, rows: RecordDto[]) {
-    const fields = RESOURCE_CONFIG[resource].fields;
+    const fields = exportFields(resource);
     return {
       headers: [
         "Record ID",
@@ -1280,7 +1286,7 @@ describe("outputs on the engine (R2a-08)", () => {
       const today = todayTable(resource, rows);
       expect(exportTable(resource, rows), resource).toEqual(today);
       expect(exportTable(resource, rows, new Set()), resource).toEqual(today);
-      const fields = RESOURCE_CONFIG[resource].fields;
+      const fields = exportFields(resource);
       const hidden = new Set(
         [fields[0], fields[fields.length - 1]].map((field) => field.key),
       );
@@ -1296,6 +1302,18 @@ describe("outputs on the engine (R2a-08)", () => {
       expect(hidden.size, resource).toBe(2);
       expect(table.headers.length, resource).toBe(today.headers.length - 2);
     }
+    expect(exportTable("tasks", [full("task")]).headers).toEqual([
+      "Record ID",
+      "Title",
+      "Context",
+      "Owner",
+      "Due Date",
+      "Priority",
+      "Description",
+      "Custom task values",
+      "Created at",
+      "Updated at",
+    ]);
   });
 });
 

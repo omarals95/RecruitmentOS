@@ -89,6 +89,7 @@ import {
   humanError,
 } from "./client";
 import { moveRecord, saveFollowup, updateRecord } from "./optimistic";
+import { useTeamMembers, type TeamMember } from "./team-members";
 import { startSpeedTimer, useReadyTiming } from "./speed-log";
 import type { SpeedTab } from "@/domain/speed";
 
@@ -193,6 +194,43 @@ export function withoutImportLink(href: string): string {
   return url.toString();
 }
 
+/** The list's Export button; Assigned to me is a list-only filter that an export refuses. */
+export function ExportControl({
+  exporting,
+  loading,
+  assignedToMe,
+  onExport,
+}: {
+  exporting: boolean;
+  loading: boolean;
+  assignedToMe: boolean;
+  onExport: () => void;
+}) {
+  const noteId = useId();
+  return (
+    <>
+      <button
+        className="button secondary"
+        disabled={exporting || loading || assignedToMe}
+        aria-describedby={assignedToMe ? noteId : undefined}
+        onClick={onExport}
+      >
+        {exporting ? (
+          <LoaderCircle className="spin" size={16} aria-hidden="true" />
+        ) : (
+          <Download size={16} aria-hidden="true" />
+        )}
+        Export
+      </button>
+      {assignedToMe && (
+        <small id={noteId} className="muted">
+          Turn off Assigned to me to export.
+        </small>
+      )}
+    </>
+  );
+}
+
 export function RecordsScreen({ section }: { section: string }) {
   const searchParams = useSearchParams();
   const linkedRecord = searchParams.get("record");
@@ -219,6 +257,7 @@ export function RecordsScreen({ section }: { section: string }) {
   const [minYears, setMinYears] = useState(initial.minYears);
   const [maxYears, setMaxYears] = useState(initial.maxYears);
   const [vacancy, setVacancy] = useState(initial.vacancy);
+  const [assignedToMe, setAssignedToMe] = useState(!!initial.assignedToMe);
   const [archived, setArchived] = useState(initial.archived);
   const [sort, setSort] = useState(initial.sort);
   const [direction, setDirection] = useState(initial.direction);
@@ -280,6 +319,7 @@ export function RecordsScreen({ section }: { section: string }) {
         education,
         minYears,
         maxYears,
+        assignedToMe,
       }),
     [
       page,
@@ -302,9 +342,12 @@ export function RecordsScreen({ section }: { section: string }) {
       maxYears,
       shortlisted,
       reviewStatus,
+      assignedToMe,
     ],
   );
   const result = useApi<ListResponse>(listPath(resource, params));
+  // Tasks only: member names for the board's and the profile's assignees, loaded once per screen.
+  const members = useTeamMembers(team?.id ?? null, resource === "tasks");
   // The interviews tab is timed by its calendar, which shows this list only on request.
   useReadyTiming(
     section === "interviews" ? null : `tab.${section as SpeedTab}`,
@@ -362,6 +405,7 @@ export function RecordsScreen({ section }: { section: string }) {
     maxYears,
     shortlisted,
     reviewStatus,
+    assignedToMe,
   ]);
   useEffect(() => {
     let active = true;
@@ -525,6 +569,7 @@ export function RecordsScreen({ section }: { section: string }) {
     maxYears,
     vacancy,
     archived,
+    assignedToMe,
   };
   const clearFilters = () => {
     setSearch("");
@@ -541,6 +586,7 @@ export function RecordsScreen({ section }: { section: string }) {
     setMinYears("");
     setMaxYears("");
     setVacancy("");
+    setAssignedToMe(false);
     setArchived(false);
   };
   const exportAll = async () => {
@@ -726,18 +772,12 @@ export function RecordsScreen({ section }: { section: string }) {
                 Save view
               </button>
             )}
-            <button
-              className="button secondary"
-              disabled={exporting || result.loading}
-              onClick={exportAll}
-            >
-              {exporting ? (
-                <LoaderCircle className="spin" size={16} aria-hidden="true" />
-              ) : (
-                <Download size={16} aria-hidden="true" />
-              )}
-              Export
-            </button>
+            <ExportControl
+              exporting={exporting}
+              loading={result.loading}
+              assignedToMe={assignedToMe}
+              onExport={exportAll}
+            />
             <DisplayModeToggle
               board={resource === "applications" || resource === "tasks"}
               mode={mode}
@@ -948,6 +988,16 @@ export function RecordsScreen({ section }: { section: string }) {
               <option value="desc">Descending</option>
             </select>
           </label>
+          {resource === "tasks" && (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={assignedToMe}
+                onChange={(e) => setAssignedToMe(e.target.checked)}
+              />
+              Assigned to me
+            </label>
+          )}
           <label className="checkbox-label">
             <input
               type="checkbox"
@@ -1078,6 +1128,7 @@ export function RecordsScreen({ section }: { section: string }) {
             onOpen={setDetail}
             onMove={move}
             canWrite={canWrite}
+            members={members.members}
           />
         ) : mode === "cards" ? (
           <div className="record-card-grid">
@@ -1330,6 +1381,7 @@ export function RecordsScreen({ section }: { section: string }) {
             setEditor({ resource: nextResource, references: refs, prefill })
           }
           onUpdated={setDetail}
+          {...(resource === "tasks" ? { members: members.members } : {})}
         />
       )}
       {bulkCv && (
@@ -1629,6 +1681,7 @@ export function Kanban({
   onMove,
   canWrite,
   emptyText = "No records on this page",
+  members = null,
 }: {
   resource: ResourceName;
   records: RecordDto[];
@@ -1637,6 +1690,8 @@ export function Kanban({
   onMove: (r: RecordDto, value: string) => void;
   canWrite: boolean;
   emptyText?: string;
+  /** Tasks only: the team's members, to name the assignees. */
+  members?: TeamMember[] | null;
 }) {
   // A card whose move is still saving cannot be moved again with a stale version.
   const pending = usePendingKeys();
@@ -1742,6 +1797,9 @@ export function Kanban({
                     </p>
                   ) : null}
                   {resource === "tasks" && (
+                    <TaskAssignment record={record} members={members} />
+                  )}
+                  {resource === "tasks" && (
                     <div className="row space-between">
                       <Badge value={dataOf(record).priority} />
                       <span className="small-text muted">
@@ -1793,6 +1851,48 @@ export function Kanban({
         );
       })}
     </div>
+  );
+}
+/**
+ * A task's assignees by name and its linked record, as the board card and the task profile show
+ * them. An assignee who is no longer a member reads "Former member", never an id; until the names
+ * load, only the count shows.
+ */
+export function TaskAssignment({
+  record,
+  members,
+}: {
+  record: RecordDto;
+  members: TeamMember[] | null;
+}) {
+  const ids = dataOf(record).assigneeIds;
+  const assignees = Array.isArray(ids) ? (ids as string[]) : [];
+  const names = members
+    ? assignees.map(
+        (userId) =>
+          members.find((member) => member.userId === userId)?.name ??
+          "Former member",
+      )
+    : null;
+  return (
+    <>
+      {assignees.length > 0 && (
+        <p className="muted">
+          Assigned:{" "}
+          {names
+            ? names.join(", ")
+            : `${assignees.length} ${assignees.length === 1 ? "member" : "members"}`}
+        </p>
+      )}
+      {record.parentRecordId && (
+        <p className="muted">
+          Linked record:{" "}
+          {record.parentKind
+            ? `${RESOURCE_CONFIG[kindToResource[record.parentKind]].singular} · ${record.parentLabel}`
+            : "Unavailable record"}
+        </p>
+      )}
+    </>
   );
 }
 /**
@@ -1927,6 +2027,7 @@ export function RecordDetail({
   inline = false,
   initialTab = "details",
   focusChecklistId,
+  members,
 }: {
   record: RecordDto;
   onClose: () => void;
@@ -1941,8 +2042,14 @@ export function RecordDetail({
   inline?: boolean;
   initialTab?: "details" | "checklist";
   focusChecklistId?: string;
+  /** Tasks only: the team's members when the screen has them; otherwise the profile loads them. */
+  members?: TeamMember[] | null;
 }) {
   const { team, role } = useWorkspace();
+  const loaded = useTeamMembers(
+    team?.id ?? null,
+    record.kind === "task" && members === undefined,
+  );
   const [tab, setTab] = useState<string>(initialTab);
   const [error, setError] = useState("");
   const busy = usePendingKeys().has(record.id);
@@ -2233,6 +2340,12 @@ export function RecordDetail({
                 </button>
               )}
             </div>
+            {record.kind === "task" && (
+              <TaskAssignment
+                record={record}
+                members={members === undefined ? loaded.members : members}
+              />
+            )}
             <div className="detail-facts">
               {Object.entries(record)
                 .filter(
@@ -2240,6 +2353,8 @@ export function RecordDetail({
                     key.endsWith("Id") &&
                     key !== "legacyId" &&
                     key !== "privateOwnerId" &&
+                    // A task's linked record shows above, by its kind and label.
+                    !(record.kind === "task" && key === "parentRecordId") &&
                     value,
                 )
                 .map(([key, value]) => (
@@ -2272,7 +2387,9 @@ export function RecordDetail({
                   (field) =>
                     !field.readOnly &&
                     field.key !== "legacyAuthorLabel" &&
-                    field.key !== "customValues",
+                    field.key !== "customValues" &&
+                    // Assignees show above by name, never as ids.
+                    field.key !== "assigneeIds",
                 )
                 .map((field) => (
                   <div
