@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useId, useRef, useState } from "react";
+import { Fragment, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Search } from "lucide-react";
 import {
   RESOURCE_CONFIG,
@@ -16,13 +16,16 @@ import {
   type FieldConfig,
 } from "@/domain/records";
 import { Dialog } from "@/components/ui/dialog";
+import { UnitPicker } from "@/components/settings/unit-picker";
 import {
+  ClientError,
   useApi,
   useDebounced,
   useUnsavedWork,
   useWorkspace,
   requestJson,
   humanError,
+  teamRequester,
 } from "./client";
 import { DuplicateWarning, useDuplicateLookup } from "./duplicate-warning";
 import {
@@ -36,6 +39,8 @@ import { recordMutation, customValueDefaults } from "./mutation";
 import { startSpeedTimer } from "./speed-log";
 
 type Values = Record<string, unknown>;
+/** A vacancy's org unit as the editor shows it: its id and "Name (CODE)". */
+type ChosenUnit = { id: string; label: string } | null;
 const REFERENCE_LABELS: Record<ReferenceField, string> = {
   candidateId: "Candidate",
   vacancyId: "Vacancy",
@@ -104,11 +109,29 @@ export function RecordEditor({
       return result;
     },
   );
+  // Vacancies only: the unit as saved, the one this save will send and the picker's fallback.
+  const [savedUnit] = useState<ChosenUnit>(() =>
+    record?.orgUnitId
+      ? { id: record.orgUnitId, label: record.orgUnitLabel ?? "Org unit" }
+      : null,
+  );
+  const [orgUnit, setOrgUnit] = useState<ChosenUnit>(savedUnit);
+  const [unitBase, setUnitBase] = useState<ChosenUnit>(savedUnit);
+  const [pickerKey, setPickerKey] = useState(0);
+  const [unitError, setUnitError] = useState("");
+  const unitChanged = (orgUnit?.id ?? null) !== (savedUnit?.id ?? null);
+  const teamId = team?.id ?? null;
+  const request = useMemo(
+    () => (teamId ? teamRequester(teamId) : null),
+    [teamId],
+  );
   const [opened] = useState(() => JSON.stringify([values, refs]));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
-  useUnsavedWork(saving || JSON.stringify([values, refs]) !== opened);
+  useUnsavedWork(
+    saving || unitChanged || JSON.stringify([values, refs]) !== opened,
+  );
   const [copyingRole, setCopyingRole] = useState(false);
   const pending = saving || copyingRole;
   const [advanced, setAdvanced] = useState(false);
@@ -132,6 +155,7 @@ export function RecordEditor({
     if (!team || pending) return;
     setError("");
     setFieldErrors({});
+    setUnitError("");
     const submitted =
       resource === "tasks"
         ? {
@@ -142,7 +166,13 @@ export function RecordEditor({
             ),
           }
         : values;
-    const input = recordMutation(resource, submitted, refs, record);
+    const input: Values = {
+      ...recordMutation(resource, submitted, refs, record),
+      // Sent only when it changed, so a save that leaves it alone never touches it.
+      ...(resource === "vacancies" && unitChanged
+        ? { orgUnitId: orgUnit?.id ?? null }
+        : {}),
+    };
     const parsed = (
       record
         ? updateRecordSchemas[config.kind]
@@ -186,7 +216,18 @@ export function RecordEditor({
       timed?.();
       onSaved(response.data);
     } catch (e) {
-      setError(humanError(e));
+      // The unit is refused only when it changed; the rest of the draft stays as entered.
+      if (
+        unitChanged &&
+        e instanceof ClientError &&
+        e.code === "invalid_reference" &&
+        e.message.startsWith("orgUnitId")
+      ) {
+        setUnitError(
+          "This unit is not a current unit of your company. Choose another unit, or remove the org unit.",
+        );
+        setError("Please review the org unit.");
+      } else setError(humanError(e));
       setTimeout(() => errorRef.current?.focus(), 0);
     } finally {
       setSaving(false);
@@ -344,6 +385,57 @@ export function RecordEditor({
                   );
                 })}
             </div>
+            {resource === "vacancies" && request && (
+              <fieldset
+                className="stack"
+                aria-describedby={
+                  unitError ? "editor-org-unit-error" : undefined
+                }
+              >
+                <legend>Org unit</legend>
+                <p id="editor-org-unit" style={{ margin: 0 }}>
+                  {orgUnit ? orgUnit.label : "No org unit"}
+                  {unitChanged && (
+                    <span className="muted"> (saved when you save)</span>
+                  )}
+                </p>
+                <UnitPicker
+                  key={pickerKey}
+                  request={request}
+                  label="Choose an org unit"
+                  emptyLabel="Choose a unit"
+                  disabled={pending}
+                  onChange={(unit) =>
+                    setOrgUnit(
+                      unit
+                        ? { id: unit.id, label: `${unit.name} (${unit.code})` }
+                        : unitBase,
+                    )
+                  }
+                />
+                {orgUnit && (
+                  <div>
+                    <button
+                      type="button"
+                      className="button secondary small"
+                      onClick={() => {
+                        setOrgUnit(null);
+                        setUnitBase(null);
+                        setUnitError("");
+                        setPickerKey((key) => key + 1);
+                      }}
+                    >
+                      Remove org unit
+                    </button>
+                  </div>
+                )}
+                {unitError && (
+                  <span id="editor-org-unit-error" className="field-error">
+                    {unitError}
+                  </span>
+                )}
+              </fieldset>
+            )}
             {resource === "tasks" && fields.error && (
               <p className="notice error" role="alert">
                 Custom fields could not be loaded: {fields.error}. Refresh
