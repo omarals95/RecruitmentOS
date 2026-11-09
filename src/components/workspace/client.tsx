@@ -107,7 +107,8 @@ export async function requestJson<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (teamId) headers.set("X-Team-Id", teamId);
-  if (init.body) headers.set("Content-Type", "application/json");
+  if (init.body && !headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   const controller = new AbortController();
   const signal = init.signal
     ? AbortSignal.any([controller.signal, init.signal])
