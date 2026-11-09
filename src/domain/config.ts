@@ -112,6 +112,10 @@ export type FieldRule = (typeof FIELD_RULES)[number];
 export const RECORD_SCOPES = ["all", "unit", "assigned"] as const;
 export type RecordScope = (typeof RECORD_SCOPES)[number];
 
+/** basic: name, position and unit; full: also work email and phone (architecture §6.3, D16). */
+export const DIRECTORY_RULES = ["basic", "full"] as const;
+export type DirectoryRule = (typeof DIRECTORY_RULES)[number];
+
 /** Company areas a company owner may grant to a company admin (drizzle/0028). */
 export const GRANTABLE_ADMIN_AREAS = [
   "fields",
@@ -272,6 +276,8 @@ const roleBody = <M extends z.ZodType<Role>>(membership: M) =>
           tasks: z.enum(RECORD_SCOPES),
         })
         .strict(),
+      /** The directory contact rule; absent means basic. */
+      directoryRule: z.enum(DIRECTORY_RULES).optional(),
     })
     .strict()
     .superRefine((body, ctx) => insideCeiling(body as RoleGrants, ctx));
