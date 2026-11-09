@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppDb } from "../src/db";
 import { authTables } from "../src/db/auth-schema";
 import { createAuth } from "../src/lib/auth";
+import { changeTeamRole } from "../src/lib/member-roles";
 import {
   addMember,
   authCaller,
@@ -630,5 +631,41 @@ describe("owner role and team creation through the handler", () => {
     expect(message.text).toContain(
       "You have been invited to join FictionalUrgentteamname.",
     );
+  });
+
+  it("keeps every role-change rule when the role service drives updateMemberRole (R2a-10)", async () => {
+    const as = (cookie: string) => new Headers({ cookie });
+    const change = (cookie: string, memberId: string, role: string) =>
+      changeTeamRole(caller.auth, as(cookie), {
+        organizationId: teamId,
+        memberId,
+        role,
+      });
+    const ownerMember = (
+      await h.pg.query<{ id: string }>(
+        "SELECT id FROM auth.member WHERE organization_id=$1 AND role='owner' ORDER BY created_at LIMIT 1",
+        [teamId],
+      )
+    ).rows[0].id;
+    // A recruiter holds no member update; an admin cannot change an owner or make one.
+    expect(await change(recruiter.cookie, admin.memberId, "viewer")).toBe(
+      false,
+    );
+    expect(await change(admin.cookie, ownerMember, "recruiter")).toBe(false);
+    expect(await change(admin.cookie, recruiter.memberId, "owner")).toBe(false);
+    // Only exact role names are valid, even from an owner.
+    expect(await change(ownerCookie, recruiter.memberId, " viewer")).toBe(
+      false,
+    );
+    expect(await roleOf(admin.memberId)).toBe("admin");
+    expect(await roleOf(ownerMember)).toBe("owner");
+    expect(await roleOf(recruiter.memberId)).toBe("recruiter");
+    // A team owner changes a member's role, and back.
+    expect(await change(ownerCookie, recruiter.memberId, "viewer")).toBe(true);
+    expect(await roleOf(recruiter.memberId)).toBe("viewer");
+    expect(await change(ownerCookie, recruiter.memberId, "recruiter")).toBe(
+      true,
+    );
+    expect(await roleOf(recruiter.memberId)).toBe("recruiter");
   });
 });

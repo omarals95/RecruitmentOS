@@ -10,6 +10,9 @@ import {
   publishConfigVersion,
 } from "@/lib/config-store";
 import { withTeam } from "@/lib/db-team";
+import { assignMemberRole } from "@/lib/member-roles";
+import { roleScopes } from "@/lib/permissions";
+import { RECRUITER_ROLE } from "@/domain/config-defaults";
 import { bootstrapTeam, createRecord, listRecords } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
@@ -314,6 +317,49 @@ describe("database round trips per request", () => {
         label: "Fictional budget workflow",
       });
       expect(configBodyCache.ids()).toContain(versionId);
+    });
+
+    // A custom role (R2a-10): install narrows to it in the same statement, so the counts hold.
+    it("keeps every request within budget for a member holding an assigned configured role", async () => {
+      const member = await seedIdentity(fixture.db, {
+        userId: "budget-recruiter",
+        teamId: owner.teamId,
+        role: "recruiter",
+      });
+      const role = await createConfigDraft(owner, {
+        type: "role",
+        key: "budget-role",
+        body: {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional budget role",
+          scopes: roleScopes("recruiter").filter((s) => s !== "cvs:write"),
+        },
+      });
+      await publishConfigVersion(owner, role.versionId);
+      await assignMemberRole(
+        owner,
+        { userId: member.userId, roleObjectId: role.objectId },
+        new Headers(),
+      );
+      const signIn = (p: Principal) =>
+        vi.mocked(getVerifiedSession).mockResolvedValue({
+          user: { id: p.userId, twoFactorEnabled: true },
+          session: { activeOrganizationId: p.teamId },
+        } as never);
+      signIn(member);
+      try {
+        const access = await withTeam(member, (tx, state) =>
+          Promise.resolve(state),
+        );
+        expect(access.roleVersionId).toBe(role.versionId);
+        expect(access.scopes).not.toContain("cvs:write");
+        expect(await measure(() => configBodyCache.clear())).toEqual([
+          6, 6, 11, 11, 6, 15,
+        ]);
+        expect(await measure(() => {})).toEqual([6, 6, 11, 11, 6, 15]);
+      } finally {
+        signIn(owner);
+      }
     });
   });
 });
