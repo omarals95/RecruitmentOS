@@ -671,7 +671,7 @@ describe("roles and permissions tab", () => {
     for (const label of [
       "Vacancies, applications, interviews, offers and onboarding",
       "Candidates",
-      "Recruitment tasks",
+      "Team tasks",
     ])
       expect(scope).toContain(`<span>${label}</span><select>`);
     expect(scope).not.toContain("later release");

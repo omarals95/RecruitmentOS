@@ -171,7 +171,7 @@ export function Overview() {
                 caption="Nonarchived application records"
               />
               <Stat
-                label="Recruitment tasks"
+                label="Team tasks"
                 value={result.data.counts.tasks}
                 icon={CheckCheck}
                 href="/app/tasks"

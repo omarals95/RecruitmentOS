@@ -35,7 +35,7 @@ export const screenDefinitions: Record<
     resource: "applications",
   },
   tasks: {
-    title: "Recruitment tasks",
+    title: "Team tasks",
     description: "Your workflow, your buckets, your next steps.",
     resource: "tasks",
   },

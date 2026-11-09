@@ -1671,7 +1671,7 @@ export function Kanban({
     <div
       className="kanban"
       aria-label={
-        resource === "tasks" ? "Recruitment task board" : "Application pipeline"
+        resource === "tasks" ? "Team task board" : "Application pipeline"
       }
     >
       {columns.map((column) => {
