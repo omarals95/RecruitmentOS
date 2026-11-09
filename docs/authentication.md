@@ -104,6 +104,15 @@ Setup is claimed once per database in the same transaction as the initial user i
 
 Roles are owner, admin, recruiter, and viewer. Only owners can grant or change ownership. Recruiter/viewer roles do not administer team memberships. Unknown or combined role strings are rejected. Personal API tokens use a separate scope policy and cannot administer authentication or teams.
 
+### Team roles and configured roles
+
+`member.role` (owner, admin, recruiter or viewer) is the membership ceiling: the most a member can hold in that team. Since migration `0035` (Release 2 item R2a-10) a company owner can also give a member a configured role, a published `role` configuration object of the company whose body names its membership (admin, recruiter or viewer; owner is reserved for the Owner template), scopes, pages, actions and field rules. The assignment is the member's `app.member_roles` row; a member without a row holds the built-in template of `member.role`, exactly as before.
+
+- **Who assigns.** Only a company owner (company authority from `app.workspace_admins`, never a team role), signed in, through `POST /api/v1/teams/member-roles` (`src/lib/member-roles.ts`). Team owners and admins without company authority, including the owner of a newly created team, company admins, API tokens and OAuth grants are refused with 403 `role_assignment_forbidden` or `session_required`, and the database refuses the same writes. Team owners keep the Owner role and cannot be given a configured role (409 `team_owner_role`). Only company owners publish role versions.
+- **Write order.** The `app.member_roles` row is written first. Only then, when `member.role` differs from the role's membership, the service calls Better Auth's `updateMemberRole` with the caller's own request headers, so every existing organization rule and hook applies: members are updated by team owners and admins only, and only a team owner changes ownership. If Better Auth refuses, the row stays and the response is 409 `team_role_unchanged`. Clearing a role deletes the row and leaves `member.role` unchanged.
+- **The narrower wins.** If the two disagree, for example after such a refusal, `tenant_context.install` stores the asserted scopes (which never exceed `member.role`'s ceiling) intersected with the role's scopes, and the permission engine also takes the stricter of the two memberships, so a viewer membership never writes. A role that cannot be used (archived, unpublished or with a record scope other than all) gives the member no access until a company owner reassigns or clears it.
+- **Not yet.** Roles limited to a unit or to assigned records, including the built-in hiring manager and interviewer templates, cannot be assigned until R2a-18 enforces record scope (409 `role_record_scope_unsupported`, SQLSTATE `RQ011` in the database). A member promoted to admin by a role with admin membership sets up two-step sign-in at their next sign-in, as for any admin.
+
 ## Optional providers
 
 Google requires `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, with callback `${BETTER_AUTH_URL}/api/auth/callback/google`. Google must report a verified email.
