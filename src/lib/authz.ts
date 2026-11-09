@@ -266,8 +266,8 @@ function kindOf(request: AccessRequest): RecordKind | null {
 
 /**
  * The one authorization decision: the record scope and field rules for an allowed request, or a
- * 403 in today's words. Synchronous and pure. The records service, insights and exports decide
- * through it; MCP moves onto it in R2a-09.
+ * 403 in today's words. Synchronous and pure. The records service, insights, exports and the MCP
+ * tools decide through it.
  */
 export function authorize(
   ctx: AccessContext,

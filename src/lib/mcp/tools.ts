@@ -12,6 +12,13 @@ import {
   getBulkBatch,
 } from "@/lib/bulk-intake";
 import {
+  accessContext,
+  decide,
+  hiddenKeys,
+  type AccessContext,
+  type AccessRequest,
+} from "@/lib/authz";
+import {
   beginCvUpload,
   completeCvUpload,
   listCandidateCvsPage,
@@ -27,7 +34,7 @@ import {
   searchWorkspace,
 } from "@/lib/insights";
 import { appOrigin } from "@/lib/oauth";
-import { requireScope, type Scope } from "@/lib/permissions";
+import type { Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import {
   bulkApplications,
@@ -63,6 +70,7 @@ import {
   type ReferenceField,
   type ResourceName,
 } from "@/domain/records";
+import { RECORD_RESOURCES } from "@/domain/config";
 import {
   ACCESS_OFF_MESSAGE,
   CvTextAccessOff,
@@ -100,14 +108,101 @@ interface ToolDefinition<S extends z.ZodType> {
   name: string;
   title: string;
   description: string;
+  /** The text of the description suffix and of a refusal; the engine checks them too. */
   scopes: Scope[];
+  /** Every entry must be allowed; an array entry is allowed when any one of its requests is. */
+  access: (AccessRequest | AccessRequest[])[];
   effect: Effect;
   input: S;
-  run: (p: Principal, input: z.output<S>) => Promise<CallToolResult>;
+  run: (
+    p: Principal,
+    input: z.output<S>,
+    ctx: AccessContext,
+  ) => Promise<CallToolResult>;
 }
 type McpTool = ToolDefinition<z.ZodType>;
 const tool = <S extends z.ZodType>(definition: ToolDefinition<S>) =>
   definition as unknown as McpTool;
+
+/** The kinds the overview and analytics count, each viewed on the tool's page. */
+const inventory = (page: "home" | "analytics") =>
+  (
+    [
+      "candidates",
+      "vacancies",
+      "applications",
+      "tasks",
+      "interviews",
+      "offers",
+      "onboarding",
+    ] as const
+  ).map((resource): AccessRequest => ({ page, resource, action: "view" }));
+/** The reminder kinds, as the notifications service views them. */
+const REMINDER_KINDS = (
+  [
+    "tasks",
+    "interviews",
+    "offers",
+    "checklist",
+    "vacancies",
+    "onboarding",
+  ] as const
+).map((resource): AccessRequest => ({ resource, action: "view" }));
+/** The groups search_workspace searches, as the search service views them. */
+const SEARCHED_KINDS = (
+  ["candidates", "vacancies", "job-roles", "tasks", "applications"] as const
+).map((resource): AccessRequest => ({ resource, action: "view" }));
+/** The record history of any record kind, viewed on the activity page. */
+const ACTIVITY_KINDS = RECORD_RESOURCES.map((resource): AccessRequest => ({
+  page: "activity",
+  resource,
+  action: "view",
+}));
+
+type InputCheck = { scope: Scope; requests: AccessRequest[] };
+/** The checks some inputs add, each refused in the words of the scope it stands for. */
+export const INPUT_CHECKS = {
+  /** archive_record and restore_record with recordType candidate. */
+  archiveCandidate: {
+    scope: "candidates:write",
+    requests: [{ resource: "candidates", action: "edit" }],
+  },
+  /** get_cv_texts with vacancyId. */
+  vacancyCvTexts: {
+    scope: "recruitment:read",
+    requests: [
+      { resource: "vacancies", action: "view" },
+      { resource: "applications", action: "view" },
+    ],
+  },
+  /** upload_cv with newCandidate. */
+  newCandidateUpload: {
+    scope: "candidates:write",
+    requests: [{ resource: "candidates", action: "create" }],
+  },
+  /** update_task with customValues. */
+  taskCustomValues: {
+    scope: "recruitment:read",
+    requests: [{ resource: "tasks", action: "view" }],
+  },
+  /** add_comment on a candidate. */
+  candidateComment: {
+    scope: "candidates:write",
+    requests: [{ resource: "candidates", action: "comment" }],
+  },
+} satisfies Record<string, InputCheck>;
+/** Whether the engine allows every request of a per-input check on the call's context. */
+export function inputAllowed(ctx: AccessContext, check: InputCheck) {
+  return check.requests.every((request) => decide(ctx, request));
+}
+function requireAccess(ctx: AccessContext, check: InputCheck) {
+  if (!inputAllowed(ctx, check))
+    throw new ApiError(
+      403,
+      "scope_required",
+      `Permission ${check.scope} is required.`,
+    );
+}
 
 const page = z.number().int().min(1).max(1000).default(1);
 const pageSize = z.number().int().min(1).max(25).default(10);
@@ -135,9 +230,21 @@ function listQuery(values: Record<string, unknown>) {
       );
   return params;
 }
-function fields(row: RecordDto, keys: string[]): Data {
+/** Whether the caller's role shows a key of the row's kind; a result leaves a hidden key out. */
+function visible(ctx: AccessContext, row: RecordDto) {
+  const hidden = hiddenKeys(ctx, row.kind);
+  return (key: string) => !hidden.has(key);
+}
+/** The visible keys of the row's data in the order given, an empty one as null. */
+function fields(ctx: AccessContext, row: RecordDto, keys: string[]): Data {
   const data = row.data as Data;
-  return Object.fromEntries(keys.map((key) => [key, data[key] ?? null]));
+  return Object.fromEntries(
+    keys.filter(visible(ctx, row)).map((key) => [key, data[key] ?? null]),
+  );
+}
+/** The row's label, unless the role hides it. */
+function labelled(ctx: AccessContext, row: RecordDto): Data {
+  return visible(ctx, row)("label") ? { label: row.label ?? null } : {};
 }
 function listed(rows: Data[]) {
   return rows.map((row) => capRecord(row, LIST_TEXT_LIMIT));
@@ -249,10 +356,19 @@ const ARCHIVABLE: Record<(typeof RECORD_TYPES)[number], ResourceName> = {
 const archiveInput = z
   .object({ recordType: z.enum(RECORD_TYPES), id: z.uuid(), version })
   .strict();
+/** Every record type but the candidate, which is decided per input. */
+const ARCHIVE_ACCESS = RECORD_TYPES.filter((type) => type !== "candidate").map(
+  (type): AccessRequest => ({ resource: ARCHIVABLE[type], action: "edit" }),
+);
 const archives =
   (archived: boolean) =>
-  async (p: Principal, input: z.output<typeof archiveInput>) => {
-    if (input.recordType === "candidate") requireScope(p, "candidates:write");
+  async (
+    p: Principal,
+    input: z.output<typeof archiveInput>,
+    ctx: AccessContext,
+  ) => {
+    if (input.recordType === "candidate")
+      requireAccess(ctx, INPUT_CHECKS.archiveCandidate);
     return success(
       written(
         await updateRecord(p, ARCHIVABLE[input.recordType], input.id, {
@@ -262,11 +378,11 @@ const archives =
       ),
     );
   };
-function taskItem(row: RecordDto): Data {
+function taskItem(ctx: AccessContext, row: RecordDto): Data {
   return {
     id: row.id,
     ...state(row),
-    ...fields(row, [
+    ...fields(ctx, row, [
       "title",
       "context",
       "owner",
@@ -281,28 +397,37 @@ function taskItem(row: RecordDto): Data {
     updatedAt: row.updatedAt,
   };
 }
-function interviewItem(row: RecordDto): Data {
+/** Times and the meeting-link flag only from visible fields: a hidden one derives nothing. */
+function interviewItem(ctx: AccessContext, row: RecordDto): Data {
   const data = row.data as Data;
-  const startAt = new Date(String(data.startAt)).toISOString();
+  const see = visible(ctx, row);
+  let start: Data = {};
+  if (see("startAt")) {
+    const startAt = new Date(String(data.startAt)).toISOString();
+    start = {
+      startAt,
+      startAtDubai: dubaiDateTime(startAt),
+      timezone: "Asia/Dubai",
+    };
+  }
   return {
     id: row.id,
     ...state(row),
     applicationId: row.applicationId,
-    title: data.title,
-    startAt,
-    startAtDubai: dubaiDateTime(startAt),
-    timezone: "Asia/Dubai",
-    ...fields(row, ["minutes", "interviewer", "location", "status"]),
-    hasMeetingUrl: Boolean(data.meetingUrl),
+    ...(see("title") ? { title: data.title } : {}),
+    ...start,
+    ...fields(ctx, row, ["minutes", "interviewer", "location", "status"]),
+    ...(see("meetingUrl") ? { hasMeetingUrl: Boolean(data.meetingUrl) } : {}),
   };
 }
-function factsOf(row: RecordDto, omit: string[] = []) {
+function factsOf(ctx: AccessContext, row: RecordDto, omit: string[] = []) {
   return {
     id: row.id,
     ...state(row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     facts: fields(
+      ctx,
       row,
       Object.keys(recordDataSchemas[row.kind].shape).filter(
         (key) => !omit.includes(key),
@@ -327,30 +452,32 @@ function sensitiveEvidence(entry: unknown) {
     ),
   );
 }
-/** The first ten non-sensitive evidence entries, each reduced to ten short scalar pairs. */
-function evidenceSummary(data: Data) {
+/**
+ * The first ten non-sensitive evidence entries, each reduced to ten short scalar pairs, with no
+ * count or item from a field the role hides.
+ */
+function evidenceSummary(data: Data, see: (key: string) => boolean) {
   const evidence = (Array.isArray(data.evidence) ? data.evidence : []).filter(
     (entry) => !sensitiveEvidence(entry),
   );
   const reviews = Array.isArray(data.sourceReviews) ? data.sourceReviews : [];
-  return {
-    evidenceCount: evidence.length,
-    sourceReviewCount: reviews.length,
-    items: evidence.slice(0, 10).map((entry) =>
-      Object.fromEntries(
-        Object.entries(
-          entry && typeof entry === "object" ? (entry as Data) : {},
+  const items = evidence.slice(0, 10).map((entry) =>
+    Object.fromEntries(
+      Object.entries(entry && typeof entry === "object" ? (entry as Data) : {})
+        .filter(([, value]) =>
+          ["string", "number", "boolean"].includes(typeof value),
         )
-          .filter(([, value]) =>
-            ["string", "number", "boolean"].includes(typeof value),
-          )
-          .slice(0, 10)
-          .map(([key, value]) => [
-            clip(key, 100),
-            typeof value === "string" ? clip(value, 300) : value,
-          ]),
-      ),
+        .slice(0, 10)
+        .map(([key, value]) => [
+          clip(key, 100),
+          typeof value === "string" ? clip(value, 300) : value,
+        ]),
     ),
+  );
+  return {
+    ...(see("evidence") ? { evidenceCount: evidence.length } : {}),
+    ...(see("sourceReviews") ? { sourceReviewCount: reviews.length } : {}),
+    ...(see("evidence") ? { items } : {}),
   };
 }
 
@@ -410,11 +537,15 @@ const workflowFields = optionalFields({
   ...WORKFLOW_SHAPES.bucket,
   ...WORKFLOW_SHAPES.field,
 });
-function workflowItem(row: RecordDto, type: ItemType): Data {
+function workflowItem(
+  ctx: AccessContext,
+  row: RecordDto,
+  type: ItemType,
+): Data {
   return {
     id: row.id,
     ...state(row),
-    ...fields(row, Object.keys(WORKFLOW_SHAPES[type])),
+    ...fields(ctx, row, Object.keys(WORKFLOW_SHAPES[type])),
   };
 }
 
@@ -450,6 +581,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Search candidates by stated facts: words, quoted phrases and -exclusions, skill, certification, category, emirate, degree, education, review and stated-experience filters, and your own shortlist or follow-up status. Pass archived: true for archived ones. Nothing is ranked or scored.",
     scopes: ["candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -473,7 +605,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { query: search, followUpStatus, ...rest } = input;
       // On candidates, status is the caller's own follow-up status.
       const result = await listRecords(
@@ -487,7 +619,7 @@ export const TOOLS: McpTool[] = [
           result.data.map((row) => ({
             id: row.id,
             ...state(row),
-            ...fields(row, [
+            ...fields(ctx, row, [
               "name",
               "jobTitle",
               "employer",
@@ -511,13 +643,14 @@ export const TOOLS: McpTool[] = [
     description:
       "One candidate's stated facts, an evidence summary and, with cvs:read, CV file metadata. Never returns personal shortlists, follow-up statuses, private notes or CV contents.",
     scopes: ["candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: z.object({ id: z.uuid() }).strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const row = await getRecord(p, "candidates", input.id);
       const data = row.data as Data;
       let cvs: Data[] | null = null;
-      if (p.scopes.includes("cvs:read"))
+      if (ctx.scopes.includes("cvs:read"))
         cvs = (
           await listCandidateCvsPage(p, input.id, { pageSize: 20 })
         ).data.map((cv) => ({
@@ -532,8 +665,11 @@ export const TOOLS: McpTool[] = [
       return success(
         capRecord(
           {
-            ...factsOf(row, [...SOURCE_FIELDS, ...SENSITIVE_CANDIDATE_FIELDS]),
-            evidenceSummary: evidenceSummary(data),
+            ...factsOf(ctx, row, [
+              ...SOURCE_FIELDS,
+              ...SENSITIVE_CANDIDATE_FIELDS,
+            ]),
+            evidenceSummary: evidenceSummary(data, visible(ctx, row)),
             cvs,
             ...(cvs ? {} : { cvsNote: "cvs:read scope required" }),
           },
@@ -548,12 +684,21 @@ export const TOOLS: McpTool[] = [
     description:
       "Find possible duplicates by email or by a phone number of at least seven digits. Call it before create_candidate. A match is only possible and needs a person to review; no match does not prove the candidate is new. Changes nothing.",
     scopes: ["candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: candidateDuplicateQuerySchema,
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await findCandidateDuplicates(p, input);
+      // A match leaves out the contact fields the role hides.
+      const hidden = hiddenKeys(ctx, "candidate");
       return success({
-        matches: listed(result.data),
+        matches: listed(
+          result.data.map((match) =>
+            Object.fromEntries(
+              Object.entries(match).filter(([key]) => !hidden.has(key)),
+            ),
+          ),
+        ),
         limited: result.limited,
         limit: CANDIDATE_DUPLICATE_LIMIT,
         note: DUPLICATE_NOTE,
@@ -566,6 +711,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Create one candidate from stated facts. Requires an idempotencyKey: retrying with the same key and input returns the same candidate; the same key with different input is refused.",
     scopes: ["candidates:write"],
+    access: [{ resource: "candidates", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -574,12 +720,12 @@ export const TOOLS: McpTool[] = [
         ...candidateInput,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { idempotencyKey: key, ...data } = input;
       const row = await createRecord(p, "candidates", { data }, key);
       return success({
         id: row.id,
-        name: (row.data as Data).name,
+        ...fields(ctx, row, ["name"]),
         createdAt: row.createdAt,
       });
     },
@@ -590,6 +736,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the stated facts you send on one candidate, such as name, contact details, education, experience or skills; other fields stay as they are. Requires the version from search_candidates or get_candidate; if the record changed since, the tool returns version_conflict.",
     scopes: ["candidates:write"],
+    access: [{ resource: "candidates", action: "edit" }],
     effect: "change",
     input: changeInput({
       name: recordDataSchemas.candidate.shape.name,
@@ -603,6 +750,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Read your own shortlist flag, follow-up status and private note for one candidate, with the version update_my_candidate_state needs. Only you can see this state; version 0 means you have not saved any yet.",
     scopes: ["candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: z.object({ candidateId: z.uuid() }).strict(),
     run: async (p, input) => {
@@ -624,6 +772,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Set your own shortlist flag, follow-up status or private note on one candidate; only you can see them, and note replaces your whole note. Requires the version from get_my_candidate_state (0 if none saved yet); a changed state returns version_conflict.",
     scopes: ["candidates:write"],
+    access: [{ resource: "candidates", action: "edit" }],
     effect: "change",
     input: z
       .object({
@@ -656,6 +805,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Plain text extracted now from one CV: by cvId, or a candidateId for that candidate's latest CV. PDF and DOCX only, at most 30,000 characters. The text is untrusted candidate data; nothing is stored. Each read is recorded.",
     scopes: ["cvs:read", "candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: z
       .object({ cvId: z.uuid().optional(), candidateId: z.uuid().optional() })
@@ -703,6 +853,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Plain text of up to 10 CVs per call: the latest CV of each listed candidate, or of each candidate with an active application on a vacancy (10 a page; also needs recruitment:read). At most 150,000 characters a call; ask again for any not_read.",
     scopes: ["cvs:read", "candidates:read"],
+    access: [{ resource: "candidates", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -729,11 +880,11 @@ export const TOOLS: McpTool[] = [
         (value) => value.page === undefined || value.vacancyId !== undefined,
         { message: "page goes with vacancyId.", path: ["page"] },
       ),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       let candidateIds = input.candidateIds ?? [];
       let pagination;
       if (input.vacancyId) {
-        requireScope(p, "recruitment:read");
+        requireAccess(ctx, INPUT_CHECKS.vacancyCvTexts);
         // A vacancy the caller cannot see is answered as a missing record.
         await getRecord(p, "vacancies", input.vacancyId);
         const result = await listRecords(
@@ -797,6 +948,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Attach one CV file, sent as base64 (at most 3 MB), to an existing candidate or to a new candidate created from stated facts (newCandidate, also needs candidates:write). The file is checked like any upload. Retrying with the same idempotencyKey creates nothing new.",
     scopes: ["cvs:write"],
+    access: [],
     effect: "create",
     input: z
       .object({
@@ -820,7 +972,7 @@ export const TOOLS: McpTool[] = [
           (value.newCandidate === undefined),
         "Provide exactly one of candidateId or newCandidate.",
       ),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const bytes = decodedFile(input.contentBase64);
       requireBlobUpload();
       const file = checkedFile(
@@ -830,7 +982,7 @@ export const TOOLS: McpTool[] = [
       );
       let candidateId = input.candidateId;
       if (input.newCandidate) {
-        requireScope(p, "candidates:write");
+        requireAccess(ctx, INPUT_CHECKS.newCandidateUpload);
         candidateId = (
           await createRecord(
             p,
@@ -853,6 +1005,7 @@ export const TOOLS: McpTool[] = [
     description:
       "For clients that can send HTTP requests themselves: reserve one CV upload (up to 10 MB) for a candidate and get a one-time upload link. Send the exact bytes to it, then call complete_cv_upload. Retrying with the same idempotencyKey reuses the reservation.",
     scopes: ["cvs:write"],
+    access: [],
     effect: "create",
     input: z
       .object({
@@ -885,6 +1038,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Check a CV sent to its upload link and make it available: its size, type and contents are verified. A file still on its way stays pending; a rejected file returns INVALID_CV.",
     scopes: ["cvs:write"],
+    access: [],
     effect: "create",
     input: z.object({ cvId: z.uuid() }).strict(),
     run: async (p, input) =>
@@ -896,6 +1050,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Get a new batch ID for importing up to 200 reviewed CVs with add_bulk_import_item; to skip a file, do not add it. Changes nothing: the batch starts with its first item and stays open for 24 hours.",
     scopes: ["cvs:write", "candidates:write"],
+    access: [{ resource: "candidates", action: "create" }],
     effect: "read",
     input: z.object({}).strict(),
     run: async () => {
@@ -918,6 +1073,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Import one CV as a Reviewed candidate in a batch, with the file as contentBase64 (up to 3 MB) or sizeBytes for an upload link. First run find_duplicate_candidates on email and phone and show the matches; pass their IDs as acknowledgedDuplicateIds and set both review flags once the user reviewed.",
     scopes: ["cvs:write", "candidates:write"],
+    access: [{ resource: "candidates", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1012,6 +1168,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List the items imported into one of your batches, with each item's outcome (not-imported, cv-pending, imported or cv-rejected) and the number of possible duplicates found when it was imported.",
     scopes: ["cvs:write", "candidates:write"],
+    access: [{ resource: "candidates", action: "create" }],
     effect: "read",
     input: z.object({ batchId: z.uuid() }).strict(),
     run: async (p, input) => {
@@ -1033,6 +1190,7 @@ export const TOOLS: McpTool[] = [
     description:
       "A link to RecruitmentOS's Import CVs screen, for when you cannot send file bytes: the user uploads and reviews the CVs there. Changes nothing.",
     scopes: ["cvs:write", "candidates:write"],
+    access: [{ resource: "candidates", action: "create" }],
     effect: "read",
     input: z.object({}).strict(),
     run: async () =>
@@ -1047,6 +1205,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List job roles, optionally by department or text. Pass archived: true to list only archived job roles, for example to restore one. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "job-roles", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1057,7 +1216,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { query: search, ...rest } = input;
       const result = await listRecords(
         p,
@@ -1069,7 +1228,7 @@ export const TOOLS: McpTool[] = [
           result.data.map((row) => ({
             id: row.id,
             ...state(row),
-            ...fields(row, [
+            ...fields(ctx, row, [
               "title",
               "department",
               "location",
@@ -1090,6 +1249,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Create one job role, a reusable template for vacancies. Requires an idempotencyKey: retrying with the same key and input returns the same job role; the same key with different input is refused.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "job-roles", action: "create" }],
     effect: "create",
     input: z
       .object({ idempotencyKey, ...recordDataSchemas["job-role"].shape })
@@ -1102,6 +1262,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one job role; other fields stay as they are. Vacancies made from it do not change. Requires the version from list_job_roles; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "job-roles", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas["job-role"].shape),
     run: changes("job-roles"),
@@ -1112,6 +1273,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List vacancies with optional status, department and text filters. Pass archived: true to list only archived vacancies. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "vacancies", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1123,7 +1285,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { query: search, ...rest } = input;
       const result = await listRecords(
         p,
@@ -1135,7 +1297,7 @@ export const TOOLS: McpTool[] = [
           result.data.map((row) => ({
             id: row.id,
             ...state(row),
-            ...fields(row, [
+            ...fields(ctx, row, [
               "title",
               "requisitionId",
               "department",
@@ -1159,12 +1321,13 @@ export const TOOLS: McpTool[] = [
     description:
       "One vacancy's facts, including description, requirements, skills, hiring manager and recruiter, and its version.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "vacancies", action: "view" }],
     effect: "read",
     input: z.object({ id: z.uuid() }).strict(),
-    run: async (p, input) =>
+    run: async (p, input, ctx) =>
       success(
         capRecord(
-          factsOf(await getRecord(p, "vacancies", input.id)),
+          factsOf(ctx, await getRecord(p, "vacancies", input.id)),
           GET_TEXT_LIMIT,
         ),
       ),
@@ -1175,6 +1338,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Create one vacancy, optionally from a job role and with a status (Draft unless you send another, such as Open). Requires an idempotencyKey: retrying with the same key and input returns the same vacancy; the same key with different input is refused.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "vacancies", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1191,6 +1355,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one vacancy, such as its status (Draft, Open, On hold, Filled or Closed) or jobRoleId (null clears it). Requires the version from list_vacancies or get_vacancy; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "vacancies", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.vacancy.shape, {
       jobRoleId: z.uuid().nullable().optional(),
@@ -1203,6 +1368,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List applications for exactly one candidate or one vacancy, optionally by stage. Pass archived: true to list only archived ones. Labels name the candidate only with candidates:read.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "applications", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1219,7 +1385,7 @@ export const TOOLS: McpTool[] = [
           (value.candidateId === undefined) !== (value.vacancyId === undefined),
         "Provide exactly one of candidateId or vacancyId.",
       ),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await listRecords(p, "applications", listQuery(input));
       return success(
         listed(
@@ -1228,8 +1394,8 @@ export const TOOLS: McpTool[] = [
             ...state(row),
             candidateId: row.candidateId,
             vacancyId: row.vacancyId,
-            label: row.label ?? null,
-            ...fields(row, ["stage", "source", "owner", "appliedDate"]),
+            ...labelled(ctx, row),
+            ...fields(ctx, row, ["stage", "source", "owner", "appliedDate"]),
             updatedAt: row.updatedAt,
           })),
         ),
@@ -1243,17 +1409,18 @@ export const TOOLS: McpTool[] = [
     description:
       "Get one application's facts, candidate and vacancy IDs, label and version. The label names the candidate only with candidates:read.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "applications", action: "view" }],
     effect: "read",
     input: z.object({ id: z.uuid() }).strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const row = await getRecord(p, "applications", input.id);
       return success(
         capRecord(
           {
-            ...factsOf(row),
+            ...factsOf(ctx, row),
             candidateId: row.candidateId,
             vacancyId: row.vacancyId,
-            label: row.label ?? null,
+            ...labelled(ctx, row),
           },
           GET_TEXT_LIMIT,
         ),
@@ -1266,6 +1433,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Add one candidate to a vacancy, at any stage but Rejected or Withdrawn (Sourced unless you send another). A candidate has one active application per vacancy. Requires an idempotencyKey: retrying with the same key and input returns the same application.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "applications", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1284,6 +1452,10 @@ export const TOOLS: McpTool[] = [
     description:
       "Add up to 500 candidates to one vacancy; candidates already active on it are skipped. Returns counts and IDs only. Requires an idempotencyKey: retrying with the same key and input returns the same result; the same key with different input is refused.",
     scopes: ["recruitment:write", "candidates:read"],
+    access: [
+      { resource: "applications", action: "create" },
+      { resource: "candidates", action: "view" },
+    ],
     effect: "create",
     input: z
       .object({
@@ -1314,6 +1486,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the source, owner, notes or applied date you send on one application. To change its stage, reject or withdraw, use move_application_stage. Requires the version from list_applications or get_application; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "applications", action: "edit" }],
     effect: "change",
     input: changeInput(
       recordDataSchemas.application.omit({ stage: true }).shape,
@@ -1326,6 +1499,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Move one application to a stage; this is also how to reject or withdraw, which need a reason. A reason is saved as a comment on the application in the same change. Requires the current version; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "applications", action: "edit" }],
     effect: "change",
     input: z
       .object({
@@ -1364,6 +1538,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List interviews with start times in UTC and Asia/Dubai, optionally by application, candidate, status or start range; for calendar questions use startFrom and startTo (ISO 8601 with offset). Pass archived: true for archived ones. Meeting links are not returned.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "interviews", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1377,14 +1552,17 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { candidateId, ...rest } = input;
       const result = await listRecords(
         p,
         "interviews",
         listQuery({ ...rest, applicationCandidateId: candidateId }),
       );
-      return success(listed(result.data.map(interviewItem)), result.pagination);
+      return success(
+        listed(result.data.map((row) => interviewItem(ctx, row))),
+        result.pagination,
+      );
     },
   }),
   tool({
@@ -1393,6 +1571,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Schedule one interview for an application; startAt is ISO 8601 with an offset, and it starts as Scheduled. A meeting link is stored, never opened. Requires an idempotencyKey: retrying with the same key and input returns the same interview.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "interviews", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1409,6 +1588,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one interview: reschedule it with a new startAt, add notes, or set its status to Completed, Cancelled or No show. Requires the version from list_interviews; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "interviews", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.interview.shape),
     run: changes("interviews"),
@@ -1419,6 +1599,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List offers, optionally by application, candidate or status. Pass archived: true to list only archived offers. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "offers", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1430,7 +1611,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { candidateId, ...rest } = input;
       const result = await listRecords(
         p,
@@ -1443,7 +1624,7 @@ export const TOOLS: McpTool[] = [
             id: row.id,
             ...state(row),
             applicationId: row.applicationId,
-            ...fields(row, [
+            ...fields(ctx, row, [
               "title",
               "amount",
               "currency",
@@ -1466,6 +1647,7 @@ export const TOOLS: McpTool[] = [
     description:
       'Create one draft offer for an application; amount is a decimal string such as "15000.00". Set its status later with update_offer. Requires an idempotencyKey: retrying with the same key and input returns the same offer.',
     scopes: ["recruitment:write"],
+    access: [{ resource: "offers", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1483,6 +1665,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one offer, such as its status (Draft, Sent, Accepted, Declined, Withdrawn or Expired) and a declineReason when declined. Requires the version from list_offers; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "offers", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.offer.shape),
     run: changes("offers"),
@@ -1493,6 +1676,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List onboarding records, optionally by application, candidate or status. Pass archived: true to list only archived ones. Labels name the candidate only with candidates:read.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "onboarding", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1504,7 +1688,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { candidateId, ...rest } = input;
       const result = await listRecords(
         p,
@@ -1517,8 +1701,8 @@ export const TOOLS: McpTool[] = [
             id: row.id,
             ...state(row),
             applicationId: row.applicationId,
-            label: row.label ?? null,
-            ...fields(row, ["startDate", "owner", "status"]),
+            ...labelled(ctx, row),
+            ...fields(ctx, row, ["startDate", "owner", "status"]),
             updatedAt: row.updatedAt,
           })),
         ),
@@ -1532,6 +1716,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Start onboarding for one application; it starts as Planned, and an application has at most one active onboarding. Requires an idempotencyKey: retrying with the same key and input returns the same onboarding.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "onboarding", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1548,6 +1733,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one onboarding record; set status Completed to complete it. Requires the version from list_onboarding; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "onboarding", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.onboarding.shape),
     run: changes("onboarding"),
@@ -1558,6 +1744,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List onboarding checklist items, optionally by onboarding record or status. Pass archived: true to list only archived items. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "checklist", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1568,7 +1755,7 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await listRecords(p, "checklist", listQuery(input));
       return success(
         listed(
@@ -1576,7 +1763,13 @@ export const TOOLS: McpTool[] = [
             id: row.id,
             ...state(row),
             onboardingId: row.onboardingId,
-            ...fields(row, ["title", "category", "dueDate", "owner", "status"]),
+            ...fields(ctx, row, [
+              "title",
+              "category",
+              "dueDate",
+              "owner",
+              "status",
+            ]),
             updatedAt: row.updatedAt,
           })),
         ),
@@ -1590,6 +1783,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Add one checklist item to an onboarding record; it starts as Pending. Requires an idempotencyKey: retrying with the same key and input returns the same item; the same key with different input is refused.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "checklist", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1606,6 +1800,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one checklist item; set status Complete to complete it, or Waived. Requires the version from list_checklist_items; if the record changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "checklist", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.checklist.shape),
     run: changes("checklist"),
@@ -1616,6 +1811,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List recruitment tasks with their custom field values, optionally by bucket, candidate, vacancy or priority. Pass archived: true to list only archived tasks. Each item has the version an update needs.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "tasks", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1628,9 +1824,12 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await listRecords(p, "tasks", listQuery(input));
-      return success(listed(result.data.map(taskItem)), result.pagination);
+      return success(
+        listed(result.data.map((row) => taskItem(ctx, row))),
+        result.pagination,
+      );
     },
   }),
   tool({
@@ -1639,6 +1838,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Create one task in a bucket, optionally linked to a candidate or vacancy, with custom field values keyed by field ID (required fields need a value). Requires an idempotencyKey: retrying with the same key and input returns the same task; the same key with different input is refused.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "tasks", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1657,17 +1857,18 @@ export const TOOLS: McpTool[] = [
     description:
       "Change the fields you send on one task. Move it with bucketId; complete it by moving it to a completed bucket. customValues sets only the fields you send (null empties one) and also needs recruitment:read. Requires the version from list_tasks; a changed task returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "tasks", action: "edit" }],
     effect: "change",
     input: changeInput(recordDataSchemas.task.shape, {
       bucketId: z.uuid().optional(),
       candidateId: z.uuid().nullable().optional(),
       vacancyId: z.uuid().nullable().optional(),
     }),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const { customValues, ...rest } = input as Data;
       if (customValues === undefined) return changes("tasks")(p, rest);
       // A partial map: read the stored values at this version and keep the ones not sent.
-      requireScope(p, "recruitment:read");
+      requireAccess(ctx, INPUT_CHECKS.taskCustomValues);
       const current = await getRecord(p, "tasks", rest.id as string);
       if (current.version !== rest.version)
         throw new ApiError(409, "version_conflict", REREAD);
@@ -1686,9 +1887,13 @@ export const TOOLS: McpTool[] = [
     description:
       'List task buckets (itemType "bucket") or custom task fields (itemType "field") in position order. A bucket with completed: true counts its tasks as done. Pass archived: true for archived ones. Each item has the version an update needs.',
     scopes: ["recruitment:read"],
+    access: [
+      { resource: "buckets", action: "view" },
+      { resource: "task-fields", action: "view" },
+    ],
     effect: "read",
     input: z.object({ itemType, archived, page, pageSize }).strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await listRecords(
         p,
         WORKFLOW_ITEMS[input.itemType].resource,
@@ -1700,7 +1905,9 @@ export const TOOLS: McpTool[] = [
         }),
       );
       return success(
-        listed(result.data.map((row) => workflowItem(row, input.itemType))),
+        listed(
+          result.data.map((row) => workflowItem(ctx, row, input.itemType)),
+        ),
         result.pagination,
       );
     },
@@ -1711,6 +1918,10 @@ export const TOOLS: McpTool[] = [
     description:
       'Add a task bucket (itemType "bucket": name, color, position, completed) or a custom task field (itemType "field": name, type, options, required, position). Requires an idempotencyKey: retrying with the same key and input returns the same item.',
     scopes: ["recruitment:write"],
+    access: [
+      { resource: "buckets", action: "create" },
+      { resource: "task-fields", action: "create" },
+    ],
     effect: "create",
     input: z
       .object({
@@ -1736,6 +1947,10 @@ export const TOOLS: McpTool[] = [
     description:
       "Rename or change the fields you send on one task bucket or custom task field; itemType must match the item. Requires the version from list_task_workflow_items; if the item changed since, the tool returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: [
+      { resource: "buckets", action: "edit" },
+      { resource: "task-fields", action: "edit" },
+    ],
     effect: "change",
     input: z
       .object({ itemType, id: z.uuid(), version, ...workflowFields })
@@ -1763,6 +1978,7 @@ export const TOOLS: McpTool[] = [
     description:
       'List your own saved views, optionally by area ("directory" for candidates or "applications"), with their saved filters. Only you can see your saved views.',
     scopes: ["recruitment:read"],
+    access: [{ resource: "views", action: "view" }],
     effect: "read",
     input: z
       .object({
@@ -1771,14 +1987,14 @@ export const TOOLS: McpTool[] = [
         pageSize,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       const result = await listRecords(p, "views", listQuery(input));
       return success(
         listed(
           result.data.map((row) => ({
             id: row.id,
             version: row.version,
-            ...fields(row, ["name", "area", "query"]),
+            ...fields(ctx, row, ["name", "area", "query"]),
             updatedAt: row.updatedAt,
           })),
         ),
@@ -1792,6 +2008,7 @@ export const TOOLS: McpTool[] = [
     description:
       'Save a named view of filters for the candidate directory (area "directory") or applications; only you can see it. Requires an idempotencyKey: retrying with the same key and input returns the same view; the same key with different input is refused.',
     scopes: ["recruitment:write"],
+    access: [{ resource: "views", action: "create" }],
     effect: "create",
     input: z
       .object({ idempotencyKey, ...recordDataSchemas["saved-view"].shape })
@@ -1804,9 +2021,10 @@ export const TOOLS: McpTool[] = [
     description:
       "List the comments on one record, oldest first, with each author's name. Comments on a candidate also need candidates:read.",
     scopes: ["recruitment:read"],
+    access: [{ resource: "comments", action: "view" }],
     effect: "read",
     input: z.object({ parentRecordId: z.uuid(), page, pageSize }).strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       // A parent the caller cannot see is answered as a missing record.
       await recordKindOf(p, input.parentRecordId);
       const result = await listRecords(
@@ -1821,9 +2039,9 @@ export const TOOLS: McpTool[] = [
             return {
               id: row.id,
               parentRecordId: row.parentRecordId,
-              body: data.body,
+              ...(visible(ctx, row)("body") ? { body: data.body } : {}),
               authorName: row.authorName ?? null,
-              legacyAuthorLabel: data.legacyAuthorLabel ?? null,
+              ...fields(ctx, row, ["legacyAuthorLabel"]),
               createdAt: row.createdAt,
             };
           }),
@@ -1838,6 +2056,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Append a comment to any active record except a comment or saved view. Comments on a candidate also require candidates:read and candidates:write. Requires an idempotencyKey; comments cannot be edited or deleted.",
     scopes: ["recruitment:write"],
+    access: [{ resource: "comments", action: "create" }],
     effect: "create",
     input: z
       .object({
@@ -1846,10 +2065,11 @@ export const TOOLS: McpTool[] = [
         body: recordDataSchemas.comment.shape.body,
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, ctx) => {
       // Without candidates:read, a candidate parent is answered as a missing record.
       const parent = await recordKindOf(p, input.parentRecordId);
-      if (parent.kind === "candidate") requireScope(p, "candidates:write");
+      if (parent.kind === "candidate")
+        requireAccess(ctx, INPUT_CHECKS.candidateComment);
       // Saved views are private and comments are team-visible, so a view takes no comments.
       if (parent.archived || ["comment", "saved-view"].includes(parent.kind))
         throw new ApiError(
@@ -1876,6 +2096,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List the history of one record, newest first: who created, changed, archived or restored it and when. Activity on a candidate also needs candidates:read.",
     scopes: ["recruitment:read"],
+    access: [ACTIVITY_KINDS],
     effect: "read",
     input: z.object({ recordId: z.uuid(), page, pageSize }).strict(),
     run: async (p, input) => {
@@ -1905,6 +2126,7 @@ export const TOOLS: McpTool[] = [
     description:
       "List your reminders for tasks, interviews, offers, onboarding and vacancy dates that are overdue or due within 7 days, unread first, with unread and total counts. Read markers are your own.",
     scopes: ["recruitment:read"],
+    access: [REMINDER_KINDS],
     effect: "read",
     input: z.object({ page, pageSize }).strict(),
     run: async (p, input) => {
@@ -1944,6 +2166,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Mark reminders read for you only, by their keys from list_notifications; teammates' reminders do not change. A key already read or no longer due changes nothing, so a retry is safe.",
     scopes: ["recruitment:read", "recruitment:write"],
+    access: [REMINDER_KINDS],
     effect: "create",
     input: z
       .object({
@@ -1959,9 +2182,10 @@ export const TOOLS: McpTool[] = [
     description:
       "Team inventory counts, data coverage, stage and category totals, upcoming interviews and overdue tasks.",
     scopes: ["candidates:read", "recruitment:read"],
+    access: inventory("home"),
     effect: "read",
     input: z.object({}).strict(),
-    run: async (p) => {
+    run: async (p, _input, ctx) => {
       const result = await overview(p);
       const { shortlisted: _personal, ...counts } = result.counts;
       return success({
@@ -1971,9 +2195,11 @@ export const TOOLS: McpTool[] = [
         departments: result.departments,
         categories: result.categories,
         upcomingInterviews: listed(
-          result.upcomingInterviews.map(interviewItem),
+          result.upcomingInterviews.map((row) => interviewItem(ctx, row)),
         ),
-        overdueTasks: listed(result.overdueTasks.map(taskItem)),
+        overdueTasks: listed(
+          result.overdueTasks.map((row) => taskItem(ctx, row)),
+        ),
         asOf: result.asOf,
         timezone: result.timezone,
       });
@@ -1985,6 +2211,7 @@ export const TOOLS: McpTool[] = [
     description:
       "The dashboard's analytics for a date range (from and to as YYYY-MM-DD, Asia/Dubai, at most 367 days; the last 30 days by default): inventory, stages, daily series, hires, time to hire, stage durations, conversions and grouped totals. Groups after the first 25 are summed.",
     scopes: ["candidates:read", "recruitment:read"],
+    access: inventory("analytics"),
     effect: "read",
     input: z
       .object({
@@ -2014,6 +2241,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Search candidates, vacancies, job roles, tasks and applications at once, up to 8 results each, as the app's global search does. Candidates appear only with candidates:read. Sensitive and source fields are never matched.",
     scopes: ["recruitment:read"],
+    access: [SEARCHED_KINDS],
     effect: "read",
     input: z.object({ query: query.min(1) }).strict(),
     run: async (p, input) => {
@@ -2037,6 +2265,7 @@ export const TOOLS: McpTool[] = [
     description:
       "Archive one candidate, task, job role, vacancy, application, interview, offer, onboarding record or checklist item; a candidate also needs candidates:write. It can be restored with restore_record; nothing is deleted. Requires the current version; a changed record returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: ARCHIVE_ACCESS,
     effect: "change",
     input: archiveInput,
     run: archives(true),
@@ -2047,14 +2276,27 @@ export const TOOLS: McpTool[] = [
     description:
       "Restore one archived record that archive_record takes; a candidate also needs candidates:write. Find it with a list or search tool and archived: true. Refused if it would duplicate an active record. Requires the current version; a changed record returns version_conflict.",
     scopes: ["recruitment:write"],
+    access: ARCHIVE_ACCESS,
     effect: "change",
     input: archiveInput,
     run: archives(false),
   }),
 ];
 
-function allowed(p: Principal, definition: McpTool) {
-  return definition.scopes.every((scope) => p.scopes.includes(scope));
+/**
+ * The one decision for a tool: every scope it names is among the engine's effective scopes, so the
+ * stored ones, and the engine allows every entry of its access, an array entry when any one of its
+ * requests is allowed.
+ */
+export function toolAllowed(ctx: AccessContext, definition: McpTool) {
+  return (
+    definition.scopes.every((scope) => ctx.scopes.includes(scope)) &&
+    definition.access.every((entry) =>
+      (Array.isArray(entry) ? entry : [entry]).some((request) =>
+        decide(ctx, request),
+      ),
+    )
+  );
 }
 function inputSchema(definition: McpTool): ListedTool["inputSchema"] {
   const { $schema: _dialect, ...schema } = z.toJSONSchema(definition.input, {
@@ -2062,9 +2304,23 @@ function inputSchema(definition: McpTool): ListedTool["inputSchema"] {
   }) as Record<string, unknown>;
   return schema as ListedTool["inputSchema"];
 }
-/** Only the tools the principal's current effective scopes allow. */
-export function listTools(p: Principal): ListedTool[] {
-  return TOOLS.filter((definition) => allowed(p, definition)).map(
+/**
+ * Only the tools the engine allows under the access state install returned. Without one, for
+ * in-process callers only, under the principal's built-in template and its own scopes.
+ */
+export function listTools(
+  p: Principal,
+  access: AccessContext["access"] = {
+    scopes: p.scopes,
+    workspaceId: "",
+    memberRole: p.role,
+    companyLevel: null,
+    companyAreas: [],
+    versions: {},
+  },
+): ListedTool[] {
+  const ctx = accessContext(p, access, { channel: "mcp" });
+  return TOOLS.filter((definition) => toolAllowed(ctx, definition)).map(
     (definition) => ({
       name: definition.name,
       title: definition.title,
@@ -2085,6 +2341,14 @@ export function listTools(p: Principal): ListedTool[] {
 }
 
 /**
+ * tools/list: one transaction with no statement beyond the install, so the list follows the scopes
+ * and role install stored for the member. Not audited.
+ */
+export async function listStoredTools(p: Principal): Promise<ListedTool[]> {
+  return withTeam(p, async (_tx, access) => listTools(p, access));
+}
+
+/**
  * Audits, then runs, one known tool. The audit row is written in its own transaction before the
  * tool runs and records only the tool name and decision; if it fails, the tool does not run.
  */
@@ -2093,15 +2357,18 @@ export async function callTool(
   definition: McpTool,
   args: unknown,
 ): Promise<CallToolResult> {
-  let decision: "allowed" | "denied" = "denied";
+  let ctx: AccessContext;
+  let decision: "allowed" | "denied";
   try {
-    await withTeam(p, async (tx) => {
-      // After install, so the decision uses the scopes it stored for this principal.
-      decision = allowed(p, definition) ? "allowed" : "denied";
+    ({ ctx, decision } = await withTeam(p, async (tx, access) => {
+      // After install, so the engine decides under the scopes and role it stored for this principal.
+      const context = accessContext(p, access, { channel: "mcp" });
+      const decision = toolAllowed(context, definition) ? "allowed" : "denied";
       await tx.execute(
         sql`select tenant_context.audit_mcp_call(${definition.name}, ${decision})`,
       );
-    });
+      return { ctx: context, decision };
+    }));
   } catch (error) {
     return failureFrom(error);
   }
@@ -2111,7 +2378,6 @@ export async function callTool(
       `This tool requires ${definition.scopes.join(" and ")}.`,
     );
   try {
-    for (const scope of definition.scopes) requireScope(p, scope);
     const parsed = definition.input.safeParse(args ?? {});
     if (!parsed.success)
       return failure(
@@ -2123,7 +2389,7 @@ export async function callTool(
           )
           .join("; "),
       );
-    return await definition.run(p, parsed.data);
+    return await definition.run(p, parsed.data, ctx);
   } catch (error) {
     // An assistant cannot review a draft, so it is told to reread rather than to refresh.
     if (error instanceof ApiError && error.code === "version_conflict")
