@@ -437,7 +437,7 @@ describe("roles and permissions tab", () => {
         const markup = render("roles", access(teamRole, companyLevel));
         if (companyLevel === "owner") {
           expect(tabLinks(markup)).toContain("roles");
-          expect(markup).toContain("<h2>Roles</h2>");
+          expect(markup).toContain('<h2 tabindex="-1">Roles</h2>');
           expect(markup).toContain("<h2>Company authority</h2>");
           expect(markup).toContain(
             'aria-current="page" href="/app/admin/roles"',

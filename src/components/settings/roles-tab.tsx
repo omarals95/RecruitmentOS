@@ -7,6 +7,7 @@ import {
   useState,
   type FormEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { authClient } from "@/lib/auth-client";
 import type { CompanyAuthorityHolder } from "@/lib/company-authority";
@@ -183,6 +184,8 @@ const box = {
   minWidth: 0,
 } as const;
 const checks = { display: "flex", flexWrap: "wrap", columnGap: 18 } as const;
+// Row actions never break inside a word; a narrow table scrolls inside its .table-wrap.
+const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
 
 /** Only the API's own message: humanError adds draft advice to a 409 that does not fit here. */
 const plainError = (error: unknown) =>
@@ -273,6 +276,19 @@ export function RolesTab({ onAccessChanged }: { onAccessChanged: () => void }) {
   );
 }
 
+/**
+ * A ref and a request that focuses its element after the next render: where focus goes when the
+ * control that had it is removed.
+ */
+function useFocusAfter<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [requested, setRequested] = useState(0);
+  useEffect(() => {
+    if (requested) ref.current?.focus();
+  }, [requested]);
+  return [ref, () => setRequested((count) => count + 1)] as const;
+}
+
 type Open =
   | { kind: "template" | "copy"; template: RoleTemplate }
   | { kind: "editor"; roleKey: string; versionId: string; body: RoleBody };
@@ -288,6 +304,12 @@ function RolesPanel() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
+  const [headingRef, focusHeading] = useFocusAfter<HTMLHeadingElement>();
+  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
+  const close = () => {
+    focusHeading();
+    setOpen(null);
+  };
   async function run<T>(work: () => Promise<T>): Promise<T | undefined> {
     if (busy || !teamId) return;
     setBusy(true);
@@ -347,13 +369,16 @@ function RolesPanel() {
       ),
     );
     if (published) {
+      focusNotice();
       setOpen(null);
       setNotice(`${name} is published as version ${published.data.number}.`);
     }
   }
   return (
     <section className="panel stack">
-      <h2>Roles</h2>
+      <h2 ref={headingRef} tabIndex={-1}>
+        Roles
+      </h2>
       <p className="muted">
         A role narrows what its members can do inside their team role&apos;s
         membership. Copy a built-in template, change it as a draft, then publish
@@ -365,7 +390,12 @@ function RolesPanel() {
         </p>
       )}
       {notice && (
-        <p className="notice success" role="status">
+        <p
+          ref={noticeRef}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </p>
       )}
@@ -389,7 +419,7 @@ function RolesPanel() {
         <RoleTemplateView
           template={open.template}
           onCopy={() => setOpen({ kind: "copy", template: open.template })}
-          onClose={() => setOpen(null)}
+          onClose={close}
         />
       )}
       {open?.kind === "copy" && (
@@ -397,7 +427,7 @@ function RolesPanel() {
           template={open.template}
           busy={busy || !roles.data}
           onSubmit={(name) => void copy(open.template, name)}
-          onCancel={() => setOpen(null)}
+          onCancel={close}
         />
       )}
       {open?.kind === "editor" && (
@@ -414,7 +444,7 @@ function RolesPanel() {
             return !!issues && !issues.length;
           }}
           onPublish={(name) => void publish(name, open.versionId)}
-          onClose={() => setOpen(null)}
+          onClose={close}
         />
       )}
       {dialog}
@@ -521,7 +551,7 @@ export function RolesList({
                       )}
                     </td>
                     <td data-label="Actions">
-                      <div className="row" style={{ flexWrap: "wrap" }}>
+                      <div className="row" style={actionRow}>
                         {draft ? (
                           <>
                             <button
@@ -732,6 +762,29 @@ export function RoleCopyForm({
   );
 }
 
+/**
+ * A collapsed group that a refusal opens; fixing the refusal never closes it, so the control that
+ * fixed it keeps its focus.
+ */
+function Disclosure({
+  summary,
+  refused,
+  children,
+}: {
+  summary: string;
+  refused: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(refused);
+  if (refused && !open) setOpen(true);
+  return (
+    <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>{summary}</summary>
+      {children}
+    </details>
+  );
+}
+
 /** A visually grouped fieldset; issues are linked to it with aria-describedby. */
 function Group({
   legend,
@@ -905,10 +958,11 @@ export function RoleEditor({
             const held = body.actions[resource] ?? [];
             const refused = issuesOf(`actions.${resource}`);
             return (
-              <details key={resource} open={refused.length > 0 || undefined}>
-                <summary>
-                  {resourceLabel(resource)} ({held.length} allowed)
-                </summary>
+              <Disclosure
+                key={resource}
+                summary={`${resourceLabel(resource)} (${held.length} allowed)`}
+                refused={refused.length > 0}
+              >
                 <Group
                   legend={`Actions on ${resourceLabel(resource)}`}
                   issues={refused}
@@ -929,7 +983,7 @@ export function RoleEditor({
                     ))}
                   </div>
                 </Group>
-              </details>
+              </Disclosure>
             );
           })}
         </div>
@@ -945,10 +999,11 @@ export function RoleEditor({
             const rules = body.fields[kind] ?? {};
             const refused = issuesOf(`fields.${kind}`);
             return (
-              <details key={kind} open={refused.length > 0 || undefined}>
-                <summary>
-                  {KIND_LABELS[kind][0]} ({Object.keys(rules).length} rules)
-                </summary>
+              <Disclosure
+                key={kind}
+                summary={`${KIND_LABELS[kind][0]} (${Object.keys(rules).length} rules)`}
+                refused={refused.length > 0}
+              >
                 <Group
                   legend={`Field rules for ${KIND_LABELS[kind][0]}`}
                   issues={refused}
@@ -983,7 +1038,7 @@ export function RoleEditor({
                     })}
                   </div>
                 </Group>
-              </details>
+              </Disclosure>
             );
           })}
         </div>
@@ -1049,6 +1104,7 @@ function CompanyAuthority({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
+  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   useEffect(() => {
     if (!teamId) return;
     let active = true;
@@ -1096,8 +1152,14 @@ function CompanyAuthority({
         "/api/v1/company-authority",
         { method: "POST", body: JSON.stringify(grant) },
       );
+      // The row's button may be gone after the change, so focus moves to the outcome.
+      focusNotice();
       setNotice(
-        result.data.changed ? "Company authority saved." : "Nothing changed.",
+        !result.data.changed
+          ? "Nothing changed."
+          : grant.level === null
+            ? "Company authority removed."
+            : "Company authority saved.",
       );
       if (result.data.changed && grant.userId === user.id) onAccessChanged();
     } catch (e) {
@@ -1114,6 +1176,7 @@ function CompanyAuthority({
         error={holders.error || memberError}
         actionError={error}
         notice={notice}
+        noticeRef={noticeRef}
         busy={busy}
         currentUserId={user.id}
         onSubmit={(grant, name) => void submit(grant, name)}
@@ -1245,6 +1308,7 @@ export function CompanyAuthorityPanel({
   error,
   actionError = "",
   notice = "",
+  noticeRef,
   busy = false,
   currentUserId,
   onSubmit = () => {},
@@ -1255,6 +1319,7 @@ export function CompanyAuthorityPanel({
   error: string;
   actionError?: string;
   notice?: string;
+  noticeRef?: RefObject<HTMLParagraphElement | null>;
   busy?: boolean;
   currentUserId: string;
   onSubmit?: (grant: AuthorityGrant, name: string) => void;
@@ -1322,7 +1387,12 @@ export function CompanyAuthorityPanel({
         </p>
       )}
       {notice && (
-        <p className="notice success" role="status">
+        <p
+          ref={noticeRef}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </p>
       )}
@@ -1373,7 +1443,7 @@ export function CompanyAuthorityPanel({
                           : "Active"}
                       </td>
                       <td data-label="Actions">
-                        <div className="row" style={{ flexWrap: "wrap" }}>
+                        <div className="row" style={actionRow}>
                           {holder.suspended && (
                             <button
                               type="button"

@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { Building2, Plus, RefreshCw, UserPlus, Users } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import type { MemberRoles } from "@/lib/member-roles";
@@ -252,6 +258,11 @@ function TeamSettingsContent() {
   const memberRoles = useApi<{ data: MemberRoles }>(
     team && companyOwner ? "/api/v1/teams/member-roles" : null,
   );
+  const outcome = useRef<HTMLDivElement>(null);
+  const [outcomeFocus, setOutcomeFocus] = useState(0);
+  useEffect(() => {
+    if (outcomeFocus) outcome.current?.focus();
+  }, [outcomeFocus]);
   const load = useCallback(async () => {
     try {
       const teamResult = await authClient.organization.list();
@@ -476,6 +487,8 @@ function TeamSettingsContent() {
       },
       roleObjectId ? "Configured role saved." : "Configured role cleared.",
     );
+    // The row's control is replaced with the new assignment, so focus moves to the outcome.
+    setOutcomeFocus((count) => count + 1);
   }
   async function removeMember(person: TeamMember) {
     if (
@@ -546,12 +559,17 @@ function TeamSettingsContent() {
       </header>
       <SettingsNavigation active="team" role={role} />
       {error && (
-        <div className="notice error" role="alert">
+        <div ref={outcome} tabIndex={-1} className="notice error" role="alert">
           {error} Your unsaved fields are retained.
         </div>
       )}
       {notice && (
-        <div className="notice success" role="status">
+        <div
+          ref={outcome}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </div>
       )}
