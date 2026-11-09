@@ -1,6 +1,6 @@
 import "./load-env";
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { seedTotpCode } from "./totp";
 
 /**
@@ -12,9 +12,18 @@ import { seedTotpCode } from "./totp";
  * With --fixture it first adds a fictional fixture (2,000 candidates, 20 vacancies, 1,200
  * applications) to the seed team through the route handlers, once, and runs every request under a
  * non-superuser, non-BYPASSRLS role, so the row-level security policies run as they do hosted.
+ *
+ * With --scoped as well (only with --fixture) it sets up once, as the seed owner, a fictional
+ * recruiter member of the seed team holding a published copy of the Hiring manager template (with
+ * view on tasks and onboarding added), an employee link to a position in a fictional unit, and half
+ * of the fixture vacancies in that unit. It then signs that member in, in process, and runs the
+ * same requests as them; a request their role refuses is timed and marked refused.
  */
 const RUNS = 5;
 const FIXTURE = process.argv.includes("--fixture");
+const SCOPED = process.argv.includes("--scoped");
+const SCOPED_EMAIL = "bench-hiring-manager@example.test";
+const SCOPED_UNIT_CODE = "BENCH-SCOPE";
 const FIXTURE_CANDIDATES = 2000;
 const FIXTURE_VACANCIES = 20;
 const FIXTURE_APPLICATIONS = 1200;
@@ -61,6 +70,10 @@ async function main() {
   )
     refuse(
       "The round-trip benchmark runs only against the fictional local PGlite database (DATABASE_MODE=pglite and ALLOW_LOCAL_DB=true).",
+    );
+  if (SCOPED && !FIXTURE)
+    refuse(
+      "--scoped runs only with --fixture: the scoped member's unit holds half of the fixture vacancies.",
     );
   const password = process.env.DEV_SEED_PASSWORD;
   if (!password)
@@ -139,6 +152,25 @@ async function main() {
         .map((value) => value.split(";")[0])
         .filter((pair) => !pair.endsWith("="))
         .join("; ");
+    /** The fictional scoped member's session: a password sign-in, without two-step sign-in. */
+    async function signInScoped() {
+      const response = await auth.handler(
+        new Request(`${origin}/api/auth/sign-in/email`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin,
+            "x-forwarded-for": "127.0.0.1",
+          },
+          body: JSON.stringify({ email: SCOPED_EMAIL, password }),
+        }),
+      );
+      if (response.status !== 200)
+        refuse(
+          `The fictional scoped member's sign-in failed with status ${response.status}.`,
+        );
+      return cookieOf(response);
+    }
     // The seed owner has two-step sign-in: the password opens a challenge for the current code.
     const verified = await auth.handler(
       new Request(`${origin}/api/auth/two-factor/verify-totp`, {
@@ -156,7 +188,9 @@ async function main() {
       refuse(
         `The fictional seed two-step code was refused with status ${verified.status}. Check DEV_SEED_TOTP_KEY.`,
       );
-    const cookie = cookieOf(verified);
+    let cookie = cookieOf(verified);
+    /** True once the scoped member is signed in: a 403 is then timed as a refusal. */
+    let refusals = false;
     const teams = (await (
       await auth.handler(
         new Request(`${origin}/api/auth/organization/list`, {
@@ -216,7 +250,7 @@ async function main() {
         }),
         { params: Promise.resolve(params) } as never,
       );
-      if (!response.ok)
+      if (!response.ok && !(refusals && response.status === 403))
         throw new Error(`${method} ${path} returned ${response.status}.`);
       const timing =
         /^total;dur=([\d.]+), db;dur=([\d.]+), dbrt;desc="(\d+)"$/.exec(
@@ -231,37 +265,9 @@ async function main() {
         total: Number(timing[1]),
         db: Number(timing[2]),
         roundTrips: Number(timing[3]),
+        refused: !response.ok,
       };
     }
-
-    const stamp = new Date().toISOString().slice(0, 19);
-    const buckets = (
-      await call("GET", "/api/v1/buckets?pageSize=100&sort=position")
-    ).body.data;
-    if (buckets.length < 2) refuse("The fictional team needs two buckets.");
-    let task = (
-      await call("POST", "/api/v1/tasks", {
-        bucketId: buckets[0].id,
-        data: { title: `Benchmark task ${stamp}`, priority: "Normal" },
-      })
-    ).body.data;
-    let candidate = (
-      await call("POST", "/api/v1/candidates", {
-        data: { name: `Benchmark Candidate ${stamp}` },
-      })
-    ).body.data;
-    const vacancy = (
-      await call("POST", "/api/v1/vacancies", {
-        data: { title: `Benchmark vacancy ${stamp}`, status: "Open" },
-      })
-    ).body.data;
-    let application = (
-      await call("POST", "/api/v1/applications", {
-        candidateId: candidate.id,
-        vacancyId: vacancy.id,
-        data: { stage: "Sourced", source: "Benchmark" },
-      })
-    ).body.data;
 
     /** Every page of a list path, 100 records at a time. */
     async function listAll(path: string) {
@@ -372,9 +378,212 @@ async function main() {
       console.log(
         `Fixture: ${created.candidates} candidates, ${created.vacancies} vacancies and ${created.applications} applications added; ${total} fixture candidates in the team. Requests run as ${BENCH_ROLE} with row-level security enforced.\n`,
       );
-      return vacancies.get("Fixture vacancy 01")!;
+      return vacancies;
     }
-    const boardVacancyId = FIXTURE ? await ensureFixture() : vacancy.id;
+    /**
+     * Adds whatever part of the scoped member's setup is missing, as the seed owner, and returns
+     * the fictional unit: the member and its credentials, the unit, a position there held by an
+     * employee linked to the member, the published hiring manager copy assigned to the member, and
+     * every odd-numbered fixture vacancy in the unit.
+     */
+    async function ensureScoped(vacancies: Map<string, string>) {
+      const { eq } = await import("drizzle-orm");
+      const { hashPassword } = await import("better-auth/crypto");
+      const { account, member, user } = await import("../src/db/auth-schema");
+      const { withTeam } = await import("../src/lib/db-team");
+      const { roleScopes } = await import("../src/lib/permissions");
+      const { createConfigDraft, publishConfigVersion } =
+        await import("../src/lib/config-store");
+      const { assignMemberRole } = await import("../src/lib/member-roles");
+      const { createOrgLevel, createOrgUnit } = await import("../src/lib/org");
+      const {
+        createEmployee,
+        createPosition,
+        linkEmployeeUser,
+        setEmployeePositions,
+      } = await import("../src/lib/directory");
+      const { getRecord, updateRecord } = await import("../src/lib/records");
+      const { HIRING_MANAGER_ROLE } =
+        await import("../src/domain/config-defaults");
+      const session = (await (
+        await auth.handler(
+          new Request(`${origin}/api/auth/get-session`, {
+            headers: { cookie, "x-forwarded-for": "127.0.0.1" },
+          }),
+        )
+      ).json()) as { user: { id: string } };
+      const owner = {
+        userId: session.user.id,
+        teamId: team!.id,
+        role: "owner" as const,
+        scopes: roleScopes("owner"),
+        authType: "session" as const,
+      };
+      // The identity rows have no row-level security; they are written as the seed writes its own.
+      const db = await getDb();
+      let [scoped] = await db
+        .select({ id: user.id })
+        .from(user)
+        .where(eq(user.email, SCOPED_EMAIL));
+      if (!scoped) {
+        scoped = { id: randomUUID() };
+        await db.insert(user).values({
+          id: scoped.id,
+          name: "Fictional Benchmark Hiring Manager",
+          email: SCOPED_EMAIL,
+          emailVerified: true,
+        });
+        await db.insert(account).values({
+          id: randomUUID(),
+          accountId: scoped.id,
+          providerId: "credential",
+          userId: scoped.id,
+          password: await hashPassword(password!),
+        });
+        await db.insert(member).values({
+          id: randomUUID(),
+          organizationId: owner.teamId,
+          userId: scoped.id,
+          role: "recruiter",
+        });
+      }
+      const lookup = (query: SQL) =>
+        withTeam(owner, async (tx) =>
+          (await tx.execute<Record<string, string>>(query)).rows.at(0),
+        );
+      let unit = (
+        await lookup(
+          sql`select id::text as id from app.org_units where code = ${SCOPED_UNIT_CODE} and valid_to is null and archived_at is null`,
+        )
+      )?.id;
+      if (!unit) {
+        const depth = Number(
+          (
+            await lookup(
+              sql`select (coalesce(max(depth), -1) + 1)::text as depth from app.org_levels`,
+            )
+          )?.depth,
+        );
+        const level = await createOrgLevel(owner, {
+          name: "Fictional benchmark level",
+          depth,
+        });
+        unit = (
+          await createOrgUnit(owner, {
+            name: "Fictional benchmark unit",
+            code: SCOPED_UNIT_CODE,
+            levelId: level.id,
+          })
+        ).id;
+      }
+      if (
+        !(await lookup(
+          sql`select id::text as id from app.employees where employee_number = 'BENCH-HM'`,
+        ))
+      ) {
+        const position = await createPosition(owner, {
+          title: "Fictional benchmark manager desk",
+          code: "BENCH-HM-DESK",
+          orgUnitId: unit,
+        });
+        const employee = await createEmployee(owner, {
+          displayName: "Fictional Benchmark Manager",
+          employeeNumber: "BENCH-HM",
+        });
+        await linkEmployeeUser(owner, employee.id, { userId: scoped.id });
+        await setEmployeePositions(owner, employee.id, {
+          positions: [{ positionId: position.id, primary: true }],
+        });
+      }
+      let role = (
+        await lookup(
+          sql`select id::text as id from app.config_objects where type = 'role' and key = 'bench-hiring-manager'`,
+        )
+      )?.id;
+      if (!role) {
+        const { body } = HIRING_MANAGER_ROLE;
+        const draft = await createConfigDraft(owner, {
+          type: "role",
+          key: "bench-hiring-manager",
+          body: {
+            ...structuredClone(body),
+            name: "Fictional benchmark hiring manager",
+            // The overview reads tasks and onboarding as well.
+            actions: {
+              ...structuredClone(body.actions),
+              tasks: ["view"],
+              onboarding: ["view"],
+            },
+          },
+        });
+        await publishConfigVersion(owner, draft.versionId);
+        role = draft.objectId;
+      }
+      if (
+        !(await lookup(
+          sql`select user_id as id from app.member_roles where user_id = ${scoped.id}`,
+        ))
+      )
+        await assignMemberRole(
+          owner,
+          { userId: scoped.id, roleObjectId: role },
+          new Headers(),
+        );
+      for (let index = 1; index <= FIXTURE_VACANCIES; index += 2) {
+        const id = vacancies.get(`Fixture vacancy ${padded(index, 2)}`)!;
+        const current = await getRecord(owner, "vacancies", id);
+        if (current.orgUnitId !== unit)
+          await updateRecord(owner, "vacancies", id, {
+            version: current.version,
+            orgUnitId: unit,
+          });
+      }
+      console.log(
+        `Scoped member: a hiring manager limited to one fictional unit, which holds ${Math.ceil(FIXTURE_VACANCIES / 2)} of the ${FIXTURE_VACANCIES} fixture vacancies.\n`,
+      );
+      return unit;
+    }
+    const fixtureVacancies = FIXTURE ? await ensureFixture() : undefined;
+    const scopedUnit = SCOPED
+      ? await ensureScoped(fixtureVacancies!)
+      : undefined;
+
+    const stamp = new Date().toISOString().slice(0, 19);
+    const buckets = (
+      await call("GET", "/api/v1/buckets?pageSize=100&sort=position")
+    ).body.data;
+    if (buckets.length < 2) refuse("The fictional team needs two buckets.");
+    let task = (
+      await call("POST", "/api/v1/tasks", {
+        bucketId: buckets[0].id,
+        data: { title: `Benchmark task ${stamp}`, priority: "Normal" },
+      })
+    ).body.data;
+    let candidate = (
+      await call("POST", "/api/v1/candidates", {
+        data: { name: `Benchmark Candidate ${stamp}` },
+      })
+    ).body.data;
+    const vacancy = (
+      await call("POST", "/api/v1/vacancies", {
+        data: { title: `Benchmark vacancy ${stamp}`, status: "Open" },
+        ...(scopedUnit ? { orgUnitId: scopedUnit } : {}),
+      })
+    ).body.data;
+    let application = (
+      await call("POST", "/api/v1/applications", {
+        candidateId: candidate.id,
+        vacancyId: vacancy.id,
+        data: { stage: "Sourced", source: "Benchmark" },
+      })
+    ).body.data;
+    const boardVacancyId =
+      fixtureVacancies?.get("Fixture vacancy 01") ?? vacancy.id;
+    // The records above are the owner's; every measured request below is the scoped member's.
+    if (SCOPED) {
+      cookie = await signInScoped();
+      refusals = true;
+    }
 
     const rows: {
       action: string;
@@ -395,7 +604,10 @@ async function main() {
       for (let index = 0; index < RUNS; index++) samples.push(await run(index));
       const trips = [...new Set(samples.map((sample) => sample.roundTrips))];
       rows.push({
-        action,
+        // A request the scoped member's role refuses is still timed, and marked.
+        action: samples.some((sample) => sample.refused)
+          ? `${action} (refused, 403)`
+          : action,
         request: label,
         roundTrips: trips.length === 1 ? String(trips[0]) : trips.join("/"),
         db: median(samples.map((sample) => sample.db)),
@@ -409,7 +621,7 @@ async function main() {
         version: task.version,
         bucketId: target.id,
       });
-      task = result.body.data;
+      if (!result.refused) task = result.body.data;
       return result;
     });
     const stages = ["Screening", "Sourced"];
@@ -425,7 +637,7 @@ async function main() {
             data: { stage: stages[(index + 2) % 2] },
           },
         );
-        application = result.body.data;
+        if (!result.refused) application = result.body.data;
         return result;
       },
     );
@@ -468,7 +680,7 @@ async function main() {
             data: { jobTitle: `Benchmark title ${index + 2}` },
           },
         );
-        candidate = result.body.data;
+        if (!result.refused) candidate = result.body.data;
         return result;
       },
     );
@@ -485,7 +697,7 @@ async function main() {
     );
 
     console.log(
-      `Round trips per request (session lookup included), median of ${RUNS} runs after one warm-up. Local PGlite${FIXTURE ? " with the fixture and row-level security enforced" : ""}; not representative of hosted timings.\n`,
+      `Round trips per request (session lookup included), median of ${RUNS} runs after one warm-up. Local PGlite${FIXTURE ? " with the fixture and row-level security enforced" : ""}${SCOPED ? ", as the scoped hiring manager" : ""}; not representative of hosted timings.\n`,
     );
     console.log("| Action | Request | Round trips | db ms | total ms |");
     console.log("| --- | --- | ---: | ---: | ---: |");

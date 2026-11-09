@@ -46,7 +46,11 @@
  *   app.record_assignments or insert an assignment activity row, even under the company owner's
  *   session, and a member whose role limits records to their unit cannot assign or unassign
  *   themselves through tenant_context.add_assignment or remove_assignment (RQ014), while they can
- *   assign another member and a company owner session can assign itself.
+ *   assign another member and a company owner session can assign itself. Under that member's
+ *   unit-limited context (0038), direct SQL reads only the records, activity, uploads and
+ *   assignments of records in its scope, cannot insert a record outside it, update an
+ *   out-of-scope record, or insert activity or an upload for one, and reads, changes and deletes
+ *   no other actor's app.idempotency row nor writes one under another actor's key.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -87,7 +91,10 @@
  *   employee.erased row in team A, and briefly adds one more API token holding every scope for the
  *   team A owner. As the owner it writes one more published fixture role limited to the unit,
  *   gives it to the team A recruiter and one assignment of them on the team A fixture vacancy,
- *   removing all three in that check; the data role's assignment writes are rolled back. As the
+ *   removing all three in that check; the data role's assignment writes are rolled back. In each
+ *   of the two record-scope checks it writes one more such role, gives it to the team A recruiter
+ *   and assigns them to the team A fixture vacancy and the team A owner to the fixture candidate,
+ *   removing all four in that check; the data role's writes there are rolled back. As the
  *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
@@ -1128,7 +1135,8 @@ async function seedTeam(
         "INSERT INTO app.idempotency(team_id,actor_key,operation,key,payload_hash,response,expires_at) VALUES($1,$2,'fixture',$3,$4,'{}'::jsonb,now() + interval '1 hour')",
         [
           team,
-          `session:${actor}`,
+          // The key idempotencyActorKey builds, the only one the actor-only policy accepts (0038).
+          `${actor}:${principal.auth}:${principal.token ?? "session"}`,
           `${team}-idempotency`,
           createHash("sha256").update(team).digest("hex"),
         ],
@@ -1268,7 +1276,7 @@ async function runChecks(run: Run) {
         ["INSERT INTO app.storage_usage(team_id) VALUES($1)", [B]],
         [
           "INSERT INTO app.idempotency(team_id,actor_key,operation,key,payload_hash,response,expires_at) VALUES($1,$2,'fixture',$3,$4,'{}'::jsonb,now() + interval '1 hour')",
-          [B, `session:${f.users.a1}`, `${B}-cross`, "0".repeat(64)],
+          [B, `${f.users.a1}:session:session`, `${B}-cross`, "0".repeat(64)],
         ],
         [
           "INSERT INTO app.notification_reads(team_id,user_id,key) VALUES($1,$2,$3)",
@@ -4462,6 +4470,276 @@ async function runChecks(run: Run) {
       );
     },
   );
+
+  // Record scope in row-level security (0038). The owner writes one more published fixture role
+  // limited to the unit, gives it to the team A recruiter, who holds no position and so no home
+  // unit, assigns them to the team A fixture vacancy and the team A owner to the fixture candidate,
+  // and removes all four in each check. Every data-role write here is rolled back.
+  async function withUnitScopedMember(
+    probe: Probe,
+    name: string,
+    work: () => Promise<boolean>,
+  ) {
+    probe.at("setup");
+    const object = (
+      await owner.query(
+        "INSERT INTO app.config_objects(workspace_id,type,key,created_by) VALUES($1::uuid,'role',$2,$3) RETURNING id::text AS id",
+        [COMPANY_WORKSPACE, configKey(name), f.users.a1],
+      )
+    ).rows[0].id as string;
+    try {
+      const version = (
+        await owner.query(
+          "INSERT INTO app.config_versions(object_id,workspace_id,state,number,body,created_by,published_at) VALUES($1::uuid,$2::uuid,'published',1,$3::jsonb,$4,now()) RETURNING id::text AS id",
+          [
+            object,
+            COMPANY_WORKSPACE,
+            JSON.stringify({
+              ...RECRUITER_ROLE.body,
+              name: "Fictional unit recruiter",
+              recordScope: {
+                pipeline: "unit",
+                candidates: "unit",
+                tasks: "unit",
+              },
+            }),
+            f.users.a1,
+          ],
+        )
+      ).rows[0].id as string;
+      await owner.query(
+        "UPDATE app.config_objects SET current_version_id = $2::uuid WHERE id = $1::uuid",
+        [object, version],
+      );
+      const assigned = await owner.query(
+        "INSERT INTO app.member_roles(team_id,user_id,role_object_id) VALUES($1,$2,$3::uuid)",
+        [f.teams.a, f.users.a2, object],
+      );
+      const placed = await owner.query(
+        "INSERT INTO app.record_assignments(team_id,record_id,user_id,relation) VALUES($1,$2::uuid,$3,'interviewer'),($1,$4::uuid,$5,'interviewer')",
+        [f.teams.a, a.vacancy, f.users.a2, a.candidate, f.users.a1],
+      );
+      return (
+        probe.all([
+          "setup",
+          assigned.rowCount === 1 && placed.rowCount === 2,
+        ]) && (await work())
+      );
+    } finally {
+      await owner.query(
+        "DELETE FROM app.record_assignments WHERE team_id LIKE $1",
+        [f.pattern],
+      );
+      await owner.query("DELETE FROM app.member_roles WHERE team_id LIKE $1", [
+        f.pattern,
+      ]);
+      await owner.query("DELETE FROM app.config_objects WHERE id = $1::uuid", [
+        object,
+      ]);
+    }
+  }
+  const scopedEnd = async (probe: Probe, pass: boolean) => {
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await assignmentRows()) === 0 && (await memberRoles()) === 0,
+      ])
+    );
+  };
+
+  // Under the unit-scoped context, direct SQL reads and writes only records in scope, here the
+  // assigned vacancy: not the candidate (no application), its activity, upload or assignment.
+  await check("record-scope-direct-sql", async (probe) => {
+    // The fixture candidate's upload, by the given user.
+    const upload = (userId: string) =>
+      attempt(data, INSERT_UPLOAD, [
+        f.teams.a,
+        a.candidate,
+        `${f.prefix}-scope.pdf`,
+        UPLOAD_BYTES,
+        `${f.prefix}/scope/cv.pdf`,
+        f.stores.seed,
+        userId,
+      ]);
+    const event = (recordId: string, kind: string) =>
+      attempt(
+        data,
+        "INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary) VALUES($1,$2::uuid,$3,'session','updated',$4,$5)",
+        [f.teams.a, recordId, f.users.a2, kind, `Fictional event ${f.prefix}`],
+      );
+    const pass = await withUnitScopedMember(probe, "rls-direct", async () => {
+      const scoped = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.memberA);
+        await data.query(
+          "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
+          [f.stores.seed],
+        );
+        probe.at("outcome");
+        const ids = (text: string) =>
+          attempt(data, text, [f.teams.a]).then((outcome) => ({
+            outcome,
+            ids: outcome.rows.map((row) => row.id),
+          }));
+        const records = await ids(
+          "SELECT id::text AS id FROM app.records WHERE team_id = $1",
+        );
+        const assignments = await ids(
+          "SELECT record_id::text AS id FROM app.record_assignments WHERE team_id = $1",
+        );
+        const events = await attempt(
+          data,
+          "SELECT count(*)::int AS n FROM app.activity WHERE record_id = $1::uuid",
+          [a.candidate],
+        );
+        const uploads = await attempt(
+          data,
+          "SELECT count(*)::int AS n FROM app.uploads WHERE id = $1::uuid",
+          [a.upload],
+        );
+        const insert = await attempt(
+          data,
+          "INSERT INTO app.records(team_id,kind,data,created_by) VALUES($1,'vacancy',$2::jsonb,$3)",
+          [
+            f.teams.a,
+            JSON.stringify({ title: `Fictional vacancy ${f.prefix} out` }),
+            f.users.a2,
+          ],
+        );
+        const update = await attempt(
+          data,
+          "UPDATE app.records SET updated_at = updated_at WHERE id = $1::uuid",
+          [a.candidate],
+        );
+        const otherEvent = await event(a.candidate, "candidate");
+        const otherUpload = await upload(f.users.a2);
+        probe.at("positive-control");
+        const own = await attempt(
+          data,
+          "UPDATE app.records SET updated_at = updated_at WHERE id = $1::uuid",
+          [a.vacancy],
+        );
+        const ownEvent = await event(a.vacancy, "vacancy");
+        return {
+          access,
+          conditions: [
+            outcomeIs(
+              records.outcome.ok &&
+                JSON.stringify(records.ids) === JSON.stringify([a.vacancy]),
+              records.outcome,
+            ),
+            outcomeIs(
+              assignments.outcome.ok &&
+                JSON.stringify(assignments.ids) === JSON.stringify([a.vacancy]),
+              assignments.outcome,
+            ),
+            outcomeIs(events.ok && events.rows[0]?.n === 0, events),
+            outcomeIs(uploads.ok && uploads.rows[0]?.n === 0, uploads),
+            denial(insert),
+            leftAlone(update),
+            denial(otherEvent),
+            denial(otherUpload),
+            outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+            outcomeIs(
+              ownEvent.ok && ownEvent.count === 1,
+              ownEvent,
+              "positive-control",
+            ),
+          ] as Condition[],
+        };
+      });
+      // The team A owner's context, whose record scope is all, reaches the same rows.
+      const all = await transaction(data, async () => {
+        await installAs(data, signer, p.ownerA);
+        await data.query(
+          "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
+          [f.stores.seed],
+        );
+        return {
+          records: await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.records WHERE id = ANY($1::uuid[])",
+            [[a.candidate, a.vacancy]],
+          ),
+          assignments: await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.record_assignments WHERE team_id = $1",
+            [f.teams.a],
+          ),
+          upload: await upload(f.users.a1),
+        };
+      });
+      return probe.all(
+        [
+          "setup",
+          scoped.access.recordScope?.pipeline === "unit" &&
+            scoped.access.homeUnits.length === 0,
+        ],
+        ...scoped.conditions,
+        [
+          "positive-control",
+          all.records === 2 && all.assignments === 2 && all.upload.ok,
+        ],
+      );
+    });
+    return scopedEnd(probe, pass);
+  });
+
+  // A scoped context reads, changes and deletes no other actor's cached response, and cannot write
+  // one under another actor's key; its own key is accepted.
+  await check("record-scope-idempotency-actor-only", async (probe) => {
+    const others = () =>
+      count(
+        owner,
+        "SELECT count(*)::int AS n FROM app.idempotency WHERE team_id = $1 AND actor_key = $2",
+        [f.teams.a, `${f.users.a1}:session:session`],
+      );
+    const before = await others();
+    const pass = await withUnitScopedMember(probe, "rls-idempotency", () =>
+      transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.memberA);
+        probe.at("outcome");
+        const read = await attempt(
+          data,
+          "SELECT count(*)::int AS n FROM app.idempotency WHERE team_id = $1",
+          [f.teams.a],
+        );
+        const changed = await attempt(
+          data,
+          "UPDATE app.idempotency SET response = '{}'::jsonb WHERE team_id = $1",
+          [f.teams.a],
+        );
+        const deleted = await attempt(
+          data,
+          "DELETE FROM app.idempotency WHERE team_id = $1",
+          [f.teams.a],
+        );
+        const write = (actorKey: string) =>
+          attempt(
+            data,
+            "INSERT INTO app.idempotency(team_id,actor_key,operation,key,payload_hash,response,expires_at) VALUES($1,$2,'fixture',$3,$4,'{}'::jsonb,now() + interval '1 hour')",
+            [f.teams.a, actorKey, `${f.teams.a}-scoped`, "0".repeat(64)],
+          );
+        const forged = await write(`${f.users.a1}:session:session`);
+        probe.at("positive-control");
+        const own = await write(`${f.users.a2}:session:session`);
+        return probe.all(
+          outcomeIs(read.ok && read.rows[0]?.n === 0, read),
+          leftAlone(changed),
+          leftAlone(deleted),
+          denial(forged),
+          outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+        );
+      }),
+    );
+    return (
+      (await scopedEnd(probe, pass)) &&
+      probe.all(["end-state", before === 1 && (await others()) === 1])
+    );
+  });
 
   // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock
   // in set_workspace_authority's membership check (0029) orders a grant and a concurrent removal of
