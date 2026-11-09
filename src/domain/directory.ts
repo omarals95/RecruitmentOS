@@ -5,6 +5,8 @@ import { configLabel } from "./config";
 // names and employee numbers are text facts under the configuration label rule; work email and
 // phone follow the candidate contact rules. Strict objects refuse unknown keys.
 export const EMPLOYEE_STATUSES = ["active", "left"] as const;
+/** Shown for the company owners' retention review only; nothing enforces a class yet (D11). */
+export const EMPLOYEE_RETENTION_CLASSES = ["standard", "extended"] as const;
 const workEmail = z.email().max(320).nullable();
 const workPhone = z
   .string()
@@ -48,6 +50,7 @@ export const employeeInput = z
     workEmail: workEmail.optional(),
     workPhone: workPhone.optional(),
     status: z.enum(EMPLOYEE_STATUSES).optional(),
+    retentionClass: z.enum(EMPLOYEE_RETENTION_CLASSES).optional(),
     userId: z.string().min(1).max(128).optional(),
   })
   .strict();
@@ -58,6 +61,7 @@ export const employeeFacts = z
     workEmail: workEmail.optional(),
     workPhone: workPhone.optional(),
     status: z.enum(EMPLOYEE_STATUSES).optional(),
+    retentionClass: z.enum(EMPLOYEE_RETENTION_CLASSES).optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0);
@@ -99,7 +103,14 @@ export const employeeListQuery = z
     levelId: z.uuid().optional(),
     positionId: z.uuid().optional(),
     status: z.enum(EMPLOYEE_STATUSES).optional(),
+    /** A case-insensitive part of the display name or employee number. */
+    search: z.string().trim().min(1).max(120).optional(),
+    includeArchived: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     page,
     pageSize,
   })
   .strict();
+export const retentionReviewQuery = z.object({ page, pageSize }).strict();

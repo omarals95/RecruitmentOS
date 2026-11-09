@@ -225,7 +225,7 @@ Every create, rename, move and archive appears in Activity for the team you made
 The position routes under `/api/v1/positions` and the employee routes under `/api/v1/employees` need a signed-in browser session, like the organisation routes. A Bearer token, including an MCP OAuth token, gets 403 `session_required` on every method, and there is no MCP tool.
 
 - **Positions** are company structure. Any signed-in member of a team in the company can read them. Creating, changing, moving and archiving them needs a company owner, or a company admin with the organisation area; anyone else gets 403 `org_forbidden`.
-- **Employees** hold work contact facts only: a display name, an employee number, a work email, a work phone and a status of `active` or `left`. Reading them needs `directory:read`, which team owners and admins have; changing them needs `directory:write` as well. Anyone else gets 403 `directory_forbidden`.
+- **Employees** hold work contact facts only: a display name, an employee number, a work email, a work phone, a status of `active` or `left` and a retention class of `standard` (the default) or `extended`, which is shown for the company owners' retention review and enforces nothing. Reading them needs `directory:read`, which team owners and admins have; changing them needs `directory:write` as well. Anyone else gets 403 `directory_forbidden`.
 - **Home-unit facts are owner-only.** An employee's user link and the positions of a linked employee decide that member's home units. So only a company owner can link or unlink a user, create an employee with a `userId`, change the positions of a linked employee, or move or archive a position that a linked employee holds. Anyone else, including a company admin and the employee's own member, gets 403 `directory_owner_required`.
 - **Contact rule.** The owner and admin roles have the `full` directory rule and see `workEmail` and `workPhone`. A role with the `basic` rule gets employees without those two keys.
 
@@ -269,10 +269,10 @@ Create an employee:
 POST /api/v1/employees
 Content-Type: application/json
 
-{"displayName":"Fictional Dana Sample","employeeNumber":"EMP-0001","workEmail":"dana.sample@example.test","workPhone":"+971 50 000 0001"}
+{"displayName":"Fictional Dana Sample","employeeNumber":"EMP-0001","workEmail":"dana.sample@example.test","workPhone":"+971 50 000 0001","retentionClass":"standard"}
 ```
 
-It returns 201 with `{"data":{"id","displayName","employeeNumber","status","source","userId","workEmail","workPhone","positions","createdAt","updatedAt","archivedAt"}}`. Names and numbers are text facts with the same cleaning and 1 to 120 character bounds as unit names. The work email must be a valid address, and an empty work phone is stored as null.
+It returns 201 with `{"data":{"id","displayName","employeeNumber","status","retentionClass","source","userId","workEmail","workPhone","positions","createdAt","updatedAt","archivedAt"}}`. Names and numbers are text facts with the same cleaning and 1 to 120 character bounds as unit names. The work email must be a valid address, and an empty work phone is stored as null.
 
 Set the employee's current positions by sending the full set, at most 20 positions and at most one primary:
 
@@ -285,16 +285,18 @@ Content-Type: application/json
 
 Positions you leave out end now and stay as history. New ones start now.
 
-A company owner links the employee to a member's user with `PATCH /api/v1/employees/{id}` and `{"userId":"<user id>"}`, and unlinks with `{"userId":null}`. A user is linked to at most one employee in the company. The same route takes one or more of `{"displayName","employeeNumber","workEmail","workPhone","status"}`, or `{"archived":true}`.
+A company owner links the employee to a member's user with `PATCH /api/v1/employees/{id}` and `{"userId":"<user id>"}`, and unlinks with `{"userId":null}`. A user is linked to at most one employee in the company. The same route takes one or more of `{"displayName","employeeNumber","workEmail","workPhone","status","retentionClass"}`, or `{"archived":true}`. When the status becomes `left` the service records the date for the retention review; returning to `active` clears it.
 
 Page through the directory with `GET /api/v1/employees?unitId=<unit id>&levelId=<level id>&positionId=<position id>&status=active&page=1&pageSize=100`. Every filter is optional, and filters combine on the same current position:
 
 - `unitId` matches employees holding a current position in that unit or any unit below it;
 - `levelId` matches the level of that position's unit;
 - `positionId` matches its holders;
-- `status` matches the employee status.
+- `status` matches the employee status;
+- `search` (1 to 120 characters) matches part of the display name or employee number, ignoring case; the text is matched literally;
+- `includeArchived=true` also returns archived employees (default `false`).
 
-The list is ordered by display name.
+The list is ordered by display name. For example, `GET /api/v1/employees?search=dana&includeArchived=true&pageSize=20` finds every employee whose name or number contains "dana", archived or not.
 
 | Error                          | When                                                                                |
 | ------------------------------ | ----------------------------------------------------------------------------------- |
@@ -306,6 +308,67 @@ The list is ordered by display name.
 | 404 `not_found`                | The unit, level, position, employee, job role or user is not in your company        |
 
 Every create, update and archive appears in Activity for the team you made it from, with ids and field names only, never a name, number, email or phone. Each owner-only change also records which users' home units changed.
+
+### Employee erasure and the retention review
+
+Both are for company owners only, signed in. Company admins, team owners without company authority and every other member get 403; a Bearer token gets 403 `session_required`. There is no MCP tool.
+
+List the employees whose status has been `left` for 12 months or more, oldest first, archived ones included. It is read only; nothing is erased automatically:
+
+```http
+GET /api/v1/employees/retention-review?page=1&pageSize=100
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000e2",
+      "displayName": "Fictional Former Clerk",
+      "employeeNumber": "EMP-0002",
+      "leftAt": "2025-06-10T09:00:00+00:00",
+      "retentionClass": "standard",
+      "archivedAt": null
+    }
+  ],
+  "pagination": { "page": 1, "pageSize": 100, "hasMore": false }
+}
+```
+
+`leftAt` is when the status became `left`, or the last update for employees who left before that date was recorded. Anyone but a company owner gets 403 `retention_review_forbidden`; a company owner whose team role has no `directory:read` gets 403 `directory_forbidden`.
+
+Permanently erase one employee for a data-protection request, with the display name typed exactly as shown (spaces at either end are ignored, case matters) and an optional `Idempotency-Key`:
+
+```http
+POST /api/v1/employees/00000000-0000-4000-a000-0000000000e2/erasure
+Content-Type: application/json
+Idempotency-Key: fictional-erasure-0001
+
+{"confirmName":"Fictional Former Clerk"}
+```
+
+```json
+{
+  "data": {
+    "erasureId": "00000000-0000-4000-a000-0000000000f1",
+    "alreadyErased": false,
+    "erasedAt": "2026-11-09T09:00:00.000Z",
+    "removed": { "positionRows": 2, "activityRedacted": 7, "userLinks": 1 }
+  }
+}
+```
+
+It deletes the employee and their position history, removes the user link (with one home-unit change entry naming that user), redacts every activity entry about the employee to its type, time and actor, and keeps a tombstone with no personal data. The response never holds a name, number, email or phone. Sending the same key again returns the identical response; a new key or no key returns the earlier erasure with `"alreadyErased": true`, the same `erasureId`, `erasedAt` and counts.
+
+| Error                               | When                                      |
+| ----------------------------------- | ----------------------------------------- |
+| 403 `employee_erasure_forbidden`    | Anyone but a signed-in company owner      |
+| 409 `erasure_confirmation_mismatch` | The typed name is not the employee's name |
+| 409 `idempotency_mismatch`          | The key was used for another employee     |
+| 404 `not_found`                     | The employee is not in your company       |
+| 400 `invalid_input`                 | A malformed id or body                    |
+
+See [erasure-runbook.md](erasure-runbook.md#erase-an-employee) for the steps before and after erasing.
 
 ## Your access and the Admin portal reads
 

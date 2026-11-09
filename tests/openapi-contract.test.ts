@@ -546,6 +546,81 @@ describe("OpenAPI contract", () => {
       expect(text).toContain(code);
   });
 
+  it("documents employee erasure and the retention review as session-only and company owner only, with no name in the erasure response", () => {
+    const erasure = document.paths["/api/v1/employees/{id}/erasure"].post;
+    const review = document.paths["/api/v1/employees/retention-review"].get;
+    for (const operation of [erasure, review]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(["200", "400", "401", "403", "500"]),
+      );
+    }
+    expect(Object.keys(erasure.responses)).toEqual(
+      expect.arrayContaining(["404", "409"]),
+    );
+    const text = JSON.stringify(erasure);
+    for (const code of [
+      "company owner",
+      "confirmName",
+      "employee_erasure_forbidden",
+      "session_required",
+      "erasure_confirmation_mismatch",
+      "invalid_input",
+      "not_found",
+      "idempotency_mismatch",
+      "invalid_idempotency_key",
+      "alreadyErased",
+      "erasureId",
+      "erasedAt",
+      "positionRows",
+      "activityRedacted",
+      "userLinks",
+      "scope.home_units_changed",
+      "There is no MCP tool",
+    ])
+      expect(text).toContain(code);
+    expect(
+      (
+        erasure as Operation & {
+          parameters: { name: string; in: string; required?: boolean }[];
+        }
+      ).parameters,
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "Idempotency-Key",
+        in: "header",
+        required: false,
+      }),
+    );
+    expect(JSON.stringify(erasure.responses["200"])).not.toMatch(
+      /[Nn]ame|employeeNumber|workEmail|workPhone/,
+    );
+    const reviewText = JSON.stringify(review);
+    for (const code of [
+      "retention_review_forbidden",
+      "directory_forbidden",
+      "session_required",
+      "12 months",
+      "leftAt",
+      "retentionClass",
+      "archivedAt",
+      "Nothing is erased automatically",
+    ])
+      expect(reviewText).toContain(code);
+    const list = JSON.stringify(document.paths["/api/v1/employees"]);
+    for (const text of [
+      '"name":"search"',
+      '"name":"includeArchived"',
+      "retentionClass",
+      '"enum":["standard","extended"]',
+    ])
+      expect(list).toContain(text);
+    expect(
+      JSON.stringify(document.paths["/api/v1/employees/{id}"].patch),
+    ).toContain("retentionClass");
+  });
+
   it("documents the Admin portal reads as session-only, with their codes and no ids", () => {
     const access = document.paths["/api/v1/me/access"].get;
     const history = document.paths["/api/v1/config-history"].get;
@@ -678,6 +753,8 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/employees",
         "PATCH /api/v1/employees/{id}",
         "PUT /api/v1/employees/{id}/positions",
+        "POST /api/v1/employees/{id}/erasure",
+        "GET /api/v1/employees/retention-review",
         "GET /api/v1/me/access",
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",

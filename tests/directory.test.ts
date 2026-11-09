@@ -371,6 +371,8 @@ describe("positions and employees under the split runtime roles", () => {
       "created_at",
       "updated_at",
       "archived_at",
+      "retention_class",
+      "left_at",
     ]);
   });
 

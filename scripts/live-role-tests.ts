@@ -38,7 +38,11 @@
  *   position names only a current job role of the writer's own team. A member's configured role
  *   narrows the scopes install stores and returns, never widening them; a company admin, a team
  *   owner without company authority and a token context of the company owner write no
- *   app.member_roles row, and the token gets no owner-only list of role assignments.
+ *   app.member_roles row, and the token gets no owner-only list of role assignments. A company
+ *   admin, the team B owner and a token context of the company owner cannot call
+ *   tenant_context.erase_employee, the data role cannot insert, update or delete
+ *   app.employee_erasures, and a company owner session erases one fixture employee and gets the
+ *   same erasure back on a retry.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -73,15 +77,20 @@
  *   fixture role keyed by the run prefix and, in each member-role check, one app.member_roles
  *   row giving it to the team A recruiter (the owner's own SQL writes no activity row), removing
  *   the row in that check, and briefly adds one more API token holding every scope for the team
- *   A owner. As the identity role it briefly makes the team A fixture recruiter a viewer and
+ *   A owner. As the owner it writes one more fixture employee, linked to the team C member and
+ *   holding one fixture position, which the data role erases under the team A owner's company
+ *   owner session: that commits one employee tombstone, one scope.home_units_changed row and one
+ *   employee.erased row in team A, and briefly adds one more API token holding every scope for the
+ *   team A owner. As the identity role it briefly makes the team A fixture recruiter a viewer and
  *   restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
  *   locks), deletes the fixture rows and restores both before COMMIT; then the fixture member
- *   roles, configuration objects, position rows, employees, positions, organisation units (with
- *   their closure rows) and levels, the contexts,
+ *   roles, configuration objects, position rows, employees, employee tombstones (with FORCE ROW
+ *   LEVEL SECURITY lifted on app.employee_erasures inside that transaction), positions,
+ *   organisation units (with their closure rows) and levels, the contexts,
  *   leases, stores, teams, users (with their cascaded workspace mappings and company authority) and, in
  *   the open bootstrap variant, the setup claim it created go.
  * - It prints one JSON document of counts and static check ids, never a URL, host, port,
@@ -206,6 +215,8 @@ const DIRECTORY_TABLES = [
   "employees",
   "employee_positions",
 ] as const;
+/** The employee erasure tombstones (0036), owner-only under FORCE RLS with no DELETE policy. */
+const ERASURE_TABLES = ["employee_erasures"] as const;
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
@@ -616,6 +627,8 @@ function fixtureTables(f: Fixtures, variant: Variant) {
       [f.pattern],
     ],
     ["app.employees", "employee_number LIKE $1", [f.pattern]],
+    // Fixture employee tombstones by their erasing fixture owner (0036); their activity goes first.
+    ["app.employee_erasures", "erased_by LIKE $1", [f.pattern]],
     ["app.positions", "code LIKE $1", [f.pattern]],
     // Fixture units by code and levels by name; closure rows cascade from their units.
     [
@@ -731,14 +744,21 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
     await transaction(
       owner,
       async () => {
+        // No runtime role and no policy deletes a tombstone; only the owner, with FORCE lifted here.
+        for (const table of ERASURE_TABLES)
+          await owner.query(
+            `ALTER TABLE app.${table} NO FORCE ROW LEVEL SECURITY`,
+          );
         for (const table of [
           // The guard lets the owner delete published versions; the second workspace goes after
           // its objects and org rows, position rows before employees and positions, positions
-          // before their units, units before their levels, and employees before their users.
+          // before their units, units before their levels, and employees and tombstones before
+          // their users.
           "app.member_roles",
           "app.config_objects",
           "app.employee_positions",
           "app.employees",
+          "app.employee_erasures",
           "app.positions",
           "app.org_units",
           "app.org_levels",
@@ -752,6 +772,10 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           ...(variant === "open" ? ["auth.initial_admin_claim"] : []),
         ])
           await remove(table);
+        for (const table of ERASURE_TABLES)
+          await owner.query(
+            `ALTER TABLE app.${table} FORCE ROW LEVEL SECURITY`,
+          );
       },
       true,
     );
@@ -771,6 +795,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         ...CONFIG_TABLES,
         ...ORG_TABLES,
         ...DIRECTORY_TABLES,
+        ...ERASURE_TABLES,
       ],
     ],
   );
@@ -782,7 +807,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           WORKSPACE_TABLES.length +
           CONFIG_TABLES.length +
           ORG_TABLES.length +
-          DIRECTORY_TABLES.length &&
+          DIRECTORY_TABLES.length +
+          ERASURE_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -4031,6 +4057,213 @@ async function runChecks(run: Run) {
     }
     probe.at("end-state");
     return pass && probe.all(["end-state", (await memberRoles()) === 0]);
+  });
+
+  // Employee erasure (0036). The owner writes one more fixture employee, linked to the team C
+  // member and holding the free fixture position; only a company owner session erases it.
+  const eraseTarget = await dirEmployee(COMPANY_WORKSPACE, "erase", f.users.c2);
+  await dirHold(COMPANY_WORKSPACE, eraseTarget, dir.free);
+  const eraseSql =
+    "SELECT tenant_context.erase_employee($1::uuid, $2, 'app') AS result";
+  /** The fixture directory rows, activity and employee tombstones, as one string. */
+  const erasureCommitted = async () =>
+    JSON.stringify({
+      directory: await dirCommitted(),
+      tombstones: await count(
+        owner,
+        "SELECT count(*)::int AS n FROM app.employee_erasures WHERE erased_by LIKE $1",
+        [f.pattern],
+      ),
+    });
+
+  // A company admin (the team A recruiter), the team B owner without company authority and a
+  // token context of the company owner holding every scope cannot call the helper; the company
+  // owner's session reaches it (a wrong name, rolled back).
+  await check("employee-erasure-owner-only", async (probe) => {
+    const before = await erasureCommitted();
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-erasure`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    const token: Principal = {
+      team: f.teams.a,
+      actor: f.users.a1,
+      auth: "token",
+      token: tokenId,
+      scopes: ALL_SCOPES,
+    };
+    const refusedFor = (principal: Principal) =>
+      transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, principal);
+        probe.at("outcome");
+        return {
+          access,
+          outcome: await attempt(data, eraseSql, [
+            eraseTarget,
+            "Fictional employee",
+          ]),
+        };
+      });
+    let pass: boolean;
+    try {
+      const admin = await refusedFor(p.memberA);
+      const teamOwner = await refusedFor(p.ownerB);
+      const tokenOutcome = await refusedFor(token);
+      const control = await transaction(data, async () => {
+        probe.at("positive-control");
+        await installAs(data, signer, p.ownerA);
+        return attempt(data, eraseSql, [eraseTarget, "Fictional someone else"]);
+      });
+      pass = probe.all(
+        [
+          "setup",
+          stored.rowCount === 1 &&
+            admin.access.companyLevel === "admin" &&
+            teamOwner.access.companyLevel === null &&
+            tokenOutcome.access.companyLevel === "owner",
+        ],
+        denial(admin.outcome),
+        denial(teamOwner.outcome),
+        denial(tokenOutcome.outcome),
+        outcomeIs(
+          control.ok === false && control.code === "RQ003",
+          control,
+          "positive-control",
+        ),
+      );
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+    }
+    probe.at("end-state");
+    return (
+      pass && probe.all(["end-state", (await erasureCommitted()) === before])
+    );
+  });
+
+  // The data role inserts, updates and deletes no employee tombstone, even under the company
+  // owner's session; the same transaction still reads the fixture directory rows.
+  await check("employee-erasure-tombstone-write-denied", async (probe) => {
+    const before = await erasureCommitted();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const inserted = await attempt(
+        data,
+        "INSERT INTO app.employee_erasures(id,workspace_id,employee_id,erased_by,erased_at,erasure_source) VALUES(gen_random_uuid(),$1::uuid,$2::uuid,$3,now(),'app')",
+        [COMPANY_WORKSPACE, eraseTarget, f.users.a1],
+      );
+      const updated = await attempt(
+        data,
+        "UPDATE app.employee_erasures SET erased_at = now() WHERE erased_by LIKE $1",
+        [f.pattern],
+      );
+      const deleted = await attempt(
+        data,
+        "DELETE FROM app.employee_erasures WHERE erased_by LIKE $1",
+        [f.pattern],
+      );
+      probe.at("positive-control");
+      const read = await people(data);
+      return probe.all(denial(inserted), denial(updated), denial(deleted), [
+        "positive-control",
+        read === 5,
+      ]);
+    });
+    probe.at("end-state");
+    return (
+      pass && probe.all(["end-state", (await erasureCommitted()) === before])
+    );
+  });
+
+  // A company owner session erases the fixture employee: the employee and its position row go,
+  // one tombstone, one scope.home_units_changed and one employee.erased row commit, and a retry in
+  // a later transaction returns the same erasure, writing nothing.
+  await check("employee-erasure-owner", async (probe) => {
+    const erased = await transaction(
+      data,
+      async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerA);
+        probe.at("outcome");
+        return attempt(data, eraseSql, [eraseTarget, " Fictional employee "]);
+      },
+      true,
+    );
+    const after = await erasureCommitted();
+    const retried = await transaction(data, async () => {
+      await installAs(data, signer, p.ownerA);
+      return attempt(data, eraseSql, [eraseTarget, "Any name"]);
+    });
+    probe.at("end-state");
+    const first = erased.rows[0]?.result as
+      | {
+          erasureId: string;
+          alreadyErased: boolean;
+          erasedAt: string;
+          removed: Record<string, number>;
+        }
+      | undefined;
+    const again = retried.rows[0]?.result as typeof first;
+    const rows = await transaction(owner, async () => {
+      await owner.query("ALTER TABLE app.activity NO FORCE ROW LEVEL SECURITY");
+      const { rows } = await owner.query(
+        `SELECT action, employee_erasure_id::text AS erasure FROM app.activity
+          WHERE team_id = $1 AND action IN ('scope.home_units_changed', 'employee.erased')
+            AND (employee_erasure_id IS NOT NULL OR metadata->'affectedUserIds' = $2::jsonb)
+          ORDER BY created_at, id`,
+        [f.teams.a, JSON.stringify([f.users.c2])],
+      );
+      return rows;
+    });
+    return probe.all(
+      outcomeIs(
+        erased.ok &&
+          first?.alreadyErased === false &&
+          first.removed.positionRows === 1 &&
+          first.removed.activityRedacted === 0 &&
+          first.removed.userLinks === 1,
+        erased,
+      ),
+      outcomeIs(
+        retried.ok &&
+          again?.alreadyErased === true &&
+          again.erasureId === first?.erasureId &&
+          again.erasedAt === first?.erasedAt &&
+          JSON.stringify(again.removed) === JSON.stringify(first?.removed),
+        retried,
+      ),
+      [
+        "end-state",
+        (await count(
+          owner,
+          "SELECT ((SELECT count(*) FROM app.employees WHERE id = $1::uuid) + (SELECT count(*) FROM app.employee_positions WHERE employee_id = $1::uuid))::int AS n",
+          [eraseTarget],
+        )) === 0,
+      ],
+      ["end-state", JSON.parse(after).tombstones === 1],
+      ["end-state", (await erasureCommitted()) === after],
+      [
+        "end-state",
+        JSON.stringify(rows) ===
+          JSON.stringify([
+            { action: "scope.home_units_changed", erasure: null },
+            { action: "employee.erased", erasure: first?.erasureId },
+          ]),
+      ],
+    );
   });
 
   // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock

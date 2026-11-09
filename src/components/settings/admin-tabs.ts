@@ -1,8 +1,9 @@
 /**
  * The Admin portal tabs that exist today, in order. Team tabs follow the team role; History follows
- * company authority and Roles & permissions the company owner level only (D1), so a team role never
- * yields either and company authority never yields a team tab. A tab is added here only when its
- * feature exists.
+ * company authority, and Roles & permissions and Employees the company owner level only (D1), so a
+ * team role never yields any of them and company authority never yields a team tab. A tab is added
+ * here only when its feature exists; Employees holds employee erasure and the retention review
+ * until the Organisation tab (R2a-16) takes them.
  */
 export const ADMIN_TABS = [
   { key: "members", label: "Members", level: "team" },
@@ -10,6 +11,7 @@ export const ADMIN_TABS = [
   { key: "speed", label: "Speed", level: "team" },
   { key: "tokens", label: "API tokens", level: "team" },
   { key: "roles", label: "Roles & permissions", level: "owner" },
+  { key: "employees", label: "Employees", level: "owner" },
   { key: "history", label: "History", level: "company" },
 ] as const;
 export type AdminTab = (typeof ADMIN_TABS)[number];

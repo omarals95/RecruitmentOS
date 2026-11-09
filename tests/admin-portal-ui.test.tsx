@@ -40,6 +40,15 @@ import {
 } from "../src/domain/config-defaults";
 import type { ConfigObject } from "../src/lib/config-store";
 import type { CompanyAuthorityHolder } from "../src/lib/company-authority";
+import {
+  ERASED_NOTICE,
+  EmployeeErasureDialogView,
+  EmployeeSearchPanel,
+  RetentionReviewPanel,
+  type EmployeeMatch,
+} from "../src/components/settings/employees-tab";
+import type { RetentionReviewRow } from "../src/lib/directory";
+import { formatDate } from "../src/components/workspace/helpers";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -112,13 +121,14 @@ const onlyHeadingAndNoAccess = (markup: string) => {
 };
 
 describe("admin portal tabs", () => {
-  it("defines exactly the six tabs that exist, in order", () => {
+  it("defines exactly the seven tabs that exist, in order", () => {
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label])).toEqual([
       ["members", "Members"],
       ["cv-storage", "CV storage"],
       ["speed", "Speed"],
       ["tokens", "API tokens"],
       ["roles", "Roles & permissions"],
+      ["employees", "Employees"],
       ["history", "History"],
     ]);
   });
@@ -132,7 +142,7 @@ describe("admin portal tabs", () => {
         const team = teamRole === "owner" || teamRole === "admin";
         expect(keys, `${teamRole} / ${companyLevel}`).toEqual([
           ...(team ? TEAM_TABS : []),
-          ...(companyLevel === "owner" ? ["roles"] : []),
+          ...(companyLevel === "owner" ? ["roles", "employees"] : []),
           ...(companyLevel ? ["history"] : []),
         ]);
       }
@@ -144,9 +154,14 @@ describe("admin portal tabs", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all six tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all seven tab links and nothing that does not exist yet", () => {
     const markup = render("members", access("owner", "owner"));
-    expect(tabLinks(markup)).toEqual([...TEAM_TABS, "roles", "history"]);
+    expect(tabLinks(markup)).toEqual([
+      ...TEAM_TABS,
+      "roles",
+      "employees",
+      "history",
+    ]);
     const current = [...markup.matchAll(/<a [^>]*>/g)]
       .map((match) => match[0])
       .filter((tag) => tag.includes('aria-current="page"'));
@@ -227,7 +242,7 @@ describe("admin portal", () => {
 
   it("shows the access changes panel in History only for a company owner", () => {
     const owner = render("history", access("recruiter", "owner"));
-    expect(tabLinks(owner)).toEqual(["roles", "history"]);
+    expect(tabLinks(owner)).toEqual(["roles", "employees", "history"]);
     expect(owner).toContain("<h2>Configuration history</h2>");
     expect(owner).toContain("<h2>Recent access changes (last 7 days)</h2>");
     const admin = render("history", access("owner", "admin"));
@@ -836,5 +851,268 @@ describe("company authority panel", () => {
     expect(last).toContain(
       "The last company owner cannot be removed. Make someone else a company owner first.",
     );
+  });
+});
+
+// R2a-15 (job 057): the Employees tab, for company owners only, until the Organisation tab.
+describe("employees tab", () => {
+  const match = (
+    id: string,
+    displayName: string,
+    changes: Partial<EmployeeMatch> = {},
+  ): EmployeeMatch => ({
+    id,
+    displayName,
+    employeeNumber: `EMP-${id}`,
+    status: "active",
+    retentionClass: "standard",
+    archivedAt: null,
+    ...changes,
+  });
+  const search = (
+    props: Partial<Parameters<typeof EmployeeSearchPanel>[0]> = {},
+  ) =>
+    renderToStaticMarkup(
+      <EmployeeSearchPanel
+        query="fictional"
+        busy={false}
+        error=""
+        result={null}
+        searched={false}
+        {...props}
+      />,
+    );
+  const page = (data: EmployeeMatch[], hasMore = false) => ({
+    data,
+    pagination: { page: 1, pageSize: 20, hasMore },
+  });
+  const reviewRows: RetentionReviewRow[] = [
+    {
+      id: "fictional-review-1",
+      displayName: "Fictional Former Analyst",
+      employeeNumber: "EMP-R1",
+      leftAt: "2025-03-04T09:00:00.000Z",
+      retentionClass: "extended",
+      archivedAt: "2025-04-01T09:00:00.000Z",
+    },
+    {
+      id: "fictional-review-2",
+      displayName: "Fictional Former Clerk",
+      employeeNumber: "EMP-R2",
+      leftAt: "2025-06-10T09:00:00.000Z",
+      retentionClass: "standard",
+      archivedAt: null,
+    },
+  ];
+  const rowsOf = (markup: string) =>
+    [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((row) => row[1]).slice(1);
+  type ViewProps = Parameters<typeof EmployeeErasureDialogView>[0];
+  const dialog = (overrides: Partial<ViewProps> = {}) =>
+    renderToStaticMarkup(
+      <EmployeeErasureDialogView
+        name="Fictional Erasable Employee"
+        typed=""
+        busy={false}
+        error=""
+        ids={{ description: "what", input: "typed", name: "hint" }}
+        onTyped={() => {}}
+        onCancel={() => {}}
+        onConfirm={() => {}}
+        {...overrides}
+      />,
+    );
+  const eraseButton = /<button[^>]*>Permanently erase<\/button>/;
+
+  it("shows the tab, the search and the retention review only to a company owner, and the no-access text to everyone else", () => {
+    for (const teamRole of TEAM_ROLES)
+      for (const companyLevel of COMPANY_LEVELS) {
+        const markup = render("employees", access(teamRole, companyLevel));
+        if (companyLevel === "owner") {
+          expect(tabLinks(markup)).toContain("employees");
+          expect(markup).toContain(
+            'aria-current="page" href="/app/admin/employees"',
+          );
+          expect(markup).toContain("<h2>Find an employee</h2>");
+          expect(markup).toContain("<h2>Retention review</h2>");
+          expect(markup).toContain("Name or employee number");
+          expect(markup).toContain(
+            '<p role="status">Loading the retention review…</p>',
+          );
+          // No create, edit, link or position control.
+          expect(markup).not.toMatch(/Create|Edit|Link|Position/);
+        } else {
+          onlyHeadingAndNoAccess(markup);
+          expect(markup).not.toContain("Permanently erase");
+        }
+      }
+    // A company admin, a team owner without company authority and a recruiter.
+    for (const [teamRole, companyLevel] of [
+      ["owner", "admin"],
+      ["admin", "admin"],
+      ["owner", null],
+      ["recruiter", null],
+    ] as const)
+      onlyHeadingAndNoAccess(
+        render("employees", access(teamRole, companyLevel)),
+      );
+  });
+
+  it("lists matches with status, retention class, archived and an erase button per row", () => {
+    const markup = search({
+      searched: true,
+      result: page([
+        match("1", "Fictional Kept Employee"),
+        match("2", "Fictional Former Employee", {
+          status: "left",
+          retentionClass: "extended",
+          archivedAt: "2025-01-01T00:00:00.000Z",
+        }),
+      ]),
+    });
+    expect(markup).toMatch(
+      /<form class="row"[^>]*><label class="field" for="[^"]+">Name or employee number<input id="[^"]+"/,
+    );
+    expect(markup).toContain(
+      '<button type="submit" class="button">Search</button>',
+    );
+    for (const header of [
+      "Name",
+      "Employee number",
+      "Status",
+      "Retention class",
+      "Archived",
+    ])
+      expect(markup).toContain(`<th>${header}</th>`);
+    const [kept, former] = rowsOf(markup);
+    expect(kept).toContain('data-label="Status">Active<');
+    expect(kept).toContain('data-label="Retention class">Standard<');
+    expect(kept).toContain('data-label="Archived">No<');
+    expect(former).toContain('data-label="Status">Left<');
+    expect(former).toContain('data-label="Retention class">Extended<');
+    expect(former).toContain('data-label="Archived">Yes<');
+    for (const [row, name] of [
+      [kept, "Fictional Kept Employee"],
+      [former, "Fictional Former Employee"],
+    ])
+      expect(row).toContain(
+        `<button type="button" class="button danger">Permanently erase employee<span class="sr-only">: ${name}</span></button>`,
+      );
+    expect(markup).not.toContain("Showing the first 20 matches");
+    expect(
+      search({ searched: true, result: page([match("1", "A")], true) }),
+    ).toContain(
+      "Showing the first 20 matches. Search with more of the name or number to narrow the list.",
+    );
+  });
+
+  it("shows nothing before a search, then the searching, empty and error states", () => {
+    const idle = search();
+    expect(idle).not.toMatch(/<table|role="status"|role="alert"/);
+    expect(search({ busy: true, searched: true })).toContain(
+      '<p role="status">Searching…</p>',
+    );
+    expect(search({ searched: true, result: page([]) })).toContain(
+      '<p role="status">No employees match.</p>',
+    );
+    const failed = search({
+      searched: true,
+      error: "Your role does not include this directory access.",
+    });
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Your role does not include this directory access.</p>',
+    );
+    expect(failed).not.toContain("<table");
+  });
+
+  it("lists the retention review with the left date, class and archived, an erase button and Show more", () => {
+    const markup = renderToStaticMarkup(
+      <RetentionReviewPanel rows={reviewRows} hasMore error="" />,
+    );
+    expect(markup).toContain(
+      "Employees whose status has been Left for 12 months or more, for your review. Nothing is erased automatically; erase an employee only after you have decided their data is no longer needed.",
+    );
+    for (const header of [
+      "Name",
+      "Employee number",
+      "Left on",
+      "Retention class",
+      "Archived",
+    ])
+      expect(markup).toContain(`<th>${header}</th>`);
+    const [first, second] = rowsOf(markup);
+    expect(first).toContain(
+      `data-label="Left on">${formatDate(reviewRows[0].leftAt)}<`,
+    );
+    expect(first).toContain('data-label="Retention class">Extended<');
+    expect(first).toContain('data-label="Archived">Yes<');
+    expect(second).toContain('data-label="Archived">No<');
+    for (const row of [first, second])
+      expect(row).toContain(">Permanently erase employee<");
+    expect(markup).toMatch(
+      /<button type="button" class="button secondary">Show more<\/button>/,
+    );
+    expect(
+      renderToStaticMarkup(
+        <RetentionReviewPanel rows={reviewRows} hasMore={false} error="" />,
+      ),
+    ).not.toContain("Show more");
+    expect(
+      renderToStaticMarkup(
+        <RetentionReviewPanel rows={[]} hasMore={false} error="" />,
+      ),
+    ).toContain('<p role="status">No employees are due for review.</p>');
+    expect(
+      renderToStaticMarkup(
+        <RetentionReviewPanel rows={null} hasMore={false} error="" />,
+      ),
+    ).toContain('<p role="status">Loading the retention review…</p>');
+    const failed = renderToStaticMarkup(
+      <RetentionReviewPanel
+        rows={null}
+        hasMore={false}
+        error="Only a company owner can see the retention review."
+      />,
+    );
+    expect(failed).toContain('role="alert"');
+    expect(failed).not.toContain("<table");
+  });
+
+  it("confirms in an alert dialog, with Cancel first and Permanently erase disabled until the name is typed exactly", () => {
+    const empty = dialog();
+    expect(empty).toContain('role="alertdialog"');
+    expect(empty).toContain('aria-describedby="what"');
+    expect(empty).toContain("Permanently erase Fictional Erasable Employee?");
+    for (const text of [
+      "<strong>Removed:</strong> the employee&#x27;s directory entry (name, employee number, work email and phone, status and retention class), their position history and their link to a user account.",
+      "<strong>Kept:</strong> positions and units, the user&#x27;s account and team memberships, activity entries without personal details, a home-unit change entry for the unlinked user, and a record of who erased the employee and when.",
+      "<strong>Not covered:</strong> copies outside the app, such as spreadsheets the directory was imported from.",
+      "Name: <strong>Fictional Erasable Employee</strong>",
+    ])
+      expect(empty).toContain(text);
+    expect(empty).toMatch(
+      /<button type="button" class="button secondary" autofocus="">Cancel<\/button><button type="button" class="button danger" disabled="">Permanently erase<\/button>/,
+    );
+    for (const typed of [
+      "Fictional Erasable",
+      "fictional erasable employee",
+      "   ",
+    ])
+      expect(dialog({ typed })).toMatch(
+        /<button type="button" class="button danger" disabled="">Permanently erase<\/button>/,
+      );
+    const ready = dialog({ typed: "  Fictional Erasable Employee " });
+    expect(ready).toMatch(eraseButton);
+    expect(ready).not.toMatch(
+      /<button type="button" class="button danger" disabled="">Permanently erase/,
+    );
+    const busy = dialog({ typed: "Fictional Erasable Employee", busy: true });
+    expect(busy).toContain(">Erasing…</button>");
+    expect(busy).toMatch(/<input id="typed"[^>]*disabled=""/);
+    expect(
+      dialog({
+        error: "Type the employee's name exactly as shown to confirm.",
+      }),
+    ).toContain('<p class="notice error" role="alert">');
+    expect(ERASED_NOTICE).toBe("Employee permanently erased.");
   });
 });

@@ -479,6 +479,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "scope",
   "role-assignment",
   "workspace-authority",
+  "employee-erasure",
 ];
 
 /**
