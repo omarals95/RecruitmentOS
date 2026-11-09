@@ -69,8 +69,11 @@ const migrationFiles = async (dir: string) =>
   (await readdir(dir)).filter((f) => /^\d{4}.*\.sql$/.test(f)).sort();
 // A row as the earlier schema wrote it: the activity column 0036 adds is left out, so an upgrade
 // from before it compares the columns its fixture rows had.
-const earlierColumns = (row: Record<string, unknown>) => {
-  const { employee_erasure_id: _added, ...kept } = row;
+const earlierColumns = (row: unknown) => {
+  const { employee_erasure_id: _added, ...kept } = row as Record<
+    string,
+    unknown
+  >;
   return kept;
 };
 
@@ -1596,7 +1599,7 @@ describe("upgrade from 0035 to employee erasure", () => {
     "app.employees",
     "auth.member",
   ];
-  const rows = async () => {
+  const rows = async (): Promise<Record<string, Record<string, unknown>[]>> => {
     await pg.exec("SET SESSION AUTHORIZATION postgres");
     return Object.fromEntries(
       await Promise.all(

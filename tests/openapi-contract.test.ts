@@ -581,11 +581,19 @@ describe("OpenAPI contract", () => {
     ])
       expect(text).toContain(code);
     expect(
-      (erasure.parameters as { name: string; in: string }[]).find(
-        (parameter) => parameter.name === "Idempotency-Key",
-      ),
-    ).toMatchObject({ in: "header", required: false });
-    expect(String(erasure.responses["200"].description)).not.toMatch(
+      (
+        erasure as Operation & {
+          parameters: { name: string; in: string; required?: boolean }[];
+        }
+      ).parameters,
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "Idempotency-Key",
+        in: "header",
+        required: false,
+      }),
+    );
+    expect(JSON.stringify(erasure.responses["200"])).not.toMatch(
       /[Nn]ame|employeeNumber|workEmail|workPhone/,
     );
     const reviewText = JSON.stringify(review);
