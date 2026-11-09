@@ -50,7 +50,12 @@ type WriteInput = Partial<RecordReferences> & {
   moveToBucketId?: string;
 };
 const knownRoles = new Set(["owner", "admin", "recruiter", "viewer"]);
-function permission(p: Principal, resource: ResourceName, write = false) {
+// permission, importPermission and owned are exported for tests/authz.test.ts until R2a-07 removes them.
+export function permission(
+  p: Principal,
+  resource: ResourceName,
+  write = false,
+) {
   const scope = `${resource === "candidates" ? "candidates" : "recruitment"}:${write ? "write" : "read"}`;
   if (
     !knownRoles.has(p.role) ||
@@ -63,7 +68,7 @@ function permission(p: Principal, resource: ResourceName, write = false) {
       "You do not have permission for this action.",
     );
 }
-function importPermission(p: Principal) {
+export function importPermission(p: Principal) {
   if (
     !["owner", "admin"].includes(p.role) ||
     !p.scopes.includes("imports:write")
@@ -265,7 +270,7 @@ async function decorate(
         : row,
   );
 }
-function owned(p: Principal, kind: RecordKind): SQL[] {
+export function owned(p: Principal, kind: RecordKind): SQL[] {
   return [
     eq(records.teamId, p.teamId),
     eq(records.kind, kind),
