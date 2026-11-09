@@ -56,6 +56,12 @@ import {
   type Role,
 } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import {
+  INPUT_CHECKS,
+  TOOLS,
+  inputAllowed,
+  toolAllowed,
+} from "@/lib/mcp/tools";
 import { eq, sql } from "drizzle-orm";
 import { records } from "@/db/schema";
 
@@ -1270,6 +1276,115 @@ describe("outputs on the engine (R2a-08)", () => {
       expect(hidden.size, resource).toBe(2);
       expect(table.headers.length, resource).toBe(today.headers.length - 2);
     }
+  });
+});
+
+// The MCP dispatcher decides each tool and per-input check on the engine (R2a-09).
+describe("MCP tools on the engine (R2a-09)", () => {
+  const tool = (name: string) => TOOLS.find((item) => item.name === name)!;
+  /** Every built-in team role with each MCP scope subset as an API token, over MCP. */
+  const tokenContexts = () =>
+    ROLES.flatMap((role) =>
+      subsets(MCP_SCOPES).map((stored) => {
+        const p = token(role, stored);
+        return { p, ctx: contextOf(p, { channel: "mcp" }) };
+      }),
+    );
+  // The tools each per-input check runs in; it is reached only once the tool is allowed.
+  const CHECKED: Record<keyof typeof INPUT_CHECKS, string[]> = {
+    archiveCandidate: ["archive_record", "restore_record"],
+    vacancyCvTexts: ["get_cv_texts"],
+    newCandidateUpload: ["upload_cv"],
+    taskCustomValues: ["update_task"],
+    candidateComment: ["add_comment"],
+  };
+
+  it("has 59 tools, each with its scopes and an access declaration", () => {
+    expect(TOOLS).toHaveLength(59);
+    expect(new Set(TOOLS.map((item) => item.name)).size).toBe(59);
+    for (const definition of TOOLS) {
+      expect(definition.scopes.length, definition.name).toBeGreaterThan(0);
+      expect(Array.isArray(definition.access), definition.name).toBe(true);
+    }
+  });
+
+  it("decides every tool as today's scope check for the four team roles and every MCP scope subset", () => {
+    let cases = 0;
+    for (const { p, ctx } of tokenContexts())
+      for (const definition of TOOLS) {
+        const expected = definition.scopes.every((scope) =>
+          p.scopes.includes(scope),
+        );
+        if (toolAllowed(ctx, definition) !== expected)
+          expect({ p, tool: definition.name }).toEqual({
+            p,
+            tool: `${definition.name} ${expected}`,
+          });
+        cases++;
+      }
+    expect(cases).toBe(ROLES.length * 64 * 59);
+  });
+
+  it("decides the five per-input checks as today's requireScope wherever the tool runs", () => {
+    let cases = 0;
+    for (const { p, ctx } of tokenContexts())
+      for (const [key, check] of Object.entries(INPUT_CHECKS)) {
+        for (const name of CHECKED[key as keyof typeof INPUT_CHECKS]) {
+          if (!toolAllowed(ctx, tool(name))) continue;
+          // Without candidates:read a candidate parent reads as missing before the check.
+          if (
+            key === "candidateComment" &&
+            !p.scopes.includes("candidates:read")
+          )
+            continue;
+          expect(inputAllowed(ctx, check), `${p.role} ${p.scopes} ${key}`).toBe(
+            p.scopes.includes(check.scope),
+          );
+          cases++;
+        }
+      }
+    expect(cases).toBeGreaterThan(0);
+  });
+
+  it("names only record resources and no company area or directory, plan or admin page", () => {
+    const requests = [
+      ...TOOLS.flatMap((definition) => definition.access.flat()),
+      ...Object.values(INPUT_CHECKS).flatMap((check) => check.requests),
+    ];
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests) {
+      expect(Object.keys(resourceToKind)).toContain(request.resource);
+      expect(request.adminArea).toBeUndefined();
+      expect(["directory", "plan", "admin"]).not.toContain(request.page);
+    }
+  });
+
+  it("follows a configured role's actions and pages", () => {
+    const vacancyViewer = contextOf(session("recruiter"), {
+      channel: "mcp",
+      role: body({
+        actions: {
+          ...structuredClone(RECRUITER_ROLE.body.actions),
+          vacancies: ["view", "export"],
+        },
+      }) as RoleBody,
+    });
+    expect(toolAllowed(vacancyViewer, tool("list_vacancies"))).toBe(true);
+    expect(toolAllowed(vacancyViewer, tool("create_vacancy"))).toBe(false);
+    expect(toolAllowed(vacancyViewer, tool("update_vacancy"))).toBe(false);
+    // Archive and restore need edit on every pipeline resource they take.
+    expect(toolAllowed(vacancyViewer, tool("archive_record"))).toBe(false);
+    const noActivity = contextOf(session("recruiter"), {
+      channel: "mcp",
+      role: body({
+        pages: RECRUITER_ROLE.body.pages.filter((page) => page !== "activity"),
+      }) as RoleBody,
+    });
+    expect(toolAllowed(noActivity, tool("list_activity"))).toBe(false);
+    expect(toolAllowed(noActivity, tool("get_overview"))).toBe(true);
+    expect(
+      toolAllowed(contextOf(session("recruiter")), tool("list_activity")),
+    ).toBe(true);
   });
 });
 

@@ -20,7 +20,9 @@ import { GET as listRoute } from "@/app/api/v1/[resource]/route";
 import { GET as getRoute, PATCH } from "@/app/api/v1/[resource]/[id]/route";
 import { GET as overviewRoute } from "@/app/api/v1/overview/route";
 import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
-import { createTestDb, seedIdentity } from "./helpers/db";
+import { createTestDb, seedApiToken, seedIdentity } from "./helpers/db";
+import { listStoredTools } from "@/lib/mcp/tools";
+import { runWithServerTiming } from "@/lib/server-timing";
 
 // Fictional team and records only; the session lookup is mocked, so it is not counted.
 const ORIGIN = "http://localhost:3000";
@@ -224,6 +226,18 @@ describe("database round trips per request", () => {
     );
     expect(response.status).toBe(200);
     const timing = response.headers.get("server-timing") ?? "";
+    expect(timing).toMatch(TIMING);
+    expect(Number(TIMING.exec(timing)![1])).toBeLessThanOrEqual(6);
+  });
+
+  // R2a-09: tools/list reads the stored access in one transaction with only the install.
+  it("lists an owner token's MCP tools in at most 6 round trips", async () => {
+    const token = await seedApiToken(fixture.db, owner);
+    const { tools, timing } = await runWithServerTiming(async (finish) => {
+      const tools = await listStoredTools(token);
+      return { tools, timing: finish() };
+    });
+    expect(tools).toHaveLength(59);
     expect(timing).toMatch(TIMING);
     expect(Number(TIMING.exec(timing)![1])).toBeLessThanOrEqual(6);
   });
