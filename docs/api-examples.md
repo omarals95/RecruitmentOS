@@ -220,6 +220,93 @@ Send `{"parentId":"<unit id>"}` to move it with everything below it (`null` move
 
 Every create, rename, move and archive appears in Activity for the team you made it from, with ids only. A move or archive also records that home units changed.
 
+## Positions and employees
+
+The position routes under `/api/v1/positions` and the employee routes under `/api/v1/employees` need a signed-in browser session, like the organisation routes. A Bearer token, including an MCP OAuth token, gets 403 `session_required` on every method, and there is no MCP tool.
+
+- **Positions** are company structure. Any signed-in member of a team in the company can read them. Creating, changing, moving and archiving them needs a company owner, or a company admin with the organisation area; anyone else gets 403 `org_forbidden`.
+- **Employees** hold work contact facts only: a display name, an employee number, a work email, a work phone and a status of `active` or `left`. Reading them needs `directory:read`, which team owners and admins have; changing them needs `directory:write` as well. Anyone else gets 403 `directory_forbidden`.
+- **Home-unit facts are owner-only.** An employee's user link and the positions of a linked employee decide that member's home units. So only a company owner can link or unlink a user, create an employee with a `userId`, change the positions of a linked employee, or move or archive a position that a linked employee holds. Anyone else, including a company admin and the employee's own member, gets 403 `directory_owner_required`.
+- **Contact rule.** The owner and admin roles have the `full` directory rule and see `workEmail` and `workPhone`. A role with the `basic` rule gets employees without those two keys.
+
+The examples use fictional names and ids.
+
+Create a position in a unit. `isManager` and `jobRoleId` (a job role of your team) are optional:
+
+```http
+POST /api/v1/positions
+Content-Type: application/json
+
+{"title":"Fictional Payroll Lead","code":"FIN-PAY-1","orgUnitId":"00000000-0000-4000-a000-0000000000b1","isManager":true}
+```
+
+```json
+{
+  "data": {
+    "id": "00000000-0000-4000-a000-0000000000c1",
+    "orgUnitId": "00000000-0000-4000-a000-0000000000b1",
+    "title": "Fictional Payroll Lead",
+    "code": "FIN-PAY-1",
+    "isManager": true,
+    "jobRoleId": null,
+    "validFrom": "2026-11-09T08:00:00.000Z",
+    "archivedAt": null
+  }
+}
+```
+
+`GET /api/v1/positions?unitId=00000000-0000-4000-a000-0000000000b1` lists the current positions of one unit, ordered by title; leave out `unitId` for every position of the company. `jobRoleId` is shown only to members of the team that owns the job role. Change a position with exactly one operation per request on `PATCH /api/v1/positions/{id}`:
+
+- one or more of `{"title","isManager","jobRoleId"}`, where `"jobRoleId":null` clears it;
+- `{"orgUnitId":"<unit id>"}` to move it;
+- `{"archived":true}` to archive it for good.
+
+A code cannot change.
+
+Create an employee:
+
+```http
+POST /api/v1/employees
+Content-Type: application/json
+
+{"displayName":"Fictional Dana Sample","employeeNumber":"EMP-0001","workEmail":"dana.sample@example.test","workPhone":"+971 50 000 0001"}
+```
+
+It returns 201 with `{"data":{"id","displayName","employeeNumber","status","source","userId","workEmail","workPhone","positions","createdAt","updatedAt","archivedAt"}}`. Names and numbers are text facts with the same cleaning and 1 to 120 character bounds as unit names. The work email must be a valid address, and an empty work phone is stored as null.
+
+Set the employee's current positions by sending the full set, at most 20 positions and at most one primary:
+
+```http
+PUT /api/v1/employees/00000000-0000-4000-a000-0000000000e1/positions
+Content-Type: application/json
+
+{"positions":[{"positionId":"00000000-0000-4000-a000-0000000000c1","primary":true}]}
+```
+
+Positions you leave out end now and stay as history. New ones start now.
+
+A company owner links the employee to a member's user with `PATCH /api/v1/employees/{id}` and `{"userId":"<user id>"}`, and unlinks with `{"userId":null}`. A user is linked to at most one employee in the company. The same route takes one or more of `{"displayName","employeeNumber","workEmail","workPhone","status"}`, or `{"archived":true}`.
+
+Page through the directory with `GET /api/v1/employees?unitId=<unit id>&levelId=<level id>&positionId=<position id>&status=active&page=1&pageSize=100`. Every filter is optional, and filters combine on the same current position:
+
+- `unitId` matches employees holding a current position in that unit or any unit below it;
+- `levelId` matches the level of that position's unit;
+- `positionId` matches its holders;
+- `status` matches the employee status.
+
+The list is ordered by display name.
+
+| Error                          | When                                                                                |
+| ------------------------------ | ----------------------------------------------------------------------------------- |
+| 403 `directory_owner_required` | A user link, a linked employee's positions, or a move or archive of a held position |
+| 409 `position_code_exists`     | Another current position already uses the code                                      |
+| 409 `employee_number_exists`   | Another employee of the company already has the number                              |
+| 409 `employee_user_linked`     | The user is already linked to another employee                                      |
+| 409 `directory_state_conflict` | An archived or closed position, unit or employee                                    |
+| 404 `not_found`                | The unit, level, position, employee, job role or user is not in your company        |
+
+Every create, update and archive appears in Activity for the team you made it from, with ids and field names only, never a name, number, email or phone. Each owner-only change also records which users' home units changed.
+
 ## Errors
 
 The API uses structured errors: `{"error":{"code","message","correlationId"}}`. 401 indicates an invalid session or token, 403 an unavailable scope or membership, 409 a version/idempotency/uniqueness conflict, 413 an oversized body and 429 a rate limit. A 429 response carries `Retry-After` with the number of seconds to wait before retrying; for 429 `CV_UPLOAD_RATE_LIMITED` (the team's CV upload rate limit) and `token_guess_rate_limited` it is 60, and for 429 `STORAGE_RECONCILIATION_COOLDOWN` it is the seconds left of the team's 10-minute cleanup cooldown. 5xx failures may have an uncertain result; check by idempotency key or legacy ID before attempting another create. Avoid logging response payloads containing candidate personal information.
