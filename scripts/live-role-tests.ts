@@ -42,7 +42,11 @@
  *   admin, the team B owner and a token context of the company owner cannot call
  *   tenant_context.erase_employee, the data role cannot insert, update or delete
  *   app.employee_erasures, and a company owner session erases one fixture employee and gets the
- *   same erasure back on a retry.
+ *   same erasure back on a retry. The data role cannot insert, update or delete
+ *   app.record_assignments or insert an assignment activity row, even under the company owner's
+ *   session, and a member whose role limits records to their unit cannot assign or unassign
+ *   themselves through tenant_context.add_assignment or remove_assignment (RQ014), while they can
+ *   assign another member and a company owner session can assign itself.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -81,8 +85,10 @@
  *   holding one fixture position, which the data role erases under the team A owner's company
  *   owner session: that commits one employee tombstone, one scope.home_units_changed row and one
  *   employee.erased row in team A, and briefly adds one more API token holding every scope for the
- *   team A owner. As the identity role it briefly makes the team A fixture recruiter a viewer and
- *   restores the role.
+ *   team A owner. As the owner it writes one more published fixture role limited to the unit,
+ *   gives it to the team A recruiter and one assignment of them on the team A fixture vacancy,
+ *   removing all three in that check; the data role's assignment writes are rolled back. As the
+ *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -439,6 +445,8 @@ type Access = {
   companyAreas: string[];
   versions: Record<string, string>;
   roleVersionId: string | null;
+  recordScope: Record<string, string> | null;
+  homeUnits: string[];
   documents: {
     versionId: string;
     objectId: string;
@@ -607,6 +615,8 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     ["app.workspace_admins", "user_id LIKE $1", [f.pattern]],
     // Fixture member roles by team (0035); removed before the role objects they name.
     ["app.member_roles", ...team],
+    // Fixture assignments by team (0037); they also cascade from the fixture records.
+    ["app.record_assignments", ...team],
     // Fixture configuration: company objects by key, task boards by team; versions and layouts
     // cascade from their object. The owner-only policies let the owner count and delete them.
     [
@@ -4265,6 +4275,193 @@ async function runChecks(run: Run) {
       ],
     );
   });
+
+  // Record assignments (0037): only the owner-run helpers write them. Every data-role write here
+  // is rolled back.
+  const assignmentRows = () =>
+    count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.record_assignments WHERE team_id LIKE $1",
+      [f.pattern],
+    );
+
+  // The data role inserts, updates and deletes no assignment and inserts no assignment activity
+  // row, even under the company owner's session; the same transaction reads its team's
+  // assignments and reaches the helper.
+  await check("record-assignments-direct-write-denied", async (probe) => {
+    const before = await assignmentRows();
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const inserted = await attempt(
+        data,
+        "INSERT INTO app.record_assignments(team_id,record_id,user_id,relation) VALUES($1,$2::uuid,$3,'assignee')",
+        [f.teams.a, a.vacancy, f.users.a2],
+      );
+      const updated = await attempt(
+        data,
+        "UPDATE app.record_assignments SET relation = 'assignee' WHERE team_id LIKE $1",
+        [f.pattern],
+      );
+      const deleted = await attempt(
+        data,
+        "DELETE FROM app.record_assignments WHERE team_id LIKE $1",
+        [f.pattern],
+      );
+      const forged = await attempt(
+        data,
+        `INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary,metadata)
+          VALUES($1,$2::uuid,$3,'session','assignment.added','assignment','Forged','{}')`,
+        [f.teams.a, a.vacancy, f.users.a1],
+      );
+      probe.at("positive-control");
+      const read = await attempt(
+        data,
+        "SELECT count(*)::int AS n FROM app.record_assignments WHERE team_id = $1",
+        [f.teams.a],
+      );
+      const helper = await attempt(
+        data,
+        "SELECT tenant_context.add_assignment($1::uuid, $2, 'assignee') AS changed",
+        [a.vacancy, f.users.a2],
+      );
+      return probe.all(
+        denial(inserted),
+        denial(updated),
+        denial(deleted),
+        denial(forged),
+        outcomeIs(read.ok && read.rows[0]?.n === 0, read, "positive-control"),
+        outcomeIs(
+          helper.ok && helper.rows[0]?.changed === true,
+          helper,
+          "positive-control",
+        ),
+      );
+    });
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all(["end-state", before === 0 && (await assignmentRows()) === 0])
+    );
+  });
+
+  // The owner writes one more published fixture role limited to the unit, gives it to the team A
+  // recruiter and assigns them to the team A fixture vacancy, removing all three in this check. That
+  // member cannot assign or unassign themselves, but assigns the team A owner; the company owner's
+  // session, whose record scope is all, assigns itself.
+  await check(
+    "record-assignments-scoped-self-assignment-denied",
+    async (probe) => {
+      probe.at("setup");
+      const scopedObject = (
+        await owner.query(
+          "INSERT INTO app.config_objects(workspace_id,type,key,created_by) VALUES($1::uuid,'role',$2,$3) RETURNING id::text AS id",
+          [COMPANY_WORKSPACE, configKey("scoped-role"), f.users.a1],
+        )
+      ).rows[0].id as string;
+      let pass: boolean;
+      try {
+        const scopedVersion = (
+          await owner.query(
+            "INSERT INTO app.config_versions(object_id,workspace_id,state,number,body,created_by,published_at) VALUES($1::uuid,$2::uuid,'published',1,$3::jsonb,$4,now()) RETURNING id::text AS id",
+            [
+              scopedObject,
+              COMPANY_WORKSPACE,
+              JSON.stringify({
+                ...RECRUITER_ROLE.body,
+                name: "Fictional unit recruiter",
+                recordScope: {
+                  pipeline: "unit",
+                  candidates: "unit",
+                  tasks: "unit",
+                },
+              }),
+              f.users.a1,
+            ],
+          )
+        ).rows[0].id as string;
+        await owner.query(
+          "UPDATE app.config_objects SET current_version_id = $2::uuid WHERE id = $1::uuid",
+          [scopedObject, scopedVersion],
+        );
+        const assigned = await owner.query(
+          "INSERT INTO app.member_roles(team_id,user_id,role_object_id) VALUES($1,$2,$3::uuid)",
+          [f.teams.a, f.users.a2, scopedObject],
+        );
+        const placed = await owner.query(
+          "INSERT INTO app.record_assignments(team_id,record_id,user_id,relation) VALUES($1,$2::uuid,$3,'interviewer')",
+          [f.teams.a, a.vacancy, f.users.a2],
+        );
+        const helper = (fn: string, user: string, relation: string) =>
+          attempt(
+            data,
+            `SELECT tenant_context.${fn}($1::uuid, $2, $3) AS changed`,
+            [a.vacancy, user, relation],
+          );
+        const scoped = await transaction(data, async () => {
+          probe.at("install");
+          const { access } = await installAs(data, signer, p.memberA);
+          probe.at("outcome");
+          const self = await helper("add_assignment", f.users.a2, "assignee");
+          const unself = await helper(
+            "remove_assignment",
+            f.users.a2,
+            "interviewer",
+          );
+          probe.at("positive-control");
+          const other = await helper("add_assignment", f.users.a1, "assignee");
+          return { access, self, unself, other };
+        });
+        const all = await transaction(data, async () => {
+          await installAs(data, signer, p.ownerA);
+          return helper("add_assignment", f.users.a1, "assignee");
+        });
+        pass = probe.all(
+          [
+            "setup",
+            assigned.rowCount === 1 &&
+              placed.rowCount === 1 &&
+              scoped.access.roleVersionId === scopedVersion &&
+              scoped.access.recordScope?.pipeline === "unit",
+          ],
+          failsWith(scoped.self, "RQ014"),
+          failsWith(scoped.unself, "RQ014"),
+          outcomeIs(
+            scoped.other.ok && scoped.other.rows[0]?.changed === true,
+            scoped.other,
+            "positive-control",
+          ),
+          outcomeIs(
+            all.ok && all.rows[0]?.changed === true,
+            all,
+            "positive-control",
+          ),
+        );
+      } finally {
+        await owner.query(
+          "DELETE FROM app.record_assignments WHERE team_id LIKE $1",
+          [f.pattern],
+        );
+        await owner.query(
+          "DELETE FROM app.member_roles WHERE team_id LIKE $1",
+          [f.pattern],
+        );
+        await owner.query(
+          "DELETE FROM app.config_objects WHERE id = $1::uuid",
+          [scopedObject],
+        );
+      }
+      probe.at("end-state");
+      return (
+        pass &&
+        probe.all([
+          "end-state",
+          (await assignmentRows()) === 0 && (await memberRoles()) === 0,
+        ])
+      );
+    },
+  );
 
   // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock
   // in set_workspace_authority's membership check (0029) orders a grant and a concurrent removal of
