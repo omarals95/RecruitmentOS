@@ -365,9 +365,9 @@ describe("Admin portal routes under the split runtime roles", () => {
         companyLevel: null,
         role: { name: "Fictional narrowed recruiter", membership: "recruiter" },
         scopes: ctx.scopes,
-        adminAreas: [],
         ...expectedAnswers(ctx),
       });
+      expect(body.data.adminAreas).toEqual([]);
       expect(body.data.scopes).not.toContain("cvs:write");
       expect(body.data.actions.candidates).toEqual([
         "view",
