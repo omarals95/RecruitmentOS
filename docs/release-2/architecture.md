@@ -139,7 +139,7 @@ The checks are spread over several places:
 - `owned(p, kind)` filtered every query by team and kind, restricted saved views to their private owner and hid candidate comments without `candidates:read`.
 - `importPermission(p)` required an owner or admin with `imports:write`.
 - `roleScopes()` in `src/lib/permissions.ts` gives each role its scopes. `requirePrincipal()` in `src/lib/principal.ts` builds the `Principal`; token scopes are intersected with the holder's current role in `src/lib/api-tokens.ts`, and OAuth consent offers only `MCP_SCOPES` the role holds (`src/lib/oauth.ts`).
-- Insights call `requireScope` directly (`overview`, `analytics`, `listActivity`, `searchWorkspace`, `notifications` in `src/lib/insights.ts`). MCP tools declare `scopes` and the dispatcher checks them before running (`src/lib/mcp/tools.ts`).
+- Until R2a-08 moved them onto `authorize`, `scopeFilter` and `redact`, insights called `requireScope` directly (`overview`, `analytics`, `listActivity`, `searchWorkspace`, `notifications` in `src/lib/insights.ts`). MCP tools declare `scopes` and the dispatcher checks them before running (`src/lib/mcp/tools.ts`).
 - In the database, `tenant_context.install` checks the asserted scopes against a hard-coded `known` list and a hard-coded ceiling per role, and the coarse write gate in `allows` needs any write scope (`docs/identity-boundary-plan.md`, "Coarse write gate").
 
 ### 3.2 One authorization function
