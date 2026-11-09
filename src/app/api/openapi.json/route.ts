@@ -957,13 +957,24 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  const memberRolesShape =
+    "{data:{assignments:[{userId, roleObjectId, roleName, available}], roles:[{roleObjectId, name, membership}], scopedRolesHidden}}";
   paths["/api/v1/teams/member-roles"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the active team's configured roles",
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, including team owners and admins without company authority and company admins, gets 403 role_assignment_forbidden. assignments lists each member of the active team who holds a configured role, with the role's last published name (else its draft's, else null) and available: true only when the role's current published version is in force, is a valid role and sees all records, the rule the request context applies; a member whose role is not available is refused everything until it is reassigned or cleared. roles lists the roles that can be assigned, by the same rule, ordered by name. scopedRolesHidden is true when a published role was left out because it is limited to a unit or to assigned records, which cannot be assigned yet. Nothing is audited. Returns ${memberRolesShape}.`,
+      },
+      { "200": { description: memberRolesShape } },
+      { sessionOnly: true },
+    ),
     post: operation(
       [],
       {
         summary: "Assign or clear a member's configured role",
         description:
-          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role, 409 role_record_scope_unsupported for a role limited to a unit or to assigned records (refused until record scope is enforced). Body at most 1024 bytes.",
+          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies; if the change fails in any other way, 503 team_role_unconfirmed says the same and the request can be retried. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role, 409 role_record_scope_unsupported for a role limited to a unit or to assigned records (refused until record scope is enforced). Body at most 1024 bytes.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -1163,6 +1174,155 @@ export function GET() {
         description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 role_assignment_forbidden. Lists the role assignments and clears (role.assigned, role.cleared) and the home-unit changes (scope.home_units_changed) of every team in the workspace from the last seven days, newest first: time, kind, action, the affected user ids, the role name (null for home-unit changes) and the actor's display name only. At most the latest 100 of each kind are read; truncated is true when 100 of a kind were read and the oldest of them is still inside the seven days. It takes no query parameters: any query key returns 400 invalid_input. Returns ${accessChangesShape}.`,
       },
       { "200": { description: accessChangesShape } },
+      { sessionOnly: true },
+    ),
+  };
+  // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.
+  const roleWriteRule =
+    "Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners and admins without company authority included, gets 403 config_forbidden.";
+  const roleBodyRule =
+    "body is a role: {name, membership (admin, recruiter or viewer), scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit|hidden-unless-approver}}, recordScope:{pipeline, candidates, tasks}, directoryRule?}. The strict role schema refuses any unknown key, membership owner (the Owner template is code and cannot be written), and any grant outside the membership's ceiling, such as a write action for viewer membership, import without imports:write or any plans action, with 400 invalid_input; nothing is stored then.";
+  const configObjectShape =
+    "{id, type, key, createdAt, archivedAt, current:{id, number, state, body, bodySha256, note, createdAt, publishedAt}|null, draft:{...}|null}";
+  const roleExample = {
+    name: "Fictional reader",
+    membership: "viewer",
+    scopes: ["candidates:read", "recruitment:read", "cvs:read"],
+    pages: ["home", "candidates", "vacancies"],
+    actions: { candidates: ["view", "export"], vacancies: ["view"] },
+    fields: { candidate: { email: "read" } },
+    recordScope: { pipeline: "all", candidates: "all", tasks: "all" },
+  };
+  paths["/api/v1/roles"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the company's roles",
+        description: `${roleWriteRule} Returns the company's roles that are not archived, ordered by key, at most 100, each with its current published version and its draft. Nothing is audited. Returns {data:[${configObjectShape}]}.`,
+      },
+      { "200": { description: `{data:[${configObjectShape}]}.` } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a role draft",
+        description: `${roleWriteRule} Send {key, body, note?}: key is 1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit. A new key creates the role and its draft; the key of an existing role adds a new draft to it. ${roleBodyRule} A role that already has a draft returns 409 config_draft_exists; an archived role returns 409 config_state_conflict. Writes one config.draft_created row, listed in GET /api/v1/config-history. Body at most 512 KiB. Returns 201 {data:{objectId, versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["key", "body"],
+            additionalProperties: false,
+            properties: {
+              key: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" },
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { key: "fictional-reader", body: roleExample },
+        ),
+      },
+      { "201": { description: "{data:{objectId, versionId}}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/roles/{id}"] = {
+    put: operation(
+      [],
+      {
+        summary: "Replace a role draft's body",
+        description: `${roleWriteRule} id is the draft's version id. Send {body, note?}. ${roleBodyRule} A version of another configuration type returns 404 not_found; a version that is no longer a draft returns 409 config_state_conflict. Nothing is audited. Body at most 512 KiB. Returns {data:{versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["body"],
+            additionalProperties: false,
+            properties: {
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { body: roleExample },
+        ),
+      },
+      { "200": { description: "{data:{versionId}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/roles/{id}/publish"] = {
+    post: operation(
+      [],
+      {
+        summary: "Publish a role draft",
+        description: `${roleWriteRule} id is the draft's version id. Publishing makes the draft the role's current version, so it changes the access of every member who holds the role. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+      },
+      { "200": { description: "{data:{versionId, number}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  const authorityShape =
+    "{data:[{userId, name, level:owner|admin, areas, planAccess, suspended}]}";
+  const authorityAreas = [
+    "fields",
+    "workflows",
+    "boards",
+    "organisation",
+    "templates",
+  ];
+  paths["/api/v1/company-authority"] = {
+    get: operation(
+      [],
+      {
+        summary: "List company owners and admins",
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 authority_forbidden. Lists every company owner and admin of the workspace, owners first and then by name, with their display name, areas, plan access and whether they are suspended because they left every team of the company. Nothing is audited. Returns ${authorityShape}.`,
+      },
+      { "200": { description: authorityShape } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Grant, change or remove a person's company authority",
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else gets 403 authority_forbidden. Send {userId, level:null} to remove, {userId, level:"owner", areas:[], planAccess} or {userId, level:"admin", areas, planAccess} with areas a unique subset of ${authorityAreas.join(", ")}. Anything else, including roles, ai, plan or home-units as an area or an unknown key, returns 400 invalid_input. Removing or demoting the last company owner returns 409 last_company_owner; a grant to someone in no team of the company returns 409 not_in_company. Re-sending the grant of a suspended person who has rejoined a team restores it. Each change writes one workspace-authority activity row (workspace_authority.changed) to your team with the person's id and the grant before and after; changed is false, and nothing is written, when nothing changes. Body at most 1024 bytes. Returns {data:{changed}}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                required: ["userId", "level"],
+                additionalProperties: false,
+                properties: {
+                  userId: { type: "string", minLength: 1, maxLength: 128 },
+                  level: { type: "null" },
+                },
+              },
+              {
+                type: "object",
+                required: ["userId", "level", "areas", "planAccess"],
+                additionalProperties: false,
+                properties: {
+                  userId: { type: "string", minLength: 1, maxLength: 128 },
+                  level: { enum: ["owner", "admin"] },
+                  areas: {
+                    type: "array",
+                    uniqueItems: true,
+                    items: { enum: authorityAreas },
+                    description: "Empty for owner.",
+                  },
+                  planAccess: { type: "boolean" },
+                },
+              },
+            ],
+          },
+          {
+            userId: "fictional-member-id",
+            level: "admin",
+            areas: ["fields"],
+            planAccess: true,
+          },
+        ),
+      },
+      { "200": { description: "{data:{changed}}." } },
       { sessionOnly: true },
     ),
   };
