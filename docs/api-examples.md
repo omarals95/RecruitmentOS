@@ -372,7 +372,7 @@ See [erasure-runbook.md](erasure-runbook.md#erase-an-employee) for the steps bef
 
 ## Organisation import
 
-`POST /api/v1/org-import/dry-run` checks an .xlsx workbook and `POST /api/v1/org-import/apply` applies it. Both need a signed-in browser session; a Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The caller is a company owner, or a company admin with the organisation area, and a workbook with Employees rows also needs a role with directory create and edit. The body is the raw workbook, not JSON, at most 5 MiB.
+`POST /api/v1/org-import/dry-run` checks an .xlsx workbook and `POST /api/v1/org-import/apply` applies it. Both need a signed-in browser session; a Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool. The caller is a company owner, or a company admin with the organisation area, and a workbook with Employees rows also needs a role with directory create and edit. These checks run before the body is read. The body is the raw workbook, not JSON, at most 5 MiB.
 
 The workbook has up to three sheets, matched by name ignoring case: `Units` (Code, Name, Level, Parent code), `Positions` (Code, Title, Unit code, Manager) and `Employees` (Employee number, Name, Work email, Work phone, Position codes, Primary position). Row 1 names the columns. `Level` is the name of a current level; `Manager` is yes, no, true or false; `Position codes` are separated by commas or semicolons. A blank cell leaves the stored value unchanged. Formulas are never evaluated, and a value starting with `=`, `+`, `-`, `@`, tab or CR is stored as text and listed in `flagged`.
 
@@ -459,22 +459,22 @@ Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
 
 Its `create` and `update` count the owner rows written; a row whose new parent, unit or position does not exist yet is rejected, so run the normal apply first.
 
-| Error                          | When                                                                                                 |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| 403 `session_required`         | A Bearer token, including an MCP OAuth token                                                         |
-| 403 `org_forbidden`            | Not a company owner, or a company admin with the organisation area                                   |
-| 403 `directory_forbidden`      | Employees rows without a role that can create and edit employees                                     |
-| 403 `org_owner_required`       | `group=owner` by anyone but a company owner                                                          |
-| 403 `org_import_forbidden`     | Apply by a role with none of `candidates:write`, `recruitment:write`, `cvs:write` or `imports:write` |
-| 415 `xlsx_required`            | Another content type                                                                                 |
-| 413 `import_too_large`         | A body over 5 MiB                                                                                    |
-| 422 `import_unreadable`        | Not a readable .xlsx, ZIP64 or encrypted, or an unsafe entry name such as `../x.xml`                 |
-| 422 `import_archive_too_large` | More than 2,000 archive entries or 50 MiB declared uncompressed                                      |
-| 422 `import_too_many_rows`     | More than 20,000 rows below the headers                                                              |
-| 422 `import_columns_missing`   | A present sheet without one of its columns                                                           |
-| 422 `import_empty`             | No rows to import                                                                                    |
-| 400 `invalid_input`            | Apply without a 64-character `sha256`, with a `group` other than `owner`, or with another query key  |
-| 409 `import_file_changed`      | The body is not the file whose `sha256` was sent; run the dry run again                              |
+| Error                          | When                                                                                                                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 403 `session_required`         | A Bearer token, including an MCP OAuth token                                                                                                                                     |
+| 403 `org_forbidden`            | Not a company owner, or a company admin with the organisation area                                                                                                               |
+| 403 `directory_forbidden`      | Employees rows without a role that can create and edit employees                                                                                                                 |
+| 403 `org_owner_required`       | `group=owner` by anyone but a company owner                                                                                                                                      |
+| 403 `org_import_forbidden`     | Apply by a role with none of `candidates:write`, `recruitment:write`, `cvs:write` or `imports:write`                                                                             |
+| 415 `xlsx_required`            | Another content type                                                                                                                                                             |
+| 413 `import_too_large`         | A body over 5 MiB                                                                                                                                                                |
+| 422 `import_unreadable`        | Not a readable .xlsx, ZIP64 or encrypted, an unsafe entry name such as `../x.xml`, or a local entry that does not match the central directory or inflates past its declared size |
+| 422 `import_archive_too_large` | More than 2,000 archive entries or 50 MiB declared uncompressed                                                                                                                  |
+| 422 `import_too_many_rows`     | More than 20,000 rows below the headers                                                                                                                                          |
+| 422 `import_columns_missing`   | A present sheet without one of its columns                                                                                                                                       |
+| 422 `import_empty`             | No rows to import                                                                                                                                                                |
+| 400 `invalid_input`            | Apply without a 64-character `sha256`, with a `group` other than `owner`, or with another query key                                                                              |
+| 409 `import_file_changed`      | The body is not the file whose `sha256` was sent; run the dry run again                                                                                                          |
 
 ## Your access and the Admin portal reads
 
