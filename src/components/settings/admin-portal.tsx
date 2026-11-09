@@ -14,6 +14,7 @@ import {
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { adminTabs, type AdminTabKey } from "./admin-tabs";
+import { EmployeesTab } from "./employees-tab";
 import { RolesTab } from "./roles-tab";
 
 /** GET /api/v1/me/access. */
@@ -73,8 +74,9 @@ const accessActions: Record<string, string> = {
 };
 const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
+type TeamTabKey = Exclude<AdminTabKey, "roles" | "employees" | "history">;
 const teamPanels: Record<
-  Exclude<AdminTabKey, "roles" | "history">,
+  TeamTabKey,
   { title: string; text: string; href: string; link: string }
 > = {
   members: {
@@ -195,6 +197,8 @@ export function AdminPortalView({
             </>
           ) : current.key === "roles" ? (
             <RolesTab onAccessChanged={onAccessChanged} />
+          ) : current.key === "employees" ? (
+            <EmployeesTab />
           ) : (
             <TeamPanel tab={current.key} />
           )}
@@ -213,11 +217,7 @@ function NoAccess() {
 }
 
 /** Team tabs link to the existing settings pages, which keep their own guards. */
-function TeamPanel({
-  tab,
-}: {
-  tab: Exclude<AdminTabKey, "roles" | "history">;
-}) {
+function TeamPanel({ tab }: { tab: TeamTabKey }) {
   const panel = teamPanels[tab];
   return (
     <section className="panel">
