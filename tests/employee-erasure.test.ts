@@ -29,6 +29,7 @@ import {
   archiveEmployee,
   type Employee,
 } from "@/lib/directory";
+import { addAssignment } from "@/lib/assignments";
 import { eraseEmployee } from "@/lib/employee-erasure";
 import { createOrgLevel, createOrgUnit } from "@/lib/org";
 import type { Principal } from "@/lib/principal";
@@ -1280,6 +1281,87 @@ describe("employee erasure and retention under the split runtime roles", () => {
       const listed = await listEmployees(owner, { search: "SRCH" });
       for (const row of listed.data)
         expect(row.retentionClass).toBe("standard");
+    });
+  });
+
+  // R2a-18 (job 060): erasing the employee of a former member removes that user's assignments.
+  describe("record assignments of the linked user", () => {
+    let vacancy: string;
+    let former: Principal;
+    let formerEmployee: Employee, currentEmployee: Employee;
+    const assignments = () =>
+      look<{ team_id: string; record_id: string; user_id: string }>(
+        "SELECT team_id, record_id, user_id FROM app.record_assignments ORDER BY user_id",
+      );
+
+    beforeAll(async () => {
+      former = await seedIdentity(await harness.asOwner(), {
+        userId: "ee-person-former",
+        teamId: "ee-team-a",
+        role: "viewer",
+      });
+      [{ id: vacancy }] = (await sqlAs(
+        owner,
+        `INSERT INTO app.records(team_id,kind,data,created_by) VALUES ('ee-team-a','vacancy','{"title":"Fictional assigned vacancy"}','ee-owner') RETURNING id::text AS id`,
+      )) as { id: string }[];
+      for (const userId of [former.userId, people[3]])
+        expect(
+          await addAssignment(owner, {
+            recordId: vacancy,
+            userId,
+            relation: "interviewer",
+          }),
+        ).toEqual({ changed: true });
+      formerEmployee = await employee(owner);
+      await linkEmployeeUser(owner, formerEmployee.id, {
+        userId: former.userId,
+      });
+      currentEmployee = await employee(owner);
+      await linkEmployeeUser(owner, currentEmployee.id, { userId: people[3] });
+      // The former member leaves team A, the only team they belonged to.
+      await look("DELETE FROM auth.member WHERE user_id = $1", [former.userId]);
+    });
+
+    it("removes a former member's assignments and keeps a current member's, with no extra activity row", async () => {
+      expect(await assignments()).toEqual([
+        { team_id: "ee-team-a", record_id: vacancy, user_id: people[3] },
+        { team_id: "ee-team-a", record_id: vacancy, user_id: former.userId },
+      ]);
+      for (const [target, kept] of [
+        [formerEmployee, [people[3]]],
+        [currentEmployee, [people[3]]],
+      ] as const) {
+        const earlier = new Set((await activity()).map((row) => row.id));
+        const result = await eraseSql(owner, target.id, target.displayName);
+        expect(Object.keys(result!).sort()).toEqual([
+          "alreadyErased",
+          "erasedAt",
+          "erasureId",
+          "removed",
+        ]);
+        expect(result!.removed).toEqual({
+          positionRows: 0,
+          activityRedacted: expect.any(Number),
+          userLinks: 1,
+        });
+        expect((await assignments()).map((row) => row.user_id)).toEqual(kept);
+        const added = (await activity()).filter((row) => !earlier.has(row.id));
+        expect(added.map((row) => row.action).sort()).toEqual([
+          "employee.erased",
+          "scope.home_units_changed",
+        ]);
+        expect(
+          Object.keys(
+            added.find((row) => row.action === "employee.erased")!.metadata,
+          ).sort(),
+        ).toEqual([
+          "activityRedacted",
+          "positionRows",
+          "source",
+          "userLinks",
+          "workspaceId",
+        ]);
+      }
     });
   });
 });

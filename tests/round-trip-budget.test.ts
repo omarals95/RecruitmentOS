@@ -13,7 +13,7 @@ import {
 import { withTeam } from "@/lib/db-team";
 import { assignMemberRole } from "@/lib/member-roles";
 import { roleScopes } from "@/lib/permissions";
-import { RECRUITER_ROLE } from "@/domain/config-defaults";
+import { HIRING_MANAGER_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
 import { bootstrapTeam, createRecord, listRecords } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { RecordDto } from "@/domain/records";
@@ -512,6 +512,136 @@ describe("database round trips per request", () => {
       );
       expect(page.rows).toHaveLength(25);
       expect(page.roundTrips).toBeLessThanOrEqual(6);
+    });
+
+    // R2a-18 (job 060): the record scope and home units come back with install, and the scope
+    // predicate sits inside the existing statements, so a hiring manager's counts hold.
+    it("keeps a hiring manager's read, write and overview at 6, 11 and 15", async () => {
+      const manager = await seedIdentity(fixture.db, {
+        userId: "budget-hiring-manager",
+        teamId: owner.teamId,
+        role: "recruiter",
+      });
+      const { body: template } = HIRING_MANAGER_ROLE;
+      const role = await createConfigDraft(owner, {
+        type: "role",
+        key: "budget-hiring-manager",
+        body: {
+          ...structuredClone(template),
+          name: "Fictional budget hiring manager",
+          // The overview reads tasks and onboarding as well.
+          actions: {
+            ...structuredClone(template.actions),
+            tasks: ["view"],
+            onboarding: ["view"],
+          },
+        },
+      });
+      await publishConfigVersion(owner, role.versionId);
+      await assignMemberRole(
+        owner,
+        { userId: manager.userId, roleObjectId: role.objectId },
+        new Headers(),
+      );
+      // A home unit in the middle of the tree: tree[3][0] and tree[4][0] are below tree[2][0].
+      await withTeam(owner, async (tx, access) => {
+        const [desk] = (
+          await tx.execute<{ id: string }>(sql`
+            insert into app.positions(workspace_id, org_unit_id, title, code)
+            values (${access.workspaceId}::uuid, ${tree[2][0]}::uuid, 'Fictional budget manager desk', 'BUDGET-HM-DESK') returning id`)
+        ).rows;
+        const [person] = (
+          await tx.execute<{ id: string }>(sql`
+            insert into app.employees(workspace_id, display_name, employee_number, user_id)
+            values (${access.workspaceId}::uuid, 'Fictional Budget Manager', 'BUDGET-HM', ${manager.userId}) returning id`)
+        ).rows;
+        await tx.execute(sql`
+          insert into app.employee_positions(employee_id, position_id, workspace_id, "primary")
+          values (${person.id}::uuid, ${desk.id}::uuid, ${access.workspaceId}::uuid, true)`);
+      });
+      const unitVacancy = await createRecord(owner, "vacancies", {
+        data: { title: "Fictional budget unit vacancy" },
+        orgUnitId: tree[3][0],
+      });
+      const unitCandidate = await createRecord(owner, "candidates", {
+        data: { name: "Fictional Budget Unit Candidate" },
+      });
+      let unitApplication = await createRecord(owner, "applications", {
+        candidateId: unitCandidate.id,
+        vacancyId: unitVacancy.id,
+        data: { stage: "Sourced" },
+      });
+      vi.mocked(getVerifiedSession).mockResolvedValue({
+        user: { id: manager.userId, twoFactorEnabled: true },
+        session: { activeOrganizationId: manager.teamId },
+      } as never);
+      try {
+        const access = await withTeam(manager, (tx, state) =>
+          Promise.resolve(state),
+        );
+        expect(access).toMatchObject({
+          roleVersionId: role.versionId,
+          recordScope: template.recordScope,
+          homeUnits: [tree[2][0]],
+        });
+        const list = await call(
+          "GET",
+          "/api/v1/applications?page=1&pageSize=25",
+          { resource: "applications" },
+        );
+        expect(list.status).toBe(200);
+        // Only the application below the manager's unit.
+        expect(
+          (list.body.data as unknown as RecordDto[]).map((row) => row.id),
+        ).toEqual([unitApplication.id]);
+        // The simple read of the cases above: a task page, tasks being scoped by the creator rule.
+        const read = await call("GET", "/api/v1/tasks?page=1&pageSize=25", {
+          resource: "tasks",
+        });
+        expect(read.status).toBe(200);
+        expect(read.body.data).toEqual([]);
+        expect(read.roundTrips).toBe(6);
+        const open = await call("GET", `/api/v1/vacancies/${unitVacancy.id}`, {
+          resource: "vacancies",
+          id: unitVacancy.id,
+        });
+        expect(open.status).toBe(200);
+        expect(open.roundTrips).toBe(6);
+        const stage = await call(
+          "PATCH",
+          `/api/v1/applications/${unitApplication.id}`,
+          { resource: "applications", id: unitApplication.id },
+          { version: unitApplication.version, data: { stage: "Screening" } },
+        );
+        expect(stage.status).toBe(200);
+        expect(stage.roundTrips).toBe(11);
+        unitApplication = stage.body.data;
+        const moved = await call(
+          "PATCH",
+          `/api/v1/vacancies/${unitVacancy.id}`,
+          { resource: "vacancies", id: unitVacancy.id },
+          { version: unitVacancy.version, orgUnitId: tree[4][0] },
+        );
+        expect(moved.status).toBe(200);
+        expect(moved.body.data).toMatchObject({ orgUnitId: tree[4][0] });
+        // Inside the 11 of a simple write: no reference or uniqueness lookup, the cascade runs in
+        // the update's own trigger and the label comes back in its RETURNING.
+        expect(moved.roundTrips).toBe(9);
+        const response = await overviewRoute(
+          new Request(`${ORIGIN}/api/v1/overview`, {
+            headers: { origin: ORIGIN, "x-team-id": manager.teamId },
+          }),
+        );
+        expect(response.status).toBe(200);
+        const timing = response.headers.get("server-timing") ?? "";
+        expect(timing).toMatch(TIMING);
+        expect(Number(TIMING.exec(timing)![1])).toBe(15);
+      } finally {
+        vi.mocked(getVerifiedSession).mockResolvedValue({
+          user: { id: owner.userId, twoFactorEnabled: true },
+          session: { activeOrganizationId: owner.teamId },
+        } as never);
+      }
     });
   });
 });

@@ -505,6 +505,34 @@ describe("OpenAPI contract", () => {
     expect(JSON.stringify(record.vacancyLabel)).toContain("Untitled vacancy");
   });
 
+  it("documents a vacancy's org unit on create, update and responses only (R2a-18)", () => {
+    const record = document.components.schemas.RecordDto.properties!;
+    for (const key of ["orgUnitId", "orgUnitLabel"])
+      expect(JSON.stringify(record[key]), key).toContain(
+        "Vacancies with an org unit only",
+      );
+    const input = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method].requestBody);
+    for (const [path, method] of [
+      ["/api/v1/vacancies", "post"],
+      ["/api/v1/vacancies/{id}", "patch"],
+    ]) {
+      expect(input(path, method)).toContain('"orgUnitId"');
+      expect(input(path, method)).toContain("400 invalid_reference");
+    }
+    for (const resource of Object.keys(resourceToKind).filter(
+      (name) => name !== "vacancies",
+    )) {
+      expect(input(`/api/v1/${resource}`, "post"), resource).not.toContain(
+        "orgUnitId",
+      );
+      expect(
+        input(`/api/v1/${resource}/{id}`, "patch"),
+        resource,
+      ).not.toContain("orgUnitId");
+    }
+  });
+
   it("documents hidden export columns and search groups left out by role (R2a-08)", () => {
     for (const resource of EXPORT_RESOURCES)
       expect(
@@ -697,12 +725,12 @@ describe("OpenAPI contract", () => {
       expect(text("/api/v1/roles", "post")).toContain(code);
     expect(text("/api/v1/roles/{id}", "put")).toContain("not_found");
     expect(text("/api/v1/roles/{id}/publish", "post")).toContain("not_found");
-    for (const code of [
-      "role_assignment_forbidden",
-      "scopedRolesHidden",
-      "available",
-    ])
+    for (const code of ["role_assignment_forbidden", "available"])
       expect(text("/api/v1/teams/member-roles", "get")).toContain(code);
+    // R2a-18 (job 060): roles of any record scope can be assigned.
+    for (const method of ["get", "post"])
+      for (const gone of ["scopedRolesHidden", "role_record_scope_unsupported"])
+        expect(text("/api/v1/teams/member-roles", method)).not.toContain(gone);
     const assign = document.paths["/api/v1/teams/member-roles"].post;
     expect(JSON.stringify(assign)).toContain("team_role_unconfirmed");
     expect(Object.keys(assign.responses)).toContain("503");

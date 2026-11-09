@@ -193,6 +193,8 @@ describe("signed tenant context under separate nonowner data and identity roles"
     versions: {},
     documents: {},
     roleVersionId: "00000000-0000-4000-8000-000000000101",
+    recordScope: { pipeline: "all", candidates: "all", tasks: "all" },
+    homeUnits: [],
   };
 
   beforeAll(async () => {
@@ -920,6 +922,8 @@ describe("signed tenant context under separate nonowner data and identity roles"
     versions: {},
     documents: {},
     roleVersionId: "00000000-0000-4000-8000-000000000103",
+    recordScope: { pipeline: "all", candidates: "all", tasks: "all" },
+    homeUnits: [],
   });
 
   it("passes the access state install derived to withTeam's work", async () => {
@@ -1947,6 +1951,185 @@ describe("signed tenant context under separate nonowner data and identity roles"
       expect((await direct(moved)).stored).toEqual({
         scopes: narrowScopes,
         role_version_id: narrowRole.versionId,
+      });
+    });
+
+    // R2a-18 (job 060): the record scope and the home units come back in the same statement.
+    describe("record scope and home units (0037)", () => {
+      let scoped: Principal, failing: Principal;
+      let scopedRole: { objectId: string; versionId: string };
+      let units: string[];
+      const recordScope = {
+        pipeline: "unit",
+        candidates: "assigned",
+        tasks: "all",
+      } as const;
+      /** The stored record scope and home units of the principal's committed install. */
+      async function derived(p: Principal) {
+        const client = await asData();
+        await client.exec("BEGIN");
+        let result: Record<string, unknown>, xid: string;
+        try {
+          const claim = await claimFor(p);
+          xid = claim.xid;
+          result = (await installed(claim, "{}")) as Record<string, unknown>;
+          await client.exec("COMMIT");
+        } catch (error) {
+          await client.exec("ROLLBACK");
+          throw error;
+        }
+        await harness.asSuperuser();
+        const { rows } = await harness.client.query<Record<string, unknown>>(
+          "SELECT scopes, role_version_id, record_scope, home_units FROM tenant_context.contexts WHERE xid::text = $1",
+          [xid],
+        );
+        return { result, stored: rows[0] };
+      }
+      /** As the owner: the role object's current version, archive time or body changed in place. */
+      const asOwnerSql = async (statement: string) => {
+        await harness.asOwner();
+        await harness.client.exec(statement);
+      };
+
+      beforeAll(async () => {
+        const db = await harness.asOwner();
+        scoped = await seedIdentity(db, {
+          userId: "ctx-scope-member",
+          teamId: "ctx-a",
+          role: "recruiter",
+        });
+        failing = await seedIdentity(db, {
+          userId: "ctx-scope-failing",
+          teamId: "ctx-a",
+          role: "recruiter",
+        });
+        scopedRole = await publish("ctx-scoped", {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional scoped recruiter",
+          recordScope,
+        });
+        await assign(scoped, scopedRole.objectId);
+        await assign(failing, scopedRole.objectId);
+        // Two units held through two current positions, a third through an ended one, and a fourth
+        // through an archived position: only the first two are home units.
+        units = await withTeam(ownerA, async (tx, access) => {
+          const level = await tx.execute<{ id: string }>(
+            sql`insert into app.org_levels(workspace_id, name, depth) values (${access.workspaceId}::uuid, 'Fictional scope level', 0) returning id`,
+          );
+          const { rows } = await tx.execute<{ id: string }>(
+            sql`insert into app.org_units(workspace_id, level_id, name, code)
+              select ${access.workspaceId}::uuid, ${level.rows[0].id}::uuid, 'Fictional scope unit ' || g, 'CTX-SCOPE-' || g
+              from generate_series(1, 4) g order by g returning id`,
+          );
+          return rows.map((row) => row.id);
+        });
+        await withTeam(ownerA, async (tx, access) => {
+          const positions = await tx.execute<{ id: string }>(
+            sql`insert into app.positions(workspace_id, org_unit_id, title, code)
+              select ${access.workspaceId}::uuid, u, 'Fictional scope desk ' || n, 'CTX-DESK-' || n
+              from unnest(${`{${units.join(",")}}`}::uuid[]) with ordinality t(u, n) order by n returning id`,
+          );
+          const [employee] = (
+            await tx.execute<{ id: string }>(
+              sql`insert into app.employees(workspace_id, display_name, employee_number, user_id) values (${access.workspaceId}::uuid, 'Fictional Scope Member', 'CTX-EMP-1', ${scoped.userId}) returning id`,
+            )
+          ).rows;
+          const desks = positions.rows.map((row) => row.id);
+          await tx.execute(
+            sql`insert into app.employee_positions(employee_id, position_id, workspace_id, "primary")
+              select ${employee.id}::uuid, p, ${access.workspaceId}::uuid, n = 1
+              from unnest(${`{${desks.join(",")}}`}::uuid[]) with ordinality t(p, n)`,
+          );
+          await tx.execute(
+            sql`update app.employee_positions set valid_to = now() where employee_id = ${employee.id}::uuid and position_id = ${desks[2]}::uuid`,
+          );
+          await tx.execute(
+            sql`update app.positions set archived_at = now() where id = ${desks[3]}::uuid`,
+          );
+        });
+      });
+
+      it("returns and stores a scoped role's record scope and the sorted home units, never failing it closed", async () => {
+        const home = [...units.slice(0, 2)].sort();
+        const { result, stored } = await derived(scoped);
+        expect(result).toMatchObject({
+          scopes: roleScopes("recruiter"),
+          roleVersionId: scopedRole.versionId,
+          recordScope,
+          homeUnits: home,
+        });
+        expect(stored).toEqual({
+          scopes: roleScopes("recruiter"),
+          role_version_id: scopedRole.versionId,
+          record_scope: recordScope,
+          home_units: home,
+        });
+        // withTeam passes both to the work, for sessions and tokens alike.
+        const token = await seedApiToken(await harness.asOwner(), scoped);
+        for (const p of [scoped, token])
+          expect(
+            await withTeam(p, (tx, access) => Promise.resolve(access)),
+            p.authType,
+          ).toMatchObject({ recordScope, homeUnits: home });
+        // A member without a row: all in every group, and no linked employee means no home units.
+        expect((await derived(plain)).stored).toEqual({
+          scopes: roleScopes("recruiter"),
+          role_version_id: RECRUITER_ROLE.versionId,
+          record_scope: { pipeline: "all", candidates: "all", tasks: "all" },
+          home_units: [],
+        });
+      });
+
+      it("still fails closed for an unpublished, malformed or archived role, with no record scope", async () => {
+        const closed = {
+          scopes: [],
+          role_version_id: null,
+          record_scope: null,
+          home_units: [],
+        };
+        const { objectId, versionId } = scopedRole;
+        // Unpublished: the object names no current version.
+        await asOwnerSql(
+          `UPDATE app.config_objects SET current_version_id = NULL WHERE id = '${objectId}'`,
+        );
+        expect((await derived(failing)).stored, "unpublished").toEqual(closed);
+        expect((await derived(failing)).result).toMatchObject({
+          scopes: [],
+          roleVersionId: null,
+          recordScope: null,
+          homeUnits: [],
+        });
+        // Malformed: a published body whose record scope or scopes install cannot use.
+        await asOwnerSql(
+          `UPDATE app.config_objects SET current_version_id = '${versionId}' WHERE id = '${objectId}'`,
+        );
+        for (const [label, change] of [
+          [
+            "record scope",
+            `jsonb_set(body, '{recordScope,pipeline}', '"team"')`,
+          ],
+          ["record scope type", `jsonb_set(body, '{recordScope}', '"unit"')`],
+          ["scopes", `jsonb_set(body, '{scopes}', '"candidates:read"')`],
+        ]) {
+          await asOwnerSql(
+            `ALTER TABLE app.config_versions DISABLE TRIGGER USER; UPDATE app.config_versions SET body = ${change} WHERE id = '${versionId}'; ALTER TABLE app.config_versions ENABLE TRIGGER USER`,
+          );
+          try {
+            expect((await derived(failing)).stored, label).toEqual(closed);
+          } finally {
+            await asOwnerSql(
+              `ALTER TABLE app.config_versions DISABLE TRIGGER USER; UPDATE app.config_versions SET body = '${JSON.stringify({ ...RECRUITER_ROLE.body, name: "Fictional scoped recruiter", recordScope })}' WHERE id = '${versionId}'; ALTER TABLE app.config_versions ENABLE TRIGGER USER`,
+            );
+          }
+        }
+        expect((await derived(failing)).stored.record_scope).toEqual(
+          recordScope,
+        );
+        // Archived, last: an archived object stays archived.
+        await asOwnerSql(
+          `UPDATE app.config_objects SET archived_at = now() WHERE id = '${objectId}'`,
+        );
+        expect((await derived(failing)).stored, "archived").toEqual(closed);
       });
     });
   });

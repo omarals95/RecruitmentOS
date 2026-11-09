@@ -184,6 +184,8 @@ const expectedData = {
     ),
     // Configured member roles, written only under company owner sessions (0035).
     "app.member_roles": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+    // Record assignments, written only through the two owner-run helpers (0037).
+    "app.record_assignments": ["SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -1043,6 +1045,87 @@ describe("split runtime role template", () => {
       },
       { fn: helper, owned: true, definer: true, path: true },
     ]);
+  });
+
+  it("grants the data role only reads of record assignments and the two helpers, the identity role nothing, and refuses forged assignment activity (0037)", async () => {
+    const writes = [
+      "INSERT INTO app.record_assignments(team_id,record_id,user_id,relation) VALUES ('fictional',gen_random_uuid(),'fictional','assignee')",
+      "UPDATE app.record_assignments SET relation = relation",
+      "DELETE FROM app.record_assignments",
+      "TRUNCATE app.record_assignments",
+    ];
+    await harness.dataDb();
+    await expectDenied(writes);
+    await harness.identityDb();
+    await expectDenied([
+      "SELECT * FROM app.record_assignments",
+      ...writes,
+      "SELECT tenant_context.add_assignment(gen_random_uuid(), 'fictional', 'assignee')",
+      "SELECT tenant_context.remove_assignment(gen_random_uuid(), 'fictional', 'assignee')",
+    ]);
+    // The same fictional company owner as the cases above; seeding is idempotent.
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    for (const action of ["assignment.added", "assignment.removed"])
+      await expect(
+        harness.dataDb().then((db) =>
+          withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+            await installTenantContext(tx, owner, snapshot);
+            return tx.execute(
+              sql.raw(
+                `INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary,metadata) VALUES ('${owner.teamId}',gen_random_uuid(),'${owner.userId}','session','${action}','assignment','Forged','{}')`,
+              ),
+            );
+          }),
+        ),
+        action,
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+    await harness.asSuperuser();
+    const helpers = [
+      "tenant_context.add_assignment(uuid,text,text)",
+      "tenant_context.remove_assignment(uuid,text,text)",
+    ];
+    const internal = [
+      "tenant_context.change_assignment(uuid,text,text,boolean)",
+      "app.maintain_record_scope()",
+    ];
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    for (const fn of helpers) {
+      expect(await execute(splitRoles.data, fn), fn).toBe(true);
+      expect(await execute(splitRoles.identity, fn), fn).toBe(false);
+      expect(await execute("public", fn), fn).toBe(false);
+    }
+    for (const fn of internal)
+      for (const grantee of [...roles, "public"])
+        expect(await execute(grantee, fn), `${grantee} ${fn}`).toBe(false);
+    expect(
+      (
+        await harness.client.query<{
+          owned: boolean;
+          definer: boolean;
+          path: boolean;
+        }>(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) AS path
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[])`,
+          [[...helpers, ...internal]],
+        )
+      ).rows,
+    ).toEqual(
+      [...helpers, ...internal].map(() => ({
+        owned: true,
+        definer: true,
+        path: true,
+      })),
+    );
   });
 });
 

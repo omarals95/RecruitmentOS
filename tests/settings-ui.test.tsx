@@ -14,7 +14,6 @@ import {
   ConfiguredRolesNotice,
   MemberActions,
   MemberRoleControl,
-  SCOPED_ROLES_HIDDEN,
   TeamSettings,
 } from "../src/components/settings/team-settings";
 import { TokenSettings } from "../src/components/settings/token-settings";
@@ -618,28 +617,43 @@ describe("configured role control", () => {
     expect(markup).not.toMatch(/<select|<button/);
   });
 
-  it("says when roles limited to a unit or to assigned records are left out", () => {
-    expect(
-      renderToStaticMarkup(
-        <ConfiguredRolesNotice error="" scopedRolesHidden />,
-      ),
-    ).toBe(
-      '<p class="muted">Roles limited to a unit or to assigned records are not offered yet.</p>',
+  // R2a-18 (job 060): roles limited to a unit or to assigned records are offered like any other.
+  it("offers hiring manager and interviewer roles in the select", () => {
+    const markup = renderToStaticMarkup(
+      <MemberRoleControl
+        name="Fictional Member"
+        teamOwner={false}
+        assignment={null}
+        roles={[
+          {
+            roleObjectId: "fictional-role-hm",
+            name: "Fictional hiring manager",
+            membership: "recruiter",
+          },
+          {
+            roleObjectId: "fictional-role-int",
+            name: "Fictional interviewer",
+            membership: "viewer",
+          },
+        ]}
+        busy={false}
+        onSave={() => {}}
+      />,
     );
-    expect(SCOPED_ROLES_HIDDEN).toBe(
-      "Roles limited to a unit or to assigned records are not offered yet.",
+    expect(markup).toContain(
+      '<option value="fictional-role-hm">Fictional hiring manager (recruiter)</option>',
     );
+    expect(markup).toContain(
+      '<option value="fictional-role-int">Fictional interviewer (viewer)</option>',
+    );
+  });
+
+  // R2a-18 (job 060): every role can be assigned, so the notice only reports a load error.
+  it("shows only a load error above the members table", () => {
+    expect(renderToStaticMarkup(<ConfiguredRolesNotice error="" />)).toBe("");
     expect(
       renderToStaticMarkup(
-        <ConfiguredRolesNotice error="" scopedRolesHidden={false} />,
-      ),
-    ).toBe("");
-    expect(
-      renderToStaticMarkup(
-        <ConfiguredRolesNotice
-          error="Only a company owner can assign roles."
-          scopedRolesHidden
-        />,
+        <ConfiguredRolesNotice error="Only a company owner can assign roles." />,
       ),
     ).toContain('role="alert"');
   });

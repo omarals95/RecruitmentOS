@@ -27,13 +27,14 @@ import {
   RoleEditor,
   RoleTemplateView,
   RolesList,
-  SCOPED_ROLES_LATER,
   roleKeyFor,
   saveRoleDraft,
 } from "../src/components/settings/roles-tab";
 import type { RoleBody } from "../src/domain/config";
 import {
   ADMIN_ROLE,
+  HIRING_MANAGER_ROLE,
+  INTERVIEWER_ROLE,
   OWNER_ROLE,
   RECRUITER_ROLE,
   VIEWER_ROLE,
@@ -490,7 +491,13 @@ describe("roles and permissions tab", () => {
       "All records",
     ])
       expect(owner, text).toContain(text);
-    for (const template of [ADMIN_ROLE, RECRUITER_ROLE, VIEWER_ROLE]) {
+    for (const template of [
+      ADMIN_ROLE,
+      RECRUITER_ROLE,
+      VIEWER_ROLE,
+      HIRING_MANAGER_ROLE,
+      INTERVIEWER_ROLE,
+    ]) {
       const markup = renderToStaticMarkup(
         <RoleTemplateView template={template} />,
       );
@@ -498,6 +505,13 @@ describe("roles and permissions tab", () => {
       expect(markup).not.toMatch(/<input|<select|<textarea/);
       expect(markup).not.toContain("cannot be edited or copied");
     }
+    // R2a-18 (job 060): the scoped templates name their record scope in the editor's words.
+    expect(
+      renderToStaticMarkup(<RoleTemplateView template={HIRING_MANAGER_ROLE} />),
+    ).toContain("Candidates: My org unit and below");
+    expect(
+      renderToStaticMarkup(<RoleTemplateView template={INTERVIEWER_ROLE} />),
+    ).toContain("Candidates: Assigned records");
   });
 
   it("uses the Owner template only for display in the new components", () => {
@@ -513,13 +527,18 @@ describe("roles and permissions tab", () => {
     }
   });
 
-  it("lists the four built-in templates without Hiring manager or Interviewer, with the scoped-roles note", () => {
+  it("lists the six built-in templates, Hiring manager and Interviewer included", () => {
     const markup = list([]);
-    for (const name of ["Owner", "Admin", "Recruiter", "Viewer"])
+    for (const name of [
+      "Owner",
+      "Admin",
+      "Recruiter",
+      "Viewer",
+      "Hiring manager",
+      "Interviewer",
+    ])
       expect(markup).toContain(`>View ${name} template</button>`);
-    expect(markup).not.toContain("Hiring manager");
-    expect(markup).not.toContain("Interviewer");
-    expect(markup).toContain(SCOPED_ROLES_LATER);
+    expect(markup).not.toContain("later release");
     expect(markup).toContain(
       '<p role="status">No company roles yet. Copy a template to start.</p>',
     );
@@ -532,7 +551,7 @@ describe("roles and permissions tab", () => {
     expect(failed).not.toContain("<table");
   });
 
-  it("shows each company role's state, the scoped mark and its actions", () => {
+  it("shows each company role's state and its actions, with no mark on a scoped role", () => {
     const version = (number: number | null, body: RoleBody) => ({
       id: `00000000-0000-4000-a000-00000000000${number ?? 9}`,
       number,
@@ -586,12 +605,10 @@ describe("roles and permissions tab", () => {
     expect(rows[0]).toContain(">Publish</button>");
     expect(rows[1]).toContain("Published (version 2), draft in progress");
     expect(rows[1]).toContain(">Edit draft</button>");
-    expect(rows[2]).toContain("Published (version 1)");
-    expect(rows[2]).toContain("Cannot be assigned yet");
+    expect(rows[2]).toContain('data-label="State">Published (version 1)<');
     expect(rows[2]).toContain(">New draft</button>");
     expect(rows[2]).not.toContain("Edit draft");
-    for (const row of rows.slice(0, 2))
-      expect(row).not.toContain("Cannot be assigned yet");
+    for (const row of rows) expect(row).not.toContain("badge");
   });
 
   it("derives a valid role key from the name", () => {
@@ -601,7 +618,7 @@ describe("roles and permissions tab", () => {
     expect(roleKeyFor("!!!")).toBe("");
   });
 
-  it("edits pages with a screen, actions without plans or erase, field rules on system fields and All records only", () => {
+  it("edits pages with a screen, actions without plans or erase, field rules on system fields and the record scope", () => {
     const markup = editor(RECRUITER_ROLE.body as RoleBody);
     expect(markup).not.toContain('role="alert"');
     const pages = fieldset(markup, "Pages");
@@ -639,31 +656,47 @@ describe("roles and permissions tab", () => {
     for (const option of ["Default", "Hidden", "Read only", "Can edit"])
       expect(candidates).toContain(`>${option}</option>`);
     expect(markup).not.toContain("Hidden unless approver");
-    // Record scope: each group offers only All records.
+    // Record scope: each group offers the three scopes, the role's own selected (R2a-18).
     const scope = fieldset(markup, "Record scope");
     expect(scope.match(/<select/g)).toHaveLength(3);
     expect(scope.match(/<option[^>]*>[^<]*<\/option>/g)).toEqual(
-      Array(3).fill('<option value="all" selected="">All records</option>'),
+      Array(3)
+        .fill([
+          '<option value="all" selected="">All records</option>',
+          '<option value="unit">My org unit and below</option>',
+          '<option value="assigned">Assigned records</option>',
+        ])
+        .flat(),
     );
-    expect(scope).toContain(
-      "Roles limited to a unit or to assigned records arrive in a later release.",
-    );
+    for (const label of [
+      "Vacancies, applications, interviews, offers and onboarding",
+      "Candidates",
+      "Recruitment tasks",
+    ])
+      expect(scope).toContain(`<span>${label}</span><select>`);
+    expect(scope).not.toContain("later release");
     // Membership is text, never a control.
     expect(markup).toContain("Membership: Recruiter.");
     expect(markup).not.toMatch(/<option[^>]*>(Owner|Admin|Viewer)<\/option>/);
   });
 
-  it("shows a held hidden-unless-approver rule and a scoped draft's notice", () => {
+  it("shows a held hidden-unless-approver rule and keeps a scoped draft's record scope", () => {
     const markup = editor(
       copyOf(RECRUITER_ROLE.body as RoleBody, {
         fields: { offer: { amount: "hidden-unless-approver" } },
-        recordScope: { pipeline: "unit", candidates: "unit", tasks: "unit" },
+        recordScope: { pipeline: "unit", candidates: "assigned", tasks: "all" },
       }),
     );
     expect(fieldset(markup, "Field rules for Offers")).toContain(
       '<option value="hidden-unless-approver" selected="">Hidden unless approver</option>',
     );
-    expect(markup).toContain("Saving sets every group to All records");
+    expect(markup).not.toContain("Saving sets every group to All records");
+    const selected = [
+      ...fieldset(markup, "Record scope").matchAll(
+        /<option value="(\w+)" selected="">/g,
+      ),
+    ].map((match) => match[1]);
+    expect(selected).toEqual(["unit", "assigned", "all"]);
   });
 
   // R2a-16 (job 058): checkboxes no service checks yet are labelled, never hidden.
