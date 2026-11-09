@@ -42,15 +42,6 @@ export const configOptionValue = cleanText(1, 200);
 const envelope = z
   .object({ label: configLabel, help: configHelpText.optional() })
   .strict();
-export const configBodySchemas = {
-  "kind-schema": envelope,
-  workflow: envelope,
-  board: envelope,
-  role: envelope,
-  template: envelope,
-  "task-board": envelope,
-} satisfies Record<ConfigType, z.ZodType>;
-export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;
 
 /** Record kinds with a kind schema; buckets, task fields, saved views and comments have none. */
 export const CONFIGURABLE_KINDS = [
@@ -275,12 +266,21 @@ const uniqueList = <T extends string>(values: readonly [T, ...T[]]) =>
     .array(z.enum(values))
     .max(values.length * 4)
     .transform((list) => [...new Set(list)]);
+/** Row keys outside data that a field rule of any kind may name; redact applies them to the row. */
+export const TOP_LEVEL_FIELD_KEYS = [
+  "importMeta",
+  "legacyId",
+  "label",
+  "candidateLabel",
+  "vacancyLabel",
+] as const;
 const fieldKey = (kind: RecordKind) =>
   z
     .string()
     .refine(
       (key) =>
         Object.hasOwn(recordDataSchemas[kind].shape, key) ||
+        (TOP_LEVEL_FIELD_KEYS as readonly string[]).includes(key) ||
         uuidSchema.safeParse(key).success,
       `Not a field of ${kind}.`,
     );
@@ -397,3 +397,14 @@ export type RoleBody = Omit<z.output<typeof roleBodySchema>, "membership"> & {
 export function isOwnerTemplateBody(body: unknown): boolean {
   return ownerTemplateSchema.safeParse(body).success;
 }
+
+// Role drafts carry real role bodies; every other type keeps the envelope until its own item.
+export const configBodySchemas = {
+  "kind-schema": envelope,
+  workflow: envelope,
+  board: envelope,
+  role: roleBodySchema,
+  template: envelope,
+  "task-board": envelope,
+} satisfies Record<ConfigType, z.ZodType>;
+export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;

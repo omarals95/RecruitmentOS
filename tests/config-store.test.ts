@@ -27,6 +27,7 @@ import {
   updateConfigDraft,
   type ConfigDocumentRow,
 } from "@/lib/config-store";
+import { HIRING_MANAGER_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
 import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { installTenantContext, type TenantAccess } from "@/lib/tenant-context";
@@ -766,7 +767,13 @@ describe("versioned configuration store under the split runtime roles", () => {
           ),
         "42501",
       );
-      const role = await draft(owner, "role", "hiring-manager");
+      const role = await run(() =>
+        createConfigDraft(owner, {
+          type: "role",
+          key: "hiring-manager",
+          body: HIRING_MANAGER_ROLE.body,
+        }),
+      );
       expect(await run(() => publishConfigVersion(owner, role.versionId))).toBe(
         1,
       );
@@ -1549,7 +1556,7 @@ describe("configuration body schemas", () => {
   });
 
   it("refuses any key beyond the envelope, so no record id or value is stored", () => {
-    for (const type of CONFIG_TYPES) {
+    for (const type of CONFIG_TYPES.filter((type) => type !== "role")) {
       expect(configBodySchemas[type].parse({ label: " Fictional " })).toEqual({
         label: "Fictional",
       });
@@ -1560,5 +1567,18 @@ describe("configuration body schemas", () => {
         }).success,
       ).toBe(false);
     }
+    // A role body is strict on every level too (R2a-10).
+    expect(
+      configBodySchemas.role.parse({
+        ...RECRUITER_ROLE.body,
+        name: " Fictional ",
+      }),
+    ).toEqual({ ...RECRUITER_ROLE.body, name: "Fictional" });
+    expect(
+      configBodySchemas.role.safeParse({
+        ...RECRUITER_ROLE.body,
+        recordId: "00000000-0000-4000-a000-000000000009",
+      }).success,
+    ).toBe(false);
   });
 });

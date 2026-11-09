@@ -9,6 +9,8 @@ import {
   GRANTABLE_ADMIN_AREAS,
   READ_ACTIONS,
   TEAM_ADMIN_RESOURCES,
+  TOP_LEVEL_FIELD_KEYS,
+  roleBodySchema,
   type Action,
   type ActionResource,
   type AdminArea,
@@ -29,6 +31,8 @@ import {
 /**
  * The Principal, the access state tenant_context.install returned for this transaction and the
  * caller's role body. scopes is the intersection of every layer, computed once by accessContext().
+ * An access state built without roleVersionId (never one install returned) keeps the built-in
+ * template of principal.role.
  */
 export type AccessContext = {
   principal: Principal;
@@ -40,8 +44,12 @@ export type AccessContext = {
     | "companyLevel"
     | "companyAreas"
     | "versions"
-  >;
-  /** Null for a team role outside the four known roles: every request is then refused. */
+  > &
+    Partial<Pick<TenantAccess, "roleVersionId" | "documents">>;
+  /**
+   * Null for a team role outside the four known roles, or an assigned role install or the strict
+   * schema could not use: every request is then refused.
+   */
   role: RoleBody | null;
   scopes: Scope[];
   channel?: "mcp";
@@ -83,6 +91,29 @@ const RECORD_KIND_GROUPS: Partial<
 };
 
 /**
+ * The role the access state names, with no statement: the built-in template of member.role for its
+ * fixed version id, else the verified document of that version parsed with the strict role schema.
+ * A null or unknown id, or a body the schema refuses, is no role.
+ */
+function assignedRole(
+  principal: Principal,
+  access: AccessContext["access"],
+): RoleBody | null {
+  const { roleVersionId, documents = {} } = access;
+  if (roleVersionId === undefined)
+    return known(principal.role) ? builtInRoleFor(principal.role).body : null;
+  if (roleVersionId === null || !known(access.memberRole)) return null;
+  const template = builtInRoleFor(access.memberRole);
+  if (roleVersionId === template.versionId) return template.body;
+  const document = Object.hasOwn(documents, roleVersionId)
+    ? documents[roleVersionId]
+    : undefined;
+  if (document?.type !== "role") return null;
+  const parsed = roleBodySchema.safeParse(document.body);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
  * The context for one transaction. Effective scopes are the intersection of the team role, the
  * stored membership, the role body's membership and scopes, the principal's scopes (a token's
  * stored scopes as effectiveTokenScopes() intersected them) and the scopes install verified.
@@ -93,9 +124,7 @@ export function accessContext(
   access: AccessContext["access"],
   options: { role?: RoleBody; channel?: "mcp" } = {},
 ): AccessContext {
-  const role =
-    options.role ??
-    (known(principal.role) ? builtInRoleFor(principal.role).body : null);
+  const role = options.role ?? assignedRole(principal, access);
   const scopes =
     role &&
     known(principal.role) &&
@@ -293,9 +322,10 @@ export function scopeFilter(ctx: AccessContext, kind: RecordKind): SQL[] {
 }
 
 /**
- * A copy of the row without the fields the caller may not see, in data and data.customValues;
- * with explicit read rules for the kind, readOnlyFields names the read-only fields present. MCP
- * results never carry SENSITIVE_CANDIDATE_FIELDS.
+ * A copy of the row without the fields the caller may not see, in data and data.customValues, and
+ * without hidden top-level keys (importMeta, legacyId and the decorated labels); with explicit read
+ * rules for the kind, readOnlyFields names the read-only fields and keys present. MCP results never
+ * carry SENSITIVE_CANDIDATE_FIELDS.
  */
 export function redact<T extends RecordDto>(
   ctx: AccessContext,
@@ -323,15 +353,17 @@ export function redact<T extends RecordDto>(
     data.customValues = Object.fromEntries(
       Object.entries(customValues).filter(([key]) => !hidden.has(key)),
     );
+  const visible: T = { ...row, data: data as T["data"] };
+  for (const key of TOP_LEVEL_FIELD_KEYS)
+    if (hidden.has(key)) Reflect.deleteProperty(visible, key);
+  const present = (key: string) =>
+    Object.hasOwn(data, key) ||
+    ((TOP_LEVEL_FIELD_KEYS as readonly string[]).includes(key) &&
+      Object.hasOwn(visible, key));
   return {
-    ...row,
-    data: data as T["data"],
+    ...visible,
     ...(readOnly.length
-      ? {
-          readOnlyFields: readOnly
-            .filter((key) => Object.hasOwn(data, key))
-            .sort(),
-        }
+      ? { readOnlyFields: readOnly.filter(present).sort() }
       : {}),
   };
 }

@@ -628,9 +628,16 @@ describe("built-in role templates", () => {
       RECRUITER_ROLE,
       VIEWER_ROLE,
     ]);
-    // The config store keeps the minimal role envelope until R2a-10.
+    // The config store takes real role bodies since R2a-10, never the envelope or the Owner template.
+    expect(configBodySchemas.role).toBe(roleBodySchema);
     expect(configBodySchemas.role.safeParse({ label: "Role" }).success).toBe(
+      false,
+    );
+    expect(configBodySchemas.role.safeParse(RECRUITER_ROLE.body).success).toBe(
       true,
+    );
+    expect(configBodySchemas.role.safeParse(OWNER_ROLE.body).success).toBe(
+      false,
     );
   });
 
@@ -901,6 +908,172 @@ describe("redact", () => {
     scopeFilter(ctx, "comment");
     expect({ ctx, rows }).toEqual(before);
     expect(HIRING_MANAGER_ROLE.body.fields.candidate?.email).toBe("read");
+  });
+
+  // Job 048 follow-up b (R2a-10): field rules reach the top-level keys and the source fields.
+  it("removes hidden top-level keys and candidate source fields, and lists read ones", () => {
+    const imported = {
+      ...candidate,
+      data: recordDataSchemas.candidate.parse({
+        ...candidate.data,
+        rawSource: { folder: "Fictional folder" },
+        evidence: [{ quote: "Fictional evidence" }],
+        sourceReviews: [{ note: "Fictional review" }],
+      }) as RecordDto<"candidate">["data"],
+      legacyId: "fictional-legacy-1",
+      importMeta: { batch: "fictional-batch" },
+      label: "Fictional Candidate",
+    };
+    const application = {
+      ...row("application", { stage: "Sourced" }),
+      legacyId: "fictional-legacy-2",
+      candidateLabel: "Fictional Candidate",
+      vacancyLabel: "Fictional vacancy",
+    };
+    const keys = (value: object) => Object.keys(value).sort();
+    for (const key of [
+      "importMeta",
+      "legacyId",
+      "label",
+      "rawSource",
+      "evidence",
+      "sourceReviews",
+    ]) {
+      const role = body({ fields: { candidate: { [key]: "hidden" } } });
+      expect(roleBodySchema.safeParse(role).success, key).toBe(true);
+      const ctx = contextOf(session("recruiter"), { role: role as RoleBody });
+      const output = redact(ctx, imported);
+      expect(
+        Object.hasOwn(output, key) || Object.hasOwn(output.data, key),
+        key,
+      ).toBe(false);
+      expect([...keys(output), ...keys(output.data)].sort(), key).toEqual(
+        [...keys(imported), ...keys(imported.data)]
+          .filter((name) => name !== key)
+          .sort(),
+      );
+      const read = redact(
+        contextOf(session("recruiter"), {
+          role: body({ fields: { candidate: { [key]: "read" } } }) as RoleBody,
+        }),
+        imported,
+      );
+      expect(read.readOnlyFields, key).toEqual([key]);
+      expect({ ...read, readOnlyFields: undefined }, key).toEqual({
+        ...imported,
+        readOnlyFields: undefined,
+      });
+    }
+    for (const key of ["candidateLabel", "vacancyLabel"]) {
+      const role = body({ fields: { application: { [key]: "hidden" } } });
+      expect(roleBodySchema.safeParse(role).success, key).toBe(true);
+      const output = redact(
+        contextOf(session("recruiter"), { role: role as RoleBody }),
+        application,
+      );
+      expect(Object.hasOwn(output, key), key).toBe(false);
+      expect(keys(output), key).toEqual(
+        keys(application).filter((name) => name !== key),
+      );
+      expect(
+        redact(
+          contextOf(session("recruiter"), {
+            role: body({
+              fields: { application: { [key]: "read" } },
+            }) as RoleBody,
+          }),
+          application,
+        ).readOnlyFields,
+        key,
+      ).toEqual([key]);
+    }
+    // A read rule for a key the row does not carry lists nothing.
+    expect(
+      redact(
+        contextOf(session("recruiter"), {
+          role: body({
+            fields: { candidate: { importMeta: "read" } },
+          }) as RoleBody,
+        }),
+        candidate,
+      ).readOnlyFields,
+    ).toEqual([]);
+    // The built-in templates keep every key.
+    for (const role of ROLES)
+      expect(redact(contextOf(session(role)), imported)).toEqual(imported);
+    refused(body({ fields: { candidate: { unknownTopLevel: "hidden" } } }));
+  });
+});
+
+describe("the role the access state names (R2a-10)", () => {
+  const VERSION = "80000000-0000-4000-8000-000000000008";
+  const OBJECT = "90000000-0000-4000-8000-000000000009";
+  const documents = (value: unknown, type = "role") =>
+    ({
+      [VERSION]: {
+        versionId: VERSION,
+        objectId: OBJECT,
+        type,
+        key: "fictional-role",
+        number: 1,
+        bodySha256: "0".repeat(64),
+        body: value,
+      },
+    }) as NonNullable<AccessContext["access"]["documents"]>;
+  const narrowed = body({
+    name: "Fictional narrowed recruiter",
+    scopes: ["candidates:read", "recruitment:read"],
+  });
+
+  it("gives the built-in template for its fixed id and the parsed body of an assigned version", () => {
+    for (const role of ROLES) {
+      const { versionId, body: template } = builtInRoleFor(role);
+      const ctx = contextOf(session(role), {}, { roleVersionId: versionId });
+      expect(ctx.role, role).toBe(template);
+      expect(ctx.scopes, role).toEqual(roleScopes(role));
+    }
+    const ctx = contextOf(
+      session("recruiter"),
+      {},
+      { roleVersionId: VERSION, documents: documents(narrowed) },
+    );
+    expect(ctx.role).toEqual(narrowed);
+    expect(ctx.scopes).toEqual(["candidates:read", "recruitment:read"]);
+    expect(
+      authorize(ctx, { resource: "candidates", action: "view" }),
+    ).toMatchObject({ scope: { recordScope: "all" } });
+    expect(() =>
+      authorize(ctx, { resource: "candidates", action: "edit" }),
+    ).toThrow(ApiError);
+  });
+
+  it("gives no role for a null, unknown or unusable version, so every request is refused", () => {
+    const cases: [string | null, AccessContext["access"]["documents"]][] = [
+      [null, documents(narrowed)],
+      ["a0000000-0000-4000-8000-00000000000a", documents(narrowed)],
+      [VERSION, documents({ ...narrowed, scopes: ["imports:write"] })],
+      [VERSION, documents({ ...narrowed, membership: "owner" })],
+      [VERSION, documents({ label: "Fictional envelope" })],
+      [VERSION, documents(narrowed, "workflow")],
+      [VERSION, {}],
+      [HIRING_MANAGER_ROLE.versionId, {}],
+      [builtInRoleFor("admin").versionId, {}],
+    ];
+    for (const [roleVersionId, held] of cases) {
+      const label = `${roleVersionId} ${JSON.stringify(held).slice(0, 80)}`;
+      const ctx = contextOf(
+        session("recruiter"),
+        {},
+        { roleVersionId, documents: held },
+      );
+      expect(ctx.role, label).toBeNull();
+      expect(ctx.scopes, label).toEqual([]);
+      expect(
+        () => authorize(ctx, { resource: "candidates", action: "view" }),
+        label,
+      ).toThrow(ApiError);
+      expect(() => redact(ctx, {} as RecordDto), label).toThrow(ApiError);
+    }
   });
 });
 

@@ -957,6 +957,38 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  paths["/api/v1/teams/member-roles"] = {
+    post: operation(
+      [],
+      {
+        summary: "Assign or clear a member's configured role",
+        description:
+          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role, 409 role_record_scope_unsupported for a role limited to a unit or to assigned records (refused until record scope is enforced). Body at most 1024 bytes.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["userId", "roleObjectId"],
+            additionalProperties: false,
+            properties: {
+              userId: { type: "string", minLength: 1, maxLength: 128 },
+              roleObjectId: { type: ["string", "null"], format: "uuid" },
+            },
+          },
+          {
+            userId: "fictional-member-id",
+            roleObjectId: "00000000-0000-4000-a000-000000000010",
+          },
+        ),
+      },
+      {
+        "200": {
+          description:
+            "{data:{userId, roleObjectId, roleVersionId, membership}}; the role fields are null after a clear.",
+        },
+      },
+      { sessionOnly: true },
+    ),
+  };
   const storageSettings = {
     type: "object",
     required: [

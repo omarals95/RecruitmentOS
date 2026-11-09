@@ -118,6 +118,7 @@ GRANT SELECT ON TABLE app.org_unit_closure TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.positions TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.employees TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.employee_positions TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.member_roles TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;
@@ -146,6 +147,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.audit_config(uuid, text) TO recruitment
 GRANT EXECUTE ON FUNCTION tenant_context.config_history(uuid, timestamp with time zone, integer) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.allows_directory(uuid, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.home_unit_changes(timestamp with time zone, integer) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.role_assignment_changes(timestamp with time zone, integer) TO recruitmentos_data;
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and

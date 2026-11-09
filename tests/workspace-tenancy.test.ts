@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppDb, TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
+import { builtInRoleFor } from "@/domain/config-defaults";
 import type { Principal } from "@/lib/principal";
 import { installTenantContext } from "@/lib/tenant-context";
 import {
@@ -708,6 +709,7 @@ describe("the signed context derives the workspace and company authority (R2a-02
     companyAreas,
     versions: {},
     documents: {},
+    roleVersionId: builtInRoleFor(principal.role).versionId,
   });
   const stored = (
     principal: Principal,
@@ -800,13 +802,14 @@ describe("the signed context derives the workspace and company authority (R2a-02
       });
   });
 
-  it("returns exactly the seven access keys", async () => {
+  it("returns exactly the eight access keys", async () => {
     for (const principal of [owner, admin, teamOwner, suspended])
       expect(Object.keys((await derive(principal)).access).sort()).toEqual([
         "companyAreas",
         "companyLevel",
         "documents",
         "memberRole",
+        "roleVersionId",
         "scopes",
         "versions",
         "workspaceId",

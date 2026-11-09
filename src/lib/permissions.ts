@@ -65,6 +65,9 @@ export function roleScopes(role: Role): Scope[] {
       : [...VIEWER_SCOPES];
 }
 export const getRoleScopes = roleScopes;
+// The scopes each principal has passed requireScope with, so withTeam can refuse a request whose
+// stored scopes lack one that was checked before the transaction.
+const passed = new WeakMap<object, Set<Scope>>();
 export function requireScope(p: { scopes: readonly string[] }, scope: Scope) {
   if (!p.scopes.includes(scope))
     throw new ApiError(
@@ -72,4 +75,9 @@ export function requireScope(p: { scopes: readonly string[] }, scope: Scope) {
       "scope_required",
       `Permission ${scope} is required.`,
     );
+  const checked = passed.get(p) ?? new Set<Scope>();
+  passed.set(p, checked.add(scope));
+}
+export function passedScopes(p: object): Scope[] {
+  return [...(passed.get(p) ?? [])];
 }

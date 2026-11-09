@@ -35,7 +35,10 @@
  *   link another employee; a company admin with the organisation area cannot change a linked
  *   employee's positions or move or archive the position they hold, but places unlinked employees;
  *   a token context, even one holding the directory scopes, writes no directory row; and a
- *   position names only a current job role of the writer's own team.
+ *   position names only a current job role of the writer's own team. A member's configured role
+ *   narrows the scopes install stores and returns, never widening them; a company admin, a team
+ *   owner without company authority and a token context of the company owner write no
+ *   app.member_roles row, and the token gets no owner-only list of role assignments.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -66,15 +69,19 @@
  *   the team B owner) and position rows keyed by the run prefix, inserts the second workspace a
  *   last time with one of each, removing them in that check, briefly makes the team C owner a
  *   company admin with the organisation area, and briefly adds an API token holding every scope
- *   for the team A owner, removing both in their checks. As the
- *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
+ *   for the team A owner, removing both in their checks. As the owner it writes one published
+ *   fixture role keyed by the run prefix and, in each member-role check, one app.member_roles
+ *   row giving it to the team A recruiter (the owner's own SQL writes no activity row), removing
+ *   the row in that check, and briefly adds one more API token holding every scope for the team
+ *   A owner. As the identity role it briefly makes the team A fixture recruiter a viewer and
+ *   restores the role.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
  *   ROW LEVEL SECURITY and the immutable_activity trigger on the app tables (ACCESS EXCLUSIVE
- *   locks), deletes the fixture rows and restores both before COMMIT; then the fixture
- *   configuration objects, position rows, employees, positions, organisation units (with their
- *   closure rows) and levels, the contexts,
+ *   locks), deletes the fixture rows and restores both before COMMIT; then the fixture member
+ *   roles, configuration objects, position rows, employees, positions, organisation units (with
+ *   their closure rows) and levels, the contexts,
  *   leases, stores, teams, users (with their cascaded workspace mappings and company authority) and, in
  *   the open bootstrap variant, the setup claim it created go.
  * - It prints one JSON document of counts and static check ids, never a URL, host, port,
@@ -112,6 +119,7 @@ import {
   TRANSACTION_TIMEOUT_MS as APP_TRANSACTION_TIMEOUT_MS,
 } from "../src/db/deadlines.ts";
 import { runtimeRoleSafetyQuery } from "../src/db/runtime-role.ts";
+import { RECRUITER_ROLE } from "../src/domain/config-defaults.ts";
 import { SCOPES, roleScopes } from "../src/lib/permissions.ts";
 import { assertTenantContextKey } from "../src/lib/tenant-context.ts";
 
@@ -419,6 +427,7 @@ type Access = {
   companyLevel: string | null;
   companyAreas: string[];
   versions: Record<string, string>;
+  roleVersionId: string | null;
   documents: {
     versionId: string;
     objectId: string;
@@ -585,6 +594,8 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     // Both cascade from the fixture teams and users; the owner-only policies let the owner count them.
     ["app.workspace_teams", ...team],
     ["app.workspace_admins", "user_id LIKE $1", [f.pattern]],
+    // Fixture member roles by team (0035); removed before the role objects they name.
+    ["app.member_roles", ...team],
     // Fixture configuration: company objects by key, task boards by team; versions and layouts
     // cascade from their object. The owner-only policies let the owner count and delete them.
     [
@@ -724,6 +735,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           // The guard lets the owner delete published versions; the second workspace goes after
           // its objects and org rows, position rows before employees and positions, positions
           // before their units, units before their levels, and employees before their users.
+          "app.member_roles",
           "app.config_objects",
           "app.employee_positions",
           "app.employees",
@@ -3781,6 +3793,244 @@ async function runChecks(run: Run) {
     });
     probe.at("end-state");
     return pass && probe.all(["end-state", (await dirCommitted()) === before]);
+  });
+
+  // Configured member roles (0035). The owner writes one published fixture role, narrowed to the
+  // recruiter scopes without cvs:write, and in each check one row giving it to the team A
+  // recruiter, removed in that check; the owner's own SQL writes no activity row. Every data-role
+  // write is rolled back.
+  const roleObject = (
+    await owner.query(
+      "INSERT INTO app.config_objects(workspace_id,type,key,created_by) VALUES($1::uuid,'role',$2,$3) RETURNING id::text AS id",
+      [COMPANY_WORKSPACE, configKey("role"), f.users.a1],
+    )
+  ).rows[0].id as string;
+  const NARROW_SCOPES = RECRUITER_SCOPES.filter(
+    (scope) => scope !== "cvs:write",
+  );
+  const roleVersion = (
+    await owner.query(
+      "INSERT INTO app.config_versions(object_id,workspace_id,state,number,body,created_by,published_at) VALUES($1::uuid,$2::uuid,'published',1,$3::jsonb,$4,now()) RETURNING id::text AS id",
+      [
+        roleObject,
+        COMPANY_WORKSPACE,
+        JSON.stringify({
+          ...RECRUITER_ROLE.body,
+          name: "Fictional narrowed recruiter",
+          scopes: NARROW_SCOPES,
+        }),
+        f.users.a1,
+      ],
+    )
+  ).rows[0].id as string;
+  await owner.query(
+    "UPDATE app.config_objects SET current_version_id = $2::uuid WHERE id = $1::uuid",
+    [roleObject, roleVersion],
+  );
+  const memberRoles = () =>
+    count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.member_roles WHERE team_id LIKE $1",
+      [f.pattern],
+    );
+  /** The owner gives the team A recruiter the fixture role for the work, and removes it after. */
+  async function withAssignment(work: () => Promise<boolean>) {
+    const assigned = await owner.query(
+      "INSERT INTO app.member_roles(team_id,user_id,role_object_id) VALUES($1,$2,$3::uuid)",
+      [f.teams.a, f.users.a2, roleObject],
+    );
+    try {
+      return assigned.rowCount === 1 && (await work());
+    } finally {
+      await owner.query("DELETE FROM app.member_roles WHERE team_id LIKE $1", [
+        f.pattern,
+      ]);
+    }
+  }
+  /** An insert into the team, then an update and a delete of every fixture row, in order. */
+  const memberRoleWrites = async (db: Db, team: string) => [
+    await attempt(
+      db,
+      "INSERT INTO app.member_roles(team_id,user_id,role_object_id) VALUES($1,$2,$3::uuid)",
+      [team, f.users.a2, roleObject],
+    ),
+    await attempt(
+      db,
+      "UPDATE app.member_roles SET role_object_id = role_object_id WHERE team_id LIKE $1",
+      [f.pattern],
+    ),
+    await attempt(db, "DELETE FROM app.member_roles WHERE team_id LIKE $1", [
+      f.pattern,
+    ]),
+  ];
+
+  // Install narrows the asserted scopes to the assigned role's, never widening them.
+  await check("member-role-narrowing", async (probe) => {
+    probe.at("setup");
+    const pass = await withAssignment(async () => {
+      const assigned = await transaction(data, async () => {
+        probe.at("install");
+        return (await installAs(data, signer, p.memberA)).access;
+      });
+      const asserted = await transaction(data, async () =>
+        installAs(data, signer, {
+          ...p.memberA,
+          scopes: ["candidates:read", "cvs:write"],
+        }),
+      );
+      probe.at("positive-control");
+      const plain = await transaction(data, async () =>
+        installAs(data, signer, p.ownerA),
+      );
+      probe.at("outcome");
+      return probe.all(
+        [
+          "outcome",
+          JSON.stringify(assigned.scopes) === JSON.stringify(NARROW_SCOPES) &&
+            assigned.roleVersionId === roleVersion,
+        ],
+        [
+          "outcome",
+          JSON.stringify(asserted.access.scopes) ===
+            JSON.stringify(["candidates:read"]),
+        ],
+        [
+          "positive-control",
+          plain.access.scopes.length === ALL_SCOPES.length &&
+            plain.access.roleVersionId ===
+              "00000000-0000-4000-8000-000000000101",
+        ],
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await memberRoles()) === 0]);
+  });
+
+  // A company admin (the team A recruiter, with the organisation area) writes no member role, while
+  // the company owner's session updates the row.
+  await check("member-role-company-admin-denied", async (probe) => {
+    probe.at("setup");
+    const pass = await withAssignment(async () => {
+      const denials = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.memberA);
+        probe.at("outcome");
+        const outcomes = await memberRoleWrites(data, f.teams.a);
+        return { access, outcomes };
+      });
+      const changed = await transaction(data, async () => {
+        probe.at("positive-control");
+        await installAs(data, signer, p.ownerA);
+        return attempt(
+          data,
+          "UPDATE app.member_roles SET role_object_id = role_object_id WHERE team_id = $1",
+          [f.teams.a],
+        );
+      });
+      const [inserted, updated, deleted] = denials.outcomes;
+      return probe.all(
+        ["setup", denials.access.companyLevel === "admin"],
+        denial(inserted),
+        outcomeIs(updated.ok && updated.count === 0, updated),
+        outcomeIs(deleted.ok && deleted.count === 0, deleted),
+        outcomeIs(
+          changed.ok && changed.count === 1,
+          changed,
+          "positive-control",
+        ),
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await memberRoles()) === 0]);
+  });
+
+  // The team B owner, who holds no company authority, writes no member role in their own team or
+  // another, and reads none of team A's.
+  await check("member-role-team-b-owner-denied", async (probe) => {
+    probe.at("setup");
+    const pass = await withAssignment(() =>
+      transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.ownerB);
+        probe.at("outcome");
+        const read = await count(
+          data,
+          "SELECT count(*)::int AS n FROM app.member_roles WHERE team_id LIKE $1",
+          [f.pattern],
+        );
+        const own = await attempt(
+          data,
+          "INSERT INTO app.member_roles(team_id,user_id,role_object_id) VALUES($1,$2,$3::uuid)",
+          [f.teams.b, f.users.b2, roleObject],
+        );
+        const outcomes = await memberRoleWrites(data, f.teams.a);
+        const [inserted, updated, deleted] = outcomes;
+        return probe.all(
+          ["setup", access.companyLevel === null],
+          ["outcome", read === 0],
+          denial(own),
+          denial(inserted),
+          leftAlone(updated),
+          leftAlone(deleted),
+        );
+      }),
+    );
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await memberRoles()) === 0]);
+  });
+
+  // A token context of the company owner, holding every scope, writes no member role and gets no
+  // owner-only list of role assignments.
+  await check("member-role-token-denied", async (probe) => {
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-member-roles`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    const token: Principal = {
+      team: f.teams.a,
+      actor: f.users.a1,
+      auth: "token",
+      token: tokenId,
+      scopes: ALL_SCOPES,
+    };
+    let pass: boolean;
+    try {
+      pass = await withAssignment(() =>
+        transaction(data, async () => {
+          probe.at("install");
+          const { access } = await installAs(data, signer, token);
+          probe.at("outcome");
+          const outcomes = await memberRoleWrites(data, f.teams.a);
+          const listed = await attempt(
+            data,
+            "SELECT * FROM tenant_context.role_assignment_changes(NULL, 50)",
+          );
+          const [inserted, updated, deleted] = outcomes;
+          return probe.all(
+            ["setup", stored.rowCount === 1 && access.companyLevel === "owner"],
+            denial(inserted),
+            leftAlone(updated),
+            leftAlone(deleted),
+            denial(listed),
+          );
+        }),
+      );
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+    }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await memberRoles()) === 0]);
   });
 
   // Last, because a successful grant writes a workspace-authority activity row. The FOR SHARE lock
