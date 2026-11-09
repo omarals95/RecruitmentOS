@@ -46,11 +46,44 @@ export const records = appSchema.table(
     createdAt: time("created_at").notNull().defaultNow(),
     updatedAt: time("updated_at").notNull().defaultNow(),
     archivedAt: time("archived_at"),
+    /** A vacancy's org unit, copied down its pipeline by app.maintain_record_scope() (0037). */
+    orgUnitId: uuid("org_unit_id"),
+    /** Set only by the trigger: the vacancy and application a pipeline row or comment belongs to. */
+    scopeVacancyId: uuid("scope_vacancy_id"),
+    scopeApplicationId: uuid("scope_application_id"),
   },
   (t) => [
     unique("records_team_id_id_key").on(t.teamId, t.id),
     index("records_team_kind_idx").on(t.teamId, t.kind),
     index("records_team_updated_idx").on(t.teamId, t.updatedAt),
+    index("records_application_candidate_idx")
+      .on(t.teamId, t.candidateId)
+      .where(sql`${t.kind} = 'application'`),
+  ],
+);
+/**
+ * Who is assigned to a record (0037). Read-only for the data role: written only through
+ * tenant_context.add_assignment and remove_assignment.
+ */
+export const recordAssignments = appSchema.table(
+  "record_assignments",
+  {
+    teamId: text("team_id").notNull(),
+    recordId: uuid("record_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id),
+    relation: text("relation")
+      .$type<
+        "recruiter" | "hiring-manager" | "interviewer" | "assignee" | "approver"
+      >()
+      .notNull(),
+    createdBy: text("created_by").references(() => user.id),
+    createdAt: time("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.recordId, t.userId, t.relation] }),
+    index("record_assignments_user_idx").on(t.teamId, t.userId),
   ],
 );
 export const candidateStates = appSchema.table(
