@@ -91,7 +91,8 @@ BEGIN
 END $connect$;
 
 -- recruitmentos_data: recruitment tables under FORCE RLS, the markers and the allowlisted helpers.
--- The erasure tombstones in app.candidate_erasures are owner-only: neither runtime role gets a grant.
+-- The erasure tombstones in app.candidate_erasures and app.employee_erasures are owner-only: neither
+-- runtime role gets a grant.
 GRANT USAGE ON SCHEMA app TO recruitmentos_data;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_data;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_data;
@@ -136,6 +137,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.set_storage_limits(bigint, integer, int
 GRANT EXECUTE ON FUNCTION tenant_context.release_blob_charge(text, uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.claim_blob_reconciliation(text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.erase_candidate(uuid, text, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.erase_employee(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_mcp_cv_text_access(boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_mcp_cv_read(text, uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_workspace_authority(text, text, text[], boolean) TO recruitmentos_data;

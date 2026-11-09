@@ -67,6 +67,12 @@ const stateColumns =
   "team_id, user_id, candidate_id, shortlisted, status, note, version, import_meta, updated_at";
 const migrationFiles = async (dir: string) =>
   (await readdir(dir)).filter((f) => /^\d{4}.*\.sql$/.test(f)).sort();
+// A row as the earlier schema wrote it: the activity column 0036 adds is left out, so an upgrade
+// from before it compares the columns its fixture rows had.
+const earlierColumns = (row: Record<string, unknown>) => {
+  const { employee_erasure_id: _added, ...kept } = row;
+  return kept;
+};
 
 describe("populated fictional baseline upgrade from 0006", () => {
   const pg = new PGlite();
@@ -298,7 +304,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -458,7 +464,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -588,7 +594,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -705,7 +711,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -770,7 +776,9 @@ describe("upgrade from 0029 to the configuration store", () => {
           "auth.member",
         ].map(async (table) => [
           table,
-          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows.map(
+            earlierColumns,
+          ),
         ]),
       ),
     );
@@ -807,7 +815,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -936,7 +944,7 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
@@ -1022,7 +1030,7 @@ describe("upgrade from 0031 to configuration versions through install", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("returns the published object in versions and its body in documents", async () => {
@@ -1078,7 +1086,9 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
           "auth.member",
         ].map(async (table) => [
           table,
-          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows.map(
+            earlierColumns,
+          ),
         ]),
       ),
     );
@@ -1137,11 +1147,11 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 14", async () => {
+  it("keeps every existing row and sets storage schema 15", async () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("adds the three organisation tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1249,7 +1259,9 @@ describe("upgrade from 0033 to positions and employees", () => {
       await Promise.all(
         tables.map(async (table) => [
           table,
-          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows.map(
+            earlierColumns,
+          ),
         ]),
       ),
     );
@@ -1310,13 +1322,13 @@ describe("upgrade from 0033 to positions and employees", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 14", async () => {
+  it("keeps every existing row and sets storage schema 15", async () => {
     expect(before["app.org_unit_closure"]).toHaveLength(3);
     expect(before["app.activity"]).toHaveLength(4);
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("adds the three directory tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1433,7 +1445,9 @@ describe("upgrade from 0034 to configured member roles", () => {
       await Promise.all(
         tables.map(async (table) => [
           table,
-          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows,
+          (await pg.query(`SELECT * FROM ${table} ORDER BY 1, 2`)).rows.map(
+            earlierColumns,
+          ),
         ]),
       ),
     );
@@ -1500,13 +1514,13 @@ describe("upgrade from 0034 to configured member roles", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every existing row and sets storage schema 14", async () => {
+  it("keeps every existing row and sets storage schema 15", async () => {
     expect(before["app.config_versions"]).toHaveLength(1);
     expect(before["app.activity"]).toHaveLength(2);
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 14 }]);
+    ).toEqual([{ version: 15 }]);
   });
 
   it("adds app.member_roles empty, under ENABLE and FORCE RLS, and the context column", async () => {

@@ -98,12 +98,19 @@ export const activity = appSchema.table(
     createdAt: time("created_at").notNull().defaultNow(),
     /** Set once by the erasure helper, which also clears recordId and redacts summary and metadata. */
     erasureId: uuid("erasure_id"),
+    /** Set once by the employee erasure helper, which also redacts summary and metadata (0036). */
+    employeeErasureId: uuid("employee_erasure_id").references(
+      () => employeeErasures.id,
+    ),
   },
   (t) => [
     index("activity_team_created_idx").on(t.teamId, t.createdAt),
     index("activity_erasure_idx")
       .on(t.teamId, t.erasureId)
       .where(sql`${t.erasureId} IS NOT NULL`),
+    index("activity_employee_erasure_idx")
+      .on(t.employeeErasureId)
+      .where(sql`${t.employeeErasureId} IS NOT NULL`),
   ],
 );
 export const uploads = appSchema.table(
@@ -294,6 +301,29 @@ export const candidateErasures = appSchema.table(
       t.candidateId,
     ),
     unique("candidate_erasures_team_id_id_key").on(t.teamId, t.id),
+  ],
+);
+/**
+ * Employee erasure tombstones (0036): ids, workspace, erasing owner, time and source only.
+ * Owner-only table; workspace_id references app.workspaces, which is raw SQL only.
+ */
+export const employeeErasures = appSchema.table(
+  "employee_erasures",
+  {
+    id: uuid("id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    employeeId: uuid("employee_id").notNull(),
+    erasedBy: text("erased_by")
+      .notNull()
+      .references(() => user.id),
+    erasedAt: time("erased_at").notNull(),
+    erasureSource: text("erasure_source").$type<"app" | "script">().notNull(),
+  },
+  (t) => [
+    unique("employee_erasures_workspace_id_employee_id_key").on(
+      t.workspaceId,
+      t.employeeId,
+    ),
   ],
 );
 /** Speed log (0020): action and route timings per team, never ids, names or content; 30 days. */
