@@ -156,15 +156,17 @@ type VersionTarget = {
   state: ConfigVersion["state"];
 };
 
-/** The version and its object as visible to this context. */
+/** The version and its object as visible to this context; a type, when given, must be the object's. */
 async function findVersion(
   tx: TeamTx,
   versionId: string,
+  type?: ConfigType,
 ): Promise<VersionTarget> {
   const { rows } = await tx.execute<VersionTarget>(
     sql`select v.id as "versionId", o.type, v.state from app.config_versions v join app.config_objects o on o.id = v.object_id where v.id = ${z.uuid().parse(versionId)}::uuid`,
   );
-  if (!rows[0]) throw notFound();
+  if (!rows[0] || (type !== undefined && rows[0].type !== type))
+    throw notFound();
   return rows[0];
 }
 
@@ -216,16 +218,20 @@ export async function createConfigDraft(
   });
 }
 
-/** Replaces the draft's body and, when given, its note; a published version cannot be edited. */
+/**
+ * Replaces the draft's body and, when given, its note; a published version cannot be edited. With
+ * options.type, a version of another type is not found.
+ */
 export async function updateConfigDraft(
   p: Principal,
   versionId: string,
   input: { body: unknown; note?: string },
+  options: { type?: ConfigType } = {},
 ): Promise<void> {
   assertSize(input.body);
   const { body, note } = editInput.parse(input);
   return inStore(p, async (tx, access) => {
-    const target = await findVersion(tx, versionId);
+    const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
     if (target.state !== "draft") throw stateConflict();
     const parsed = configBodySchemas[target.type].parse(body);
@@ -235,13 +241,17 @@ export async function updateConfigDraft(
   });
 }
 
-/** Publishes the object's draft through the owner-run helper, which audits it; returns its number. */
+/**
+ * Publishes the object's draft through the owner-run helper, which audits it; returns its number.
+ * With options.type, a version of another type is not found.
+ */
 export async function publishConfigVersion(
   p: Principal,
   versionId: string,
+  options: { type?: ConfigType } = {},
 ): Promise<number> {
   return inStore(p, async (tx, access) => {
-    const target = await findVersion(tx, versionId);
+    const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
     const { rows } = await tx.execute<{ number: number }>(
       sql`select tenant_context.publish_config_version(${target.versionId}::uuid) as number`,
@@ -322,6 +332,26 @@ export async function getConfigObject(
       sql`select jsonb_build_object('id', o.id, 'type', o.type, 'key', o.key, 'createdAt', o.created_at, 'archivedAt', o.archived_at, 'current', ${versionJson("current_version_id")}, 'draft', ${versionJson("draft_version_id")}) as object from app.config_objects o where o.workspace_id = ${access.workspaceId}::uuid and o.team_id is not distinct from ${teamId}::text and o.type = ${parsedType} and o.key = ${parsedKey}`,
     );
     return rows[0]?.object ?? null;
+  });
+}
+
+/**
+ * The non-archived objects of this type with their current and draft versions, ordered by key, at
+ * most 100: the caller's workspace, or for a task board the caller's team. Write access to the type
+ * is required, as for its drafts.
+ */
+export async function listConfigObjects(
+  p: Principal,
+  type: ConfigType,
+): Promise<ConfigObject[]> {
+  const parsedType = z.enum(CONFIG_TYPES).parse(type);
+  return inStore(p, async (tx, access) => {
+    requireWrite(p, access, parsedType);
+    const teamId = parsedType === "task-board" ? p.teamId : null;
+    const { rows } = await tx.execute<{ object: ConfigObject }>(
+      sql`select jsonb_build_object('id', o.id, 'type', o.type, 'key', o.key, 'createdAt', o.created_at, 'archivedAt', o.archived_at, 'current', ${versionJson("current_version_id")}, 'draft', ${versionJson("draft_version_id")}) as object from app.config_objects o where o.workspace_id = ${access.workspaceId}::uuid and o.team_id is not distinct from ${teamId}::text and o.type = ${parsedType} and o.archived_at is null order by o.key limit 100`,
+    );
+    return rows.map((row) => row.object);
   });
 }
 
