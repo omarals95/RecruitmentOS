@@ -198,6 +198,12 @@ export function FreshSessionDialog({
   const codeRef = useRef<HTMLInputElement>(null);
   // Runs after Dialog has opened, so focus lands inside the modal.
   useEffect(() => passwordRef.current?.focus(), []);
+  // After a refusal the fields are enabled again: focus the one to correct.
+  useEffect(() => {
+    if (!error) return;
+    const onCode = error.field === "code" || (!error.field && challenged);
+    (onCode && codeRef.current ? codeRef : passwordRef).current?.focus();
+  }, [error, challenged]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
@@ -217,10 +223,7 @@ export function FreshSessionDialog({
     }
     setChallenged(outcome.challenged);
     setError(outcome.error);
-    if (outcome.error.field === "code") {
-      setCode("");
-      codeRef.current?.focus();
-    } else if (outcome.error.field === "password") passwordRef.current?.focus();
+    if (outcome.error.field === "code") setCode("");
   }
   const describes = (field: "password" | "code") =>
     error && (!error.field || error.field === field) ? ids.error : undefined;
