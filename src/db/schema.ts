@@ -59,6 +59,9 @@ export const records = appSchema.table(
     index("records_application_candidate_idx")
       .on(t.teamId, t.candidateId)
       .where(sql`${t.kind} = 'application'`),
+    index("records_candidate_id_idx")
+      .on(t.teamId, t.id)
+      .where(sql`${t.kind} = 'candidate'`),
   ],
 );
 /**

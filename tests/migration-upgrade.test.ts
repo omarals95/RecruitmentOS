@@ -2118,3 +2118,93 @@ describe("upgrade from 0037 to record scope in row-level security", () => {
     expect(await rows()).toEqual(settled);
   });
 });
+
+// Rows written by the 0038 schema, upgraded through 0039: one partial index on candidates, with no
+// row rewritten, the storage schema marker kept at 17 and every record-scope policy and helper as
+// 0038 left them.
+describe("upgrade from 0038 to the candidate scope index", () => {
+  const pg = new PGlite();
+  const owner = "candidate_scope_index_upgrade_owner";
+  const team = "candidate-scope-index-upgrade-team";
+  const user = "candidate-scope-index-upgrade-user";
+  const helpers = [
+    "tenant_context.scope_is_all()",
+    "tenant_context.in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+    "tenant_context.record_in_scope(text,uuid)",
+    "tenant_context.candidate_in_scope(text,uuid)",
+    "tenant_context.context_actor_key()",
+  ];
+  /** The rows, the restrictive policies and the helpers, read as the PGlite superuser. */
+  const state = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    return {
+      records: (await pg.query("SELECT * FROM app.records ORDER BY id")).rows,
+      policies: (
+        await pg.query(
+          `SELECT tablename, policyname, permissive, roles, cmd, qual, with_check FROM pg_policies
+           WHERE policyname IN ('record_scope', 'actor_only') ORDER BY 1, 2`,
+        )
+      ).rows,
+      helpers: (
+        await pg.query(
+          `SELECT p.oid::regprocedure::text AS fn, pg_get_functiondef(p.oid) AS definition,
+             pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.provolatile AS volatility,
+             p.proconfig AS config, p.proacl::text AS acl, has_function_privilege('public', p.oid, 'EXECUTE') AS public
+           FROM pg_proc p WHERE p.oid = ANY($1::regprocedure[]) ORDER BY 1`,
+          [helpers],
+        )
+      ).rows,
+      marker: (await pg.query("SELECT version FROM db_boundary.storage_schema"))
+        .rows,
+    };
+  };
+  let before: Awaited<ReturnType<typeof state>>;
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0038_record_scope_rls.sql");
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('${user}','Fictional Index Upgrade User','${user}@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('${team}','Fictional Index Upgrade Team','${team}','${user}');
+      INSERT INTO app.records(id,team_id,kind,data,created_by,candidate_id,vacancy_id) VALUES
+        ('${ids.candidate}','${team}','candidate','{"name":"Fictional Index Upgrade Candidate"}','${user}',NULL,NULL),
+        ('${ids.vacancy}','${team}','vacancy','{"title":"Fictional index upgrade vacancy"}','${user}',NULL,NULL),
+        ('${ids.application}','${team}','application','{"stage":"Sourced"}','${user}','${ids.candidate}','${ids.vacancy}');`);
+    before = await state();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("adds the partial candidate index and nothing else", async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    expect(
+      (
+        await pg.query(
+          "SELECT indexdef FROM pg_indexes WHERE schemaname = 'app' AND indexname = 'records_candidate_id_idx'",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        indexdef:
+          "CREATE INDEX records_candidate_id_idx ON app.records USING btree (team_id, id) WHERE (kind = 'candidate'::text)",
+      },
+    ]);
+    const after = await state();
+    expect(before.records).toHaveLength(3);
+    expect(after).toEqual(before);
+    expect(after.marker).toEqual([{ version: 17 }]);
+    expect(after.policies).toHaveLength(5);
+    expect(after.helpers).toHaveLength(5);
+  });
+
+  it("changes nothing when the migrations run again", async () => {
+    const settled = await state();
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    await applyMigrations(pg);
+    expect(await state()).toEqual(settled);
+  });
+});
