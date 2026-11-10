@@ -291,6 +291,13 @@ export function GET() {
                     description:
                       "Tasks only: true keeps tasks assigned to the caller, false the rest; any other value or resource returns 400 invalid_query. A list-only filter: an export refuses it.",
                   },
+                  {
+                    name: "board",
+                    in: "query",
+                    schema: { type: "string", format: "uuid" },
+                    description:
+                      "Tasks only: the id of one of your team's current published task boards (GET /api/v1/task-boards). Keeps the tasks in the board's buckets that match its filter, inside your record scope as always. Another resource, an unknown, another team's or retired board, and a board whose filter field your role hides return 400 invalid_query. A list-only filter: an export refuses it. Without it the list is the built-in All buckets board.",
+                  },
                 ]
               : []),
           ],
@@ -1307,6 +1314,115 @@ export function GET() {
       {
         summary: "Publish a role draft",
         description: `${roleWriteRule} id is the draft's version id. Publishing makes the draft the role's current version, so it changes the access of every member who holds the role. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+      },
+      { "200": { description: "{data:{versionId, number}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  // Task boards (R2a-21): session only, written by the team's own owners and admins without company
+  // authority; no MCP tool and no API token.
+  const taskBoardWriteRule =
+    "Session only: a signed-in owner or admin of the active team writes that team's task boards, with no company authority needed; Bearer tokens get 403 session_required, and recruiters and viewers get 403 config_forbidden. Another team's boards are not found.";
+  const taskBoardBodyRule =
+    'body is a task board: {name, columns, filter?}. name is 1 to 120 characters; columns is 1 to 100 unique bucket ids in display order; filter is at most one of {by:"vacancy", vacancyId}, {by:"linked-record", recordId} or {by:"field", fieldId, value}. The strict schema refuses any unknown key with 400 invalid_input. Every column must be an active bucket of your team, a vacancy filter an active vacancy in your record scope, a linked-record filter an active job role, vacancy, bucket, task field or task you may view and is in your scope, and a field filter an active Dropdown task field with value one of its options. A record of another team, out of your scope or missing, a field that is not a dropdown and a value outside its options return 400 invalid_reference, and an archived one 400 archived_reference; nothing is stored then.';
+  const taskBoardExample = {
+    name: "Fictional Project board",
+    columns: [
+      "00000000-0000-4000-8000-000000000401",
+      "00000000-0000-4000-8000-000000000402",
+    ],
+    filter: {
+      by: "field",
+      fieldId: "00000000-0000-4000-8000-000000000501",
+      value: "Fictional Project",
+    },
+  };
+  const taskBoardShape = "{data:[{id, key, name, columns}]}";
+  paths["/api/v1/task-boards"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the team's task boards",
+        description: `Session only; Bearer tokens get 403 session_required. Without a query, for any member who may view tasks: the team's current published boards, ordered by name and then key, as ${taskBoardShape} with id the board's object id, read from the request context with no statement of its own. A board's filter is never returned, and a board whose filter field your role hides is left out. The built-in All buckets board (every active bucket in position order, no filter) is not listed and has no id. With drafts=true, for the team's owners and admins only (anyone else gets 403 config_forbidden): the team's boards that are not archived, ordered by key, at most 100, each with its current published version and its draft, as {data:[${configObjectShape}]}. Any other query key or value returns 400 invalid_input. Nothing is audited.`,
+      },
+      {
+        "200": {
+          description: `${taskBoardShape}, or with drafts=true {data:[${configObjectShape}]}.`,
+        },
+      },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "drafts",
+            in: "query",
+            required: false,
+            schema: { type: "string", enum: ["true"] },
+          },
+        ],
+      },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a task-board draft",
+        description: `${taskBoardWriteRule} Send {key, body, note?}: key is 1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit. A new key creates the board in your team and its draft; the key of an existing board adds a new draft to it. ${taskBoardBodyRule} A board that already has a draft returns 409 config_draft_exists; a retired board's key returns 409 config_state_conflict. Writes one config.draft_created row, listed in GET /api/v1/config-history for company owners and admins of your team. Body at most 512 KiB. Returns 201 {data:{objectId, versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["key", "body"],
+            additionalProperties: false,
+            properties: {
+              key: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" },
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { key: "fictional-project-board", body: taskBoardExample },
+        ),
+      },
+      { "201": { description: "{data:{objectId, versionId}}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/task-boards/{id}"] = {
+    put: operation(
+      [],
+      {
+        summary: "Replace a task-board draft's body",
+        description: `${taskBoardWriteRule} id is the draft's version id. Send {body, note?}. ${taskBoardBodyRule} A version of another configuration type returns 404 not_found; a version that is no longer a draft returns 409 config_state_conflict. Nothing is audited. Body at most 512 KiB. Returns {data:{versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["body"],
+            additionalProperties: false,
+            properties: {
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { body: taskBoardExample },
+        ),
+      },
+      { "200": { description: "{data:{versionId}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+    delete: operation(
+      [],
+      {
+        summary: "Retire a task board",
+        description: `${taskBoardWriteRule} id is the board's object id, as GET /api/v1/task-boards lists it. Retires the board for good: it leaves the Tasks screen, board=<id> on the task list returns 400 invalid_query, and its key takes no new draft. An object of another configuration type returns 404 not_found; a board already retired returns 409 config_state_conflict. Writes one config.archived row, listed in GET /api/v1/config-history. Returns {data:{id}}.`,
+      },
+      { "200": { description: "{data:{id}}." } },
+      { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/task-boards/{id}/publish"] = {
+    post: operation(
+      [],
+      {
+        summary: "Publish a task-board draft",
+        description: `${taskBoardWriteRule} id is the draft's version id. Publishing makes the draft the board's current version, shown on your team's Tasks screen. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
       },
       { "200": { description: "{data:{versionId, number}}." } },
       { sessionOnly: true, params: [idParameter] },

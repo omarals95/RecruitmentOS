@@ -750,4 +750,30 @@ describe("database round trips per request", () => {
     // The move of the simple write (11) plus one statement for the added and the removed assignee.
     expect(swapped.roundTrips).toBe(12);
   });
+
+  // R2a-21 (job 064): the board comes from the documents install returns, so no statement is added.
+  it("keeps a Tasks list with a task board at 6 on a cold and a warm cache", async () => {
+    const { objectId, versionId } = await createConfigDraft(owner, {
+      type: "task-board",
+      key: "budget-board",
+      body: {
+        name: "Fictional budget board",
+        columns: [buckets[1].id, buckets[0].id],
+      },
+    });
+    await publishConfigVersion(owner, versionId);
+    const path = `/api/v1/tasks?page=1&pageSize=25&board=${objectId}`;
+    for (const cold of [true, false]) {
+      if (cold) configBodyCache.clear();
+      const read = await call("GET", path, { resource: "tasks" });
+      expect(read.status).toBe(200);
+      expect(
+        (read.body.data as unknown as RecordDto[]).every((row) =>
+          [buckets[0].id, buckets[1].id].includes(row.bucketId!),
+        ),
+      ).toBe(true);
+      expect(read.roundTrips, cold ? "cold" : "warm").toBe(6);
+      expect(configBodyCache.ids()).toContain(versionId);
+    }
+  });
 });

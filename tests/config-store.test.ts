@@ -30,6 +30,7 @@ import {
 import { HIRING_MANAGER_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
 import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import { createRecord } from "@/lib/records";
 import { installTenantContext, type TenantAccess } from "@/lib/tenant-context";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 
@@ -148,12 +149,24 @@ describe("versioned configuration store under the split runtime roles", () => {
         [id],
       )
     )[0];
+  /** Each team's fixture bucket, the one column of its task-board fixtures (R2a-21). */
+  const buckets: Record<string, string> = {};
   const draft = (
     p: Principal,
     type: ConfigType,
     key: string,
     label = `Fictional ${key}`,
-  ) => run(() => createConfigDraft(p, { type, key, body: { label } }));
+  ) =>
+    run(() =>
+      createConfigDraft(p, {
+        type,
+        key,
+        body:
+          type === "task-board"
+            ? { name: label, columns: [buckets[p.teamId]] }
+            : { label },
+      }),
+    );
 
   beforeAll(async () => {
     harness = await createSplitRoleDb();
@@ -199,6 +212,14 @@ describe("versioned configuration store under the split runtime roles", () => {
       UPDATE app.workspace_teams SET workspace_id = '${OTHER}' WHERE team_id = 'cfg-team-x';
     `);
     setDbForTests(harness.db);
+    for (const p of [owner, ownerB])
+      buckets[p.teamId] = (
+        await run(() =>
+          createRecord(p, "buckets", {
+            data: { name: "Fictional config to do" },
+          }),
+        )
+      ).id;
   });
   afterAll(async () => harness?.close());
 
@@ -1556,7 +1577,9 @@ describe("configuration body schemas", () => {
   });
 
   it("refuses any key beyond the envelope, so no record id or value is stored", () => {
-    for (const type of CONFIG_TYPES.filter((type) => type !== "role")) {
+    for (const type of CONFIG_TYPES.filter(
+      (type) => type !== "role" && type !== "task-board",
+    )) {
       expect(configBodySchemas[type].parse({ label: " Fictional " })).toEqual({
         label: "Fictional",
       });
@@ -1567,6 +1590,21 @@ describe("configuration body schemas", () => {
         }).success,
       ).toBe(false);
     }
+    // A task-board body is strict too, with its own fixture body (R2a-21).
+    const board = {
+      name: " Fictional ",
+      columns: ["00000000-0000-4000-a000-000000000008"],
+    };
+    expect(configBodySchemas["task-board"].parse(board)).toEqual({
+      ...board,
+      name: "Fictional",
+    });
+    expect(
+      configBodySchemas["task-board"].safeParse({
+        ...board,
+        recordId: "00000000-0000-4000-a000-000000000009",
+      }).success,
+    ).toBe(false);
     // A role body is strict on every level too (R2a-10).
     expect(
       configBodySchemas.role.parse({
