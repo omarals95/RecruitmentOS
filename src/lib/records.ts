@@ -950,7 +950,7 @@ export async function candidateSuggestions(
       sql`with tags as(select distinct f.field, ${records.id} as id, btrim(tag.value) as spelling from ${records}
         cross join (values ('skills'), ('certifications')) f(field)
         cross join lateral jsonb_array_elements_text(case when jsonb_typeof(${records.data}->f.field)='array' then ${records.data}->f.field else '[]'::jsonb end) tag(value)
-        where ${and(...scopeFilter(ctx, "candidate"))} and ${records.archivedAt} is null and btrim(tag.value)<>''),
+        where ${and(...scopeFilter(ctx, "candidate", { once: true }))} and ${records.archivedAt} is null and btrim(tag.value)<>''),
       spellings as(select field, lower(spelling) as value, spelling, count(*) as holders from tags group by field, lower(spelling), spelling),
       labels as(select distinct on (field, value) field, value, spelling as label from spellings order by field, value, holders desc, spelling collate "C"),
       totals as(select field, lower(spelling) as value, count(distinct id) as holders from tags group by field, lower(spelling)),
@@ -1106,7 +1106,7 @@ function recordQuery(
           ? "position"
           : "createdAt"),
   );
-  const where: SQL[] = scopeFilter(ctx, kind);
+  const where: SQL[] = scopeFilter(ctx, kind, { once: true });
   if (query.has("includeArchived"))
     parse(z.enum(["true", "false"]), query.get("includeArchived"));
   if (query.has("archived")) {

@@ -45,6 +45,15 @@ import {
 import { listInside } from "./records";
 
 type Count = { name: string; count: number };
+type Inventory = {
+  candidates: number;
+  vacancies?: number;
+  applications: number;
+  tasks: number;
+  interviews?: number;
+  offers: number;
+  onboarding?: number;
+};
 const GROUP_LIMIT = 100;
 function invalid(message: string): never {
   throw new ApiError(400, "invalid_query", message);
@@ -80,7 +89,7 @@ function authorizeInventory(ctx: AccessContext, page: "home" | "analytics") {
 }
 function active(ctx: AccessContext, kind: RecordKind): SQL {
   return and(
-    ...scopeFilter(ctx, kind),
+    ...scopeFilter(ctx, kind, { once: true }),
     isNull(records.archivedAt),
     isNull(records.privateOwnerId),
   )!;
@@ -106,42 +115,48 @@ function asDto(row: typeof records.$inferSelect): RecordDto {
     archivedAt: archivedAt?.toISOString() ?? null,
   };
 }
-/** A count that filters by a field the caller may not see is left out. */
+/**
+ * A count that filters by a field the caller may not see is left out. Each count is its own
+ * subquery over its kind, so it reads only that kind's rows in the caller's scope.
+ */
 async function inventory(tx: TeamTx, ctx: AccessContext) {
   const { principal: p } = ctx;
-  const where = (kind: RecordKind, ...conditions: SQL[]) =>
-    and(...scopeFilter(ctx, kind), ...conditions)!;
-  const [counts] = await tx
-    .select({
-      candidates: sql<number>`count(*) filter(where ${where("candidate")})::int`,
-      ...(visible(ctx, "vacancy", "status")
-        ? {
-            vacancies: sql<number>`count(*) filter(where ${where("vacancy", sql`${records.data}->>'status'='Open'`)})::int`,
-          }
-        : {}),
-      applications: sql<number>`count(*) filter(where ${where("application")})::int`,
-      tasks: sql<number>`count(*) filter(where ${where("task", notCompleted(p, sql`${records.bucketId}`))})::int`,
-      ...(visible(ctx, "interview", "status")
-        ? {
-            interviews: sql<number>`count(*) filter(where ${where("interview", sql`${records.data}->>'status'='Scheduled'`)})::int`,
-          }
-        : {}),
-      offers: sql<number>`count(*) filter(where ${where("offer")})::int`,
-      ...(visible(ctx, "onboarding", "status")
-        ? {
-            onboarding: sql<number>`count(*) filter(where ${where("onboarding", sql`${records.data}->>'status'<>'Completed'`)})::int`,
-          }
-        : {}),
-    })
-    .from(records)
-    .where(
-      and(
-        eq(records.teamId, p.teamId),
-        isNull(records.archivedAt),
-        isNull(records.privateOwnerId),
+  const count = (kind: RecordKind, ...conditions: SQL[]) =>
+    sql`(select count(*)::int from ${records} where ${and(...scopeFilter(ctx, kind, { once: true }), isNull(records.archivedAt), isNull(records.privateOwnerId), ...conditions)})`;
+  const counts: Partial<Record<keyof Inventory, SQL>> = {
+    candidates: count("candidate"),
+    ...(visible(ctx, "vacancy", "status")
+      ? { vacancies: count("vacancy", sql`${records.data}->>'status'='Open'`) }
+      : {}),
+    applications: count("application"),
+    tasks: count("task", notCompleted(p, sql`${records.bucketId}`)),
+    ...(visible(ctx, "interview", "status")
+      ? {
+          interviews: count(
+            "interview",
+            sql`${records.data}->>'status'='Scheduled'`,
+          ),
+        }
+      : {}),
+    offers: count("offer"),
+    ...(visible(ctx, "onboarding", "status")
+      ? {
+          onboarding: count(
+            "onboarding",
+            sql`${records.data}->>'status'<>'Completed'`,
+          ),
+        }
+      : {}),
+  };
+  const { rows } = await tx.execute<Inventory>(
+    sql`select ${sql.join(
+      Object.entries(counts).map(
+        ([key, value]) => sql`${value} as ${sql.identifier(key)}`,
       ),
-    );
-  return counts;
+      sql`, `,
+    )}`,
+  );
+  return rows[0];
 }
 /**
  * A task is completed when its bucket says so; a missing flag means not completed. The flag is
@@ -225,7 +240,7 @@ export async function overview(p: Principal) {
           eq(candidateStates.teamId, p.teamId),
           eq(candidateStates.userId, p.userId),
           eq(candidateStates.shortlisted, true),
-          ...scopeFilter(ctx, "candidate"),
+          ...scopeFilter(ctx, "candidate", { once: true }),
           isNull(records.archivedAt),
         ),
       );
@@ -280,7 +295,7 @@ export async function overview(p: Principal) {
         .where(
           and(
             eq(uploads.teamId, p.teamId),
-            ...scopeFilter(ctx, "candidate"),
+            ...scopeFilter(ctx, "candidate", { once: true }),
             isNull(records.archivedAt),
           ),
         );
