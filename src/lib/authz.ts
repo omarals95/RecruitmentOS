@@ -371,6 +371,22 @@ export function accessMap(ctx: AccessContext): AccessMap {
   };
 }
 
+/** GET /api/v1/me/access and the admin pages: the team role, company level and accessMap(). */
+export type MeAccess = AccessMap & {
+  teamRole: string | null;
+  companyLevel: "owner" | "admin" | null;
+};
+export function meAccess(
+  principal: Principal,
+  access: AccessContext["access"],
+): MeAccess {
+  return {
+    teamRole: principal.role,
+    companyLevel: access.companyLevel,
+    ...accessMap(accessContext(principal, access)),
+  };
+}
+
 const PIPELINE_KINDS: readonly RecordKind[] = [
   "application",
   "interview",

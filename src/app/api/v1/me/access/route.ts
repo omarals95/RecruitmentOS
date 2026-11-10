@@ -1,5 +1,5 @@
 import { json, runApi } from "@/lib/api";
-import { accessContext, accessMap } from "@/lib/authz";
+import { meAccess } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 
 export const runtime = "nodejs";
@@ -10,13 +10,7 @@ export async function GET(request: Request) {
     undefined,
     async (p) => {
       const access = await withTeam(p, async (_tx, state) => state);
-      return json({
-        data: {
-          teamRole: p.role,
-          companyLevel: access.companyLevel,
-          ...accessMap(accessContext(p, access)),
-        },
-      });
+      return json({ data: meAccess(p, access) });
     },
     { humanOnly: true },
   );
