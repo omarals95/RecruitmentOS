@@ -447,6 +447,19 @@ describe("field type engine (R2b-03)", () => {
       "a)|(?:b",
       "[a-z",
       "\\p{Nope}",
+      // More than one choice point (a quantifier of varying count, or |) in the whole pattern.
+      "a*a*a*b",
+      `${".?".repeat(60)}!`,
+      `${"\\w?\\d?".repeat(30)}!`,
+      `${"(?:a|aa)".repeat(24)}!`,
+      "a*a*b",
+      `.*.*${".".repeat(190)}!`,
+      "(?:a+)?",
+      "[A-Z]{2,3}-\\d+",
+      "\\p{L}{2,}(?:-\\p{L}+)?",
+      "a|b|c",
+      "(?:ab|cd)+",
+      "x?y?",
     ];
     for (const pattern of unsafe)
       expect(patternIssue(pattern), pattern).toEqual(expect.any(String));
@@ -458,18 +471,46 @@ describe("field type engine (R2b-03)", () => {
       "(ab){2}",
       "[A-Z]".repeat(40),
       // More of the same rules.
-      "(?:a+)?",
       "(?:a|b){1}",
       "(?<code>[A-Z]{3})-\\d+",
-      "\\p{L}{2,}(?:-\\p{L}+)?",
       "(?:\\u{1F600}){3}",
       "[\\]+*|]+",
       "a|b",
       "\\d+\\.\\d{2}",
+      "\\d+?-x",
+      "(ab)+?",
+      "x{2,2}y?",
+      "[A-Z]{2,}",
+      ".*.{3000}!",
     ];
     for (const pattern of safe)
       expect(patternIssue(pattern), pattern).toBe(null);
     expect("[A-Z]".repeat(40).length).toBe(200);
+    // An accepted worst case stays cheap on the longest value it can be given.
+    const worst = fieldValueSchema(
+      parsed("short-text", { pattern: ".*.{3000}!" }),
+    );
+    const times = [0, 1, 2].map(() => {
+      const start = performance.now();
+      expect(worst.safeParse("a".repeat(4000)).success).toBe(false);
+      return performance.now() - start;
+    });
+    expect(Math.min(...times)).toBeLessThanOrEqual(50);
+    // A failed length check stops the parse before the pattern runs.
+    const long = JSON.stringify(
+      worst.safeParse("a".repeat(40000)).error?.issues,
+    );
+    expect(long).toContain('"too_big"');
+    expect(long).not.toContain('"invalid_format"');
+    const bounded = fieldValueSchema(
+      parsed("short-text", { pattern: "[a-z]+!", min: 5 }),
+    );
+    const short = JSON.stringify(bounded.safeParse("ab").error?.issues);
+    expect(short).toContain('"too_small"');
+    expect(short).not.toContain('"invalid_format"');
+    expect(JSON.stringify(bounded.safeParse("abcde").error?.issues)).toContain(
+      '"invalid_format"',
+    );
     // A refused pattern is never compiled or run against the definition's default.
     for (const pattern of ["(a+)+", "("]) {
       const result = customFieldSchema.safeParse(

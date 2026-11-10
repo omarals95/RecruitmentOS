@@ -67,13 +67,31 @@ export const TASK_FIELD_TYPE_MAP = {
 } as const satisfies Record<(typeof TASK_FIELD_TYPES)[number], CustomFieldType>;
 
 const PATTERN_MAX = 200;
+// The quantifier at the start of rest: its text, its upper bound and whether its count can vary.
+function quantifierAt(rest: string) {
+  const match = /^(?:[*+?]|\{(\d+)(,(\d*))?\})/.exec(rest);
+  if (!match) return null;
+  const [token, low, comma, high] = match;
+  const lower = token === "+" ? 1 : token.startsWith("{") ? Number(low) : 0;
+  const upper =
+    token === "?"
+      ? 1
+      : token === "*" || token === "+" || high === ""
+        ? Infinity
+        : Number(comma === undefined ? low : high);
+  return { token, upper, varies: upper > lower };
+}
 /**
- * Why a pattern is refused, or null when it is safe. The rules are static and conservative: a
- * pattern that could backtrack exponentially is refused before publish, and some safe ones with it.
+ * Why a pattern is refused, or null when it is safe. The rules are static and conservative, and
+ * refuse some safe patterns too. A repeated group may hold no quantifier or alternation, which
+ * rules out exponential backtracking. The whole pattern may hold one choice point (one quantifier
+ * whose count varies, or one |), so a full match of a 4000-character value costs at most about
+ * n × n steps: two side by side with a long fixed tail already take most of a second.
  */
 export function patternIssue(source: string): string | null {
   if (source.length === 0 || source.length > PATTERN_MAX)
     return `A pattern has 1 to ${PATTERN_MAX} characters.`;
+  // The scan below relies on this: a pattern that compiles closes every class, group and brace.
   try {
     new RegExp(source, "u");
     new RegExp(`^(?:${source})$`, "u");
@@ -83,8 +101,25 @@ export function patternIssue(source: string): string | null {
   // Each open group records whether its body, nested groups included, holds a quantifier or |.
   const groups: boolean[] = [false];
   const mark = () => (groups[groups.length - 1] = true);
+  let choices = 0;
+  // A ? right after a quantifier makes it lazy; it is not a quantifier of its own.
+  let afterQuantifier = false;
   for (let i = 0; i < source.length; i++) {
     const char = source[i];
+    const quantifier = "*+?{".includes(char)
+      ? quantifierAt(source.slice(i))
+      : null;
+    if (quantifier) {
+      const lazy: boolean = char === "?" && afterQuantifier;
+      if (!lazy) {
+        mark();
+        if (quantifier.varies) choices++;
+      }
+      i += quantifier.token.length - 1;
+      afterQuantifier = !lazy;
+      continue;
+    }
+    afterQuantifier = false;
     if (char === "\\") {
       const next = source[i + 1];
       if (/[1-9]/.test(next) || (next === "k" && source[i + 2] === "<"))
@@ -104,31 +139,16 @@ export function patternIssue(source: string): string | null {
         i = source.indexOf(source[i + 2] === "<" ? ">" : ":", i);
     } else if (char === ")") {
       const repeats = groups.pop()!;
-      const quantifier = /^(?:[*+?]|\{(\d+)(,(\d*))?\})/.exec(
-        source.slice(i + 1),
-      );
-      if (repeats && quantifier) {
-        const [token, low, comma, high] = quantifier;
-        const upper =
-          token === "*" || token === "+"
-            ? Infinity
-            : token === "?"
-              ? 1
-              : comma === undefined
-                ? Number(low)
-                : high === ""
-                  ? Infinity
-                  : Number(high);
-        if (upper > 1)
-          return "A repeated group may not hold a quantifier or an alternation.";
-      }
+      if (repeats && (quantifierAt(source.slice(i + 1))?.upper ?? 0) > 1)
+        return "A repeated group may not hold a quantifier or an alternation.";
       if (repeats) mark();
-    } else if (char === "|" || "*+?".includes(char)) mark();
-    else if (char === "{") {
+    } else if (char === "|") {
       mark();
-      i = source.indexOf("}", i);
+      choices++;
     }
   }
+  if (choices > 1)
+    return "A pattern may hold only one quantifier of varying count or one alternation.";
   return null;
 }
 
@@ -272,10 +292,11 @@ function filledValue(field: CustomField): z.ZodType {
     case "short-text":
     case "long-text":
     case "rich-text": {
+      // A failed length check stops the parse, so the pattern never runs on an over-long value.
       const text = z
         .string()
-        .min(field.min ?? 0)
-        .max(field.max ?? 4000);
+        .min(field.min ?? 0, { abort: true })
+        .max(field.max ?? 4000, { abort: true });
       // Compiled once per definition, matched in full.
       return field.type === "short-text" && field.pattern !== undefined
         ? text.regex(new RegExp(`^(?:${field.pattern})$`, "u"))
