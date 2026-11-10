@@ -15,7 +15,11 @@ import type { AppDb, TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
 import { records } from "@/db/schema";
 import { addAssignment, removeAssignment } from "@/lib/assignments";
-import { accessContext, anyRecordScopeRule } from "@/lib/authz";
+import {
+  accessContext,
+  anyRecordScopeRule,
+  recordScopeRule,
+} from "@/lib/authz";
 import { eraseCandidate } from "@/lib/candidate-erasure";
 import { setCompanyAuthority } from "@/lib/company-authority";
 import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
@@ -47,7 +51,7 @@ import {
   RECRUITER_ROLE,
 } from "@/domain/config-defaults";
 import type { RoleBody } from "@/domain/config";
-import type { ResourceName } from "@/domain/records";
+import type { RecordKind, ResourceName } from "@/domain/records";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company with a small unit tree, a second fictional team for the
@@ -514,6 +518,51 @@ describe("record scope in row-level security under the split runtime roles", () 
       );
       for (const name of ["vA", "vB", "aA", "cA"])
         expect(noHomeSees, name).not.toContain(id[name]);
+    });
+
+    it("selects the same records with the rule's sets computed once per statement, for every scoped principal", async () => {
+      // As the superuser, so only the two shapes of the service rule decide (R2-PERF-01).
+      const kinds: RecordKind[] = [
+        "vacancy",
+        "application",
+        "interview",
+        "offer",
+        "onboarding",
+        "checklist",
+        "candidate",
+        "task",
+        "comment",
+        "job-role",
+      ];
+      for (const [name, p] of Object.entries(scoped())) {
+        const ctx = accessContext(
+          p,
+          await asContext(p, async (_tx, state) => state),
+        );
+        const db = await harness.asSuperuser();
+        const ofKind = async (kind: RecordKind, once: boolean) => {
+          const rule = recordScopeRule(ctx, kind, "records", { once });
+          return sorted(
+            await db
+              .select({ id: records.id })
+              .from(records)
+              .where(
+                and(
+                  eq(records.teamId, p.teamId),
+                  eq(records.kind, kind),
+                  ...(rule ? [rule] : []),
+                ),
+              ),
+          );
+        };
+        let selected = 0;
+        for (const kind of kinds) {
+          const once = await ofKind(kind, true);
+          expect(once, `${name} ${kind}`).toEqual(await ofKind(kind, false));
+          selected += once.length;
+        }
+        expect(selected, name).toBeGreaterThan(0);
+      }
     });
 
     it("sees exactly what the existing policies show a scope-all member", async () => {
