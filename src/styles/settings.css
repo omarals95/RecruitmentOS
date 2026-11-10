@@ -59,10 +59,8 @@
 }
 .admin-nav-group > p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 1px;
-  text-transform: uppercase;
   padding: 14px 10px 6px;
 }
 .admin-nav ul,
