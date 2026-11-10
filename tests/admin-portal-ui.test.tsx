@@ -1386,8 +1386,41 @@ describe("task boards tab", () => {
     expect(rows[0]).not.toContain("field-error");
     expect(rows[2]).not.toContain("field-error");
     const refused = form(fieldBoard, refusal("invalid_reference"));
-    expect(refused).toContain('<div class="notice error" role="alert">');
+    expect(refused).toContain(
+      '<div tabindex="-1" class="notice error" role="alert">',
+    );
     expect(refused).toContain("Choose it again.");
+  });
+
+  // Round 1 UX review: at 360 px the form's refusals sat above the viewport while focus stayed
+  // on Save draft, far below.
+  it("moves focus to the form's refusals after a submit, so they scroll into view", () => {
+    const refused = form(
+      fieldBoard,
+      taskBoardRefusal(new ClientError(400, "archived_reference", "Archived.")),
+    );
+    const alert =
+      /<div tabindex="-1" class="notice error" role="alert">([\s\S]*?)<\/div>/.exec(
+        refused,
+      );
+    expect(alert?.[1]).toContain("has been archived");
+    // The alert comes before the form's fields, and the form focuses it on each refusal.
+    expect(refused.indexOf("notice error")).toBeLessThan(
+      refused.indexOf("Board name"),
+    );
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/task-boards-tab.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /useEffect\(\(\) => \{\s*if \(issues\.length \|\| error\) alertRef\.current\?\.focus\(\);\s*\}, \[issues, error\]\);/,
+    );
+    expect(source).toMatch(/<div\s+ref=\{alertRef\}\s+tabIndex=\{-1\}/);
+    // Without a refusal there is no alert to focus.
+    expect(form(fieldBoard)).not.toContain("notice error");
   });
 
   it("edits the name, ticked buckets in order with Move up and Move down, and one filter", () => {

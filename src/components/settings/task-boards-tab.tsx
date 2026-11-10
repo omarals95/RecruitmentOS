@@ -510,6 +510,12 @@ export function TaskBoardForm({
     filter?.by === "field" ? filter.value : "",
   );
   const [issues, setIssues] = useState<string[]>([]);
+  // Save draft sits far below the form's top on a phone: a refusal takes focus, which scrolls it
+  // into view. Each submit sets a new issues list, and a server refusal sets error.
+  const alertRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (issues.length || error) alertRef.current?.focus();
+  }, [issues, error]);
   const dropdowns = dropdownFields(fields);
   const chosenField = dropdowns.find((field) => field.id === fieldId);
   const active = buckets ?? [];
@@ -575,7 +581,7 @@ export function TaskBoardForm({
         {boardKey ? `Edit draft: ${initial?.name ?? boardKey}` : "New board"}
       </h3>
       {(issues.length > 0 || error) && (
-        <div className="notice error" role="alert">
+        <div ref={alertRef} tabIndex={-1} className="notice error" role="alert">
           {[...issues, ...(error ? [error] : [])].map((message) => (
             <p key={message} style={{ margin: 0 }}>
               {message}
