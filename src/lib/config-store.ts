@@ -387,13 +387,16 @@ export async function listConfigObjects(
 /**
  * The current published body of the object with this type and key, read from the access state
  * install returned; it runs no statement. Null when the object has no current version, is archived
- * or is not visible to the context (another workspace, or another team's task board).
+ * or is not visible to the context (another workspace, or another team's task board). An access
+ * state without documents (never one install returned) throws.
  */
 export function currentConfigBody(
-  access: TenantAccess,
+  access: Partial<Pick<TenantAccess, "documents">>,
   type: ConfigType,
   key: string,
 ): Pick<ConfigDocument, "versionId" | "number" | "body"> | null {
+  if (!access.documents)
+    throw new Error("The access state holds no configuration documents.");
   const document = Object.values(access.documents).find(
     (candidate) => candidate.type === type && candidate.key === key,
   );
@@ -412,7 +415,7 @@ export function currentConfigBody(
  * this kind throws rather than falling back to the default.
  */
 export function kindSchemaFor(
-  access: TenantAccess,
+  access: Partial<Pick<TenantAccess, "documents">>,
   kind: ConfigurableKind,
 ): { versionId: string; number: number; body: KindSchemaBody } {
   const current = currentConfigBody(access, "kind-schema", kind);
