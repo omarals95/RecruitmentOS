@@ -21,9 +21,19 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
  * team role; History follows company authority, Roles & permissions the company owner level only
  * (D1), Organisation a company owner or a company admin with the organisation area, and Directory
  * the role's directory view action, so a team role never yields any of them and company authority
- * never yields a team page. A page is added here only when its feature exists.
+ * never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
+ * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
+ * other team by name only, never its data. A page is added here only when its feature exists.
  */
 export const ADMIN_TABS = [
+  {
+    key: "teams",
+    label: "Teams",
+    level: "teams",
+    group: "People",
+    description:
+      "See the teams you manage and create a team; company owners and admins also see every other team by name.",
+  },
   {
     key: "members",
     label: "Members",
@@ -99,7 +109,7 @@ export const ADMIN_TABS = [
 ] as const satisfies readonly {
   key: string;
   label: string;
-  level: "team" | "owner" | "organisation" | "directory" | "company";
+  level: "team" | "teams" | "owner" | "organisation" | "directory" | "company";
   group: AdminGroup;
   description: string;
 }[];
@@ -130,6 +140,7 @@ export function adminTabs({
   const company = companyLevel === "owner" || companyLevel === "admin";
   const shown: Record<AdminTab["level"], boolean> = {
     team,
+    teams: team || company,
     owner: companyLevel === "owner",
     organisation:
       companyLevel === "owner" ||

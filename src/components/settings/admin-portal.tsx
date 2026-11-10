@@ -23,6 +23,7 @@ import { DirectoryTab } from "./directory-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
 import { TaskBoardsTab } from "./task-boards-tab";
+import { TeamsTab } from "./teams-tab";
 
 export { NO_ACCESS };
 export type { MeAccess };
@@ -79,7 +80,7 @@ const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
 type TeamTabKey = Exclude<
   AdminTabKey,
-  "roles" | "organisation" | "directory" | "history" | "task-boards"
+  "teams" | "roles" | "organisation" | "directory" | "history" | "task-boards"
 >;
 // The panel texts are the page descriptions of ADMIN_TABS, which the Admin home cards also show.
 const teamPanels: Record<
@@ -172,6 +173,8 @@ export function AdminPortalView({
           <div className="stack admin-content">
             {!current ? (
               <AdminHome tabs={tabs} />
+            ) : current.key === "teams" ? (
+              <TeamsTab />
             ) : current.key === "history" ? (
               <>
                 <ConfigHistory />

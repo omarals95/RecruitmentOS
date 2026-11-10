@@ -61,6 +61,10 @@ import {
 } from "../src/components/settings/directory-tab";
 import type { Employee, RetentionReviewRow } from "../src/lib/directory";
 import { formatDate } from "../src/components/workspace/helpers";
+import {
+  TeamsPanel,
+  type AdminTeamRow,
+} from "../src/components/settings/teams-tab";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -91,7 +95,6 @@ const NOT_YET = [
 const UNBUILT = [
   "users",
   "groups",
-  "teams",
   "company-authority",
   "permissions",
   "permission-helper",
@@ -177,7 +180,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the nine pages that exist, by group, in order", () => {
+  it("defines exactly the ten pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -189,6 +192,7 @@ describe("admin portal tabs", () => {
       "Monitoring",
     ]);
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label, tab.group])).toEqual([
+      ["teams", "Teams", "People"],
       ["members", "Members", "People"],
       ["cv-storage", "CV storage", "People"],
       ["speed", "Speed", "People"],
@@ -204,14 +208,14 @@ describe("admin portal tabs", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
     for (const tab of ADMIN_TABS) {
       expect(
-        ["team", "owner", "organisation", "directory", "company"],
+        ["team", "teams", "owner", "organisation", "directory", "company"],
         tab.key,
       ).toContain(tab.level);
       expect(tab.description, tab.key).toMatch(/^[A-Z][^.]*\.$/);
     }
   });
 
-  it("gives team tabs from the team role and History from company authority only", () => {
+  it("gives team tabs from the team role, History from company authority only, and Teams from either", () => {
     for (const teamRole of TEAM_ROLES)
       for (const companyLevel of COMPANY_LEVELS) {
         const keys = adminTabs({ teamRole, companyLevel }).map(
@@ -222,11 +226,13 @@ describe("admin portal tabs", () => {
           ADMIN_TABS.map((tab) => tab.key).filter((key) =>
             TEAM_TABS.includes(key)
               ? team
-              : key === "roles" || key === "organisation"
-                ? companyLevel === "owner"
-                : key === "history"
-                  ? companyLevel !== null
-                  : false,
+              : key === "teams"
+                ? team || companyLevel !== null
+                : key === "roles" || key === "organisation"
+                  ? companyLevel === "owner"
+                  : key === "history"
+                    ? companyLevel !== null
+                    : false,
           ),
         );
       }
@@ -236,7 +242,7 @@ describe("admin portal tabs", () => {
     ).toEqual([]);
   });
 
-  it("never gives a company page for a team role or a team page for company authority, over every team role, company level, area set and directory action", () => {
+  it("never gives a company page for a team role or a team page for company authority, and Teams for either, over every team role, company level, area set and directory action", () => {
     const directories: MeAccess["actions"][] = [
       {},
       { directory: ["create", "edit", "archive"] },
@@ -258,6 +264,7 @@ describe("admin portal tabs", () => {
             const label = `${teamRole} / ${companyLevel} / ${adminAreas.join(",")} / ${actions.directory?.join(",") ?? "-"}`;
             const team = teamRole === "owner" || teamRole === "admin";
             const shown: Record<AdminTabKey, boolean> = {
+              teams: team || companyLevel !== null,
               members: team,
               "cv-storage": team,
               speed: team,
@@ -338,6 +345,23 @@ describe("admin home", () => {
     }
   });
 
+  it("shows the Teams card first under People to team owners and admins and to company owners and admins only", () => {
+    for (const [name, value] of callers) {
+      const home = content(render(null, value));
+      const shown =
+        value.teamRole === "owner" ||
+        value.teamRole === "admin" ||
+        value.companyLevel !== null;
+      expect(home.includes('href="/app/admin/teams">Teams</a>'), name).toBe(
+        shown,
+      );
+      if (shown)
+        expect(home, name).toMatch(
+          /<h2>People<\/h2><ul class="admin-cards"><li class="panel admin-card"><h3><a href="\/app\/admin\/teams">Teams<\/a><\/h3>/,
+        );
+    }
+  });
+
   it("gives the team panels the same description as their home card", () => {
     const markup = render(null, access("owner", null));
     for (const key of ["members", "cv-storage", "speed", "tokens"] as const) {
@@ -411,6 +435,13 @@ describe("admin sidebar", () => {
     }
   });
 
+  it("starts the People group with Teams for a team owner and for a company admin", () => {
+    for (const value of [access("owner", null), access("viewer", "admin")])
+      expect(sidebar(render(null, value))).toMatch(
+        /<p id="[^"]+">People<\/p><ul aria-labelledby="[^"]+"><li><a href="\/app\/admin\/teams">Teams<\/a><\/li>/,
+      );
+  });
+
   it("names each group's list by its visible group name", () => {
     const nav = sidebar(render(null, access("owner", "owner", directory)));
     const groups = [
@@ -424,9 +455,10 @@ describe("admin sidebar", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all eight tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all nine tab links and nothing that does not exist yet", () => {
     const markup = render("members", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
+      "teams",
       "members",
       "cv-storage",
       "speed",
@@ -516,7 +548,12 @@ describe("admin portal", () => {
 
   it("shows the access changes panel in History only for a company owner", () => {
     const owner = render("history", access("recruiter", "owner"));
-    expect(tabLinks(owner)).toEqual(["organisation", "roles", "history"]);
+    expect(tabLinks(owner)).toEqual([
+      "teams",
+      "organisation",
+      "roles",
+      "history",
+    ]);
     expect(owner).toContain("<h2>Configuration history</h2>");
     expect(owner).toContain("<h2>Recent access changes (last 7 days)</h2>");
     const admin = render("history", access("owner", "admin"));
@@ -1749,5 +1786,121 @@ describe("task boards tab", () => {
     expect(vacancy).toContain(
       '<label for="task-board-vacancy">Vacancy</label>',
     );
+  });
+});
+
+// ADM-02 (job 069): Admin > Teams, the list and Create a team.
+describe("teams tab", () => {
+  const row = (
+    name: string,
+    teamRole: AdminTeamRow["teamRole"],
+    current = false,
+  ): AdminTeamRow => ({
+    teamId: teamRole ? `fictional-${name.toLowerCase()}-id` : null,
+    name: `Fictional ${name}`,
+    slug: `fictional-${name.toLowerCase()}`,
+    createdAt: "2026-11-02T09:00:00.000Z",
+    teamRole,
+    current,
+  });
+  const rows = [
+    row("Alpha", "owner", true),
+    row("Bravo", "admin"),
+    row("Charlie", null),
+    row("Delta", "recruiter"),
+    row("Echo", "viewer"),
+  ];
+  const rowsOf = (markup: string) =>
+    [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+      .map((match) => match[1])
+      .slice(1);
+  const page = (canCreateTeam: boolean, value = access("owner", null)) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={{ ...workspace, canCreateTeam }}>
+        <AdminPortalView tab="teams" access={value} denied={false} error="" />
+      </WorkspaceProvider>,
+    );
+
+  it("lists name, identifier, created date and access, with Open on the active team and Switch on another managed team", () => {
+    const markup = renderToStaticMarkup(<TeamsPanel rows={rows} error="" />);
+    expect(markup).toContain("<h2>Teams</h2>");
+    expect(markup).toMatch(
+      /<div class="table-wrap"><table class="data-table"><caption class="sr-only">Teams, by name<\/caption>/,
+    );
+    for (const header of [
+      "Team",
+      "Identifier",
+      "Created",
+      "Your access",
+      "Actions",
+    ])
+      expect(markup).toContain(`<th>${header}</th>`);
+    const [alpha, bravo, charlie, delta, echo] = rowsOf(markup);
+    const created = `data-label="Created">${formatDate("2026-11-02T09:00:00.000Z")}<`;
+    expect(alpha).toContain('data-label="Team">Fictional Alpha<');
+    expect(alpha).toContain('data-label="Identifier">fictional-alpha<');
+    expect(alpha).toContain(created);
+    expect(alpha).toContain('data-label="Your access">Owner<');
+    expect(alpha).toContain(
+      '<a class="button secondary" href="/app/admin/members">Open<span class="sr-only"> Fictional Alpha</span></a>',
+    );
+    expect(alpha).not.toContain("<button");
+    expect(bravo).toContain('data-label="Your access">Admin<');
+    expect(bravo).toContain(
+      '<button type="button" class="button secondary">Switch and open<span class="sr-only"> Fictional Bravo</span></button>',
+    );
+    expect(bravo).not.toContain("<a ");
+    // Not a member, Recruiter and Viewer rows are text only: no link, button or other control.
+    expect(charlie).toContain('data-label="Team">Fictional Charlie<');
+    expect(charlie).toContain('data-label="Identifier">fictional-charlie<');
+    expect(charlie).toContain(created);
+    expect(charlie).toContain('data-label="Your access">Not a member<');
+    expect(delta).toContain('data-label="Your access">Recruiter<');
+    expect(echo).toContain('data-label="Your access">Viewer<');
+    for (const text of [charlie, delta, echo])
+      expect(text).not.toMatch(/<a |<button|<input|<select/);
+  });
+
+  it("waits every Switch button while an action runs", () => {
+    const markup = renderToStaticMarkup(
+      <TeamsPanel rows={rows} error="" busy="switch-fictional-bravo-id" />,
+    );
+    expect(markup).toContain(
+      '<button type="button" class="button secondary" disabled="">Switching…<span class="sr-only"> Fictional Bravo</span></button>',
+    );
+  });
+
+  it("shows the loading and error states plainly", () => {
+    expect(renderToStaticMarkup(<TeamsPanel rows={null} error="" />)).toContain(
+      '<p role="status">Loading teams…</p>',
+    );
+    const failed = renderToStaticMarkup(
+      <TeamsPanel rows={null} error="The request could not be completed." />,
+    );
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load the teams. The request could not be completed.</p>',
+    );
+    expect(failed).not.toContain("<table");
+  });
+
+  it("shows the list and, only when the user may create a team, the Create a team panel", () => {
+    for (const canCreateTeam of [true, false])
+      for (const value of [access("owner", null), access("viewer", "admin")]) {
+        const markup = page(canCreateTeam, value);
+        expect(markup).toContain("<h2>Teams</h2>");
+        expect(markup).toContain('<p role="status">Loading teams…</p>');
+        expect(markup).toContain('aria-current="page" href="/app/admin/teams"');
+        expect(
+          markup.includes("Create a team</h2>"),
+          String(canCreateTeam),
+        ).toBe(canCreateTeam);
+        expect(markup.includes(">Create team</button>")).toBe(canCreateTeam);
+        expect(markup).not.toContain("disabled");
+      }
+  });
+
+  it("shows the no-access text to a recruiter or viewer without company authority", () => {
+    for (const teamRole of ["recruiter", "viewer"])
+      onlyHeadingAndNoAccess(page(true, access(teamRole, null)));
   });
 });
