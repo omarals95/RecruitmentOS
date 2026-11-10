@@ -1303,7 +1303,7 @@ describe("task boards tab", () => {
         const markup = render("task-boards", access(teamRole, companyLevel));
         if (teamRole === "owner" || teamRole === "admin") {
           expect(tabLinks(markup)).toContain("task-boards");
-          expect(markup).toContain("<h2>Task boards</h2>");
+          expect(markup).toContain('<h2 tabindex="-1">Task boards</h2>');
           expect(markup).toContain(
             'aria-current="page" href="/app/admin/task-boards"',
           );

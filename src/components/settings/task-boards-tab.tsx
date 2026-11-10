@@ -114,6 +114,13 @@ export function TaskBoardsTab() {
     message: string;
   } | null>(null);
   const [notice, setNotice] = useState("");
+  // The control that had focus is gone after a save, publish or retire: the notice takes it, and
+  // the heading takes it when the form is cancelled.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const noticeRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (notice) noticeRef.current?.focus();
+  }, [notice]);
   const { confirm, dialog } = useConfirm();
   async function run<T>(
     work: () => Promise<T>,
@@ -227,7 +234,9 @@ export function TaskBoardsTab() {
   }
   return (
     <section className="panel stack">
-      <h2>Task boards</h2>
+      <h2 ref={heading} tabIndex={-1}>
+        Task boards
+      </h2>
       <p className="muted">
         A task board shows some of this team&apos;s buckets as its columns, in
         the order you choose, with an optional filter. Members choose a board in
@@ -236,7 +245,12 @@ export function TaskBoardsTab() {
         overdue tasks and reminders on every board.
       </p>
       {notice && (
-        <p className="notice success" role="status">
+        <p
+          ref={noticeRef}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </p>
       )}
@@ -273,7 +287,10 @@ export function TaskBoardsTab() {
           busy={busy}
           error={formError}
           onSave={(body) => void save(open.boardKey, body)}
-          onCancel={() => setOpen(null)}
+          onCancel={() => {
+            heading.current?.focus();
+            setOpen(null);
+          }}
         />
       )}
       {dialog}
@@ -503,12 +520,26 @@ export function TaskBoardForm({
       .filter((bucket) => !columns.includes(bucket.id))
       .map((bucket) => ({ id: bucket.id, label: recordLabel(bucket) })),
   ];
-  const move = (index: number, offset: number) =>
+  // A moved column keeps focus on its button, or on its other one when it reaches an end.
+  const moveButtons = useRef(new Map<string, HTMLButtonElement | null>());
+  const [moved, setMoved] = useState<{ key: string } | null>(null);
+  useEffect(() => {
+    if (moved) moveButtons.current.get(moved.key)?.focus();
+  }, [moved]);
+  const move = (index: number, offset: number) => {
+    const target = index + offset;
+    const end =
+      target === 0 ? "up" : target === columns.length - 1 ? "down" : "";
+    const direction = offset < 0 ? "up" : "down";
+    setMoved({
+      key: `${columns[index]}:${end === direction ? (offset < 0 ? "down" : "up") : direction}`,
+    });
     setColumns((list) => {
       const next = [...list];
-      [next[index], next[index + offset]] = [next[index + offset], next[index]];
+      [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
+  };
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const chosen =
@@ -607,6 +638,9 @@ export function TaskBoardForm({
                       <button
                         type="button"
                         className="button secondary small"
+                        ref={(element) => {
+                          moveButtons.current.set(`${row.id}:up`, element);
+                        }}
                         aria-label={`Move ${row.label} up`}
                         disabled={index === 0}
                         onClick={() => move(index, -1)}
@@ -616,6 +650,9 @@ export function TaskBoardForm({
                       <button
                         type="button"
                         className="button secondary small"
+                        ref={(element) => {
+                          moveButtons.current.set(`${row.id}:down`, element);
+                        }}
                         aria-label={`Move ${row.label} down`}
                         disabled={index === columns.length - 1}
                         onClick={() => move(index, 1)}
