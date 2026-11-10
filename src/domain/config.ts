@@ -1,8 +1,17 @@
 import { z } from "zod";
-import { cleanClientName } from "../lib/client-name";
 import { SCOPES, roleScopes, type Role } from "../lib/permissions";
+import {
+  CONFIGURABLE_KINDS,
+  configHelpText,
+  configLabel,
+  configOptionValue,
+  customFieldSchema,
+} from "./field-types";
 import { recordDataSchemas, uuidSchema } from "./record-schemas";
 import type { FieldType, RecordKind, ResourceName } from "./records";
+
+// The cleaned text schemas and the kind list live in field-types.ts, which cannot import this file.
+export { CONFIGURABLE_KINDS, configHelpText, configLabel, configOptionValue };
 
 /** The object types of the versioned configuration store (drizzle/0030_config_store.sql). */
 export const CONFIG_TYPES = [
@@ -30,31 +39,12 @@ export const CONFIG_TYPE_AREAS = {
 
 export const configKey = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 
-// Invisible, control, format and bidi characters are removed first, then the length is checked.
-const cleanText = (min: number, max: number) =>
-  z.string().overwrite(cleanClientName).min(min).max(max);
-export const configLabel = cleanText(1, 120);
-export const configHelpText = cleanText(0, 500);
-export const configOptionValue = cleanText(1, 200);
-
 // The minimal envelope for every type until its own build item replaces it. Strict objects refuse
 // unknown keys, so a body cannot carry record ids or record values.
 const envelope = z
   .object({ label: configLabel, help: configHelpText.optional() })
   .strict();
 
-/** Record kinds with a kind schema; buckets, task fields, saved views and comments have none. */
-export const CONFIGURABLE_KINDS = [
-  "candidate",
-  "job-role",
-  "vacancy",
-  "application",
-  "task",
-  "interview",
-  "offer",
-  "onboarding",
-  "checklist",
-] as const satisfies readonly RecordKind[];
 export type ConfigurableKind = (typeof CONFIGURABLE_KINDS)[number];
 export const SCREEN_ACTIONS = ["create", "edit", "view"] as const;
 
@@ -95,7 +85,12 @@ const kindSchemaShape = z
     kind: z.enum(CONFIGURABLE_KINDS),
     label: configLabel,
     singular: configLabel,
-    fields: z.array(kindSchemaField).min(1).max(150),
+    fields: z
+      .array(
+        z.discriminatedUnion("system", [kindSchemaField, customFieldSchema]),
+      )
+      .min(1)
+      .max(150),
     screens: z
       .array(
         z
@@ -117,12 +112,18 @@ function kindSchemaIssues(
     ctx.addIssue({ code: "custom", path, message });
   const keys = new Set<string>();
   body.fields.forEach((field, index) => {
-    if (!Object.hasOwn(recordDataSchemas[body.kind].shape, field.key))
+    if (
+      field.system &&
+      !Object.hasOwn(recordDataSchemas[body.kind].shape, field.key)
+    )
       issue(["fields", index, "key"], `Not a field of ${body.kind}.`);
     else if (keys.has(field.key))
       issue(["fields", index, "key"], "Field keys must be unique.");
     keys.add(field.key);
-    if ((field.type === "select") !== (field.options !== undefined))
+    if (
+      field.system &&
+      (field.type === "select") !== (field.options !== undefined)
+    )
       issue(
         ["fields", index, "options"],
         "Dropdown fields need options, and only dropdown fields have them.",
@@ -144,8 +145,9 @@ function kindSchemaIssues(
   });
 }
 /**
- * A kind schema (architecture §1.4): the kind's system fields and one screen per action. Strict on
- * every level, so a body cannot carry record ids, record values or default values.
+ * A kind schema (architecture §1.4): the kind's system fields, its custom fields (field-types.ts)
+ * and one screen per action. Strict on every level, so a body cannot carry record ids or record
+ * values; a custom field may carry a default, but no reference type takes one.
  */
 export const kindSchemaBodySchema =
   kindSchemaShape.superRefine(kindSchemaIssues);

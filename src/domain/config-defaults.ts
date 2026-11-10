@@ -30,11 +30,15 @@ export type RoleTemplate = {
   version: 1;
   body: RoleBody;
 };
+/** A default kind schema body: system fields only. */
+type DefaultKindSchemaBody = Omit<KindSchemaBody, "fields"> & {
+  fields: Extract<KindSchemaBody["fields"][number], { system: true }>[];
+};
 export type KindSchemaDefault = {
   key: ConfigurableKind;
   versionId: string;
   version: 1;
-  body: KindSchemaBody;
+  body: DefaultKindSchemaBody;
 };
 
 const RECORD_WRITES = ACTIONS.filter(
@@ -307,7 +311,7 @@ export function systemFieldConfig(kind: RecordKind, key: string) {
 }
 
 // Every key a system field in schema order, every screen in today's editor order (§2.2).
-function defaultKindSchema(kind: ConfigurableKind): KindSchemaBody {
+function defaultKindSchema(kind: ConfigurableKind): DefaultKindSchemaBody {
   const keys = systemFieldKeys(kind);
   const sensitive: readonly string[] =
     kind === "candidate" ? SENSITIVE_CANDIDATE_FIELDS : [];
