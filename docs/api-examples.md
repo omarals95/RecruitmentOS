@@ -165,6 +165,20 @@ Refusals roll back the whole write:
 | 403 `forbidden`                 | the assignees of the task cannot be changed                                                                                                                                                               |
 | 400 `invalid_reference`         | a link to a saved view, comment, candidate, application, interview, offer, onboarding or checklist item, to the task itself, or to a record that is missing, in another team or outside your record scope |
 
+## Custom values on records
+
+Candidates, job roles, vacancies, applications, interviews, offers, onboarding records and checklist items take an optional `data.customValues` on `POST /api/v1/{resource}` and `PATCH /api/v1/{resource}/{id}`: a map from a field definition ID (a UUID) to a string of at most 4000 characters, a finite number, `true`, `false` or `null`. A key that is not a UUID, an object or array value, a longer string or a non-finite number answers 400 `invalid_input`. On `PATCH`, a sent `customValues` replaces the whole stored map, and a `PATCH` without it leaves the map as it is.
+
+```bash
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: vacancy-custom-fictional-1" \
+  --data '{"data":{"title":"Fictional Data Analyst","customValues":{"9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f":"Fictional cost centre 42"}}}'
+```
+
+The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. Until custom field definitions arrive, the values are not checked against any field and are not shown in the app, exports or MCP, and OpenAPI does not list them. Tasks are unchanged: their `customValues` are still checked against the team's task fields. No response includes the kind schema version a record was last saved against.
+
 ## Upload a CV
 
 CV uploads bypass Vercel's small request-body limit by uploading directly to the configured private storage.
