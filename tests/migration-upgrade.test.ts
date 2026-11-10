@@ -18,6 +18,12 @@ import { applyMigrations, schema, setDbForTests, type AppDb } from "../src/db";
 import { withDeadlinesAndSnapshot } from "../src/db/deadlines";
 import { eraseCandidate } from "../src/lib/candidate-erasure";
 import { listCandidateCvs } from "../src/lib/cvs";
+import {
+  kindToResource,
+  resourceToKind,
+  type RecordKind,
+  type ResourceName,
+} from "../src/domain/records";
 import { roleScopes, type Role } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { getCandidateState, getRecord, listRecords } from "../src/lib/records";
@@ -2206,5 +2212,303 @@ describe("upgrade from 0038 to the candidate scope index", () => {
     await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
     await applyMigrations(pg);
     expect(await state()).toEqual(settled);
+  });
+});
+
+// A populated fictional baseline written by the 0039 schema with fixed ids and times, upgraded
+// through every later migration: no row is rewritten, and every REST list and get body is byte for
+// byte the golden file main's code wrote from the same baseline before any later migration existed.
+describe("upgrade from 0039 to record pins", () => {
+  const pg = new PGlite();
+  const owner = "record_pins_upgrade_owner";
+  const team = "record-pins-upgrade-team";
+  const teamOwner = principal("record-pins-upgrade-owner", team, "owner");
+  const viewOwner = principal(
+    "record-pins-upgrade-recruiter",
+    team,
+    "recruiter",
+  );
+  const golden = join(
+    process.cwd(),
+    "tests",
+    "fixtures",
+    "record-pins-rest-baseline.json",
+  );
+  const pins = Object.fromEntries(
+    [
+      "jobRole",
+      "archivedJobRole",
+      "vacancy",
+      "candidate",
+      "otherCandidate",
+      "application",
+      "interview",
+      "offer",
+      "onboarding",
+      "checklist",
+      "bucket",
+      "taskField",
+      "task",
+      "view",
+      "comment",
+    ].map((name, index) => [
+      name,
+      `00000000-0000-4000-8000-0000000670${String(index + 1).padStart(2, "0")}`,
+    ]),
+  ) as Record<string, string>;
+  const baseline: {
+    id: string;
+    kind: RecordKind;
+    data: object;
+    refs?: Partial<
+      Record<
+        | "candidate"
+        | "vacancy"
+        | "application"
+        | "onboarding"
+        | "bucket"
+        | "jobRole"
+        | "parent",
+        string
+      >
+    >;
+    archived?: boolean;
+    privateOwner?: string;
+  }[] = [
+    {
+      id: pins.jobRole,
+      kind: "job-role",
+      data: { title: "Fictional Data Analyst", department: "Analytics" },
+    },
+    {
+      id: pins.archivedJobRole,
+      kind: "job-role",
+      data: { title: "Fictional Archived Role" },
+      archived: true,
+    },
+    {
+      id: pins.vacancy,
+      kind: "vacancy",
+      data: {
+        title: "Fictional Data Analyst",
+        requisitionId: "PIN-001",
+        status: "Open",
+      },
+      refs: { jobRole: pins.jobRole },
+    },
+    {
+      id: pins.candidate,
+      kind: "candidate",
+      data: {
+        name: "Fictional Pin Candidate",
+        email: "pin-candidate@example.test",
+        skills: ["SQL"],
+        reviewStatus: "Reviewed",
+      },
+    },
+    {
+      id: pins.otherCandidate,
+      kind: "candidate",
+      data: { name: "Fictional Second Pin Candidate" },
+    },
+    {
+      id: pins.application,
+      kind: "application",
+      data: { stage: "Interview", source: "Referral" },
+      refs: { candidate: pins.candidate, vacancy: pins.vacancy },
+    },
+    {
+      id: pins.interview,
+      kind: "interview",
+      data: {
+        title: "Fictional pin interview",
+        startAt: "2026-03-02T09:00:00.000Z",
+        minutes: 45,
+      },
+      refs: { application: pins.application },
+    },
+    {
+      id: pins.offer,
+      kind: "offer",
+      data: {
+        title: "Fictional pin offer",
+        amount: "18000.00",
+        currency: "AED",
+        status: "Draft",
+      },
+      refs: { application: pins.application },
+    },
+    {
+      id: pins.onboarding,
+      kind: "onboarding",
+      data: { status: "Planned", startDate: "2026-04-01" },
+      refs: { application: pins.application },
+    },
+    {
+      id: pins.checklist,
+      kind: "checklist",
+      data: { title: "Fictional laptop setup", category: "Orientation" },
+      refs: { onboarding: pins.onboarding },
+    },
+    {
+      id: pins.bucket,
+      kind: "bucket",
+      data: { name: "Fictional pin follow-ups", position: 0 },
+    },
+    {
+      id: pins.taskField,
+      kind: "task-field",
+      data: { name: "Fictional reference", type: "Text", position: 0 },
+    },
+    {
+      id: pins.task,
+      kind: "task",
+      data: {
+        title: "Fictional pin follow-up",
+        priority: "High",
+        customValues: { [pins.taskField]: "Fictional reference 42" },
+      },
+      refs: { bucket: pins.bucket, parent: pins.vacancy },
+    },
+    {
+      id: pins.view,
+      kind: "saved-view",
+      data: {
+        name: "Fictional private pin view",
+        area: "directory",
+        query: { search: "Fictional" },
+      },
+      privateOwner: viewOwner.userId,
+    },
+    {
+      id: pins.comment,
+      kind: "comment",
+      data: { body: "Fictional pin comment" },
+      refs: { parent: pins.candidate },
+    },
+  ];
+  /** Every row of the three tables, read as the PGlite superuser. */
+  const rows = async () => {
+    await pg.exec("SET SESSION AUTHORIZATION postgres");
+    const all: Record<string, Record<string, unknown>[]> = {};
+    for (const [table, order] of [
+      ["app.records", "id"],
+      ["app.candidate_states", "candidate_id, user_id"],
+      ["app.activity", "id"],
+    ])
+      all[table] = (
+        await pg.query<Record<string, unknown>>(
+          `SELECT * FROM ${table} ORDER BY ${order}`,
+        )
+      ).rows;
+    await pg.exec(`SET SESSION AUTHORIZATION ${owner}`);
+    return all;
+  };
+  /** The REST bodies: each resource's default list and each baseline row's get. */
+  const responses = async () => {
+    const lists: Record<string, unknown> = {};
+    for (const resource of Object.keys(resourceToKind) as ResourceName[])
+      lists[resource] = await listRecords(
+        resource === "views" ? viewOwner : teamOwner,
+        resource,
+        new URLSearchParams(),
+      );
+    const gets: Record<string, unknown> = {};
+    for (const row of baseline) {
+      const resource = kindToResource[row.kind];
+      gets[`${resource}/${row.id}`] = {
+        data: await getRecord(
+          row.privateOwner ? viewOwner : teamOwner,
+          resource,
+          row.id,
+        ),
+      };
+    }
+    return { lists, gets };
+  };
+  let before: Awaited<ReturnType<typeof rows>>;
+
+  beforeAll(async () => {
+    await pg.exec(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE;
+      DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO ${owner}', current_database()); END $$;
+      SET SESSION AUTHORIZATION ${owner};`);
+    await applyMigrations(pg, "0039_candidate_scope_index.sql");
+    await pg.exec(`SET SESSION AUTHORIZATION postgres;
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('${teamOwner.userId}','Fictional Pin Owner','${teamOwner.userId}@example.test',true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES
+        ('${team}','Fictional Pin Team','${team}','${teamOwner.userId}');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('record-pins-upgrade-mo','${team}','${teamOwner.userId}','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin) VALUES
+        ('${viewOwner.userId}','Fictional Pin Recruiter','${viewOwner.userId}@example.test',true,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES
+        ('record-pins-upgrade-mr','${team}','${viewOwner.userId}','recruiter');`);
+    // One row a minute from 09:00 on 1 January 2026, in baseline order.
+    for (const [index, row] of baseline.entries()) {
+      const refs = row.refs ?? {};
+      await pg.query(
+        `INSERT INTO app.records(id,team_id,kind,data,created_by,private_owner_id,created_at,updated_at,archived_at,candidate_id,vacancy_id,application_id,onboarding_id,bucket_id,job_role_id,parent_record_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [
+          row.id,
+          team,
+          row.kind,
+          JSON.stringify(row.data),
+          teamOwner.userId,
+          row.privateOwner ?? null,
+          new Date(Date.UTC(2026, 0, 1, 9, index)).toISOString(),
+          row.archived ? "2026-01-05T12:00:00.000Z" : null,
+          refs.candidate ?? null,
+          refs.vacancy ?? null,
+          refs.application ?? null,
+          refs.onboarding ?? null,
+          refs.bucket ?? null,
+          refs.jobRole ?? null,
+          refs.parent ?? null,
+        ],
+      );
+    }
+    await pg.query(
+      `INSERT INTO app.candidate_states(team_id,user_id,candidate_id,status,note,updated_at) VALUES($1,$2,$3,'Contacted','Fictional private pin note','2026-01-02T08:00:00Z')`,
+      [team, viewOwner.userId, pins.candidate],
+    );
+    await pg.query(
+      `INSERT INTO app.activity(id,team_id,record_id,actor_id,actor_type,action,kind,summary,metadata,created_at) VALUES
+        ('00000000-0000-4000-8000-000000067101',$1,$2,$5,'session','created','candidate','Created candidate','{}','2026-01-01T09:03:00Z'),
+        ('00000000-0000-4000-8000-000000067102',$1,$3,$5,'session','created','offer','Created offer','{"fromStatus":null,"toStatus":"Draft"}','2026-01-01T09:07:00Z'),
+        ('00000000-0000-4000-8000-000000067103',$1,$4,$5,'session','created','comment','Created comment','{}','2026-01-01T09:14:00Z')`,
+      [team, pins.candidate, pins.offer, pins.comment, teamOwner.userId],
+    );
+    before = await rows();
+    await applyMigrations(pg);
+    await installTenantContextKey(pg);
+    setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every record, private state and audit row unchanged", async () => {
+    expect(before["app.records"]).toHaveLength(15);
+    expect(new Set(before["app.records"].map((row) => row.kind)).size).toBe(13);
+    expect(before["app.candidate_states"]).toHaveLength(1);
+    expect(before["app.activity"]).toHaveLength(3);
+    expect(await rows()).toEqual(before);
+  });
+
+  it("answers every REST list and get byte for byte as before the upgrade", async () => {
+    const expected = JSON.parse(await readFile(golden, "utf8")) as Awaited<
+      ReturnType<typeof responses>
+    >;
+    const actual = await responses();
+    expect(Object.keys(actual.lists)).toEqual(Object.keys(expected.lists));
+    expect(Object.keys(actual.gets)).toEqual(Object.keys(expected.gets));
+    for (const [name, body] of Object.entries(actual.lists))
+      expect(JSON.stringify(body), name).toBe(
+        JSON.stringify(expected.lists[name]),
+      );
+    for (const [name, body] of Object.entries(actual.gets))
+      expect(JSON.stringify(body), name).toBe(
+        JSON.stringify(expected.gets[name]),
+      );
   });
 });
