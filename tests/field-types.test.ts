@@ -313,7 +313,7 @@ describe("field type engine (R2b-03)", () => {
     // Bounded, cleaned text.
     expect(refused("short-text", { label: "x".repeat(121) })).toBe(true);
     expect(refused("short-text", { label: "x".repeat(120) })).toBe(false);
-    expect(refused("short-text", { label: " ​ " })).toBe(true);
+    expect(refused("short-text", { label: " \u200B " })).toBe(true);
     expect(refused("short-text", { help: "x".repeat(501) })).toBe(true);
     expect(refused("short-text", { help: "x".repeat(500) })).toBe(false);
     const option = (label: string, id = "opt-x") => ({
@@ -330,9 +330,9 @@ describe("field type engine (R2b-03)", () => {
     expect(refused("dropdown", { options: options(100) })).toBe(false);
     expect(refused("dropdown", { options: ["Fictional"] })).toBe(true);
     const cleaned = parsed("dropdown", {
-      label: "  Fictional​ field ‮ ",
-      help: " Fictional  help‍ ",
-      options: [{ id: " opt-a​ ", label: "⁦Alpha⁩  one " }],
+      label: "  Fictional\u200B field \u202E ",
+      help: " Fictional\u00A0 help\u200D ",
+      options: [{ id: " opt-a\u200B ", label: "\u2066Alpha\u2069  one " }],
     });
     expect(cleaned.label).toBe("Fictional field");
     expect(cleaned.help).toBe("Fictional help");
