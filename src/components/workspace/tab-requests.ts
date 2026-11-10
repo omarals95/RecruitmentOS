@@ -86,6 +86,8 @@ export interface ListQuery {
   maxYears: string;
   /** Tasks only: the caller's assigned tasks (a list-only filter; exports refuse it). */
   assignedToMe?: boolean;
+  /** Tasks only: a published task board's id; empty is the built-in All buckets board. */
+  board?: string;
 }
 export function defaultListQuery(section: string): ListQuery {
   const resource = screenDefinitions[section].resource;
@@ -140,6 +142,7 @@ export function listSearchParams(
   if (q.minYears) p.set("minYearsExperience", q.minYears);
   if (q.maxYears) p.set("maxYearsExperience", q.maxYears);
   if (resource === "tasks" && q.assignedToMe) p.set("assignedToMe", "true");
+  if (resource === "tasks" && q.board) p.set("board", q.board);
   if (section === "source-review") p.set("needsReview", "true");
   return p;
 }
@@ -147,6 +150,8 @@ export const listPath = (resource: ResourceName, params: URLSearchParams) =>
   `/api/v1/${resource}?${params}`;
 export const BUCKETS_PATH =
   "/api/v1/buckets?pageSize=100&sort=position&direction=asc";
+/** The team's published task boards for the Tasks screen's switcher; not part of the prefetch. */
+export const TASK_BOARDS_PATH = "/api/v1/task-boards";
 /** Loaded on first use of the skill or certification filter, never with the tab. */
 export const CANDIDATE_SUGGESTIONS_PATH = "/api/v1/candidates/suggestions";
 export const viewsPath = (resource: ResourceName) =>

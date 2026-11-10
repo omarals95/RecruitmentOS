@@ -21,13 +21,19 @@ import { WorkspaceShell } from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
   ApplicationReference,
+  BOARD_UNAVAILABLE,
   ExportControl,
   FilterTags,
   Kanban,
   Loading,
   RecordDetail,
   RecordsScreen,
+  TaskBoardNotice,
+  TaskBoardSwitcher,
+  boardBuckets,
+  taskBoardChoice,
   withoutImportLink,
+  type TaskBoardOption,
 } from "../src/components/workspace/records-screen";
 import {
   AssigneePicker,
@@ -1197,5 +1203,209 @@ describe("team tasks", () => {
     const on = control(false);
     expect(on).not.toContain("disabled");
     expect(on).not.toContain("Turn off Assigned to me");
+  });
+});
+
+// Task boards (R2a-21, job 064): the Tasks screen's board switcher, a board's columns, the retired
+// board fallback and the export note. Fictional boards, buckets and ids only.
+describe("task board switcher", () => {
+  const bucket = (index: number, name: string): RecordDto =>
+    ({
+      id: `00000000-0000-4000-8000-00000000080${index}`,
+      kind: "bucket",
+      data: { name, color: "#4338CA", position: index, completed: false },
+      version: 1,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-08T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+    }) as RecordDto;
+  // The active buckets in position order, as BUCKETS_PATH returns them.
+  const active = [
+    bucket(1, "Fictional to do"),
+    bucket(2, "Fictional doing"),
+    bucket(3, "Fictional done"),
+  ];
+  const archivedBucket = "00000000-0000-4000-8000-000000000809";
+  const boards: TaskBoardOption[] = [
+    {
+      id: "00000000-0000-4000-8000-000000000901",
+      key: "fictional-project",
+      name: "Fictional Project board",
+      columns: [active[2].id, archivedBucket, active[0].id],
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000902",
+      key: "fictional-sprint",
+      name: "Fictional sprint",
+      columns: [active[1].id],
+    },
+  ];
+  const task = {
+    ...bucket(5, "unused"),
+    id: "00000000-0000-4000-8000-000000000851",
+    kind: "task",
+    data: { title: "Fictional board task", priority: "Normal" },
+    bucketId: active[2].id,
+  } as RecordDto;
+
+  it("labels the switcher Task board and lists All buckets first, then the boards", () => {
+    const markup = renderToStaticMarkup(
+      <TaskBoardSwitcher boards={boards} value="" onChange={() => {}} />,
+    );
+    expect(markup).toMatch(/^<select aria-label="Task board">/);
+    expect(
+      [
+        ...markup.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)<\/option>/g),
+      ].map((match) => [match[1], match[2]]),
+    ).toEqual([
+      ["", "All buckets"],
+      [boards[0].id, "Fictional Project board"],
+      [boards[1].id, "Fictional sprint"],
+    ]);
+    expect(markup).toMatch(/<option value="" selected="">All buckets/);
+    const chosen = renderToStaticMarkup(
+      <TaskBoardSwitcher
+        boards={boards}
+        value={boards[1].id}
+        onChange={() => {}}
+      />,
+    );
+    expect(chosen).toContain(
+      `<option value="${boards[1].id}" selected="">Fictional sprint</option>`,
+    );
+    // On the Tasks screen, in the toolbar, with All buckets chosen before any board loads.
+    const screen = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordsScreen section="tasks" />
+      </WorkspaceProvider>,
+    );
+    const toolbar = /<div class="row toolbar-options">([\s\S]*?)<\/div>/.exec(
+      screen,
+    )?.[1];
+    expect(toolbar).toContain(
+      '<select aria-label="Task board"><option value="" selected="">All buckets</option></select>',
+    );
+    // The switcher uses the toolbar's own select rules, so it fits 360 px and the dark theme.
+    expect(
+      rules("src/app/globals.css").some(
+        (rule) =>
+          rule.selector.includes(".toolbar-options select") &&
+          /max-width/.test(rule.body),
+      ),
+    ).toBe(true);
+  });
+
+  it("requests a board's tasks with board and shows only its active buckets, in board order", () => {
+    const query = { ...defaultListQuery("tasks"), board: boards[0].id };
+    expect(listSearchParams("tasks", query).get("board")).toBe(boards[0].id);
+    expect(listSearchParams("tasks", query).get("page")).toBe("1");
+    expect(
+      listSearchParams("tasks", defaultListQuery("tasks")).has("board"),
+    ).toBe(false);
+    expect(
+      listSearchParams("pipeline", {
+        ...defaultListQuery("pipeline"),
+        board: boards[0].id,
+      }).has("board"),
+    ).toBe(false);
+    // All buckets keeps every active bucket in position order.
+    expect(boardBuckets(active, null)).toBe(active);
+    const columns = boardBuckets(active, boards[0]);
+    expect(columns.map((item) => item.id)).toEqual([
+      active[2].id,
+      active[0].id,
+    ]);
+    expect(
+      boardBuckets(active, { ...boards[0], columns: [archivedBucket] }),
+    ).toEqual([]);
+    const board = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <Kanban
+          resource="tasks"
+          records={[task]}
+          buckets={columns}
+          onOpen={() => {}}
+          onMove={() => {}}
+          canWrite
+        />
+      </WorkspaceProvider>,
+    );
+    expect(
+      [...board.matchAll(/<h2[^>]*>([^<]+)<span>/g)].map((match) => match[1]),
+    ).toEqual(["Fictional done", "Fictional to do"]);
+    expect(board).not.toContain("Fictional doing");
+    // A card moves only between the board's columns.
+    const move =
+      /<select aria-label="Move Fictional board task to"[\s\S]*?<\/select>/.exec(
+        board,
+      )![0];
+    expect(
+      [...move.matchAll(/<option[^>]*>([^<]+)<\/option>/g)].map(
+        (match) => match[1],
+      ),
+    ).toEqual(["Fictional done", "Fictional to do"]);
+  });
+
+  it("falls back to All buckets with a status notice when the chosen board is retired", () => {
+    expect(taskBoardChoice(boards, "")).toEqual({
+      board: null,
+      unavailable: false,
+    });
+    expect(taskBoardChoice(boards, boards[1].id)).toEqual({
+      board: boards[1],
+      unavailable: false,
+    });
+    // Before the boards load nothing is unavailable yet.
+    expect(taskBoardChoice(null, boards[1].id).unavailable).toBe(false);
+    const retired = taskBoardChoice([boards[0]], boards[1].id);
+    expect(retired).toEqual({ board: null, unavailable: true });
+    expect(
+      renderToStaticMarkup(
+        <TaskBoardNotice unavailable={retired.unavailable} />,
+      ),
+    ).toBe(`<p class="notice" role="status">${BOARD_UNAVAILABLE}</p>`);
+    expect(BOARD_UNAVAILABLE).toBe(
+      "The task board you chose is no longer available, so All buckets is shown.",
+    );
+    expect(renderToStaticMarkup(<TaskBoardNotice unavailable={false} />)).toBe(
+      "",
+    );
+  });
+
+  it("disables Export with a note while a board other than All buckets is chosen", () => {
+    const control = (board: boolean, assignedToMe = false) =>
+      renderToStaticMarkup(
+        <ExportControl
+          exporting={false}
+          loading={false}
+          assignedToMe={assignedToMe}
+          board={board}
+          onExport={() => {}}
+        />,
+      );
+    const off = control(true);
+    expect(off).toMatch(
+      /<button[^>]*disabled=""[^>]*aria-describedby="([^"]+)"/,
+    );
+    const note = /aria-describedby="([^"]+)"/.exec(off)![1];
+    expect(off).toContain(
+      `<small id="${note}" class="muted">Choose All buckets to export.</small>`,
+    );
+    expect(control(true, true)).toContain(
+      "Turn off Assigned to me to export. Choose All buckets to export.",
+    );
+    const on = control(false);
+    expect(on).not.toContain("disabled");
+    expect(on).not.toContain("Choose All buckets");
   });
 });

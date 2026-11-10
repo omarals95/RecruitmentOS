@@ -97,6 +97,7 @@ import { Loading } from "./skeleton";
 import {
   BUCKETS_PATH,
   CANDIDATE_SUGGESTIONS_PATH,
+  TASK_BOARDS_PATH,
   defaultListQuery,
   listPath,
   listSearchParams,
@@ -194,25 +195,37 @@ export function withoutImportLink(href: string): string {
   return url.toString();
 }
 
-/** The list's Export button; Assigned to me is a list-only filter that an export refuses. */
+/**
+ * The list's Export button; Assigned to me and a task board other than All buckets are list-only
+ * filters that an export refuses.
+ */
 export function ExportControl({
   exporting,
   loading,
   assignedToMe,
+  board = false,
   onExport,
 }: {
   exporting: boolean;
   loading: boolean;
   assignedToMe: boolean;
+  /** Tasks only: a task board other than All buckets is chosen. */
+  board?: boolean;
   onExport: () => void;
 }) {
   const noteId = useId();
+  const note = [
+    assignedToMe ? "Turn off Assigned to me to export." : "",
+    board ? "Choose All buckets to export." : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <>
       <button
         className="button secondary"
-        disabled={exporting || loading || assignedToMe}
-        aria-describedby={assignedToMe ? noteId : undefined}
+        disabled={exporting || loading || !!note}
+        aria-describedby={note ? noteId : undefined}
         onClick={onExport}
       >
         {exporting ? (
@@ -222,13 +235,81 @@ export function ExportControl({
         )}
         Export
       </button>
-      {assignedToMe && (
+      {note && (
         <small id={noteId} className="muted">
-          Turn off Assigned to me to export.
+          {note}
         </small>
       )}
     </>
   );
+}
+
+/** A published task board as GET /api/v1/task-boards lists it; its filter stays on the server. */
+export interface TaskBoardOption {
+  id: string;
+  key: string;
+  name: string;
+  columns: string[];
+}
+/**
+ * The chosen board among the published ones, or null for All buckets: none chosen, or a chosen
+ * board that is no longer listed (retired), which is then unavailable.
+ */
+export function taskBoardChoice(
+  boards: TaskBoardOption[] | null,
+  chosen: string,
+): { board: TaskBoardOption | null; unavailable: boolean } {
+  const board = boards?.find((item) => item.id === chosen) ?? null;
+  return { board, unavailable: !!chosen && !!boards && !board };
+}
+/**
+ * A board's Kanban columns: its bucket ids in board order, mapped onto the active buckets, so an
+ * archived or deleted bucket has no column. All buckets keeps every active bucket in position order.
+ */
+export function boardBuckets(
+  buckets: RecordDto[],
+  board: TaskBoardOption | null,
+): RecordDto[] {
+  return board
+    ? board.columns.flatMap((id) =>
+        buckets.filter((bucket) => bucket.id === id),
+      )
+    : buckets;
+}
+/** The Tasks screen's board switcher: All buckets first, then the team's published boards by name. */
+export function TaskBoardSwitcher({
+  boards,
+  value,
+  onChange,
+}: {
+  boards: TaskBoardOption[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <select
+      aria-label="Task board"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">All buckets</option>
+      {boards.map((board) => (
+        <option key={board.id} value={board.id}>
+          {board.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+export const BOARD_UNAVAILABLE =
+  "The task board you chose is no longer available, so All buckets is shown.";
+/** Announces that a chosen board was retired and the screen fell back to All buckets. */
+export function TaskBoardNotice({ unavailable }: { unavailable: boolean }) {
+  return unavailable ? (
+    <p className="notice" role="status">
+      {BOARD_UNAVAILABLE}
+    </p>
+  ) : null;
 }
 
 export function RecordsScreen({ section }: { section: string }) {
@@ -258,6 +339,16 @@ export function RecordsScreen({ section }: { section: string }) {
   const [maxYears, setMaxYears] = useState(initial.maxYears);
   const [vacancy, setVacancy] = useState(initial.vacancy);
   const [assignedToMe, setAssignedToMe] = useState(!!initial.assignedToMe);
+  // Tasks only: the chosen task board's id, kept in this screen only; empty is All buckets.
+  const [chosenBoard, setChosenBoard] = useState("");
+  const boards = useApi<{ data: TaskBoardOption[] }>(
+    resource === "tasks" ? TASK_BOARDS_PATH : null,
+  );
+  const { board: taskBoard, unavailable: boardUnavailable } = taskBoardChoice(
+    boards.data?.data ?? null,
+    chosenBoard,
+  );
+  const boardId = boardUnavailable ? "" : chosenBoard;
   const [archived, setArchived] = useState(initial.archived);
   const [sort, setSort] = useState(initial.sort);
   const [direction, setDirection] = useState(initial.direction);
@@ -320,6 +411,7 @@ export function RecordsScreen({ section }: { section: string }) {
         minYears,
         maxYears,
         assignedToMe,
+        board: boardId,
       }),
     [
       page,
@@ -343,6 +435,7 @@ export function RecordsScreen({ section }: { section: string }) {
       shortlisted,
       reviewStatus,
       assignedToMe,
+      boardId,
     ],
   );
   const result = useApi<ListResponse>(listPath(resource, params));
@@ -406,6 +499,7 @@ export function RecordsScreen({ section }: { section: string }) {
     shortlisted,
     reviewStatus,
     assignedToMe,
+    boardId,
   ]);
   useEffect(() => {
     let active = true;
@@ -437,6 +531,7 @@ export function RecordsScreen({ section }: { section: string }) {
     result.refresh();
     board.refresh();
     buckets.refresh();
+    boards.refresh();
     views.refresh();
     setSelected([]);
   };
@@ -620,6 +715,10 @@ export function RecordsScreen({ section }: { section: string }) {
     formatField(columnField(key) || { key, type: "text" }, dataOf(record));
   const filterCount = activeFilterCount(filters, section === "shortlist");
   const filtered = isFiltered(search, filters, section === "shortlist");
+  const columnBuckets = boardBuckets(buckets.data?.data || [], taskBoard);
+  // A chosen board whose every bucket is archived or deleted has no column to show.
+  const noActiveColumns =
+    !!taskBoard && !!buckets.data && !columnBuckets.length;
   const stateOptions =
     resource === "applications"
       ? APPLICATION_STAGES
@@ -692,6 +791,7 @@ export function RecordsScreen({ section }: { section: string }) {
           {error}
         </div>
       )}
+      <TaskBoardNotice unavailable={boardUnavailable} />
       {conflict && (
         <div className="notice error" role="alert">
           {recordLabel(conflict.record)} was changed by someone else, so your
@@ -772,10 +872,18 @@ export function RecordsScreen({ section }: { section: string }) {
                 Save view
               </button>
             )}
+            {resource === "tasks" && (
+              <TaskBoardSwitcher
+                boards={boards.data?.data ?? []}
+                value={boardId}
+                onChange={setChosenBoard}
+              />
+            )}
             <ExportControl
               exporting={exporting}
               loading={result.loading}
               assignedToMe={assignedToMe}
+              board={!!taskBoard}
               onExport={exportAll}
             />
             <DisplayModeToggle
@@ -1036,6 +1144,11 @@ export function RecordsScreen({ section }: { section: string }) {
           <LoadError message={result.error} retry={result.refresh} />
         ) : result.loading ? (
           <Loading />
+        ) : mode === "board" && noActiveColumns ? (
+          <EmptyState
+            title="None of this board's buckets is active"
+            description="Its buckets were archived or deleted. Choose another board, or All buckets."
+          />
         ) : !result.data ||
           !(boardQuery
             ? result.data.pagination.total
@@ -1124,7 +1237,7 @@ export function RecordsScreen({ section }: { section: string }) {
           <Kanban
             resource={resource}
             records={result.data.data}
-            buckets={buckets.data?.data || []}
+            buckets={columnBuckets}
             onOpen={setDetail}
             onMove={move}
             canWrite={canWrite}

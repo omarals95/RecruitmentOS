@@ -398,13 +398,48 @@ export function isOwnerTemplateBody(body: unknown): boolean {
   return ownerTemplateSchema.safeParse(body).success;
 }
 
-// Role drafts carry real role bodies; every other type keeps the envelope until its own item.
+/**
+ * A team's task board (architecture §10): its name, an ordered subset of the team's bucket ids as
+ * columns and at most one filter. Unlike company bodies it holds ids of the team's own records, which
+ * only that team can read (R2a-21). Strict on every level.
+ */
+export const taskBoardBodySchema = z
+  .object({
+    name: configLabel,
+    columns: z
+      .array(uuidSchema)
+      .min(1)
+      .max(100)
+      .refine(
+        (columns) => new Set(columns).size === columns.length,
+        "A bucket can be a column only once.",
+      ),
+    filter: z
+      .discriminatedUnion("by", [
+        z.object({ by: z.literal("vacancy"), vacancyId: uuidSchema }).strict(),
+        z
+          .object({ by: z.literal("linked-record"), recordId: uuidSchema })
+          .strict(),
+        z
+          .object({
+            by: z.literal("field"),
+            fieldId: uuidSchema,
+            value: configOptionValue,
+          })
+          .strict(),
+      ])
+      .optional(),
+  })
+  .strict();
+export type TaskBoardBody = z.output<typeof taskBoardBodySchema>;
+
+// Role and task-board drafts carry real bodies; every other type keeps the envelope until its own item.
 export const configBodySchemas = {
   "kind-schema": envelope,
   workflow: envelope,
   board: envelope,
   role: roleBodySchema,
   template: envelope,
-  "task-board": envelope,
+  "task-board": taskBoardBodySchema,
 } satisfies Record<ConfigType, z.ZodType>;
 export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;

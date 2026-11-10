@@ -30,7 +30,14 @@ import {
   roleKeyFor,
   saveRoleDraft,
 } from "../src/components/settings/roles-tab";
-import type { RoleBody } from "../src/domain/config";
+import type { RoleBody, TaskBoardBody } from "../src/domain/config";
+import type { RecordDto } from "../src/domain/records";
+import { ClientError } from "../src/components/workspace/client";
+import {
+  TaskBoardForm,
+  TaskBoardsList,
+  taskBoardRefusal,
+} from "../src/components/settings/task-boards-tab";
 import {
   ADMIN_ROLE,
   HIRING_MANAGER_ROLE,
@@ -68,9 +75,8 @@ const workspace = {
 };
 const TEAM_ROLES = ["owner", "admin", "recruiter", "viewer"] as const;
 const COMPANY_LEVELS = ["owner", "admin", null] as const;
-const TEAM_TABS = ["members", "cv-storage", "speed", "tokens"];
+const TEAM_TABS = ["members", "cv-storage", "speed", "tokens", "task-boards"];
 const NOT_YET = [
-  "Task boards",
   "Fields",
   "Screens",
   "Workflows",
@@ -123,12 +129,13 @@ const onlyHeadingAndNoAccess = (markup: string) => {
 };
 
 describe("admin portal tabs", () => {
-  it("defines exactly the eight tabs that exist, in order", () => {
+  it("defines exactly the nine tabs that exist, in order", () => {
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label])).toEqual([
       ["members", "Members"],
       ["cv-storage", "CV storage"],
       ["speed", "Speed"],
       ["tokens", "API tokens"],
+      ["task-boards", "Task boards"],
       ["roles", "Roles & permissions"],
       ["organisation", "Organisation"],
       ["directory", "Directory"],
@@ -157,7 +164,7 @@ describe("admin portal tabs", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all seven tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all eight tab links and nothing that does not exist yet", () => {
     const markup = render("members", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
       ...TEAM_TABS,
@@ -1178,5 +1185,305 @@ describe("directory tab erasure and retention review", () => {
       }),
     ).toContain('<p class="notice error" role="alert">');
     expect(ERASED_NOTICE).toBe("Employee permanently erased.");
+  });
+});
+
+// Task boards (R2a-21, job 064): a team tab for team owners and admins, fictional boards and ids.
+describe("task boards tab", () => {
+  const bucket = (index: number, name: string): RecordDto =>
+    ({
+      id: `00000000-0000-4000-8000-00000000040${index}`,
+      kind: "bucket",
+      data: { name, color: "#4338CA", position: index, completed: false },
+      version: 1,
+    }) as RecordDto;
+  const todo = bucket(1, "Fictional to do");
+  const doing = bucket(2, "Fictional doing");
+  const project = {
+    id: "00000000-0000-4000-8000-000000000501",
+    kind: "task-field",
+    data: {
+      name: "Project",
+      type: "Dropdown",
+      options: ["Fictional Apollo", "Fictional Zephyr"],
+    },
+    version: 1,
+  } as RecordDto;
+  const version = (number: number | null, body: TaskBoardBody) => ({
+    id: `00000000-0000-4000-8000-0000000006${String(number ?? 0).padStart(2, "0")}`,
+    number,
+    state: number === null ? ("draft" as const) : ("published" as const),
+    body: body as unknown as Record<string, unknown>,
+    bodySha256: "0".repeat(64),
+    note: null,
+    createdAt: "2026-11-08T10:00:00.000Z",
+    publishedAt: number === null ? null : "2026-11-08T10:05:00.000Z",
+  });
+  const object = (
+    key: string,
+    current: ConfigObject["current"],
+    draft: ConfigObject["draft"],
+  ): ConfigObject => ({
+    id: `00000000-0000-4000-8000-0000000007${String(key.length).padStart(2, "0")}`,
+    type: "task-board",
+    key,
+    createdAt: "2026-11-08T10:00:00.000Z",
+    archivedAt: null,
+    current,
+    draft,
+  });
+  const fieldBoard: TaskBoardBody = {
+    name: "Fictional Project board",
+    columns: [doing.id, todo.id],
+    filter: { by: "field", fieldId: project.id, value: "Fictional Apollo" },
+  };
+  const boards = [
+    object(
+      "fictional-draft",
+      null,
+      version(null, { ...fieldBoard, name: "Fictional draft board" }),
+    ),
+    object("fictional-project", version(2, fieldBoard), null),
+    object(
+      "fictional-gone",
+      version(1, {
+        name: "Fictional linked board",
+        columns: [todo.id, "00000000-0000-4000-8000-000000000499"],
+        filter: {
+          by: "linked-record",
+          recordId: "00000000-0000-4000-8000-000000000301",
+        },
+      }),
+      version(null, { name: "Fictional linked board", columns: [todo.id] }),
+    ),
+  ];
+  const list = (
+    rows: ConfigObject[] | null,
+    rowError: { id: string; message: string } | null = null,
+    error = "",
+  ) =>
+    renderToStaticMarkup(
+      <TaskBoardsList
+        boards={rows}
+        buckets={[todo, doing]}
+        fields={[project]}
+        error={error}
+        busy={false}
+        rowError={rowError}
+        onCreate={() => {}}
+        onEdit={() => {}}
+        onNewDraft={() => {}}
+        onPublish={() => {}}
+        onRetire={() => {}}
+      />,
+    );
+  const form = (initial: TaskBoardBody | null, error = "") =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TaskBoardForm
+          boardKey={initial ? "fictional-project" : null}
+          initial={initial}
+          buckets={[todo, doing]}
+          fields={[project]}
+          busy={false}
+          error={error}
+          onSave={() => {}}
+          onCancel={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  const tableRows = (markup: string) =>
+    [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+      .map((match) => match[1])
+      .slice(1);
+
+  it("shows the tab only to team owners and admins, never through company authority", () => {
+    for (const teamRole of TEAM_ROLES)
+      for (const companyLevel of COMPANY_LEVELS) {
+        const markup = render("task-boards", access(teamRole, companyLevel));
+        if (teamRole === "owner" || teamRole === "admin") {
+          expect(tabLinks(markup)).toContain("task-boards");
+          expect(markup).toContain('<h2 tabindex="-1">Task boards</h2>');
+          expect(markup).toContain(
+            'aria-current="page" href="/app/admin/task-boards"',
+          );
+          // Its own panel, not a link to a settings page.
+          expect(markup).not.toContain('class="button" href="/app/settings');
+        } else onlyHeadingAndNoAccess(markup);
+      }
+    expect(
+      adminTabs({ teamRole: "recruiter", companyLevel: "owner" }).map(
+        (tab) => tab.key,
+      ),
+    ).not.toContain("task-boards");
+  });
+
+  it("shows the built-in All buckets board as text and each board's state, columns, filter and actions", () => {
+    const markup = list(boards);
+    expect(markup).toContain("<strong>All buckets</strong>");
+    expect(markup).toContain(
+      "Every active bucket of this team, in position order, with no filter.",
+    );
+    expect(markup).toContain("It cannot be changed or retired.");
+    // The All buckets text comes before the table and has no control.
+    const builtIn = markup.slice(0, markup.indexOf("<table"));
+    expect(builtIn.match(/<button/g)).toHaveLength(1);
+    expect(builtIn).toContain(">New board</button>");
+    const rows = tableRows(markup);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain("<strong>Fictional draft board</strong>");
+    expect(rows[0]).toContain(">Draft</td>");
+    expect(rows[0]).toContain(">Edit draft</button>");
+    expect(rows[0]).toContain(">Publish</button>");
+    expect(rows[0]).not.toContain(">New draft</button>");
+    expect(rows[1]).toContain(">Published (version 2)</td>");
+    expect(rows[1]).toContain(">Fictional doing, Fictional to do</td>");
+    expect(rows[1]).toContain(">Tasks whose Project is Fictional Apollo.</td>");
+    expect(rows[1]).toContain(">New draft</button>");
+    expect(rows[1]).not.toContain(">Publish</button>");
+    expect(rows[2]).toContain(">Published (version 1), draft in progress</td>");
+    expect(rows[2]).toContain(
+      ">Fictional to do, A bucket that is no longer active</td>",
+    );
+    expect(rows[2]).toContain(">Tasks linked to one chosen record.</td>");
+    for (const row of rows) expect(row).toContain(">Retire board</button>");
+    // Bucket names only, never their ids.
+    expect(markup).not.toContain(todo.id);
+    expect(list([])).toContain("No task boards yet.");
+    expect(list(null)).toContain('<p role="status">Loading task boards…</p>');
+    expect(list(null, null, "Network unavailable")).toContain(
+      "Network unavailable",
+    );
+  });
+
+  it("shows each refusal in plain words next to its row or form", () => {
+    const refusal = (code: string, message = "Fictional message.") =>
+      taskBoardRefusal(new ClientError(400, code, message));
+    expect(refusal("invalid_reference")).toContain(
+      "is not an active record of this team that you can see",
+    );
+    expect(refusal("archived_reference")).toBe(
+      "A bucket or record this board names has been archived. Choose an active one.",
+    );
+    expect(refusal("config_draft_exists")).toBe(
+      "This board already has a draft. Edit that draft instead.",
+    );
+    expect(refusal("config_state_conflict")).toContain(
+      "a retired board used this name",
+    );
+    expect(refusal("invalid_input", "name: Too small.")).toBe(
+      "This board cannot be saved as it is: name: Too small.",
+    );
+    const rows = tableRows(
+      list(boards, {
+        id: boards[1].id,
+        message: refusal("archived_reference"),
+      }),
+    );
+    expect(rows[1]).toContain(
+      '<p class="field-error" role="alert">A bucket or record this board names has been archived. Choose an active one.</p>',
+    );
+    expect(rows[0]).not.toContain("field-error");
+    expect(rows[2]).not.toContain("field-error");
+    const refused = form(fieldBoard, refusal("invalid_reference"));
+    expect(refused).toContain(
+      '<div tabindex="-1" class="notice error" role="alert">',
+    );
+    expect(refused).toContain("Choose it again.");
+  });
+
+  // Round 1 UX review: at 360 px the form's refusals sat above the viewport while focus stayed
+  // on Save draft, far below.
+  it("moves focus to the form's refusals after a submit, so they scroll into view", () => {
+    const refused = form(
+      fieldBoard,
+      taskBoardRefusal(new ClientError(400, "archived_reference", "Archived.")),
+    );
+    const alert =
+      /<div tabindex="-1" class="notice error" role="alert">([\s\S]*?)<\/div>/.exec(
+        refused,
+      );
+    expect(alert?.[1]).toContain("has been archived");
+    // The alert comes before the form's fields, and the form focuses it on each refusal.
+    expect(refused.indexOf("notice error")).toBeLessThan(
+      refused.indexOf("Board name"),
+    );
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/task-boards-tab.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /useEffect\(\(\) => \{\s*if \(issues\.length \|\| error\) alertRef\.current\?\.focus\(\);\s*\}, \[issues, error\]\);/,
+    );
+    expect(source).toMatch(/<div\s+ref=\{alertRef\}\s+tabIndex=\{-1\}/);
+    // Without a refusal there is no alert to focus.
+    expect(form(fieldBoard)).not.toContain("notice error");
+  });
+
+  it("edits the name, ticked buckets in order with Move up and Move down, and one filter", () => {
+    const created = form(null);
+    expect(created).toContain('<h3 tabindex="-1">New board</h3>');
+    expect(created).toContain("<span>Board name</span>");
+    expect(created).toContain("<legend>Columns</legend>");
+    expect(created).not.toContain("Move up");
+    for (const option of ["None", "Vacancy", "Linked record", "Task field"])
+      expect(created).toContain(`>${option}</option>`);
+    expect(created).toContain(">Save draft</button>");
+    const edited = form(fieldBoard);
+    expect(edited).toContain(
+      '<h3 tabindex="-1">Edit draft: Fictional Project board</h3>',
+    );
+    // The ticked columns in board order, each with its move buttons; the ends are disabled.
+    const items = [...edited.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map(
+      (match) => match[1],
+    );
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatch(/checked=""\/>Fictional doing<\/label>/);
+    expect(items[0]).toMatch(
+      /aria-label="Move Fictional doing up" disabled=""/,
+    );
+    expect(items[1]).toMatch(/checked=""\/>Fictional to do<\/label>/);
+    expect(items[1]).toMatch(
+      /aria-label="Move Fictional to do down" disabled=""/,
+    );
+    expect(edited).toMatch(/<option value="field" selected="">Task field/);
+    expect(edited).toContain(
+      '<label for="task-board-field">Task field</label>',
+    );
+    expect(edited).toMatch(
+      /<option value="[^"]+" selected="">Project<\/option>/,
+    );
+    expect(edited).toMatch(
+      /<option value="Fictional Apollo" selected="">Fictional Apollo<\/option>/,
+    );
+    expect(edited).toContain(">Fictional Zephyr</option>");
+    const linked = form({
+      name: "Fictional linked board",
+      columns: [todo.id],
+      filter: {
+        by: "linked-record",
+        recordId: "00000000-0000-4000-8000-000000000301",
+      },
+    });
+    expect(linked).toContain(
+      '<label for="task-board-link-kind">Linked record type</label>',
+    );
+    expect(linked).toMatch(
+      /<option value="current" selected="">The saved linked record<\/option>/,
+    );
+    const vacancy = form({
+      name: "Fictional vacancy board",
+      columns: [todo.id],
+      filter: {
+        by: "vacancy",
+        vacancyId: "00000000-0000-4000-8000-000000000301",
+      },
+    });
+    expect(vacancy).toContain(
+      '<label for="task-board-vacancy">Vacancy</label>',
+    );
   });
 });

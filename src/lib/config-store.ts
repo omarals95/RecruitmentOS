@@ -11,12 +11,15 @@ import {
   type ConfigType,
   type ConfigurableKind,
   type KindSchemaBody,
+  type TaskBoardBody,
 } from "@/domain/config";
 import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
+import { accessContext } from "@/lib/authz";
 import type { ConfigDocument } from "@/lib/config-cache";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
+import { checkTaskBoardReferences } from "@/lib/records";
 import type { TenantAccess } from "@/lib/tenant-context";
 
 // The instance body cache lives in its own module, so tenant-context.ts imports it without a cycle.
@@ -170,6 +173,25 @@ async function findVersion(
   return rows[0];
 }
 
+/**
+ * A task board's buckets, vacancy, linked record and task field must be active records of the
+ * caller's team in their scope, checked at save in the same transaction as the write.
+ */
+async function checkBody(
+  tx: TeamTx,
+  p: Principal,
+  access: TenantAccess,
+  type: ConfigType,
+  body: unknown,
+) {
+  if (type === "task-board")
+    await checkTaskBoardReferences(
+      tx,
+      accessContext(p, access),
+      body as TaskBoardBody,
+    );
+}
+
 const audit = (tx: TeamTx, versionId: string, action: string) =>
   tx.execute(
     sql`select tenant_context.audit_config(${versionId}::uuid, ${action})`,
@@ -193,6 +215,7 @@ export async function createConfigDraft(
   return inStore(p, async (tx, access) => {
     requireWrite(p, access, type);
     const parsed = configBodySchemas[type].parse(body);
+    await checkBody(tx, p, access, type, parsed);
     const teamId = type === "task-board" ? p.teamId : null;
     let [object] = (
       await tx.execute<{ id: string; archived: boolean }>(
@@ -235,6 +258,7 @@ export async function updateConfigDraft(
     requireWrite(p, access, target.type);
     if (target.state !== "draft") throw stateConflict();
     const parsed = configBodySchemas[target.type].parse(body);
+    await checkBody(tx, p, access, target.type, parsed);
     await tx.execute(
       sql`update app.config_versions set body = ${JSON.stringify(parsed)}::jsonb, note = coalesce(${note ?? null}::text, note) where id = ${target.versionId}::uuid`,
     );
@@ -274,10 +298,14 @@ export async function retireConfigVersion(
   });
 }
 
-/** Archives the object for good and audits it with its current version, or its draft. */
+/**
+ * Archives the object for good and audits it with its current version, or its draft. With
+ * options.type, an object of another type is not found.
+ */
 export async function archiveConfigObject(
   p: Principal,
   objectId: string,
+  options: { type?: ConfigType } = {},
 ): Promise<void> {
   const id = z.uuid().parse(objectId);
   return inStore(p, async (tx, access) => {
@@ -290,7 +318,8 @@ export async function archiveConfigObject(
         sql`select type, archived_at is not null as archived, coalesce(current_version_id, draft_version_id) as "versionId" from app.config_objects where id = ${id}::uuid`,
       )
     ).rows;
-    if (!object) throw notFound();
+    if (!object || (options.type !== undefined && object.type !== options.type))
+      throw notFound();
     requireWrite(p, access, object.type);
     if (object.archived || !object.versionId) throw stateConflict();
     await tx.execute(

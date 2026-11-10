@@ -56,10 +56,13 @@ import {
   uuidSchema,
   type RecordDto,
   type RecordKind,
+  type ReferenceField,
   type RecordReferences,
   type ResourceName,
 } from "@/domain/records";
+import type { TaskBoardBody } from "@/domain/config";
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
+import { publishedTaskBoards } from "@/lib/task-boards";
 
 type DbRecord = typeof records.$inferSelect;
 /** A task's linked record as the caller may see it (parentLink). */
@@ -456,7 +459,6 @@ async function checkReferences(
   allowArchived = false,
   restoring = false,
 ) {
-  const { principal: p } = ctx;
   const allowed = referencesByKind[kind];
   for (const key of referenceFields) {
     const value =
@@ -482,51 +484,119 @@ async function checkReferences(
         `${key} cannot be changed.`,
       );
     if (!value || (!restoring && existing && value === existing[key])) continue;
-    // A parent of a named kind is looked up in the caller's scope; any kind is matched by id, in
-    // the caller's record scope for the kind it turns out to be.
-    const anyKind = anyRecordScopeRule(ctx, "records");
-    const [parent] = await tx
-      .select()
-      .from(records)
-      .where(
-        config && config.kind !== "*"
-          ? and(...scopeFilter(ctx, config.kind), eq(records.id, value))
-          : and(
-              eq(records.teamId, p.teamId),
-              eq(records.id, value),
-              ...(anyKind ? [anyKind] : []),
-            ),
-      )
-      .limit(1);
-    // A candidate the caller cannot read is answered exactly as a missing parent.
-    const candidateComment = kind === "comment" && parent?.kind === "candidate";
-    // So is a task's link to a kind outside TASK_LINK_KINDS, a kind the caller may not view, or itself.
-    const taskLink = kind === "task" && key === "parentRecordId";
-    if (
-      !parent ||
-      (config?.kind !== "*" && parent.kind !== config?.kind) ||
-      (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId) ||
-      (candidateComment && !ctx.scopes.includes("candidates:read")) ||
-      (taskLink &&
-        (!TASK_LINK_KINDS.includes(parent.kind as RecordKind) ||
-          parent.id === existing?.id ||
-          !decide(ctx, {
-            resource: kindToResource[parent.kind as RecordKind],
-            action: "view",
-          })))
+    await referencedRecord(tx, ctx, kind, key, value, {
+      existing,
+      allowArchived,
+    });
+  }
+}
+/**
+ * The record one reference of a `kind` record names, or the refusal checkReferences gives. `name`,
+ * the key by default, is the input key the errors name.
+ */
+async function referencedRecord(
+  tx: TeamTx,
+  ctx: AccessContext,
+  kind: RecordKind,
+  key: ReferenceField,
+  value: string,
+  options: { existing?: DbRecord; allowArchived?: boolean; name?: string } = {},
+): Promise<DbRecord> {
+  const { principal: p } = ctx;
+  const { existing, allowArchived = false, name = key } = options;
+  const config = referencesByKind[kind][key];
+  // A parent of a named kind is looked up in the caller's scope; any kind is matched by id, in
+  // the caller's record scope for the kind it turns out to be.
+  const anyKind = anyRecordScopeRule(ctx, "records");
+  const [parent] = await tx
+    .select()
+    .from(records)
+    .where(
+      config && config.kind !== "*"
+        ? and(...scopeFilter(ctx, config.kind), eq(records.id, value))
+        : and(
+            eq(records.teamId, p.teamId),
+            eq(records.id, value),
+            ...(anyKind ? [anyKind] : []),
+          ),
     )
+    .limit(1);
+  // A candidate the caller cannot read is answered exactly as a missing parent.
+  const candidateComment = kind === "comment" && parent?.kind === "candidate";
+  // So is a task's link to a kind outside TASK_LINK_KINDS, a kind the caller may not view, or itself.
+  const taskLink = kind === "task" && key === "parentRecordId";
+  if (
+    !parent ||
+    (config?.kind !== "*" && parent.kind !== config?.kind) ||
+    (parent.kind === "saved-view" && parent.privateOwnerId !== p.userId) ||
+    (candidateComment && !ctx.scopes.includes("candidates:read")) ||
+    (taskLink &&
+      (!TASK_LINK_KINDS.includes(parent.kind as RecordKind) ||
+        parent.id === existing?.id ||
+        !decide(ctx, {
+          resource: kindToResource[parent.kind as RecordKind],
+          action: "view",
+        })))
+  )
+    throw missingReference(name);
+  if (candidateComment)
+    authorize(ctx, { resource: "candidates", action: "comment" });
+  if (parent.archivedAt && !allowArchived)
+    throw new ApiError(
+      400,
+      "archived_reference",
+      `${name} references an archived record.`,
+    );
+  return parent;
+}
+const missingReference = (name: string) =>
+  new ApiError(
+    400,
+    "invalid_reference",
+    `${name} does not reference the expected record in this team.`,
+  );
+/**
+ * The records a task board body names, checked inside the caller's transaction as the same
+ * references of a task are: each column an active bucket of the team, a vacancy filter an active
+ * vacancy in the caller's scope, a linked-record filter an active record of TASK_LINK_KINDS the
+ * caller may view and is in scope for, and a field filter an active Dropdown task field of the team
+ * with the value among its options. A record of another team or out of scope reads as missing.
+ */
+export async function checkTaskBoardReferences(
+  tx: TeamTx,
+  ctx: AccessContext,
+  body: TaskBoardBody,
+) {
+  for (const [index, column] of body.columns.entries())
+    await referencedRecord(tx, ctx, "task", "bucketId", column, {
+      name: `columns.${index}`,
+    });
+  const { filter } = body;
+  if (filter?.by === "vacancy")
+    await referencedRecord(tx, ctx, "task", "vacancyId", filter.vacancyId, {
+      name: "filter.vacancyId",
+    });
+  if (filter?.by === "linked-record")
+    await referencedRecord(tx, ctx, "task", "parentRecordId", filter.recordId, {
+      name: "filter.recordId",
+    });
+  if (filter?.by === "field") {
+    // A task field is one of TASK_LINK_KINDS, so the linked-record lookup finds it.
+    const field = await referencedRecord(
+      tx,
+      ctx,
+      "task",
+      "parentRecordId",
+      filter.fieldId,
+      { name: "filter.fieldId" },
+    );
+    if (field.kind !== "task-field" || field.data.type !== "Dropdown")
+      throw missingReference("filter.fieldId");
+    if (!(field.data.options as string[]).includes(filter.value))
       throw new ApiError(
         400,
         "invalid_reference",
-        `${key} does not reference the expected record in this team.`,
-      );
-    if (candidateComment)
-      authorize(ctx, { resource: "candidates", action: "comment" });
-    if (parent.archivedAt && !allowArchived)
-      throw new ApiError(
-        400,
-        "archived_reference",
-        `${key} references an archived record.`,
+        "filter.value is not an option of this field.",
       );
   }
 }
@@ -1051,14 +1121,22 @@ const LIST_QUERY_KEYS = [
   "workMode",
   "area",
   "assignedToMe",
+  "board",
 ] as const;
 /**
  * Keep in step with the key list in tenant_context.audit_export (drizzle/0013_export_audit.sql).
- * assignedToMe is list-only, so an export refuses it as an unsupported filter.
+ * assignedToMe and board are list-only, so an export refuses them as unsupported filters.
  */
 export const EXPORT_FILTER_KEYS: readonly string[] = LIST_QUERY_KEYS.filter(
   (key) =>
-    !["page", "pageSize", "sort", "direction", "assignedToMe"].includes(key),
+    ![
+      "page",
+      "pageSize",
+      "sort",
+      "direction",
+      "assignedToMe",
+      "board",
+    ].includes(key),
 );
 /**
  * Filters on the exporter's own private state, left out of the team-visible export audit so it
@@ -1192,6 +1270,32 @@ function recordQuery(
       );
     const assigned = sql`exists (select 1 from ${recordAssignments} where ${recordAssignments.teamId} = ${p.teamId} and ${recordAssignments.recordId} = ${records.id} and ${recordAssignments.userId} = ${p.userId} and ${recordAssignments.relation} = 'assignee')`;
     where.push(value === "true" ? assigned : sql`not (${assigned})`);
+  }
+  // A task board of the caller's team, from the documents install returned: its columns and filter
+  // join the conditions above, record scope included.
+  if (query.has("board")) {
+    const board =
+      kind === "task"
+        ? publishedTaskBoards(ctx).find(
+            (item) => item.id === query.get("board"),
+          )
+        : undefined;
+    if (!board)
+      throw new ApiError(
+        400,
+        "invalid_query",
+        "board must name a current task board of this team, on tasks only.",
+      );
+    where.push(inArray(records.bucketId, board.columns));
+    const { filter } = board;
+    if (filter?.by === "vacancy")
+      where.push(eq(records.vacancyId, filter.vacancyId));
+    if (filter?.by === "linked-record")
+      where.push(eq(records.parentRecordId, filter.recordId));
+    if (filter?.by === "field")
+      where.push(
+        sql`${records.data}->'customValues'->>${filter.fieldId} = ${filter.value}`,
+      );
   }
   if (query.has("needsReview")) {
     if (kind !== "candidate")
