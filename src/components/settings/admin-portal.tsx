@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ShieldCheck } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
-import type { AccessMap } from "@/lib/authz";
+import type { MeAccess } from "@/lib/authz";
 import {
   humanError,
   requestJson,
@@ -13,17 +12,20 @@ import {
   useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
-import { adminTabs, type AdminTabKey } from "./admin-tabs";
+import {
+  ADMIN_GROUPS,
+  NO_ACCESS,
+  adminTabs,
+  type AdminTab,
+  type AdminTabKey,
+} from "./admin-tabs";
 import { DirectoryTab } from "./directory-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
 import { TaskBoardsTab } from "./task-boards-tab";
 
-/** GET /api/v1/me/access. */
-export type MeAccess = AccessMap & {
-  teamRole: string | null;
-  companyLevel: "owner" | "admin" | null;
-};
+export { NO_ACCESS };
+export type { MeAccess };
 export interface ConfigHistoryRow {
   occurredAt: string;
   action: string;
@@ -50,7 +52,6 @@ export interface AccessChanges {
   truncated: boolean;
 }
 
-export const NO_ACCESS = "You do not have access to this page";
 const HISTORY_PAGE_SIZE = 25;
 const historyPath = (before?: string) =>
   `/api/v1/config-history?pageSize=${HISTORY_PAGE_SIZE}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
@@ -80,46 +81,41 @@ type TeamTabKey = Exclude<
   AdminTabKey,
   "roles" | "organisation" | "directory" | "history" | "task-boards"
 >;
+// The panel texts are the page descriptions of ADMIN_TABS, which the Admin home cards also show.
 const teamPanels: Record<
   TeamTabKey,
-  { title: string; text: string; href: string; link: string }
+  { title: string; href: string; link: string }
 > = {
   members: {
     title: "Members",
-    text: "Invite people to this team, set each member's team role and remove members.",
     href: "/app/settings/team",
     link: "Open Team & access",
   },
   "cv-storage": {
     title: "CV storage",
-    text: "Set this team's CV storage limit and upload rate limit, and whether connected AI apps can read CV contents.",
     href: "/app/settings/team#cv-storage",
     link: "Open CV storage settings",
   },
   speed: {
     title: "Speed",
-    text: "See how long common actions and API requests take for this team.",
     href: "/app/settings/speed",
     link: "Open Speed",
   },
   tokens: {
     title: "API tokens",
-    text: "Create and revoke your API tokens for AI tools and integrations in this team.",
     href: "/app/settings/api-tokens",
     link: "Open API tokens",
   },
 };
 
-/** The one Admin portal: the caller's tabs from GET /api/v1/me/access, and the current tab. */
+/**
+ * The one Admin portal: the caller's pages from GET /api/v1/me/access, and the current page or,
+ * with no page, the Admin home.
+ */
 export function AdminPortal({ tab }: { tab: AdminTabKey | null }) {
   const { team } = useWorkspace();
-  const router = useRouter();
   const result = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
   const access = result.data?.data ?? null;
-  const first = access ? adminTabs(access)[0]?.key : undefined;
-  useEffect(() => {
-    if (tab === null && first) router.replace(`/app/admin/${first}`);
-  }, [tab, first, router]);
   return (
     <AdminPortalView
       key={team?.id ?? "no-team"}
@@ -170,51 +166,106 @@ export function AdminPortalView({
         <p role="status">Loading…</p>
       ) : !tabs.length || (tab !== null && !current) ? (
         <NoAccess />
-      ) : !current ? (
-        <p role="status">Loading…</p>
       ) : (
-        <>
-          <nav
-            className="settings-nav"
-            aria-label="Admin portal sections"
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              marginBottom: 24,
-            }}
-          >
-            {tabs.map((item) => (
-              <Link
-                key={item.key}
-                href={`/app/admin/${item.key}`}
-                className={`button ${item.key === current.key ? "" : "secondary"}`}
-                aria-current={item.key === current.key ? "page" : undefined}
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-          {current.key === "history" ? (
-            <>
-              <ConfigHistory />
-              {access.companyLevel === "owner" && <RecentAccessChanges />}
-            </>
-          ) : current.key === "roles" ? (
-            <RolesTab onAccessChanged={onAccessChanged} />
-          ) : current.key === "organisation" ? (
-            <OrganisationTab access={access} />
-          ) : current.key === "directory" ? (
-            <DirectoryTab access={access} />
-          ) : current.key === "task-boards" ? (
-            <TaskBoardsTab />
-          ) : (
-            <TeamPanel tab={current.key} />
-          )}
-        </>
+        <div className="admin-shell">
+          <AdminSidebar tabs={tabs} current={current?.key ?? null} />
+          <div className="stack admin-content">
+            {!current ? (
+              <AdminHome tabs={tabs} />
+            ) : current.key === "history" ? (
+              <>
+                <ConfigHistory />
+                {access.companyLevel === "owner" && <RecentAccessChanges />}
+              </>
+            ) : current.key === "roles" ? (
+              <RolesTab onAccessChanged={onAccessChanged} />
+            ) : current.key === "organisation" ? (
+              <OrganisationTab access={access} />
+            ) : current.key === "directory" ? (
+              <DirectoryTab access={access} />
+            ) : current.key === "task-boards" ? (
+              <TaskBoardsTab />
+            ) : (
+              <TeamPanel tab={current.key} text={current.description} />
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
+}
+
+/** The caller's pages in group order, leaving out every group they cannot open a page of. */
+const byGroup = (tabs: AdminTab[]) =>
+  ADMIN_GROUPS.map((group) => ({
+    group,
+    tabs: tabs.filter((tab) => tab.group === group),
+  })).filter((item) => item.tabs.length);
+
+function AdminSidebar({
+  tabs,
+  current,
+}: {
+  tabs: AdminTab[];
+  current: AdminTabKey | null;
+}) {
+  return (
+    <nav className="admin-nav" aria-label="Admin portal sections">
+      <NavGroup name="Overview">
+        <li>
+          <Link
+            href="/app/admin"
+            aria-current={current === null ? "page" : undefined}
+          >
+            Admin home
+          </Link>
+        </li>
+      </NavGroup>
+      {byGroup(tabs).map(({ group, tabs: pages }) => (
+        <NavGroup key={group} name={group}>
+          {pages.map((item) => (
+            <li key={item.key}>
+              <Link
+                href={`/app/admin/${item.key}`}
+                aria-current={item.key === current ? "page" : undefined}
+              >
+                {item.label}
+              </Link>
+            </li>
+          ))}
+        </NavGroup>
+      ))}
+    </nav>
+  );
+}
+
+function NavGroup({ name, children }: { name: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <div className="admin-nav-group">
+      <p id={id}>{name}</p>
+      <ul aria-labelledby={id}>{children}</ul>
+    </div>
+  );
+}
+
+/** One card per page the caller can open, under its group; nothing for a page not built yet. */
+function AdminHome({ tabs }: { tabs: AdminTab[] }) {
+  return byGroup(tabs).map(({ group, tabs: pages }) => (
+    <section key={group} className="stack admin-home-group">
+      <h2>{group}</h2>
+      <ul className="admin-cards">
+        {pages.map((item) => (
+          <li key={item.key} className="panel admin-card">
+            <h3>
+              <Link href={`/app/admin/${item.key}`}>{item.label}</Link>
+            </h3>
+            <p className="muted">{item.description}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  ));
 }
 
 function NoAccess() {
@@ -226,12 +277,12 @@ function NoAccess() {
 }
 
 /** Team tabs link to the existing settings pages, which keep their own guards. */
-function TeamPanel({ tab }: { tab: TeamTabKey }) {
+function TeamPanel({ tab, text }: { tab: TeamTabKey; text: string }) {
   const panel = teamPanels[tab];
   return (
     <section className="panel">
       <h2>{panel.title}</h2>
-      <p>{panel.text}</p>
+      <p>{text}</p>
       <Link href={panel.href} className="button">
         {panel.link}
       </Link>

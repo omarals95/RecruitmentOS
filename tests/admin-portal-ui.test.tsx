@@ -8,10 +8,12 @@ vi.mock("next/navigation", () => ({
 
 import { WorkspaceProvider } from "../src/components/workspace/client";
 import {
+  ADMIN_GROUPS,
   ADMIN_TABS,
   adminTabs,
   type AdminTabKey,
 } from "../src/components/settings/admin-tabs";
+import { ADMIN_AREAS } from "../src/domain/config";
 import {
   AccessChangesPanel,
   AdminPortal,
@@ -75,7 +77,7 @@ const workspace = {
 };
 const TEAM_ROLES = ["owner", "admin", "recruiter", "viewer"] as const;
 const COMPANY_LEVELS = ["owner", "admin", null] as const;
-const TEAM_TABS = ["members", "cv-storage", "speed", "tokens", "task-boards"];
+const TEAM_TABS = ["members", "cv-storage", "speed", "task-boards", "tokens"];
 const NOT_YET = [
   "Fields",
   "Screens",
@@ -85,9 +87,33 @@ const NOT_YET = [
   "AI connections",
   "Plan",
 ];
+// Pages of architecture §14.1 that are not built, or deferred by D29: no link, card or entry.
+const UNBUILT = [
+  "users",
+  "groups",
+  "teams",
+  "company-authority",
+  "permissions",
+  "permission-helper",
+  "sign-in",
+  "fields",
+  "screens",
+  "workflows",
+  "boards",
+  "templates",
+  "config-transfer",
+  "branding",
+  "domain",
+  "notifications",
+  "mail",
+  "integrations",
+  "health",
+  "audit",
+];
 const access = (
   teamRole: string,
   companyLevel: MeAccess["companyLevel"],
+  extra: Partial<MeAccess> = {},
 ): MeAccess => ({
   teamRole,
   companyLevel,
@@ -97,7 +123,12 @@ const access = (
   actions: {},
   fields: {},
   adminAreas: [],
+  ...extra,
 });
+/** The directory actions of the built-in owner and admin roles. */
+const directory: Partial<MeAccess> = {
+  actions: { directory: ["view", "create", "edit", "archive"] },
+};
 const render = (
   tab: AdminTabKey | null,
   value: MeAccess | null,
@@ -113,34 +144,71 @@ const render = (
       />
     </WorkspaceProvider>,
   );
+/** The sidebar: `<nav aria-label="Admin portal sections">`. */
+const sidebar = (markup: string) =>
+  /<nav class="admin-nav" aria-label="Admin portal sections">([\s\S]*?)<\/nav>/.exec(
+    markup,
+  )?.[1] ?? "";
+/** The page keys the sidebar links to, in order (Admin home is `/app/admin`, not a key). */
 const tabLinks = (markup: string) =>
-  [
-    ...markup.matchAll(/<nav class="settings-nav"[^>]*>([\s\S]*?)<\/nav>/g),
-  ].flatMap((nav) =>
-    [...nav[1].matchAll(/href="\/app\/admin\/([^"]+)"/g)].map(
-      (link) => link[1],
-    ),
+  [...sidebar(markup).matchAll(/href="\/app\/admin\/([^"]+)"/g)].map(
+    (link) => link[1],
   );
+const sidebarHrefs = (markup: string) =>
+  [...sidebar(markup).matchAll(/href="([^"]+)"/g)].map((link) => link[1]);
+const sidebarGroups = (markup: string) =>
+  [...sidebar(markup).matchAll(/<p id="[^"]+">([^<]+)<\/p>/g)].map((group) =>
+    group[1].replaceAll("&amp;", "&"),
+  );
+/** Everything after the sidebar: the Admin home or the current page. */
+const content = (markup: string) => markup.split("</nav>").slice(1).join("");
 const onlyHeadingAndNoAccess = (markup: string) => {
   expect(markup).toContain("<h1>Admin portal</h1>");
   expect(markup).toContain(`<p>${NO_ACCESS}</p>`);
-  expect(markup).not.toContain("settings-nav");
+  expect(markup).not.toContain("Admin portal sections");
+  expect(markup).not.toContain("<nav");
   expect(markup).not.toMatch(/<h2|<table|role="status"/);
 };
+/** Every subset of a list, the empty one first. */
+const subsets = <T,>(list: readonly T[]): T[][] =>
+  list.reduce<T[][]>(
+    (all, item) => [...all, ...all.map((subset) => [...subset, item])],
+    [[]],
+  );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the nine tabs that exist, in order", () => {
-    expect(ADMIN_TABS.map((tab) => [tab.key, tab.label])).toEqual([
-      ["members", "Members"],
-      ["cv-storage", "CV storage"],
-      ["speed", "Speed"],
-      ["tokens", "API tokens"],
-      ["task-boards", "Task boards"],
-      ["roles", "Roles & permissions"],
-      ["organisation", "Organisation"],
-      ["directory", "Directory"],
-      ["history", "History"],
+  it("defines exactly the nine pages that exist, by group, in order", () => {
+    expect(ADMIN_GROUPS).toEqual([
+      "Overview",
+      "People",
+      "Access",
+      "Configuration",
+      "Look & feel",
+      "Communication",
+      "Integrations",
+      "Monitoring",
     ]);
+    expect(ADMIN_TABS.map((tab) => [tab.key, tab.label, tab.group])).toEqual([
+      ["members", "Members", "People"],
+      ["cv-storage", "CV storage", "People"],
+      ["speed", "Speed", "People"],
+      ["task-boards", "Task boards", "People"],
+      ["organisation", "Organisation", "People"],
+      ["directory", "Directory", "People"],
+      ["roles", "Roles & permissions", "Access"],
+      ["tokens", "API tokens", "Integrations"],
+      ["history", "History", "Monitoring"],
+    ]);
+    // Rows are in group order, and each has one level and one sentence describing it.
+    const order = ADMIN_TABS.map((tab) => ADMIN_GROUPS.indexOf(tab.group));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    for (const tab of ADMIN_TABS) {
+      expect(
+        ["team", "owner", "organisation", "directory", "company"],
+        tab.key,
+      ).toContain(tab.level);
+      expect(tab.description, tab.key).toMatch(/^[A-Z][^.]*\.$/);
+    }
   });
 
   it("gives team tabs from the team role and History from company authority only", () => {
@@ -150,16 +218,208 @@ describe("admin portal tabs", () => {
           (tab) => tab.key,
         );
         const team = teamRole === "owner" || teamRole === "admin";
-        expect(keys, `${teamRole} / ${companyLevel}`).toEqual([
-          ...(team ? TEAM_TABS : []),
-          ...(companyLevel === "owner" ? ["roles", "organisation"] : []),
-          ...(companyLevel ? ["history"] : []),
-        ]);
+        expect(keys, `${teamRole} / ${companyLevel}`).toEqual(
+          ADMIN_TABS.map((tab) => tab.key).filter((key) =>
+            TEAM_TABS.includes(key)
+              ? team
+              : key === "roles" || key === "organisation"
+                ? companyLevel === "owner"
+                : key === "history"
+                  ? companyLevel !== null
+                  : false,
+          ),
+        );
       }
     expect(adminTabs({ teamRole: null, companyLevel: null })).toEqual([]);
     expect(
       adminTabs({ teamRole: "superuser", companyLevel: "member" }),
     ).toEqual([]);
+  });
+
+  it("never gives a company page for a team role or a team page for company authority, over every team role, company level, area set and directory action", () => {
+    const directories: MeAccess["actions"][] = [
+      {},
+      { directory: ["create", "edit", "archive"] },
+      { directory: ["view"] },
+      { directory: ["view", "create", "edit", "archive"] },
+    ];
+    const areaSets = subsets(ADMIN_AREAS);
+    expect(areaSets).toHaveLength(2 ** ADMIN_AREAS.length);
+    for (const teamRole of [...TEAM_ROLES, null, "superuser"])
+      for (const companyLevel of COMPANY_LEVELS)
+        for (const adminAreas of areaSets)
+          for (const actions of directories) {
+            const tabs = adminTabs({
+              teamRole,
+              companyLevel,
+              adminAreas,
+              actions,
+            });
+            const label = `${teamRole} / ${companyLevel} / ${adminAreas.join(",")} / ${actions.directory?.join(",") ?? "-"}`;
+            const team = teamRole === "owner" || teamRole === "admin";
+            const shown: Record<AdminTabKey, boolean> = {
+              members: team,
+              "cv-storage": team,
+              speed: team,
+              "task-boards": team,
+              tokens: team,
+              organisation:
+                companyLevel === "owner" ||
+                (companyLevel === "admin" &&
+                  adminAreas.includes("organisation")),
+              directory: !!actions.directory?.includes("view"),
+              roles: companyLevel === "owner",
+              history: companyLevel !== null,
+            };
+            expect(
+              tabs.map((tab) => tab.key),
+              label,
+            ).toEqual(
+              ADMIN_TABS.map((tab) => tab.key).filter((key) => shown[key]),
+            );
+            for (const tab of tabs)
+              expect(
+                ADMIN_TABS.filter((row) => row.key === tab.key),
+                label,
+              ).toEqual([tab]);
+          }
+  });
+});
+
+describe("admin home", () => {
+  const callers: [string, MeAccess][] = [
+    ["team owner and company owner", access("owner", "owner", directory)],
+    ["team admin", access("admin", null, directory)],
+    ["company owner as recruiter", access("recruiter", "owner")],
+    ["company admin", access("viewer", "admin")],
+    [
+      "company admin with organisation",
+      access("recruiter", "admin", { adminAreas: ["organisation"] }),
+    ],
+    ["directory reader", access("recruiter", null, directory)],
+  ];
+
+  it("shows one card per page the caller can open, under its group, and nothing else", () => {
+    for (const [name, value] of callers) {
+      const tabs = adminTabs(value);
+      const markup = render(null, value);
+      const home = content(markup);
+      const cards = [
+        ...home.matchAll(/<li class="panel admin-card">([\s\S]*?)<\/li>/g),
+      ].map((card) => card[1]);
+      expect(cards, name).toHaveLength(tabs.length);
+      tabs.forEach((tab, index) => {
+        expect(cards[index], `${name}: ${tab.key}`).toContain(
+          `<h3><a href="/app/admin/${tab.key}">${tab.label.replace("&", "&amp;")}</a></h3>`,
+        );
+        expect(cards[index], `${name}: ${tab.key}`).toContain(
+          `<p class="muted">${tab.description.replaceAll("'", "&#x27;")}</p>`,
+        );
+      });
+      expect(
+        [...home.matchAll(/href="(\/app\/admin[^"]*)"/g)].map(
+          (link) => link[1],
+        ),
+        name,
+      ).toEqual(tabs.map((tab) => `/app/admin/${tab.key}`));
+      expect(
+        [...home.matchAll(/<h2>([^<]+)<\/h2>/g)].map((h) => h[1]),
+        name,
+      ).toEqual(
+        ADMIN_GROUPS.filter((group) => tabs.some((tab) => tab.group === group)),
+      );
+      expect(markup.match(/<h1>/g), name).toHaveLength(1);
+      expect(markup, name).not.toContain(NO_ACCESS);
+      expect(markup, name).not.toContain('role="status"');
+      for (const key of UNBUILT)
+        expect(markup, `${name}: ${key}`).not.toContain(`/app/admin/${key}"`);
+      for (const text of ["Invite user", "Needs your attention", "Search"])
+        expect(markup, name).not.toContain(text);
+    }
+  });
+
+  it("gives the team panels the same description as their home card", () => {
+    const markup = render(null, access("owner", null));
+    for (const key of ["members", "cv-storage", "speed", "tokens"] as const) {
+      const text = ADMIN_TABS.find((tab) => tab.key === key)!.description;
+      const panel = render(key, access("owner", null));
+      const escaped = text.replaceAll("'", "&#x27;");
+      expect(markup, key).toContain(escaped);
+      expect(panel, key).toContain(`<p>${escaped}</p>`);
+    }
+  });
+
+  it("shows only the heading and the no-access text to a caller with no page", () => {
+    for (const teamRole of ["recruiter", "viewer", null, "superuser"])
+      onlyHeadingAndNoAccess(
+        render(null, access(teamRole as string, null, { adminAreas: [] })),
+      );
+  });
+});
+
+describe("admin sidebar", () => {
+  const callers: [string, MeAccess][] = [
+    ["team owner and company owner", access("owner", "owner", directory)],
+    ["team owner", access("owner", null, directory)],
+    ["company owner as recruiter", access("recruiter", "owner")],
+    ["company admin", access("viewer", "admin")],
+    [
+      "company admin with organisation",
+      access("recruiter", "admin", { adminAreas: ["organisation"] }),
+    ],
+    ["directory reader", access("recruiter", null, directory)],
+  ];
+
+  it("lists Admin home and the caller's pages in group order, and hides every group without a page", () => {
+    for (const [name, value] of callers) {
+      const tabs = adminTabs(value);
+      for (const tab of [null, ...tabs.map((item) => item.key)]) {
+        const markup = render(tab, value);
+        const label = `${name} on ${tab ?? "home"}`;
+        expect(sidebarHrefs(markup), label).toEqual([
+          "/app/admin",
+          ...tabs.map((item) => `/app/admin/${item.key}`),
+        ]);
+        expect(sidebarGroups(markup), label).toEqual([
+          "Overview",
+          ...ADMIN_GROUPS.filter(
+            (group) =>
+              group !== "Overview" && tabs.some((item) => item.group === group),
+          ),
+        ]);
+        for (const group of ["Configuration", "Look & feel", "Communication"])
+          expect(sidebarGroups(markup), label).not.toContain(group);
+        expect(sidebar(markup), label).toContain(">Admin home</a>");
+        for (const item of tabs)
+          expect(sidebar(markup), label).toContain(
+            `>${item.label.replace("&", "&amp;")}</a>`,
+          );
+        const current = [...markup.matchAll(/<a [^>]*>/g)]
+          .map((match) => match[0])
+          .filter((link) => link.includes('aria-current="page"'));
+        expect(current, label).toEqual([
+          `<a aria-current="page" href="/app/admin${tab ? `/${tab}` : ""}">`,
+        ]);
+        for (const key of UNBUILT)
+          expect(markup, `${label}: ${key}`).not.toContain(
+            `/app/admin/${key}"`,
+          );
+        expect(markup.match(/<h1>/g), label).toHaveLength(1);
+        expect(markup, label).not.toContain("settings-nav");
+        expect(markup, label).not.toMatch(/\bdir=/);
+      }
+    }
+  });
+
+  it("names each group's list by its visible group name", () => {
+    const nav = sidebar(render(null, access("owner", "owner", directory)));
+    const groups = [
+      ...nav.matchAll(
+        /<p id="([^"]+)">[^<]+<\/p><ul aria-labelledby="([^"]+)">/g,
+      ),
+    ];
+    expect(groups).toHaveLength(5);
+    for (const group of groups) expect(group[2]).toBe(group[1]);
   });
 });
 
@@ -167,9 +427,13 @@ describe("admin portal", () => {
   it("shows a company owner who is a team owner all eight tab links and nothing that does not exist yet", () => {
     const markup = render("members", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
-      ...TEAM_TABS,
-      "roles",
+      "members",
+      "cv-storage",
+      "speed",
+      "task-boards",
       "organisation",
+      "roles",
+      "tokens",
       "history",
     ]);
     const current = [...markup.matchAll(/<a [^>]*>/g)]
@@ -252,7 +516,7 @@ describe("admin portal", () => {
 
   it("shows the access changes panel in History only for a company owner", () => {
     const owner = render("history", access("recruiter", "owner"));
-    expect(tabLinks(owner)).toEqual(["roles", "organisation", "history"]);
+    expect(tabLinks(owner)).toEqual(["organisation", "roles", "history"]);
     expect(owner).toContain("<h2>Configuration history</h2>");
     expect(owner).toContain("<h2>Recent access changes (last 7 days)</h2>");
     const admin = render("history", access("owner", "admin"));

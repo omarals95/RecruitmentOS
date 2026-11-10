@@ -232,7 +232,7 @@ describe("organisation and directory tab visibility", () => {
     ] as const) {
       const markup = render(tab, value);
       expect(markup, tab).toContain(`<p>${NO_ACCESS}</p>`);
-      expect(markup, tab).not.toContain("settings-nav");
+      expect(markup, tab).not.toContain("Admin portal sections");
       expect(markup, tab).not.toMatch(/<h2|<table|role="status"/);
     }
   });
