@@ -19,7 +19,12 @@ import {
 import type { Principal } from "@/lib/principal";
 import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { assignMemberRole } from "@/lib/member-roles";
-import { DEFAULT_KIND_SCHEMAS, RECRUITER_ROLE } from "@/domain/config-defaults";
+import {
+  DEFAULT_KIND_SCHEMAS,
+  INTERVIEWER_ROLE,
+  RECRUITER_ROLE,
+  VIEWER_ROLE,
+} from "@/domain/config-defaults";
 import type { ConfigurableKind, RoleBody } from "@/domain/config";
 import {
   TASK_LINK_KINDS,
@@ -2944,6 +2949,70 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
       ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
     expect((await stored(role.id)).data.customValues).toEqual({
       [flag]: false,
+    });
+  });
+
+  it("hides custom values from a role published before they existed, in a get, a list and a search", async () => {
+    const secret = "Fictional confidential custom value";
+    const person = unpinned(
+      await createRecord(owner, "candidates", {
+        data: {
+          name: "Fictional Restricted Candidate",
+          jobTitle: "Fictional analyst",
+          customValues: { [randomUUID()]: secret },
+        },
+      }),
+    );
+    const search = new URLSearchParams({ search: `"${secret}"` });
+    // Owner, admin, recruiter and viewer have no field rules, so they keep seeing and finding them.
+    expect(
+      (await listRecords(owner, "candidates", search)).data.map(
+        (row) => row.id,
+      ),
+    ).toEqual([person.id]);
+    // The interviewer template as published before customValues existed: every candidate key but
+    // name and job title hidden, and no rule for customValues.
+    const candidate = Object.fromEntries(
+      Object.entries(INTERVIEWER_ROLE.body.fields.candidate ?? {}).filter(
+        ([key]) => key !== "customValues",
+      ),
+    );
+    const earlier = await createConfigDraft(owner, {
+      type: "role",
+      key: "earlier-interviewer",
+      body: {
+        ...structuredClone(VIEWER_ROLE.body),
+        name: "Fictional earlier interviewer",
+        fields: { candidate },
+      } as RoleBody,
+    });
+    await publishConfigVersion(owner, earlier.versionId);
+    const member = await seedIdentity(fixture.db, {
+      userId: "pin-earlier-interviewer",
+      teamId: owner.teamId,
+      role: "viewer",
+    });
+    await assignMemberRole(
+      owner,
+      { userId: member.userId, roleObjectId: earlier.objectId },
+      new Headers(),
+    );
+    const read = await getRecord(member, "candidates", person.id);
+    expect(read.data).toEqual({
+      name: "Fictional Restricted Candidate",
+      jobTitle: "Fictional analyst",
+    });
+    const listed = await listRecords(
+      member,
+      "candidates",
+      new URLSearchParams({ search: '"Fictional Restricted Candidate"' }),
+    );
+    expect(listed.data.map((row) => row.id)).toEqual([person.id]);
+    expect(JSON.stringify(listed)).not.toContain(secret);
+    expect(JSON.stringify(read)).not.toContain(secret);
+    expect(await listRecords(member, "candidates", search)).toMatchObject({
+      data: [],
+      pagination: { total: 0 },
     });
   });
 });

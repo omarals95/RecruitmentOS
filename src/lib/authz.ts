@@ -299,11 +299,14 @@ export function authorize(
     const editable =
       request.action === "edit" || allows(ctx, { ...request, action: "edit" });
     const rules = ctx.role!.fields[kind as keyof RoleBody["fields"]] ?? {};
+    const customHidden = customValuesHiddenByDefault(kind, rules);
     for (const key of Object.keys(recordDataSchemas[kind].shape)) {
       const rule = Object.hasOwn(rules, key) ? rules[key] : undefined;
       // An explicit edit rule still needs edit access to the record: layers only remove access.
       fields[key] =
-        rule === "hidden" || rule === "hidden-unless-approver"
+        rule === "hidden" ||
+        rule === "hidden-unless-approver" ||
+        (key === "customValues" && customHidden)
           ? "hidden"
           : rule === "read" || !editable
             ? "read"
@@ -705,9 +708,30 @@ function fieldRules(role: RoleBody, kind: RecordKind): Record<string, string> {
 }
 
 /**
+ * Fails closed on a non-task kind's customValues (R2b-02): until custom fields have definitions and
+ * rules of their own (R2b-04), a role that hides any field of the kind and names no rule for
+ * customValues hides every custom value, so a role published before the key existed keeps hiding
+ * what it hid. Tasks keep their per-field rules.
+ */
+function customValuesHiddenByDefault(
+  kind: RecordKind,
+  rules: Record<string, string>,
+): boolean {
+  return (
+    kind !== "task" &&
+    Object.hasOwn(recordDataSchemas[kind].shape, "customValues") &&
+    !Object.hasOwn(rules, "customValues") &&
+    Object.values(rules).some(
+      (rule) => rule === "hidden" || rule === "hidden-unless-approver",
+    )
+  );
+}
+
+/**
  * The keys of one kind the caller may not see: data keys, custom field ids and top-level keys whose
- * rule is hidden or hidden-unless-approver, plus SENSITIVE_CANDIDATE_FIELDS for an MCP candidate.
- * Every output that leaves fields out, redact() included, takes them from here.
+ * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus
+ * SENSITIVE_CANDIDATE_FIELDS for an MCP candidate. Every output that leaves fields out, redact()
+ * included, takes them from here.
  */
 export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
   if (!ctx.role) throw forbidden();
@@ -718,6 +742,7 @@ export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
         rules[key] === "hidden" || rules[key] === "hidden-unless-approver",
     ),
   );
+  if (customValuesHiddenByDefault(kind, rules)) hidden.add("customValues");
   if (ctx.channel === "mcp" && kind === "candidate")
     for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
   return hidden;
