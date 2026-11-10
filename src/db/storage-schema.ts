@@ -5,10 +5,11 @@ import { ApiError } from "../lib/errors";
  * cleanup cooldown, candidate erasure, MCP CV text setting, company workspace, three-argument
  * tenant context, versioned configuration store, explicit scope ceiling, configuration versions
  * through install, organisation hierarchy, positions and employees, configured member roles,
- * employee erasure and retention, record scope and assignment, record scope row-level security and
- * record pin schema this code was written for (`0040_record_pins.sql`).
+ * employee erasure and retention, record scope and assignment, record scope row-level security,
+ * record pin and workspace team list schema this code was written for
+ * (`0041_workspace_team_list.sql`).
  */
-export const STORAGE_SCHEMA_VERSION = 18;
+export const STORAGE_SCHEMA_VERSION = 19;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {
