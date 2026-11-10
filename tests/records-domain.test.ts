@@ -10,7 +10,9 @@ import {
   reviewStatusValue,
   REVIEW_STATUSES,
   RESOURCE_CONFIG,
+  systemFieldKeys,
   updateRecordSchemas,
+  type RecordKind,
 } from "../src/domain/records";
 
 describe("recruitment domain", () => {
@@ -200,9 +202,110 @@ describe("recruitment domain", () => {
       const config = RESOURCE_CONFIG[resource as keyof typeof RESOURCE_CONFIG];
       expect(config.kind).toBe(kind);
       expect(config.fields.map((field) => field.key)).toEqual(
-        Object.keys(recordDataSchemas[kind].shape),
+        systemFieldKeys(kind),
       );
     }
+  });
+  it("takes optional custom values in the bounded task shape on the eight configurable kinds (R2b-02)", () => {
+    const field = "6df3687a-9244-4917-8fdb-d5d8d083f2db";
+    const other = "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d";
+    const minimal: Partial<Record<RecordKind, Record<string, unknown>>> = {
+      candidate: { name: "Fictional Person" },
+      "job-role": { title: "Fictional role" },
+      vacancy: { title: "Fictional vacancy" },
+      application: {},
+      interview: {
+        title: "Fictional interview",
+        startAt: "2026-01-01T09:00:00Z",
+      },
+      offer: { title: "Fictional offer" },
+      onboarding: {},
+      checklist: { title: "Fictional item" },
+    };
+    const accepted = {
+      [field]: "x".repeat(4000),
+      [other]: 42.5,
+      "11111111-2222-4333-8444-555555555555": true,
+      "21111111-2222-4333-8444-555555555555": null,
+    };
+    const refused = [
+      { "not-a-uuid": "Fictional value" },
+      { [field]: { nested: "Fictional value" } },
+      { [field]: ["Fictional value"] },
+      { [field]: "x".repeat(4001) },
+      { [field]: Number.POSITIVE_INFINITY },
+      { [field]: Number.NaN },
+    ];
+    for (const [name, data] of Object.entries(minimal)) {
+      const kind = name as RecordKind;
+      const schema = recordDataSchemas[kind];
+      const parsed = schema.parse({ ...data, customValues: accepted }) as {
+        customValues?: unknown;
+      };
+      expect(parsed.customValues, kind).toEqual(accepted);
+      expect(Object.keys(schema.parse(data) as object), kind).not.toContain(
+        "customValues",
+      );
+      for (const customValues of refused) {
+        expect(
+          schema.safeParse({ ...data, customValues }).success,
+          `${kind} ${JSON.stringify(Object.values(customValues))}`,
+        ).toBe(false);
+        expect(
+          updateRecordSchemas[kind].safeParse({
+            version: 1,
+            data: { customValues },
+          }).success,
+          kind,
+        ).toBe(false);
+      }
+      expect(
+        updateRecordSchemas[kind].parse({
+          version: 1,
+          data: { customValues: { [field]: "Fictional value" } },
+        }),
+      ).toEqual({
+        version: 1,
+        data: { customValues: { [field]: "Fictional value" } },
+      });
+    }
+    // Tasks keep their default; the four other kinds still refuse the key.
+    expect(
+      recordDataSchemas.task.parse({ title: "Fictional task" }).customValues,
+    ).toEqual({});
+    expect(
+      recordDataSchemas.task.safeParse({
+        title: "Fictional task",
+        customValues: { [field]: "x".repeat(4001) },
+      }).success,
+    ).toBe(false);
+    for (const [kind, data] of [
+      ["bucket", { name: "Fictional bucket" }],
+      ["task-field", { name: "Fictional field" }],
+      ["saved-view", { name: "Fictional view", area: "directory", query: {} }],
+      ["comment", { body: "Fictional comment" }],
+    ] as const)
+      expect(
+        recordDataSchemas[kind].safeParse({
+          ...data,
+          customValues: { [field]: "Fictional value" },
+        }).success,
+        kind,
+      ).toBe(false);
+  });
+  it("lists today's system field keys, without customValues for every kind but task", () => {
+    for (const kind of Object.values(resourceToKind)) {
+      const keys = Object.keys(recordDataSchemas[kind].shape);
+      expect(systemFieldKeys(kind), kind).toEqual(
+        kind === "task" ? keys : keys.filter((key) => key !== "customValues"),
+      );
+      expect(systemFieldKeys(kind).includes("customValues"), kind).toBe(
+        kind === "task",
+      );
+    }
+    expect(Object.keys(recordDataSchemas.candidate.shape).at(-1)).toBe(
+      "customValues",
+    );
   });
   it("rejects deep or non-JSON source structures before recursive parsing or hashing", () => {
     let deep: unknown = "value";

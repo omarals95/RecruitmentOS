@@ -102,8 +102,16 @@ describe("MCP candidate, task and collaboration tools over real migrations and R
   const requiredOwner = session("ct-required-owner", "owner", REQUIRED_TEAM);
   const ids = {} as Record<string, string>;
   const foreign = {} as Record<string, string>;
-  const { query, count, apiToken, listNames, call, data, toolError } =
-    mcpHarness(() => fixture, TEAM);
+  const {
+    query,
+    count,
+    apiToken,
+    listNames,
+    call,
+    data,
+    rpcResult,
+    toolError,
+  } = mcpHarness(() => fixture, TEAM);
   let serial = 0;
   const key = () => `candidate-task-${randomUUID()}`;
   const unique = (label: string) => `${label} ${randomUUID().slice(0, 8)}`;
@@ -1500,5 +1508,55 @@ describe("MCP candidate, task and collaboration tools over real migrations and R
     ).toBe("invalid_assignee");
     expect(await fingerprint()).toBe(snapshot);
     expect(await assigneeRows(id)).toEqual([owner.userId]);
+  });
+
+  it("takes custom values only on the task tools and never returns a candidate's (R2b-02)", async () => {
+    const all = await token(SCOPES);
+    const tools = (await rpcResult(all, "tools/list")).tools as {
+      name: string;
+      inputSchema: { properties?: Record<string, unknown> };
+    }[];
+    expect(
+      tools
+        .filter((item) =>
+          Object.hasOwn(item.inputSchema.properties ?? {}, "customValues"),
+        )
+        .map((item) => item.name)
+        .sort(),
+    ).toEqual(["create_task", "update_task"]);
+    const field = randomUUID();
+    const stored = await createRecord(owner, "candidates", {
+      data: {
+        name: "Custom Values Fictional Candidate",
+        customValues: { [field]: "Fictional custom value" },
+      },
+    });
+    expect(stored.data).toMatchObject({
+      customValues: { [field]: "Fictional custom value" },
+    });
+    const detail = data(await call(all, "get_candidate", { id: stored.id }));
+    expect(detail).toHaveProperty("facts");
+    expect(detail.facts).not.toHaveProperty("customValues");
+    expect(JSON.stringify(detail)).not.toContain("Fictional custom value");
+    const before = await fingerprint();
+    const bulk = (candidate: Record<string, unknown>) =>
+      call(all, "add_bulk_import_item", {
+        batchId: randomUUID(),
+        idempotencyKey: randomUUID(),
+        originalName: "fictional-custom-values.pdf",
+        sizeBytes: 300,
+        candidate: {
+          name: "Custom Values Fictional Bulk Candidate",
+          ...candidate,
+        },
+        factsReviewed: true,
+        duplicatesReviewed: true,
+      });
+    const refused = await bulk({
+      customValues: { [field]: "Fictional custom value" },
+    });
+    expect(toolError(refused)).toBe("invalid_input");
+    expect(refused.structuredContent.error?.message).toContain("customValues");
+    expect(await fingerprint()).toBe(before);
   });
 });

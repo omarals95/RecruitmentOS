@@ -66,6 +66,7 @@ import {
   recordDataSchemas,
   referenceFields,
   referencesByKind,
+  systemFieldKeys,
   type RecordDto,
   type ReferenceField,
   type ResourceName,
@@ -435,9 +436,7 @@ function factsOf(ctx: AccessContext, row: RecordDto, omit: string[] = []) {
     facts: fields(
       ctx,
       row,
-      Object.keys(recordDataSchemas[row.kind].shape).filter(
-        (key) => !omit.includes(key),
-      ),
+      systemFieldKeys(row.kind).filter((key) => !omit.includes(key)),
     ),
   };
 }
@@ -1258,7 +1257,10 @@ export const TOOLS: McpTool[] = [
     access: [{ resource: "job-roles", action: "create" }],
     effect: "create",
     input: z
-      .object({ idempotencyKey, ...recordDataSchemas["job-role"].shape })
+      .object({
+        idempotencyKey,
+        ...recordDataSchemas["job-role"].omit({ customValues: true }).shape,
+      })
       .strict(),
     run: creates("job-roles"),
   }),
@@ -1270,7 +1272,9 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "job-roles", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas["job-role"].shape),
+    input: changeInput(
+      recordDataSchemas["job-role"].omit({ customValues: true }).shape,
+    ),
     run: changes("job-roles"),
   }),
   tool({
@@ -1350,7 +1354,7 @@ export const TOOLS: McpTool[] = [
       .object({
         idempotencyKey,
         jobRoleId: z.uuid().optional(),
-        ...recordDataSchemas.vacancy.shape,
+        ...recordDataSchemas.vacancy.omit({ customValues: true }).shape,
       })
       .strict(),
     run: creates("vacancies"),
@@ -1363,9 +1367,12 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "vacancies", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas.vacancy.shape, {
-      jobRoleId: z.uuid().nullable().optional(),
-    }),
+    input: changeInput(
+      recordDataSchemas.vacancy.omit({ customValues: true }).shape,
+      {
+        jobRoleId: z.uuid().nullable().optional(),
+      },
+    ),
     run: changes("vacancies"),
   }),
   tool({
@@ -1447,7 +1454,10 @@ export const TOOLS: McpTool[] = [
         candidateId: z.uuid(),
         vacancyId: z.uuid(),
         stage: startStage.optional(),
-        ...recordDataSchemas.application.omit({ stage: true }).shape,
+        ...recordDataSchemas.application.omit({
+          stage: true,
+          customValues: true,
+        }).shape,
       })
       .strict(),
     run: creates("applications"),
@@ -1495,7 +1505,8 @@ export const TOOLS: McpTool[] = [
     access: [{ resource: "applications", action: "edit" }],
     effect: "change",
     input: changeInput(
-      recordDataSchemas.application.omit({ stage: true }).shape,
+      recordDataSchemas.application.omit({ stage: true, customValues: true })
+        .shape,
     ),
     run: changes("applications"),
   }),
@@ -1583,7 +1594,10 @@ export const TOOLS: McpTool[] = [
       .object({
         idempotencyKey,
         applicationId: z.uuid(),
-        ...recordDataSchemas.interview.omit({ status: true }).shape,
+        ...recordDataSchemas.interview.omit({
+          status: true,
+          customValues: true,
+        }).shape,
       })
       .strict(),
     run: creates("interviews"),
@@ -1596,7 +1610,9 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "interviews", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas.interview.shape),
+    input: changeInput(
+      recordDataSchemas.interview.omit({ customValues: true }).shape,
+    ),
     run: changes("interviews"),
   }),
   tool({
@@ -1659,8 +1675,11 @@ export const TOOLS: McpTool[] = [
       .object({
         idempotencyKey,
         applicationId: z.uuid(),
-        ...recordDataSchemas.offer.omit({ status: true, declineReason: true })
-          .shape,
+        ...recordDataSchemas.offer.omit({
+          status: true,
+          declineReason: true,
+          customValues: true,
+        }).shape,
       })
       .strict(),
     run: creates("offers"),
@@ -1673,7 +1692,9 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "offers", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas.offer.shape),
+    input: changeInput(
+      recordDataSchemas.offer.omit({ customValues: true }).shape,
+    ),
     run: changes("offers"),
   }),
   tool({
@@ -1728,7 +1749,10 @@ export const TOOLS: McpTool[] = [
       .object({
         idempotencyKey,
         applicationId: z.uuid(),
-        ...recordDataSchemas.onboarding.omit({ status: true }).shape,
+        ...recordDataSchemas.onboarding.omit({
+          status: true,
+          customValues: true,
+        }).shape,
       })
       .strict(),
     run: creates("onboarding"),
@@ -1741,7 +1765,9 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "onboarding", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas.onboarding.shape),
+    input: changeInput(
+      recordDataSchemas.onboarding.omit({ customValues: true }).shape,
+    ),
     run: changes("onboarding"),
   }),
   tool({
@@ -1795,7 +1821,10 @@ export const TOOLS: McpTool[] = [
       .object({
         idempotencyKey,
         onboardingId: z.uuid(),
-        ...recordDataSchemas.checklist.omit({ status: true }).shape,
+        ...recordDataSchemas.checklist.omit({
+          status: true,
+          customValues: true,
+        }).shape,
       })
       .strict(),
     run: creates("checklist"),
@@ -1808,7 +1837,9 @@ export const TOOLS: McpTool[] = [
     scopes: ["recruitment:write"],
     access: [{ resource: "checklist", action: "edit" }],
     effect: "change",
-    input: changeInput(recordDataSchemas.checklist.shape),
+    input: changeInput(
+      recordDataSchemas.checklist.omit({ customValues: true }).shape,
+    ),
     run: changes("checklist"),
   }),
   tool({

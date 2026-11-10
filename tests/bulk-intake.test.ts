@@ -1061,4 +1061,21 @@ describe("bulk CV intake recovery and server review evidence", () => {
     expect(read.status).toBe(404);
     expect(read.body.error.code).toBe("not_found");
   });
+
+  it("(u) refuses custom values on a bulk item and creates nothing (R2b-02)", async () => {
+    const bearer = await token(owner);
+    const before = await counts();
+    const response = await item(
+      bearer,
+      randomUUID(),
+      randomUUID(),
+      body({
+        name: "Fictional Custom Values Item",
+        customValues: { [randomUUID()]: "Fictional custom value" },
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("invalid_input");
+    expect(await counts()).toEqual(before);
+  });
 });

@@ -41,11 +41,13 @@ type ItemRow = typeof bulkIntakeItems.$inferSelect;
 export type BulkItemOutcome =
   "not-imported" | "cv-pending" | "imported" | "cv-rejected";
 
-// Source fields stay with the legacy importer; bulk intake takes only reviewed candidate details.
+// Source fields stay with the legacy importer; bulk intake takes only reviewed candidate details,
+// and no custom values.
 const bulkCandidateData = recordDataSchemas.candidate.omit({
   rawSource: true,
   evidence: true,
   sourceReviews: true,
+  customValues: true,
 });
 export const bulkItemSchema = z
   .object({

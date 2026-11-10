@@ -4,6 +4,7 @@ import {
   BULK_INTAKE_RECOVERY_HOURS,
   recordDataSchemas,
   resourceToKind,
+  systemFieldKeys,
   type RecordKind,
 } from "@/domain/records";
 import { EXPORT_RESOURCES } from "@/domain/export";
@@ -200,10 +201,21 @@ export function GET() {
   const schemas: Record<string, unknown> = {};
   for (const [resource, kind] of Object.entries(resourceToKind)) {
     const schemaName = resource.replace(/-/g, "_");
-    schemas[schemaName] = z.toJSONSchema(recordDataSchemas[kind], {
-      io: "input",
-      unrepresentable: "any",
-    });
+    // Today's system fields only: the non-task customValues REST accepts stays undocumented here.
+    const { shape } = recordDataSchemas[kind];
+    schemas[schemaName] = z.toJSONSchema(
+      z
+        .object(
+          Object.fromEntries(
+            systemFieldKeys(kind).map((key) => [
+              key,
+              shape[key as keyof typeof shape],
+            ]),
+          ),
+        )
+        .strict(),
+      { io: "input", unrepresentable: "any" },
+    );
     const refs = Object.fromEntries(
       [
         "candidateId",
