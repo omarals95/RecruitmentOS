@@ -177,7 +177,7 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
   --data '{"data":{"title":"Fictional Data Analyst","customValues":{"9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f":"Fictional cost centre 42"}}}'
 ```
 
-The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. Until custom field definitions arrive, the values are not checked against any field and are not shown in the app, exports or MCP, and OpenAPI does not list them. Tasks are unchanged: their `customValues` are still checked against the team's task fields. No response includes the kind schema version a record was last saved against.
+The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. Until custom field definitions arrive, the values are not checked against any field and are not shown in the app, exports or MCP, and OpenAPI does not list them. A role that hides any field of a kind also hides that kind's `customValues` from its members, in responses and search, unless it names its own rule for `customValues`. Tasks are unchanged: their `customValues` are still checked against the team's task fields. No response includes the kind schema version a record was last saved against.
 
 ## Upload a CV
 
