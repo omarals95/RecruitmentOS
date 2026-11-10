@@ -22,6 +22,12 @@ const access: Record<NonNullable<AdminTeamRow["teamRole"]>, string> = {
 };
 /** Until a team detail page exists (ADM-03), a managed team opens on the active team's Members. */
 const MEMBERS = "/app/admin/members";
+// The column is as narrow as its control, which stays on one line.
+const actionCell = {
+  width: "1%",
+  whiteSpace: "nowrap",
+  overflowWrap: "normal",
+} as const;
 
 /** Admin > Teams: the list from GET /api/v1/teams, then Create a team when the caller may. */
 export function TeamsTab() {
@@ -131,8 +137,9 @@ export function TeamsPanel({
     <section className="panel stack">
       <h2>Teams</h2>
       <p className="muted">
-        The teams you are a member of. With company authority you also see every
-        other team of the company, by name, identifier and created date only.
+        The teams you own or administer, and with company authority every team
+        of the company, showing only the name, identifier and created date of a
+        team you are not a member of.
       </p>
       {error ? (
         <p className="notice error" role="alert">
@@ -162,7 +169,7 @@ export function TeamsPanel({
                   <td data-label="Your access">
                     {row.teamRole ? access[row.teamRole] : "Not a member"}
                   </td>
-                  <td data-label="Actions">
+                  <td data-label="Actions" style={actionCell}>
                     {row.teamRole !== "owner" &&
                     row.teamRole !== "admin" ? null : row.current ? (
                       <Link href={MEMBERS} className="button secondary">
