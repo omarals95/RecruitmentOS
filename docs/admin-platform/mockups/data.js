@@ -1,0 +1,47 @@
+/* Shared fictional sample data. Read-only for page files: put page-specific data inside your own page file. */
+window.MockData = {
+  company: { name: "Al Noor Holding (fictional)", workspace: "Company workspace", domain: "recruitmentos-preview.vercel.app" },
+  teams: [
+    { id: "t-ta", name: "Talent Acquisition", slug: "talent-acquisition", lead: "Omar Alshair", members: 9, candidates: 27, vacancies: 8, unit: "Human Resources" },
+    { id: "t-es", name: "Executive Search", slug: "executive-search", lead: "Mariam Al Suwaidi", members: 4, candidates: 12, vacancies: 3, unit: "Office of the CEO" },
+    { id: "t-gr", name: "Graduate Hiring", slug: "graduate-hiring", lead: "Rahul Menon", members: 6, candidates: 64, vacancies: 5, unit: "Human Resources" },
+  ],
+  users: [
+    { id: "u-101", name: "Omar Alshair", email: "omar.alshair@example.test", status: "Active", twoStep: true, lastSeen: "Today 10:42", company: "Company owner", teams: [["Talent Acquisition", "Owner"], ["Executive Search", "Owner"]], groups: ["system-administrators", "hr-leadership"], unit: "Human Resources", title: "Head of Talent" },
+    { id: "u-102", name: "Mariam Al Suwaidi", email: "mariam.alsuwaidi@example.test", status: "Active", twoStep: true, lastSeen: "Today 09:15", company: "Company admin (Organisation, Workflows)", teams: [["Executive Search", "Admin"]], groups: ["hr-leadership", "offer-approvers"], unit: "Office of the CEO", title: "Executive Search Lead" },
+    { id: "u-103", name: "Rahul Menon", email: "rahul.menon@example.test", status: "Active", twoStep: false, lastSeen: "Yesterday", company: "None", teams: [["Graduate Hiring", "Admin"], ["Talent Acquisition", "Recruiter"]], groups: ["recruiters"], unit: "Human Resources", title: "Graduate Programme Manager" },
+    { id: "u-104", name: "Sara Haddad", email: "sara.haddad@example.test", status: "Active", twoStep: true, lastSeen: "Today 08:02", company: "None", teams: [["Talent Acquisition", "Recruiter · Recruiter, no CV upload"]], groups: ["recruiters"], unit: "Human Resources", title: "Senior Recruiter" },
+    { id: "u-105", name: "Khalid Al Mansoori", email: "khalid.almansoori@example.test", status: "Active", twoStep: false, lastSeen: "3 days ago", company: "None", teams: [["Talent Acquisition", "Recruiter · Hiring manager"]], groups: ["hiring-managers", "offer-approvers"], unit: "Engineering", title: "Engineering Director" },
+    { id: "u-106", name: "Aisha Rahman", email: "aisha.rahman@example.test", status: "Invited", twoStep: false, lastSeen: "Never", company: "None", teams: [["Graduate Hiring", "Viewer"]], groups: [], unit: "Finance", title: "Finance Business Partner" },
+    { id: "u-107", name: "Daniel Okafor", email: "daniel.okafor@example.test", status: "Suspended", twoStep: true, lastSeen: "21 days ago", company: "Suspended: left every team", teams: [], groups: ["interviewers"], unit: "Engineering", title: "Staff Engineer" },
+    { id: "u-108", name: "Layla Hassan", email: "layla.hassan@example.test", status: "Active", twoStep: true, lastSeen: "Today 11:20", company: "None", teams: [["Talent Acquisition", "Viewer · Interviewer"]], groups: ["interviewers"], unit: "Marketing", title: "Brand Manager" },
+  ],
+  groups: [
+    { id: "g-sys", name: "system-administrators", desc: "Full company administration", members: 1, nested: [], source: "Local" },
+    { id: "g-hr", name: "hr-leadership", desc: "HR leadership team", members: 2, nested: ["recruiters"], source: "Local" },
+    { id: "g-rec", name: "recruiters", desc: "Everyone who recruits", members: 3, nested: [], source: "Local" },
+    { id: "g-hm", name: "hiring-managers", desc: "Department heads who own vacancies", members: 1, nested: [], source: "Local" },
+    { id: "g-int", name: "interviewers", desc: "People who interview candidates", members: 2, nested: ["hiring-managers"], source: "Local" },
+    { id: "g-off", name: "offer-approvers", desc: "Approval group for offers above AED 40,000 / month", members: 2, nested: [], source: "Local", approval: true },
+  ],
+  roles: [
+    { id: "r-owner", name: "Owner", membership: "Owner", kind: "Built-in", scope: "All records", holders: 2, locked: true },
+    { id: "r-admin", name: "Admin", membership: "Admin", kind: "Built-in", scope: "All records", holders: 2 },
+    { id: "r-rec", name: "Recruiter", membership: "Recruiter", kind: "Built-in", scope: "All records", holders: 3 },
+    { id: "r-view", name: "Viewer", membership: "Viewer", kind: "Built-in", scope: "All records", holders: 1 },
+    { id: "r-hm", name: "Hiring manager", membership: "Recruiter", kind: "Built-in template", scope: "My unit and below", holders: 1 },
+    { id: "r-int", name: "Interviewer", membership: "Viewer", kind: "Built-in template", scope: "Assigned to me", holders: 1 },
+    { id: "r-nocv", name: "Recruiter, no CV upload", membership: "Recruiter", kind: "Company role · v2", scope: "All records", holders: 1 },
+  ],
+  units: [
+    { id: "ou-1", name: "Al Noor Holding", level: "Company", parent: null },
+    { id: "ou-2", name: "Office of the CEO", level: "Division", parent: "ou-1" },
+    { id: "ou-3", name: "Human Resources", level: "Division", parent: "ou-1" },
+    { id: "ou-4", name: "Engineering", level: "Division", parent: "ou-1" },
+    { id: "ou-5", name: "Platform Engineering", level: "Department", parent: "ou-4" },
+    { id: "ou-6", name: "Finance", level: "Division", parent: "ou-1" },
+    { id: "ou-7", name: "Marketing", level: "Division", parent: "ou-1" },
+  ],
+  recordKinds: ["Candidate", "Job role", "Vacancy", "Application", "Interview", "Offer", "Onboarding", "Team task"],
+  stages: ["Applied", "Screening", "Interview", "Assessment", "Offer", "Hired", "Rejected"],
+};
