@@ -152,13 +152,13 @@ The owner approved the Admin portal mockups:
 | 2   | Job architecture: job grades, job titles, job families and salary brackets, with brackets confidential under Plan & pay access (ORG-102 to ORG-107). |
 | 3   | No right-to-left and no Arabic in the Release 2 design (UI-901). The later Arabic interface item R20-03 stays in R3.                                 |
 
-The new choices the plan raises are open decisions D18 to D34 in [architecture §13.1](release-2/architecture.md#131-open-decisions-for-the-owner), each with a recommendation.
+The new choices the plan raises are open decisions D18 to D35 in [architecture §13.1](release-2/architecture.md#131-open-decisions-for-the-owner), each with a recommendation.
 
 ### Release 2 design
 
 Design only (job 041): [architecture](release-2/architecture.md) and [build plan](release-2/build-plan.md). The owner reviews the design and decides its open decisions before any R2 build job is queued.
 
-Admin portal update (job 065, 10 November 2026): [architecture §14 Admin portal (one-stop administration)](release-2/architecture.md#14-admin-portal-one-stop-administration), the rewritten [build plan](release-2/build-plan.md) (milestones M1 to M13) and the reference material in [docs/admin-platform/README.md](admin-platform/README.md). The owner decides D18 to D34 before the new items are queued.
+Admin portal update (job 065, 10 November 2026): [architecture §14 Admin portal (one-stop administration)](release-2/architecture.md#14-admin-portal-one-stop-administration), the rewritten [build plan](release-2/build-plan.md) (milestones M1 to M13) and the reference material in [docs/admin-platform/README.md](admin-platform/README.md). The owner decides D18 to D35 before the new items are queued.
 
 ## R1.1 — Feedback loop
 

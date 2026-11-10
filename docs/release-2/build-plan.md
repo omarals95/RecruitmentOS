@@ -389,7 +389,7 @@ Contents: R2-02 screen and field builder, R2-03 categories and types. R2b-01 is 
 
 _R2-ADM-00, job 065. The owner approved the Admin portal mockups on 10 November 2026 with three changes (an org tree, job architecture, and no right-to-left or Arabic). The design is [architecture.md §14](architecture.md#14-admin-portal-one-stop-administration); the reference material and its scope are in [docs/admin-platform/README.md](../admin-platform/README.md)._
 
-Everything not yet built is planned here as milestones M1 to M13. Each item follows the rules at the top of this file and the item format of R2a, with two more lines: **Spec IDs** (the spec-pack or ORG IDs it delivers, or "none") and **Mockup** (the route in `docs/admin-platform/mockups/` it builds, or "none"). New items are numbered `ADM-01` onwards in plan order; in the factory backlog they are `R2-ADM-NN`. An unbuilt earlier item keeps its ID and its work; a **Reconciliation** line in the item says what changed. Open decisions D18 to D34 are in [architecture.md §13.1](architecture.md#131-open-decisions-for-the-owner); the owner decides them before the items that depend on them are queued.
+Everything not yet built is planned here as milestones M1 to M13. Each item follows the rules at the top of this file and the item format of R2a, with two more lines: **Spec IDs** (the spec-pack or ORG IDs it delivers, or "none") and **Mockup** (the route in `docs/admin-platform/mockups/` it builds, or "none"). New items are numbered `ADM-01` onwards in plan order; in the factory backlog they are `R2-ADM-NN`. An unbuilt earlier item keeps its ID and its work; a **Reconciliation** line in the item says what changed. Open decisions D18 to D35 are in [architecture.md §13.1](architecture.md#131-open-decisions-for-the-owner); the owner decides them before the items that depend on them are queued.
 
 **The MVP order.** The first ten milestones follow the owner's MVP order for the Admin portal:
 
@@ -468,43 +468,43 @@ Every unbuilt earlier item is kept with its ID and its work; none is dropped or 
 
 One row per mockup page (the 19 ids of `PAGE_FILES` in `docs/admin-platform/mockups/index.html`), per visible sub-view, and per page of the target sitemap that the mockups do not show.
 
-| Screen or sub-view                      | Mockup route                                  | Built by                                                                                          |
-| --------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Admin home (`home`)                     | `#/home`                                      | ADM-01; admin search ADM-61                                                                       |
-| Users (`users`)                         | `#/users`                                     | ADM-07, ADM-08, ADM-09, ADM-10, ADM-15; Effective access ADM-21; Tokens ADM-52                    |
-| Groups (`groups`)                       | `#/groups`                                    | ADM-11, ADM-12, ADM-13, ADM-14; approval settings R2c-04                                          |
-| Teams (`teams`)                         | `#/teams`                                     | ADM-02, ADM-03, ADM-04, ADM-05; Roles in this team ADM-18; colour and icon ADM-39                 |
-| Company authority (`company-authority`) | `#/company-authority`                         | Built as a panel in R2a-12; its own page ADM-16                                                   |
-| Roles (`roles`)                         | `#/roles`                                     | Built in R2a-12; holders, copy, archive and defaults ADM-17                                       |
-| Permissions (`permissions`)             | `#/permissions`                               | ADM-18, ADM-19                                                                                    |
-| Permission helper (`permission-helper`) | `#/permission-helper`                         | ADM-20, ADM-21                                                                                    |
-| Organisation (`organisation`)           | `#/organisation`                              | Built in R2a-13, R2a-16, R2a-17; ADM-22 to ADM-28                                                 |
-| Fields (`fields`)                       | `#/fields`                                    | R2b-09, ADM-29, ADM-31, R2b-11                                                                    |
-| Screens (`screens`)                     | `#/screens`                                   | R2b-07, R2b-10, ADM-30                                                                            |
-| Workflows (`workflows`)                 | `#/workflows`                                 | ADM-34, R2c-09, R2c-10, R2c-11, ADM-32, ADM-33                                                    |
-| Branding (`branding`)                   | `#/branding`                                  | ADM-36, ADM-37, ADM-38, ADM-39                                                                    |
-| Domain (`domain`)                       | `#/domain`                                    | ADM-40, ADM-41                                                                                    |
-| Notifications (`notifications`)         | `#/notifications`                             | ADM-42, ADM-44, ADM-45, ADM-46, ADM-50; bell ADM-43                                               |
-| Mail (`mail`)                           | `#/mail`                                      | ADM-48, ADM-49; SMTP ADM-51 (D25)                                                                 |
-| Integrations (`integrations`)           | `#/integrations`                              | R2d-10, ADM-52, R2d-11                                                                            |
-| Health (`health`)                       | `#/health`                                    | ADM-53, ADM-54, ADM-55, ADM-56; Linux mode ADM-57 (D25)                                           |
-| Audit (`audit`)                         | `#/audit`                                     | ADM-58, ADM-59, ADM-60                                                                            |
-| Org tree by units                       | `#/organisation?tab=chart`                    | ADM-22                                                                                            |
-| Org tree by people                      | `#/organisation?tab=chart`                    | ADM-23                                                                                            |
-| Job architecture tab                    | `#/organisation?tab=jobs`                     | ADM-24, ADM-25, ADM-26, ADM-27                                                                    |
-| Org import preview                      | `#/organisation?tab=import`                   | Built in R2a-17; Job title and Grade columns ADM-28                                               |
-| Workflow designer                       | `#/workflows` (designer)                      | R2c-09 (step list), R2c-10 (canvas), R2c-06 (problems), R2c-08 (test), R2c-07 (migration), ADM-32 |
-| Field contexts                          | `#/fields` (field detail, Contexts & options) | ADM-29                                                                                            |
-| Field wizard                            | `#/fields` (create wizard)                    | R2b-09                                                                                            |
-| Screen schemes                          | `#/screens?tab=schemes`                       | ADM-30                                                                                            |
-| Screens publish                         | `#/screens` (designer, publish)               | R2b-10 (publish checks), ADM-30 (publish summary)                                                 |
-| Roles publish, refusal and empty states | `#/roles`                                     | Built in R2a-12; the approved copy and states ADM-17                                              |
-| Permission helper refused state         | `#/permission-helper`                         | ADM-21                                                                                            |
-| Directory (sitemap, not a mockup page)  | none (Organisation > Directory tab)           | Built in R2a-14, R2a-15, R2a-16                                                                   |
-| Sign-in and security policy (sitemap)   | none                                          | Deferred by D29; two-step for company authority ADM-16, re-authentication ADM-06                  |
-| Boards (sitemap)                        | none                                          | R2c-15, R2c-16                                                                                    |
-| Templates (sitemap)                     | none                                          | R2d-01, R2d-03 to R2d-09; notification templates ADM-46                                           |
-| Configuration transfer (sitemap)        | none                                          | Deferred by D29                                                                                   |
+| Screen or sub-view                      | Mockup route                                  | Built by                                                                                                   |
+| --------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Admin home (`home`)                     | `#/home`                                      | ADM-01; admin search ADM-61                                                                                |
+| Users (`users`)                         | `#/users`                                     | ADM-07, ADM-08, ADM-09, ADM-10, ADM-15; Effective access ADM-21; Tokens ADM-52                             |
+| Groups (`groups`)                       | `#/groups`                                    | ADM-11, ADM-12, ADM-13, ADM-14; approval settings R2c-04                                                   |
+| Teams (`teams`)                         | `#/teams`                                     | ADM-02, ADM-03, ADM-04, ADM-05; Roles in this team ADM-18; colour and icon ADM-39; Mail log ADM-48, ADM-50 |
+| Company authority (`company-authority`) | `#/company-authority`                         | Built as a panel in R2a-12; its own page ADM-16                                                            |
+| Roles (`roles`)                         | `#/roles`                                     | Built in R2a-12; holders, copy, archive and defaults ADM-17                                                |
+| Permissions (`permissions`)             | `#/permissions`                               | ADM-18, ADM-19                                                                                             |
+| Permission helper (`permission-helper`) | `#/permission-helper`                         | ADM-20, ADM-21                                                                                             |
+| Organisation (`organisation`)           | `#/organisation`                              | Built in R2a-13, R2a-16, R2a-17; ADM-22 to ADM-28                                                          |
+| Fields (`fields`)                       | `#/fields`                                    | R2b-09, ADM-29, ADM-31, R2b-11                                                                             |
+| Screens (`screens`)                     | `#/screens`                                   | R2b-07, R2b-10, ADM-30                                                                                     |
+| Workflows (`workflows`)                 | `#/workflows`                                 | ADM-34, R2c-09, R2c-10, R2c-11, ADM-32, ADM-33                                                             |
+| Branding (`branding`)                   | `#/branding`                                  | ADM-36, ADM-37, ADM-38, ADM-39                                                                             |
+| Domain (`domain`)                       | `#/domain`                                    | ADM-40, ADM-41                                                                                             |
+| Notifications (`notifications`)         | `#/notifications`                             | ADM-42, ADM-44, ADM-45, ADM-46, ADM-50; bell ADM-43                                                        |
+| Mail (`mail`)                           | `#/mail`                                      | ADM-48, ADM-49; SMTP ADM-51 (D25)                                                                          |
+| Integrations (`integrations`)           | `#/integrations`                              | R2d-10, ADM-52, R2d-11                                                                                     |
+| Health (`health`)                       | `#/health`                                    | ADM-53, ADM-54, ADM-55, ADM-56; Linux mode ADM-57 (D25)                                                    |
+| Audit (`audit`)                         | `#/audit`                                     | ADM-58, ADM-59, ADM-60                                                                                     |
+| Org tree by units                       | `#/organisation?tab=chart`                    | ADM-22                                                                                                     |
+| Org tree by people                      | `#/organisation?tab=chart`                    | ADM-23                                                                                                     |
+| Job architecture tab                    | `#/organisation?tab=jobs`                     | ADM-24, ADM-25, ADM-26, ADM-27                                                                             |
+| Org import preview                      | `#/organisation?tab=import`                   | Built in R2a-17; Job title and Grade columns ADM-28                                                        |
+| Workflow designer                       | `#/workflows` (designer)                      | R2c-09 (step list), R2c-10 (canvas), R2c-06 (problems), R2c-08 (test), R2c-07 (migration), ADM-32          |
+| Field contexts                          | `#/fields` (field detail, Contexts & options) | ADM-29                                                                                                     |
+| Field wizard                            | `#/fields` (create wizard)                    | R2b-09                                                                                                     |
+| Screen schemes                          | `#/screens?tab=schemes`                       | ADM-30                                                                                                     |
+| Screens publish                         | `#/screens` (designer, publish)               | R2b-10 (publish checks), ADM-30 (publish summary)                                                          |
+| Roles publish, refusal and empty states | `#/roles`                                     | Built in R2a-12; the approved copy and states ADM-17                                                       |
+| Permission helper refused state         | `#/permission-helper`                         | ADM-21                                                                                                     |
+| Directory (sitemap, not a mockup page)  | none (Organisation > Directory tab)           | Built in R2a-14, R2a-15, R2a-16                                                                            |
+| Sign-in and security policy (sitemap)   | none                                          | Deferred by D29; two-step for company authority ADM-16, re-authentication ADM-06                           |
+| Boards (sitemap)                        | none                                          | R2c-15, R2c-16                                                                                             |
+| Templates (sitemap)                     | none                                          | R2d-01, R2d-03 to R2d-09; notification templates ADM-46                                                    |
+| Configuration transfer (sitemap)        | none                                          | Deferred by D29                                                                                            |
 
 ## M1: Admin shell and Teams move
 
@@ -857,7 +857,7 @@ Contents: Company authority on its own page, the Roles page additions, the Permi
 - **Migration:** a new body of `tenant_context.workspace_people` that also returns groups and Plan & pay access, and the owner-run read helper `tenant_context.workspace_tokens()` (new), which returns token and OAuth grant metadata of the workspace (holder, team, scopes, created, last used, expiry) to company owners only, never values or hashes. Role template: `EXECUTE` for `recruitmentos_data`. Marker: +1.
 - **Acceptance criteria:**
   1. The access review CSV lists people × teams × team role × configured role × company authority × groups; every cell goes through `safeCsvCell`; the export is audited with counts only.
-  2. The privileged access report lists company owners and admins, team owners and admins, Plan & pay access holders, and write-scoped tokens and AI apps, with last sign-in.
+  2. The privileged access report lists company owners and admins, team owners and admins, company admins by area (including `people`, which sees every team's staff emails), Plan & pay access holders, and write-scoped tokens and AI apps, with last sign-in.
   3. Both are company owner only; a formula-like fictional name exports as text.
 - **Test approach:** `tests/access-review.test.ts` (new), `tests/record-export.test.ts` unchanged; `scripts/live-role-tests.ts` token-helper-denied case.
 - **Docs:** `docs/user-guide.md`, `docs/security.md`.
@@ -1614,7 +1614,7 @@ Contents: branding as design tokens, the public brand asset store, the banner an
 - **Depends on:** ADM-01.
 - **Migration:** extends the area check of `app.workspace_admins` and `tenant_context.set_workspace_authority` with `branding` (new grantable area); adds the owner-run read helper `tenant_context.public_branding()` (new), which returns only the public token set of the published branding version, for the sign-in page. Role template: `EXECUTE` on the helper for the runtime role that renders the sign-in page. Marker: +1.
 - **Acceptance criteria:**
-  1. A strict `branding` body schema holds colour tokens (hex only), light and dark values, asset ids, the sign-in message and the email header; it refuses CSS text, URLs and unknown keys.
+  1. A strict `branding` body schema holds colour tokens (hex only), light and dark values, asset ids, the sign-in message and the email header; it refuses CSS text, URLs and unknown keys. The sign-in message and email header text are plain text, rendered escaped, with no HTML or markdown.
   2. Publishing is refused below 4.5:1 for text and 3:1 for UI parts for any token pair in either theme, with the failing pairs listed.
   3. The root layout writes the published tokens as CSS custom properties on the server; `tests/round-trip-budget.test.ts` still counts 6, 11 and 15.
   4. The sign-in page reads only `tenant_context.public_branding()`, and a test finds no configuration or record data in the pre-sign-in output.
@@ -1664,7 +1664,7 @@ Contents: branding as design tokens, the public brand asset store, the banner an
 - **Depends on:** ADM-04, ADM-38.
 - **Migration:** a new body of `tenant_context.allows_workspace` that treats `team-appearance` objects like `task-board` objects (readable by every team of the workspace, written by that team's owners). Role template: unchanged. Marker: +1.
 - **Acceptance criteria:**
-  1. A company `banner` object sets severity, audience (everyone or one team), start, end and whether it can be dismissed; the banner shows to that audience in that window.
+  1. A company `banner` object sets severity, audience (everyone or one team), start, end and whether it can be dismissed; the banner shows to that audience in that window. Its text is plain text, rendered escaped, with no HTML or markdown.
   2. A team owner sets the team's colour and icon on the team detail page; they show in the team switcher and the Teams list. Another team cannot change them, by the service or by direct SQL.
   3. A maintenance message is a banner only; nothing switches the app to read-only.
 - **Test approach:** `tests/branding.test.ts`, `tests/admin-portal-ui.test.tsx`; `scripts/live-role-tests.ts` team-B-owner-writes-appearance-denied case.
@@ -1829,7 +1829,7 @@ Contents: the template model and Resend sending moved from R2d, company notifica
 - **Migration:** none (notification templates are `template` configuration objects).
 - **Acceptance criteria:**
   1. The Templates tab edits each event's staff email subject and body with allowlisted merge fields, versioned and diffable.
-  2. Preview renders with a record the editor can read and their permissions; **Send test** goes only to the editor's own address.
+  2. Preview renders with a record the editor can read and their permissions; **Send test** goes only to the editor's own address. The preview shows the admin-authored HTML only escaped or in a sandboxed frame with no scripts.
   3. Every email uses the branded wrapper of the published branding, and links come only from `BETTER_AUTH_URL`.
   4. The HTML compatibility check lists problems before publish.
 - **Test approach:** `tests/templates.test.ts` (new in R2d-01), `tests/template-mail.test.ts` (new in R2d-02).
@@ -1857,15 +1857,17 @@ Contents: the template model and Resend sending moved from R2d, company notifica
 - **Mockup:** `#/mail` (Provider & sender, Domain authentication, Mail queue, Limits & safety).
 - **Size:** 3 h.
 - **Depends on:** ADM-06, R2d-02.
-- **Migration:** none (sender names and reply-to per team are a company `mail-settings` configuration object).
+- **Migration:** adds the owner-run aggregate helper `tenant_context.mail_queue_summary()` (new, `SECURITY DEFINER`, `SET search_path = pg_catalog, pg_temp`), which returns the number of queued and failed emails per team, counts only, to company owners. Role template: `EXECUTE` for `recruitmentos_data`. Marker: +1. Sender names and reply-to per team are a company `mail-settings` configuration object.
 - **Acceptance criteria:**
   1. `/app/admin/mail` (company owner only) shows Resend as the provider with "Set in deployment" for the key, and sets the sender name and reply-to per team.
   2. **Domain authentication** shows the Resend domain status and the SPF, DKIM and DMARC checklist.
-  3. **Mail queue** lists queued and failed email rows of the outbox with Retry and Delete, each audited.
-  4. **Send test email** goes only to the signed-in owner's address.
-  5. On Preview the page shows the capture address and a banner (D27).
-  6. Changes need a fresh session.
-- **Test approach:** `tests/mail-settings.test.ts` (new) with a fake Resend, `tests/admin-portal-ui.test.tsx`.
+  3. **Mail queue on the company page is counts only:** it shows queued and failed counts per team from `tenant_context.mail_queue_summary()`, which returns no recipient address, record id, subject or content.
+  4. **The queue rows stay with the team:** the team detail page gains a **Mail log** tab, for that team's owners and admins only, listing that team's queued and failed emails about records in the caller's scope, with Retry and Delete (each audited). The rows are read through the team-keyed row-level security and record-scope policies of `app.outbox` and `app.outbound_messages`, with no `SECURITY DEFINER` path.
+  5. **Send test email** goes only to the signed-in owner's address.
+  6. On Preview the page shows the capture address and a banner (D27).
+  7. Changes need a fresh session.
+  8. By direct SQL as the data role, a company owner with no role in team B reads no team-B queue row, recipient or record id, through the helper or the tables.
+- **Test approach:** `tests/mail-settings.test.ts` (new) with a fake Resend, `tests/admin-portal-ui.test.tsx`; `scripts/live-role-tests.ts` company-owner-without-team-B-role queue cases.
 - **Docs:** `docs/user-guide.md`, `docs/deployment.md`.
 
 ### ADM-49 Signed Resend webhooks and suppression
@@ -1880,7 +1882,8 @@ Contents: the template model and Resend sending moved from R2d, company notifica
   1. `POST /api/webhooks/resend` (new) accepts only events whose Resend signature verifies against a secret from the environment and whose timestamp is recent; others get 401 and write nothing.
   2. Delivered and bounced events update the message status; a hard bounce or complaint suppresses the address, and later sends skip it with a visible reason.
   3. A runtime role cannot write `app.mail_suppressions` directly.
-  4. Tests never contact Resend.
+  4. No company page lists suppressed addresses: the Mail page shows their count only, and a team's Mail log shows the suppression reason on that team's own messages.
+  5. Tests never contact Resend.
 - **Test approach:** `tests/resend-webhook.test.ts` (new, signed fictional events), `tests/runtime-role-grants.test.ts`; `scripts/live-role-tests.ts` direct-suppression-write-denied case.
 - **Docs:** `docs/security.md` ("Intended connections"), `docs/deployment.md` (the webhook and its secret are owner steps).
 
@@ -1888,16 +1891,24 @@ Contents: the template model and Resend sending moved from R2d, company notifica
 
 - **Epics:** R2-16.
 - **Spec IDs:** NTF-020, NTF-021, NTF-022, NTF-023.
-- **Mockup:** `#/notifications?tab=log`.
+- **Mockup:** `#/notifications?tab=log` (the company view is counts only; the record-level rows are the team's Mail log).
 - **Size:** 3 h.
 - **Depends on:** ADM-49.
-- **Migration:** adds the owner-run helpers `tenant_context.delivery_log(...)` (new; metadata of the workspace's emails to company owners and admins with `notifications`), `tenant_context.delivery_content(message_id uuid)` (new; the rendered content to company owners only) and a purge helper that removes content after 90 days and metadata after 1 year (D26). Role template: `EXECUTE` for `recruitmentos_data`. Marker: +1.
+- **Migration:** adds the owner-run helpers (all `SECURITY DEFINER`, `SET search_path = pg_catalog, pg_temp`):
+  - `tenant_context.delivery_summary(from_date date, to_date date)` (new): counts per team and event (queued, sent, delivered, bounced, failed), counts only, to company owners and company admins with `notifications`;
+  - `tenant_context.delivery_content(message_id uuid)` (new): the rendered subject and body, only when the context is of the message's team, the record is in the caller's scope, the caller is a company owner who is also an owner or admin of that team, and the caller can see every merge field the message used;
+  - a purge helper that removes content after 90 days and metadata after 1 year (D26).
+
+  Record-level rows use the team-keyed policies of `app.outbound_messages` and `app.outbox`; no helper returns them. Role template: `EXECUTE` for `recruitmentos_data`. Marker: +1.
+
 - **Acceptance criteria:**
-  1. The delivery log lists status, event, record link, recipient and time, with filters and a CSV export through `safeCsvCell`.
-  2. **Message content is company owner only and redacted:** fields hidden from the viewing owner are removed; a company admin with `notifications` sees metadata only, by the route and by the helper.
-  3. Content older than 90 days and metadata older than 1 year are purged.
-  4. **Resend** on a failed email is audited.
-- **Test approach:** `tests/delivery-log.test.ts` (new), `tests/field-redaction.test.ts`; `scripts/live-role-tests.ts` content-helper-denied case.
+  1. The team's **Mail log** tab (from ADM-48) also lists sent, delivered and bounced emails with status, event, record link, recipient and time, for that team's owners and admins and only for records in their scope, with filters and a CSV export through `safeCsvCell`.
+  2. **The company Delivery log is counts only:** Notifications > Delivery log shows the numbers per team and event from `tenant_context.delivery_summary`, with no recipient address, record id, subject or content.
+  3. **Message content** shows only to a company owner who is also an owner or admin of the message's team and can see every merge field, redacted. Everyone else, including a company owner with no role in that team, gets nothing, by the route and by the helper.
+  4. **No cross-team record-level read:** by direct SQL as the data role, a company admin with `notifications` and no team-B role, and a company owner with no team-B role, read no team-B recipient, record id or content, through the helpers or the tables.
+  5. Content older than 90 days and metadata older than 1 year are purged.
+  6. **Retry** on a failed email is audited.
+- **Test approach:** `tests/delivery-log.test.ts` (new), `tests/field-redaction.test.ts`; `scripts/live-role-tests.ts` cases for a company admin with `notifications` and a company owner, both with no team-B role, through the helpers and the tables, directly and through the pooler.
 - **Docs:** `docs/user-guide.md`, `docs/security.md`.
 
 ### ADM-51 SMTP provider in self-hosted mode
@@ -1927,7 +1938,7 @@ Contents: the template model and Resend sending moved from R2d, company notifica
   - set My notification preferences and a digest;
   - edit a notification email template, preview it and send a test to yourself;
   - check that every Preview email reaches the capture address only;
-  - read the delivery log as company owner, and as a fictional company admin see metadata only;
+  - as company owner, the Delivery log shows counts per team only; open a fictional team's Mail log as that team's owner to see its emails, and check that a second fictional team's emails appear nowhere for you there;
   - send a test email from the Mail page.
 - **Data:** real candidate and employee data stays out of Preview; only fictional data is used.
 
