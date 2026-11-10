@@ -21,6 +21,8 @@ The product scope and acceptance criteria live in `docs/requirements/`:
 
 Before touching identity, tenancy, storage or deployment code, also read `docs/security.md`, `docs/identity-boundary-plan.md`, `docs/mcp.md`, `docs/blob-security-design.md`, `docs/blob-quota-design.md`, `docs/environment-isolation.md` and `docs/erasure-runbook.md`.
 
+Before touching Admin portal code, read `docs/admin-platform/README.md`. The spec pack (`docs/admin-platform/spec/`) and the mockups (`docs/admin-platform/mockups/`) under it are reference only: they never override `docs/release-2/architecture.md` §14 or `docs/release-2/build-plan.md`.
+
 ## Runtime and fresh-checkout setup
 
 - Node.js 24 and npm only (`engines: >=24 <25`). On this Windows machine Node 26 is earlier on PATH: prefix every shell command with `export PATH="/c/Program Files/nodejs:$PATH" &&` and confirm `node --version` prints v24.
