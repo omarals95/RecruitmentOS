@@ -50,7 +50,8 @@
  *   unit-limited context (0038), direct SQL reads only the records, activity, uploads and
  *   assignments of records in its scope, cannot insert a record outside it, update an
  *   out-of-scope record, or insert activity or an upload for one, and reads, changes and deletes
- *   no other actor's app.idempotency row nor writes one under another actor's key.
+ *   no other actor's app.idempotency row nor writes one under another actor's key. The team B
+ *   owner, who holds no company authority, cannot call tenant_context.workspace_team_list (0041).
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -4021,6 +4022,21 @@ async function runChecks(run: Run) {
     );
     probe.at("end-state");
     return pass && probe.all(["end-state", (await memberRoles()) === 0]);
+  });
+
+  // The team B owner, who holds no company authority, gets no workspace team list (0041).
+  await check("workspace-team-list-team-b-owner-denied", async (probe) => {
+    probe.at("setup");
+    return transaction(data, async () => {
+      probe.at("install");
+      const { access } = await installAs(data, signer, p.ownerB);
+      probe.at("outcome");
+      const listed = await attempt(
+        data,
+        "SELECT * FROM tenant_context.workspace_team_list()",
+      );
+      return probe.all(["setup", access.companyLevel === null], denial(listed));
+    });
   });
 
   // A token context of the company owner, holding every scope, writes no member role and gets no
