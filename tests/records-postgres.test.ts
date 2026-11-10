@@ -19,9 +19,18 @@ import {
 import type { Principal } from "@/lib/principal";
 import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { assignMemberRole } from "@/lib/member-roles";
-import { RECRUITER_ROLE } from "@/domain/config-defaults";
-import type { RoleBody } from "@/domain/config";
-import { TASK_LINK_KINDS, type RecordDto } from "@/domain/records";
+import {
+  DEFAULT_KIND_SCHEMAS,
+  INTERVIEWER_ROLE,
+  RECRUITER_ROLE,
+  VIEWER_ROLE,
+} from "@/domain/config-defaults";
+import type { ConfigurableKind, RoleBody } from "@/domain/config";
+import {
+  TASK_LINK_KINDS,
+  type RecordDto,
+  type ResourceName,
+} from "@/domain/records";
 import { roleSnapshot } from "@/components/workspace/helpers";
 import { interviewsOnDay } from "@/components/workspace/calendar";
 import {
@@ -2605,6 +2614,405 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
           new URLSearchParams({ assignedToMe: "true" }),
         ),
       ).rejects.toMatchObject({ status: 400, code: "invalid_query" });
+    });
+  });
+});
+
+// Record pins and custom values (R2b-02, job 067), on a database of their own so the kind schema
+// published here reaches no other case.
+describe("record pins and custom values with real PostgreSQL migrations and RLS", () => {
+  const COMPANY = "00000000-0000-4000-a000-000000000001";
+  const PIN_NAMES = [
+    "schemaVersionId",
+    "typeId",
+    "schema_version_id",
+    "type_id",
+  ];
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  /** Runs fixture setup or inspection as the database owner, outside RLS. */
+  const asOwner = async <T>(work: () => Promise<T>): Promise<T> => {
+    await fixture.client.exec("RESET ROLE");
+    try {
+      return await work();
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+  };
+  type Stored = {
+    kind: string;
+    data: Record<string, unknown>;
+    schema_version_id: string | null;
+    type_id: string | null;
+  };
+  const stored = (id: string) =>
+    asOwner(
+      async () =>
+        (
+          await fixture.client.query<Stored>(
+            "SELECT kind, data, schema_version_id::text, type_id::text FROM app.records WHERE id = $1",
+            [id],
+          )
+        ).rows[0],
+    );
+  const pinOf = async (id: string) => {
+    const row = await stored(id);
+    return { pin: row.schema_version_id, type: row.type_id };
+  };
+  /** A REST create or update body never names the pins. */
+  const unpinned = (row: RecordDto) => {
+    const text = JSON.stringify({ data: row });
+    for (const name of PIN_NAMES) expect(text, name).not.toContain(name);
+    return row;
+  };
+  const defaultId = (kind: ConfigurableKind) =>
+    DEFAULT_KIND_SCHEMAS[kind].versionId;
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db, {
+      userId: "pin-owner",
+      teamId: "pin-team",
+    });
+    await enforceTestRls(fixture.db);
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+
+  it("pins a create of each configurable kind to its default version and leaves the other kinds and every type null", async () => {
+    const create = async (resource: ResourceName, input: object) =>
+      unpinned(await createRecord(owner, resource, input));
+    const candidate = await create("candidates", {
+      data: { name: "Fictional Pin Candidate" },
+    });
+    const jobRole = await create("job-roles", {
+      data: { title: "Fictional pin role" },
+    });
+    const vacancy = await create("vacancies", {
+      jobRoleId: jobRole.id,
+      data: { title: "Fictional pin vacancy" },
+    });
+    const application = await create("applications", {
+      candidateId: candidate.id,
+      vacancyId: vacancy.id,
+      data: {},
+    });
+    const bucket = await create("buckets", {
+      data: { name: "Fictional pin bucket" },
+    });
+    const field = await create("task-fields", {
+      data: { name: "Fictional pin field" },
+    });
+    const task = await create("tasks", {
+      bucketId: bucket.id,
+      data: { title: "Fictional pin task" },
+    });
+    const interview = await create("interviews", {
+      applicationId: application.id,
+      data: {
+        title: "Fictional pin interview",
+        startAt: "2026-11-20T06:00:00.000Z",
+      },
+    });
+    const offer = await create("offers", {
+      applicationId: application.id,
+      data: { title: "Fictional pin offer" },
+    });
+    const onboarding = await create("onboarding", {
+      applicationId: application.id,
+      data: {},
+    });
+    const checklist = await create("checklist", {
+      onboardingId: onboarding.id,
+      data: { title: "Fictional pin checklist item" },
+    });
+    const view = await create("views", {
+      data: { name: "Fictional pin view", area: "directory", query: {} },
+    });
+    const comment = await create("comments", {
+      parentRecordId: candidate.id,
+      data: { body: "Fictional pin comment" },
+    });
+    const configurable: [RecordDto, ConfigurableKind][] = [
+      [candidate, "candidate"],
+      [jobRole, "job-role"],
+      [vacancy, "vacancy"],
+      [application, "application"],
+      [task, "task"],
+      [interview, "interview"],
+      [offer, "offer"],
+      [onboarding, "onboarding"],
+      [checklist, "checklist"],
+    ];
+    for (const [row, kind] of configurable)
+      expect(await pinOf(row.id), kind).toEqual({
+        pin: defaultId(kind),
+        type: null,
+      });
+    expect(configurable.map(([, kind]) => defaultId(kind))).toEqual(
+      [1, 2, 3, 4, 5, 6, 7, 8, 9].map(
+        (n) => `00000000-0000-4000-8000-00000000020${n}`,
+      ),
+    );
+    for (const row of [bucket, field, view, comment])
+      expect(await pinOf(row.id), row.kind).toEqual({ pin: null, type: null });
+    // An update keeps those kinds unpinned and answers without the pins too.
+    const renamed = unpinned(
+      await updateRecord(owner, "buckets", bucket.id, {
+        version: 1,
+        data: { name: "Fictional renamed pin bucket" },
+      }),
+    );
+    expect(renamed.version).toBe(2);
+    expect(await pinOf(bucket.id)).toEqual({ pin: null, type: null });
+  });
+
+  it("pins creates and re-pins updates to the published kind schema current at the time", async () => {
+    const earlier = unpinned(
+      await createRecord(owner, "job-roles", {
+        data: { title: "Fictional earlier role" },
+      }),
+    );
+    expect(await pinOf(earlier.id)).toEqual({
+      pin: defaultId("job-role"),
+      type: null,
+    });
+    // The workspace's published job-role kind schema, written by the owner as an admin writer would.
+    const body = structuredClone(DEFAULT_KIND_SCHEMAS["job-role"].body);
+    body.fields[1].label = "Fictional business unit";
+    const versionId = await asOwner(async () => {
+      const objectId = (
+        await fixture.client.query<{ id: string }>(
+          `INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ('${COMPANY}', 'kind-schema', 'job-role', $1) RETURNING id`,
+          [owner.userId],
+        )
+      ).rows[0].id;
+      const id = (
+        await fixture.client.query<{ id: string }>(
+          `INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) VALUES ($1, '${COMPANY}', 'published', 1, $2::jsonb, now()) RETURNING id`,
+          [objectId, JSON.stringify(body)],
+        )
+      ).rows[0].id;
+      await fixture.client.query(
+        "UPDATE app.config_objects SET current_version_id = $1 WHERE id = $2",
+        [id, objectId],
+      );
+      return id;
+    });
+    const later = unpinned(
+      await createRecord(owner, "job-roles", {
+        data: { title: "Fictional later role" },
+      }),
+    );
+    expect(await pinOf(later.id)).toEqual({ pin: versionId, type: null });
+    const updated = unpinned(
+      await updateRecord(owner, "job-roles", earlier.id, {
+        version: 1,
+        data: { department: "Fictional Analytics" },
+      }),
+    );
+    expect(updated.data).toMatchObject({ department: "Fictional Analytics" });
+    expect(await pinOf(earlier.id)).toEqual({ pin: versionId, type: null });
+    // Kinds without a published schema keep their default.
+    const vacancy = unpinned(
+      await createRecord(owner, "vacancies", {
+        jobRoleId: later.id,
+        data: { title: "Fictional later vacancy" },
+      }),
+    );
+    expect(await pinOf(vacancy.id)).toEqual({
+      pin: defaultId("vacancy"),
+      type: null,
+    });
+  });
+
+  it("reads a row written without pins byte for byte as before, and an update adds no customValues", async () => {
+    const id = randomUUID();
+    await asOwner(() =>
+      fixture.client.query(
+        `INSERT INTO app.records(id, team_id, kind, data, created_by, created_at, updated_at) VALUES ($1, $2, 'candidate', '{"name":"Fictional Pinless Candidate"}', $3, '2026-01-01T09:00:00Z', '2026-01-01T09:00:00Z')`,
+        [id, owner.teamId, owner.userId],
+      ),
+    );
+    expect(await pinOf(id)).toEqual({ pin: null, type: null });
+    const search = new URLSearchParams({
+      search: '"Fictional Pinless Candidate"',
+    });
+    const read = async () =>
+      JSON.stringify({
+        get: { data: await getRecord(owner, "candidates", id) },
+        list: await listRecords(owner, "candidates", search),
+      });
+    const before = await read();
+    expect(before).not.toContain("customValues");
+    unpinned(
+      await createRecord(owner, "candidates", {
+        data: { name: "Fictional Unrelated Candidate" },
+      }),
+    );
+    expect(await read()).toBe(before);
+    expect(await pinOf(id)).toEqual({ pin: null, type: null });
+    const updated = unpinned(
+      await updateRecord(owner, "candidates", id, {
+        version: 1,
+        data: { phone: "+971 50 000 0000" },
+      }),
+    );
+    expect(updated.data).not.toHaveProperty("customValues");
+    const row = await stored(id);
+    expect(row.data).not.toHaveProperty("customValues");
+    expect(row.data).toMatchObject({
+      name: "Fictional Pinless Candidate",
+      phone: "+971 50 000 0000",
+    });
+    expect([row.schema_version_id, row.type_id]).toEqual([
+      defaultId("candidate"),
+      null,
+    ]);
+  });
+
+  it("round-trips non-task custom values unchecked against fields and refuses anything outside the bounded shape", async () => {
+    // Field ids that name no task field or any other record: nothing checks them until R2b-04.
+    const [text, number, flag, empty] = [1, 2, 3, 4].map(() => randomUUID());
+    const values = {
+      [text]: "Fictional custom value",
+      [number]: 12.5,
+      [flag]: true,
+      [empty]: null,
+    };
+    const person = unpinned(
+      await createRecord(owner, "candidates", {
+        data: { name: "Fictional Custom Candidate", customValues: values },
+      }),
+    );
+    expect(person.data).toMatchObject({ customValues: values });
+    expect(
+      (await getRecord(owner, "candidates", person.id)).data,
+    ).toMatchObject({ customValues: values });
+    expect((await stored(person.id)).data.customValues).toEqual(values);
+    // An update without the key keeps the map; one with it replaces the whole map.
+    const kept = unpinned(
+      await updateRecord(owner, "candidates", person.id, {
+        version: 1,
+        data: { phone: "+971 50 111 1111" },
+      }),
+    );
+    expect(kept.data).toMatchObject({ customValues: values });
+    const replaced = unpinned(
+      await updateRecord(owner, "candidates", person.id, {
+        version: 2,
+        data: { customValues: { [text]: "Fictional replaced value" } },
+      }),
+    );
+    expect((replaced.data as { customValues?: unknown }).customValues).toEqual({
+      [text]: "Fictional replaced value",
+    });
+    const role = unpinned(
+      await createRecord(owner, "job-roles", {
+        data: {
+          title: "Fictional custom role",
+          customValues: { [flag]: false },
+        },
+      }),
+    );
+    expect(role.data).toMatchObject({ customValues: { [flag]: false } });
+    const refused = [
+      { "not-a-uuid": "Fictional value" },
+      { [text]: { nested: "Fictional value" } },
+      { [text]: ["Fictional value"] },
+      { [text]: "x".repeat(4001) },
+      { [text]: Number.POSITIVE_INFINITY },
+    ];
+    for (const customValues of refused) {
+      await expect(
+        createRecord(owner, "candidates", {
+          data: { name: "Fictional Refused Candidate", customValues },
+        }),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
+      await expect(
+        updateRecord(owner, "job-roles", role.id, {
+          version: 1,
+          data: { customValues },
+        }),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
+    }
+    // Pins are never taken from input, at the top level or in data.
+    for (const input of [
+      { schemaVersionId: randomUUID(), data: { title: "Fictional forged" } },
+      { typeId: randomUUID(), data: { title: "Fictional forged" } },
+      { data: { title: "Fictional forged", schemaVersionId: randomUUID() } },
+      { data: { title: "Fictional forged", typeId: randomUUID() } },
+    ])
+      await expect(
+        createRecord(owner, "job-roles", input),
+      ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
+    expect((await stored(role.id)).data.customValues).toEqual({
+      [flag]: false,
+    });
+  });
+
+  it("hides custom values from a role published before they existed, in a get, a list and a search", async () => {
+    const secret = "Fictional confidential custom value";
+    const person = unpinned(
+      await createRecord(owner, "candidates", {
+        data: {
+          name: "Fictional Restricted Candidate",
+          jobTitle: "Fictional analyst",
+          customValues: { [randomUUID()]: secret },
+        },
+      }),
+    );
+    const search = new URLSearchParams({ search: `"${secret}"` });
+    // Owner, admin, recruiter and viewer have no field rules, so they keep seeing and finding them.
+    expect(
+      (await listRecords(owner, "candidates", search)).data.map(
+        (row) => row.id,
+      ),
+    ).toEqual([person.id]);
+    // The interviewer template as published before customValues existed: every candidate key but
+    // name and job title hidden, and no rule for customValues.
+    const candidate = Object.fromEntries(
+      Object.entries(INTERVIEWER_ROLE.body.fields.candidate ?? {}).filter(
+        ([key]) => key !== "customValues",
+      ),
+    );
+    const earlier = await createConfigDraft(owner, {
+      type: "role",
+      key: "earlier-interviewer",
+      body: {
+        ...structuredClone(VIEWER_ROLE.body),
+        name: "Fictional earlier interviewer",
+        fields: { candidate },
+      } as RoleBody,
+    });
+    await publishConfigVersion(owner, earlier.versionId);
+    const member = await seedIdentity(fixture.db, {
+      userId: "pin-earlier-interviewer",
+      teamId: owner.teamId,
+      role: "viewer",
+    });
+    await assignMemberRole(
+      owner,
+      { userId: member.userId, roleObjectId: earlier.objectId },
+      new Headers(),
+    );
+    const read = await getRecord(member, "candidates", person.id);
+    expect(read.data).toEqual({
+      name: "Fictional Restricted Candidate",
+      jobTitle: "Fictional analyst",
+    });
+    const listed = await listRecords(
+      member,
+      "candidates",
+      new URLSearchParams({ search: '"Fictional Restricted Candidate"' }),
+    );
+    expect(listed.data.map((row) => row.id)).toEqual([person.id]);
+    expect(JSON.stringify(listed)).not.toContain(secret);
+    expect(JSON.stringify(read)).not.toContain(secret);
+    expect(await listRecords(member, "candidates", search)).toMatchObject({
+      data: [],
+      pagination: { total: 0 },
     });
   });
 });

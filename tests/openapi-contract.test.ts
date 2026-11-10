@@ -737,6 +737,32 @@ describe("OpenAPI contract", () => {
       expect(JSON.stringify(changes)).toContain(text);
   });
 
+  it("documents customValues only on tasks and never names the record pins (R2b-02)", () => {
+    const found: string[] = [];
+    const walk = (value: unknown, path: string[]) => {
+      if (!value || typeof value !== "object") return;
+      const { properties } = value as { properties?: unknown };
+      if (
+        properties &&
+        typeof properties === "object" &&
+        Object.hasOwn(properties, "customValues")
+      )
+        found.push(path.join("/"));
+      for (const [key, child] of Object.entries(value))
+        walk(child, [...path, key]);
+    };
+    walk(document, []);
+    expect(found).toEqual(["components/schemas/tasks"]);
+    const text = JSON.stringify(document);
+    for (const name of [
+      "schemaVersionId",
+      "schema_version_id",
+      "typeId",
+      "type_id",
+    ])
+      expect(text, name).not.toContain(name);
+  });
+
   it("documents the Roles & permissions operations as session-only, with their codes", () => {
     const labels = [
       ["/api/v1/roles", "get"],

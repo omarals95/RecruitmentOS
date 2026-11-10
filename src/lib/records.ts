@@ -60,8 +60,13 @@ import {
   type RecordReferences,
   type ResourceName,
 } from "@/domain/records";
-import type { TaskBoardBody } from "@/domain/config";
+import {
+  CONFIGURABLE_KINDS,
+  type ConfigurableKind,
+  type TaskBoardBody,
+} from "@/domain/config";
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
+import { kindSchemaFor } from "@/lib/config-store";
 import { publishedTaskBoards } from "@/lib/task-boards";
 
 type DbRecord = typeof records.$inferSelect;
@@ -199,6 +204,17 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
 }
 function id(value: unknown) {
   return parse(uuidSchema, value);
+}
+/**
+ * The kind schema version a create or update of this kind is validated against (architecture 1.3):
+ * the current published kind schema from the install result, else the fixed default version id;
+ * null for a kind without a kind schema. It runs no statement, and an access state without
+ * documents or an invalid published body throws rather than pinning the default.
+ */
+function kindSchemaPin(ctx: AccessContext, kind: RecordKind): string | null {
+  return (CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)
+    ? kindSchemaFor(ctx.access, kind as ConfigurableKind).versionId
+    : null;
 }
 /**
  * The response shape. A vacancy with a unit read through recordColumns adds orgUnitId and
@@ -1774,6 +1790,7 @@ export async function createInside(
         updatedAt: now,
         archivedAt: input.archived ? now : null,
         orgUnitId: input.orgUnitId ?? null,
+        schemaVersionId: kindSchemaPin(ctx, kind),
       })
       .returning(readColumns(ctx)),
   );
@@ -2039,6 +2056,7 @@ export async function updateRecord(
             : {}),
           version: existing.version + 1,
           updatedAt: now,
+          schemaVersionId: kindSchemaPin(ctx, kind),
         })
         .where(
           and(

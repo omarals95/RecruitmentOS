@@ -5,7 +5,11 @@ import {
   SCREEN_ACTIONS,
   type ConfigurableKind,
 } from "@/domain/config";
-import { DEFAULT_KIND_SCHEMAS, ROLE_TEMPLATES } from "@/domain/config-defaults";
+import {
+  DEFAULT_KIND_SCHEMAS,
+  INTERVIEWER_ROLE,
+  ROLE_TEMPLATES,
+} from "@/domain/config-defaults";
 import {
   kindToResource,
   RESOURCE_CONFIG,
@@ -93,6 +97,12 @@ const fieldLabels: Record<string, string> = {
   completed: "Counts as completed",
   assigneeIds: "Assignees",
 };
+// Today's keys: the shape without the optional customValues R2b-02 added to every configurable kind
+// but task.
+const todayKeys = (kind: RecordKind) =>
+  Object.keys(recordDataSchemas[kind].shape).filter(
+    (key) => kind === "task" || key !== "customValues",
+  );
 const TODAY = Object.fromEntries(
   Object.entries(resourceToKind).map(([resource, kind]) => [
     resource,
@@ -100,7 +110,7 @@ const TODAY = Object.fromEntries(
       kind,
       label: labels[kind][0],
       singular: labels[kind][1],
-      fields: Object.keys(recordDataSchemas[kind].shape).map((key) => {
+      fields: todayKeys(kind).map((key) => {
         const options = enumOptions[`${kind}.${key}`];
         const type: FieldType = options
           ? "select"
@@ -233,7 +243,7 @@ describe("built-in default kind schemas (R2b-01)", () => {
 
   it("lists every schema key as a system field with today's label, type and options", () => {
     for (const kind of CONFIGURABLE_KINDS) {
-      const keys = Object.keys(recordDataSchemas[kind].shape);
+      const keys = todayKeys(kind);
       const today = TODAY[kindToResource[kind]];
       expect(fieldsOf(kind).map((field) => field.key)).toEqual(keys);
       expect(fieldsOf(kind).every((field) => field.system === true)).toBe(true);
@@ -336,7 +346,7 @@ describe("built-in default kind schemas (R2b-01)", () => {
       expect(DEFAULT_KIND_SCHEMAS[kind].body.screens).toEqual(
         SCREEN_ACTIONS.map((action) => ({
           action,
-          fields: Object.keys(recordDataSchemas[kind].shape),
+          fields: todayKeys(kind),
         })),
       );
     expect(SCREEN_ACTIONS).toEqual(["create", "edit", "view"]);
@@ -473,5 +483,31 @@ describe("built-in default kind schemas (R2b-01)", () => {
         ...CONFIGURABLE_KINDS,
       ]);
     }
+  });
+
+  it("keeps custom values out of the eight kinds' fields and the task's own field (R2b-02)", () => {
+    for (const kind of CONFIGURABLE_KINDS) {
+      const field = fieldsOf(kind).find(({ key }) => key === "customValues");
+      const config = RESOURCE_CONFIG[kindToResource[kind]].fields.find(
+        ({ key }) => key === "customValues",
+      );
+      if (kind === "task") {
+        expect(field?.label).toBe("Custom task values");
+        expect(config?.label).toBe("Custom task values");
+      } else {
+        expect(field, kind).toBeUndefined();
+        expect(config, kind).toBeUndefined();
+        for (const screen of DEFAULT_KIND_SCHEMAS[kind].body.screens)
+          expect(screen.fields, kind).not.toContain("customValues");
+      }
+    }
+    // The interviewer template hides every candidate key but name and job title, custom values too.
+    const candidate = INTERVIEWER_ROLE.body.fields.candidate ?? {};
+    expect(candidate.customValues).toBe("hidden");
+    expect(
+      Object.keys(recordDataSchemas.candidate.shape).filter(
+        (key) => candidate[key] !== "hidden",
+      ),
+    ).toEqual(["name", "jobTitle"]);
   });
 });

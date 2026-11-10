@@ -124,6 +124,16 @@ const savedQuery = z
   })
   .strict();
 
+/**
+ * Custom values by field definition id: a string of at most 4000 characters, a finite number, a
+ * boolean or null. Tasks default to an empty map; the other configurable kinds take it optionally,
+ * so a record without it never gains the key.
+ */
+export const customValuesSchema = z.record(
+  uuidSchema,
+  z.union([z.string().max(4000), z.number().finite(), z.boolean(), z.null()]),
+);
+
 /** Optional candidate fields about sensitive traits; MCP tools never return or search them. */
 export const SENSITIVE_CANDIDATE_FIELDS = [
   "explicitGender",
@@ -175,6 +185,7 @@ export const recordDataSchemas = {
       rawSource: jsonObject.default({}),
       evidence: z.array(jsonObject).max(1000).default([]),
       sourceReviews: z.array(jsonValue).max(1000).default([]),
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   "job-role": z
@@ -187,6 +198,7 @@ export const recordDataSchemas = {
       description: notes(),
       requirements: notes(),
       skills: tags,
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   vacancy: z
@@ -207,6 +219,7 @@ export const recordDataSchemas = {
       hiringManager: text(),
       recruiter: text(),
       targetDate: optionalDay,
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   application: z
@@ -216,6 +229,7 @@ export const recordDataSchemas = {
       owner: text(),
       notes: notes(),
       appliedDate: optionalDay,
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   bucket: z
@@ -255,17 +269,7 @@ export const recordDataSchemas = {
       dueDate: optionalDay,
       priority: z.enum(["Low", "Normal", "High", "Urgent"]).default("Normal"),
       description: notes(),
-      customValues: z
-        .record(
-          uuidSchema,
-          z.union([
-            z.string().max(4000),
-            z.number().finite(),
-            z.boolean(),
-            z.null(),
-          ]),
-        )
-        .default({}),
+      customValues: customValuesSchema.default({}),
     })
     .strict(),
   interview: z
@@ -284,6 +288,7 @@ export const recordDataSchemas = {
         .enum(["Scheduled", "Completed", "Cancelled", "No show"])
         .default("Scheduled"),
       notes: notes(),
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   offer: z
@@ -309,6 +314,7 @@ export const recordDataSchemas = {
         .default("Draft"),
       declineReason: text(2000),
       notes: notes(),
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   onboarding: z
@@ -319,6 +325,7 @@ export const recordDataSchemas = {
         .enum(["Planned", "In progress", "Completed", "On hold"])
         .default("Planned"),
       notes: notes(),
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   checklist: z
@@ -333,6 +340,7 @@ export const recordDataSchemas = {
         .enum(["Pending", "In progress", "Complete", "Waived"])
         .default("Pending"),
       notes: notes(),
+      customValues: customValuesSchema.optional(),
     })
     .strict(),
   "saved-view": z
@@ -349,3 +357,15 @@ export const recordDataSchemas = {
     })
     .strict(),
 } as const;
+
+/**
+ * A kind's system field keys in schema order. Every kind but task leaves out customValues, which
+ * holds values of custom fields rather than a field of its own; tasks keep it as today.
+ */
+export function systemFieldKeys(
+  kind: keyof typeof recordDataSchemas,
+): string[] {
+  return Object.keys(recordDataSchemas[kind].shape).filter(
+    (key) => kind === "task" || key !== "customValues",
+  );
+}

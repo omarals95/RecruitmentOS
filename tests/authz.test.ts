@@ -1184,11 +1184,11 @@ describe("outputs on the engine (R2a-08)", () => {
     expect(roleBodySchema.safeParse(withRules).success).toBe(true);
     const ctx = contextOf(session("recruiter"), { role: withRules });
     expect(hiddenKeys(ctx, "candidate")).toEqual(
-      new Set(["email", "residenceEmirate"]),
+      new Set(["email", "residenceEmirate", "customValues"]),
     );
     expect(hiddenKeys(ctx, "task")).toEqual(new Set(["title", CUSTOM]));
     expect(hiddenKeys(ctx, "application")).toEqual(
-      new Set(["stage", "candidateLabel"]),
+      new Set(["stage", "candidateLabel", "customValues"]),
     );
     expect(hiddenKeys(ctx, "vacancy")).toEqual(new Set());
     expect(
@@ -1197,11 +1197,63 @@ describe("outputs on the engine (R2a-08)", () => {
         "candidate",
       ),
     ).toEqual(
-      new Set(["email", "residenceEmirate", ...SENSITIVE_CANDIDATE_FIELDS]),
+      new Set([
+        "email",
+        "residenceEmirate",
+        "customValues",
+        ...SENSITIVE_CANDIDATE_FIELDS,
+      ]),
     );
     expect(() => hiddenKeys(contextOf(session(FORGED)), "candidate")).toThrow(
       ApiError,
     );
+  });
+
+  it("hides a non-task customValues for a role that hides any field of the kind and names no rule for it (R2b-02)", () => {
+    // The interviewer template as published before customValues existed: no rule for the key.
+    const { customValues: _added, ...candidate } =
+      INTERVIEWER_ROLE.body.fields.candidate ?? {};
+    const earlier = {
+      ...structuredClone(INTERVIEWER_ROLE.body),
+      fields: { candidate },
+    } as RoleBody;
+    expect(roleBodySchema.safeParse(earlier).success).toBe(true);
+    const ctx = contextOf(session("viewer"), { role: earlier });
+    expect(hiddenKeys(ctx, "candidate").has("customValues")).toBe(true);
+    const stored = record("candidate", {
+      name: "Fictional Interviewed Person",
+      jobTitle: "Fictional analyst",
+      email: "interviewed@example.test",
+      customValues: { [CUSTOM]: "Fictional secret" },
+    });
+    expect(redact(ctx, stored).data).toEqual({
+      name: "Fictional Interviewed Person",
+      jobTitle: "Fictional analyst",
+    });
+    expect(
+      authorize(ctx, { resource: "candidates", action: "view" }).fields
+        .customValues,
+    ).toBe("hidden");
+    // Kinds with no hidden rule, and an explicit rule for the key, keep the values visible.
+    expect(hiddenKeys(ctx, "vacancy").has("customValues")).toBe(false);
+    const explicit = contextOf(session("viewer"), {
+      role: {
+        ...earlier,
+        fields: { candidate: { ...candidate, customValues: "read" } },
+      } as RoleBody,
+    });
+    expect(hiddenKeys(explicit, "candidate").has("customValues")).toBe(false);
+    expect(redact(explicit, stored).data).toMatchObject({
+      customValues: { [CUSTOM]: "Fictional secret" },
+    });
+    expect(
+      authorize(explicit, { resource: "candidates", action: "view" }).fields
+        .customValues,
+    ).toBe("read");
+    // Tasks keep their per-field rules: a hidden title hides no other custom value.
+    expect(
+      hiddenKeys(contextOf(session("recruiter"), { role: withRules }), "task"),
+    ).toEqual(new Set(["title", CUSTOM]));
   });
 
   it("agrees with redact on data, custom values and top-level keys", () => {
@@ -1217,11 +1269,11 @@ describe("outputs on the engine (R2a-08)", () => {
           );
         expect(
           Object.hasOwn(
-            (output.data as { customValues: object }).customValues,
+            (output.data as { customValues?: object }).customValues ?? {},
             CUSTOM,
           ),
           label,
-        ).toBe(!hidden.has(CUSTOM));
+        ).toBe(!hidden.has(CUSTOM) && !hidden.has("customValues"));
         for (const key of ["legacyId", "label", "candidateLabel"])
           expect(Object.hasOwn(output, key), `${label} ${key}`).toBe(
             !hidden.has(key),

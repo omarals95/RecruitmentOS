@@ -51,6 +51,10 @@ export const records = appSchema.table(
     /** Set only by the trigger: the vacancy and application a pipeline row or comment belongs to. */
     scopeVacancyId: uuid("scope_vacancy_id"),
     scopeApplicationId: uuid("scope_application_id"),
+    /** The kind schema version of the last create or update; null = the built-in default version. */
+    schemaVersionId: uuid("schema_version_id"),
+    /** The record's type; never written until type assignment (R2b-11). */
+    typeId: uuid("type_id"),
   },
   (t) => [
     unique("records_team_id_id_key").on(t.teamId, t.id),

@@ -19,6 +19,7 @@ import {
   SENSITIVE_CANDIDATE_FIELDS,
   TASK_FIELD_TYPES,
   recordDataSchemas,
+  systemFieldKeys,
 } from "./record-schemas";
 import type { FieldType, RecordKind } from "./records";
 
@@ -307,7 +308,7 @@ export function systemFieldConfig(kind: RecordKind, key: string) {
 
 // Every key a system field in schema order, every screen in today's editor order (§2.2).
 function defaultKindSchema(kind: ConfigurableKind): KindSchemaBody {
-  const keys = Object.keys(recordDataSchemas[kind].shape);
+  const keys = systemFieldKeys(kind);
   const sensitive: readonly string[] =
     kind === "candidate" ? SENSITIVE_CANDIDATE_FIELDS : [];
   return {

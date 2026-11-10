@@ -39,7 +39,7 @@ import {
   systemFieldConfig,
   type RoleTemplate,
 } from "@/domain/config-defaults";
-import { recordDataSchemas } from "@/domain/record-schemas";
+import { systemFieldKeys } from "@/domain/record-schemas";
 import { resourceToKind, type ResourceName } from "@/domain/records";
 import type { Requester } from "@/components/workspace/optimistic";
 import {
@@ -1050,7 +1050,7 @@ export function RoleEditor({
                   hiddenLegend
                 >
                   <div className="form-grid">
-                    {Object.keys(recordDataSchemas[kind].shape).map((key) => {
+                    {systemFieldKeys(kind).map((key) => {
                       const rule = Object.hasOwn(rules, key)
                         ? rules[key]
                         : undefined;
