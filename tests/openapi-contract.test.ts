@@ -696,7 +696,8 @@ describe("OpenAPI contract", () => {
     const access = document.paths["/api/v1/me/access"].get;
     const history = document.paths["/api/v1/config-history"].get;
     const changes = document.paths["/api/v1/access-changes"].get;
-    for (const operation of [access, history, changes]) {
+    const teams = document.paths["/api/v1/teams"].get;
+    for (const operation of [access, history, changes, teams]) {
       expect(operation["x-session-only"]).toBe(true);
       expect(operation["x-required-scopes"]).toEqual([]);
       expect(Object.keys(operation.responses)).toEqual(
@@ -735,6 +736,15 @@ describe("OpenAPI contract", () => {
       "roleName",
     ])
       expect(JSON.stringify(changes)).toContain(text);
+    // ADM-02 (job 069): other teams by name, slug and created date only.
+    for (const text of [
+      "teams_forbidden",
+      "invalid_input",
+      "teamId, name, slug, createdAt, teamRole",
+      "current",
+      "no id, members, member count, record count, storage figure or activity",
+    ])
+      expect(JSON.stringify(teams)).toContain(text);
   });
 
   it("documents customValues only on tasks and never names the record pins (R2b-02)", () => {
@@ -857,6 +867,7 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/me/access",
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",
+        "GET /api/v1/teams",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",
