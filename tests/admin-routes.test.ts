@@ -231,6 +231,11 @@ describe("admin pages check access on the server (TST-002)", () => {
       teamId: "route-team-a",
       role: "recruiter",
     });
+    const viewer = await seedIdentity(db, {
+      userId: "route-viewer",
+      teamId: "route-team-a",
+      role: "viewer",
+    });
     // A newly created team: its owner holds no company authority.
     const teamOwner = await seedIdentity(db, {
       userId: "route-owner-b",
@@ -269,24 +274,33 @@ describe("admin pages check access on the server (TST-002)", () => {
     signIn("team owner", teamOwner);
     signIn("team admin", teamAdmin);
     signIn("recruiter", recruiter);
+    signIn("viewer", viewer);
     signIn("company admin", companyAdmin);
     signIn("company admin with organisation", organisationAdmin);
     signIn("company owner and team owner", owner);
     signIn("company owner as recruiter", ownerAsRecruiter);
     signIn("no team", { userId: "route-no-team" });
-    const teamPages = [null, ...TEAM_PAGES, "directory" as const];
+    const teamPages = [
+      null,
+      "teams" as const,
+      ...TEAM_PAGES,
+      "directory" as const,
+    ];
     allowed["team owner"] = teamPages;
     allowed["team admin"] = teamPages;
     allowed.recruiter = [];
-    allowed["company admin"] = [null, "history"];
+    allowed.viewer = [];
+    allowed["company admin"] = [null, "teams", "history"];
     allowed["company admin with organisation"] = [
       null,
+      "teams",
       "organisation",
       "history",
     ];
     allowed["company owner and team owner"] = [null, ...KEYS];
     allowed["company owner as recruiter"] = [
       null,
+      "teams",
       "roles",
       "organisation",
       "history",
@@ -327,6 +341,25 @@ describe("admin pages check access on the server (TST-002)", () => {
           );
         }
     expect(authenticateApiToken).not.toHaveBeenCalled();
+  });
+
+  it("opens Teams for team owners and admins and for company owners and admins only (ADM-02)", async () => {
+    for (const [name, outcome] of [
+      ["team owner", "allowed"],
+      ["team admin", "allowed"],
+      ["company admin", "allowed"],
+      ["company admin with organisation", "allowed"],
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(await open(callers[name], "[tab]/page.tsx", "teams"), name).toBe(
+        outcome,
+      );
   });
 
   it("gives every page to a company owner who is team owner, and no team page or Directory to a company owner as recruiter", async () => {

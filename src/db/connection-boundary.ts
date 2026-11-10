@@ -36,6 +36,7 @@ export const dataRoleHelpers = [
   "tenant_context.allows_directory(uuid,text)",
   "tenant_context.home_unit_changes(timestamp with time zone,integer)",
   "tenant_context.role_assignment_changes(timestamp with time zone,integer)",
+  "tenant_context.workspace_team_list()",
   "tenant_context.erase_employee(uuid,text,text)",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",

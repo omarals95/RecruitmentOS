@@ -1248,6 +1248,19 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  const teamsShape =
+    '{data:[{teamId, name, slug, createdAt, teamRole:"owner"|"admin"|"recruiter"|"viewer"|null, current}]}';
+  paths["/api/v1/teams"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the teams for the Admin portal",
+        description: `Session only: a signed-in owner or admin of the active team, or a company owner or company admin; Bearer tokens get 403 session_required, and anyone else, recruiters and viewers without company authority included, gets 403 teams_forbidden. A team owner or admin gets the teams where they are owner or admin. A company owner or admin also gets every other team of the workspace, by name, slug and created date only, through the owner-run helper tenant_context.workspace_team_list. teamRole is your role in the team, null when you are not a member; teamId is the team's id only where you are a member, null otherwise; current is true for the active team. A team you are not a member of carries no id, members, member count, record count, storage figure or activity. Ordered by name, then slug. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${teamsShape}.`,
+      },
+      { "200": { description: teamsShape } },
+      { sessionOnly: true },
+    ),
+  };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.
   const roleWriteRule =
     "Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners and admins without company authority included, gets 403 config_forbidden.";

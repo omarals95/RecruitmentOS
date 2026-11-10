@@ -1193,6 +1193,42 @@ describe("split runtime role template", () => {
       expect(await granted(splitRoles.identity), table).toEqual([]);
     }
   });
+
+  it("grants the data role EXECUTE on the workspace team list, the identity role and PUBLIC none (0041)", async () => {
+    await harness.identityDb();
+    await expectDenied(["SELECT * FROM tenant_context.workspace_team_list()"]);
+    await harness.asSuperuser();
+    const helper = "tenant_context.workspace_team_list()";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const execute = async (grantee: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, helper],
+        )
+      ).rows[0].allowed;
+    expect(await execute(splitRoles.data)).toBe(true);
+    expect(await execute(splitRoles.identity)).toBe(false);
+    expect(await execute("public")).toBe(false);
+    expect(
+      (
+        await harness.client.query(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, p.provolatile AS volatility, p.proconfig AS config
+           FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+          [helper],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        owned: true,
+        definer: true,
+        volatility: "s",
+        config: ["search_path=pg_catalog, pg_temp"],
+      },
+    ]);
+  });
 });
 
 describe("split runtime role template refusals", () => {
