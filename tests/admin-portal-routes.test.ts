@@ -71,7 +71,7 @@ type Route = (request: Request) => Promise<Response>;
 const signIn = (p: Principal) =>
   vi.mocked(getVerifiedSession).mockResolvedValue({
     user: { id: p.userId, twoFactorEnabled: true },
-    session: { activeOrganizationId: p.teamId },
+    session: { activeOrganizationId: p.teamId, createdAt: new Date() },
   } as never);
 /** Every action authorize() allows per resource, asked one request at a time. */
 function expectedAnswers(ctx: AccessContext) {

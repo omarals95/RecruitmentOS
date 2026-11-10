@@ -24,6 +24,6 @@ export async function POST(request: Request) {
       const input = await readBody(request, companyAuthorityInput, 1024);
       return json({ data: await setCompanyAuthority(p, input) });
     },
-    { humanOnly: true },
+    { humanOnly: true, freshSession: true },
   );
 }

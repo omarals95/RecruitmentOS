@@ -13,6 +13,6 @@ export async function POST(request: Request) {
       await resetMemberTwoStep(p, userId);
       return json({ data: { reset: true } });
     },
-    { humanOnly: true },
+    { humanOnly: true, freshSession: true },
   );
 }

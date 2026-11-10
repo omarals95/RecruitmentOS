@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApiError } from "./errors";
+import { requireFreshSession } from "./fresh-session";
 import { requirePrincipal, type Principal } from "./principal";
 import { runWithServerTiming } from "./server-timing";
 import type { Scope } from "./permissions";
@@ -199,16 +200,27 @@ export async function runApi(
   request: Request,
   scope: Scope | undefined,
   handler: (principal: Principal) => Promise<Response>,
-  options?: { humanOnly?: boolean },
+  options?: {
+    humanOnly?: boolean;
+    /**
+     * Sensitive admin changes (ADM-06 and the later items that name it): a session older than
+     * Better Auth's freshAge gets 403 SESSION_NOT_FRESH before the body is read or the handler runs.
+     */
+    freshSession?: boolean;
+  },
 ): Promise<Response> {
   // Every response, success or error, carries only durations and a round-trip count.
   return runWithServerTiming(async (finish) => {
     let response: Response;
     try {
       checkOrigin(request);
-      response = await handler(
-        await requirePrincipal(request, scope, options?.humanOnly),
+      const principal = await requirePrincipal(
+        request,
+        scope,
+        options?.humanOnly,
       );
+      if (options?.freshSession) requireFreshSession(principal);
+      response = await handler(principal);
     } catch (error) {
       response = errorResponse(error, request);
     }

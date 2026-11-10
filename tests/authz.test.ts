@@ -1548,7 +1548,7 @@ describe("escalation through the Roles & permissions routes", () => {
   ) {
     vi.mocked(getVerifiedSession).mockResolvedValue({
       user: { id: p.userId, twoFactorEnabled: true },
-      session: { activeOrganizationId: p.teamId },
+      session: { activeOrganizationId: p.teamId, createdAt: new Date() },
     } as never);
     const response = await handler(
       new Request(`${ORIGIN}${path}`, {
