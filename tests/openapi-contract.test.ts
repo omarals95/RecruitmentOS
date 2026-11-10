@@ -826,6 +826,34 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents the recent sign-in rule on exactly the four sensitive admin changes (ADM-06)", () => {
+    const guarded = [
+      "POST /api/v1/roles/{id}/publish",
+      "POST /api/v1/teams/member-roles",
+      "POST /api/v1/company-authority",
+      "POST /api/v1/teams/two-step-reset",
+    ];
+    for (const label of guarded) {
+      const { operation } = operations.find((item) => item.label === label)!;
+      expect(JSON.stringify(operation), label).toContain("SESSION_NOT_FRESH");
+    }
+    for (const path of [
+      "/api/v1/teams/member-roles",
+      "/api/v1/company-authority",
+    ])
+      expect(JSON.stringify(document.paths[path].get), path).not.toContain(
+        "SESSION_NOT_FRESH",
+      );
+    expect(
+      operations
+        .filter(({ operation }) =>
+          JSON.stringify(operation).includes("SESSION_NOT_FRESH"),
+        )
+        .map(({ label }) => label)
+        .sort(),
+    ).toEqual([...guarded].sort());
+  });
+
   it("rejects Bearer tokens on session-only operations", async () => {
     const sessionOnly = operations.filter(
       ({ operation }) => operation["x-session-only"],

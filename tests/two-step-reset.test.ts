@@ -211,7 +211,7 @@ describe("an owner resets a member's two-step sign-in under the split identity r
     await armTwoStep("second-owner");
     vi.mocked(getVerifiedSession).mockResolvedValue({
       user: { id: "owner", emailVerified: true, twoFactorEnabled: true },
-      session: { activeOrganizationId: "team" },
+      session: { activeOrganizationId: "team", createdAt: new Date() },
     } as never);
     const post = (body: unknown, headers: Record<string, string> = {}) =>
       resetRoute(

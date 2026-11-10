@@ -198,6 +198,9 @@ export function GET() {
     responses: { ...success, ...errors },
   });
   const paths: Record<string, Record<string, unknown>> = {};
+  // Sensitive admin changes (ADM-06): runApi's freshSession option.
+  const freshSessionRule =
+    "Needs a recent sign-in: a session older than 15 minutes gets 403 SESSION_NOT_FRESH; nothing is changed.";
   const schemas: Record<string, unknown> = {};
   for (const [resource, kind] of Object.entries(resourceToKind)) {
     const schemaName = resource.replace(/-/g, "_");
@@ -1012,8 +1015,7 @@ export function GET() {
       [],
       {
         summary: "Reset a member's two-step sign-in",
-        description:
-          "Session only: a signed-in owner of the active team; others get 403 owner_required. Removes the member's authenticator key and backup codes, turns two-step sign-in off, signs them out everywhere and forgets their trusted devices, so they set it up again at their next sign-in when their role requires it. Writes one account-security activity row (two_step.reset) with the targetUserId. 400 cannot_reset_self for your own account (use backup codes or Account settings), 404 member_not_found when the user is not a member of this team, 409 member_in_other_team when they also belong to a team you do not own (the reset is account-wide), 409 two_step_not_enabled when there is nothing to reset. Body at most 1024 bytes.",
+        description: `Session only: a signed-in owner of the active team; others get 403 owner_required. ${freshSessionRule} Removes the member's authenticator key and backup codes, turns two-step sign-in off, signs them out everywhere and forgets their trusted devices, so they set it up again at their next sign-in when their role requires it. Writes one account-security activity row (two_step.reset) with the targetUserId. 400 cannot_reset_self for your own account (use backup codes or Account settings), 404 member_not_found when the user is not a member of this team, 409 member_in_other_team when they also belong to a team you do not own (the reset is account-wide), 409 two_step_not_enabled when there is nothing to reset. Body at most 1024 bytes.`,
         requestBody: jsonBody(
           {
             type: "object",
@@ -1044,8 +1046,7 @@ export function GET() {
       [],
       {
         summary: "Assign or clear a member's configured role",
-        description:
-          "Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies; if the change fails in any other way, 503 team_role_unconfirmed says the same and the request can be retried. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role. A role limited to the member's org unit or to assigned records can be assigned; it limits the records the member sees. Body at most 1024 bytes.",
+        description: `Session only: a signed-in company owner; others, including team owners and admins without company authority and company admins, get 403 role_assignment_forbidden. ${freshSessionRule} roleObjectId names a published role configuration object of the company; null clears the member's role and leaves their team role unchanged. The role row is written first; when the member's team role differs from the role's membership it is then changed through the existing team-role rules, and if those refuse, 409 team_role_unchanged says the role was saved and the narrower of the two applies; if the change fails in any other way, 503 team_role_unconfirmed says the same and the request can be retried. Every assignment and clear writes one role-assignment activity row. 404 member_not_found when the user is not a member of this team, 404 not_found for an unknown role, 409 team_owner_role for a team owner, 409 role_not_published, 409 role_invalid for a published body that is not a valid role. A role limited to the member's org unit or to assigned records can be assigned; it limits the records the member sees. Body at most 1024 bytes.`,
         requestBody: jsonBody(
           {
             type: "object",
@@ -1338,7 +1339,7 @@ export function GET() {
       [],
       {
         summary: "Publish a role draft",
-        description: `${roleWriteRule} id is the draft's version id. Publishing makes the draft the role's current version, so it changes the access of every member who holds the role. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+        description: `${roleWriteRule} ${freshSessionRule} id is the draft's version id. Publishing makes the draft the role's current version, so it changes the access of every member who holds the role. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
       },
       { "200": { description: "{data:{versionId, number}}." } },
       { sessionOnly: true, params: [idParameter] },
@@ -1476,7 +1477,7 @@ export function GET() {
       [],
       {
         summary: "Grant, change or remove a person's company authority",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else gets 403 authority_forbidden. Send {userId, level:null} to remove, {userId, level:"owner", areas:[], planAccess} or {userId, level:"admin", areas, planAccess} with areas a unique subset of ${authorityAreas.join(", ")}. Anything else, including roles, ai, plan or home-units as an area or an unknown key, returns 400 invalid_input. Removing or demoting the last company owner returns 409 last_company_owner; a grant to someone in no team of the company returns 409 not_in_company. Re-sending the grant of a suspended person who has rejoined a team restores it. Each change writes one workspace-authority activity row (workspace_authority.changed) to your team with the person's id and the grant before and after; changed is false, and nothing is written, when nothing changes. Body at most 1024 bytes. Returns {data:{changed}}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else gets 403 authority_forbidden. ${freshSessionRule} Send {userId, level:null} to remove, {userId, level:"owner", areas:[], planAccess} or {userId, level:"admin", areas, planAccess} with areas a unique subset of ${authorityAreas.join(", ")}. Anything else, including roles, ai, plan or home-units as an area or an unknown key, returns 400 invalid_input. Removing or demoting the last company owner returns 409 last_company_owner; a grant to someone in no team of the company returns 409 not_in_company. Re-sending the grant of a suspended person who has rejoined a team restores it. Each change writes one workspace-authority activity row (workspace_authority.changed) to your team with the person's id and the grant before and after; changed is false, and nothing is written, when nothing changes. Body at most 1024 bytes. Returns {data:{changed}}.`,
         requestBody: jsonBody(
           {
             oneOf: [

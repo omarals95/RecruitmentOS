@@ -100,7 +100,7 @@ type Audit = {
 const signIn = (p: Principal) =>
   vi.mocked(getVerifiedSession).mockResolvedValue({
     user: { id: p.userId, twoFactorEnabled: true },
-    session: { activeOrganizationId: p.teamId },
+    session: { activeOrganizationId: p.teamId, createdAt: new Date() },
   } as never);
 /** A principal as requirePrincipal builds it for this request: the current team role's scopes. */
 const fresh = (p: Principal, role: Role = p.role): Principal => ({

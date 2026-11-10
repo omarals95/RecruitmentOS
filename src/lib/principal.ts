@@ -25,6 +25,8 @@ export interface Principal {
   tokenId?: string;
   /** Set for OAuth grants; tokenId is then the grant's auth.api_tokens id. */
   oauthClientId?: string;
+  /** Browser sessions only: when the session was created, for requireFreshSession. */
+  sessionCreatedAt?: Date;
 }
 export async function requirePrincipal(
   request: Request,
@@ -96,6 +98,7 @@ export async function requirePrincipal(
       role,
       scopes: roleScopes(role),
       authType: "session",
+      sessionCreatedAt: new Date(identity.session.createdAt),
     };
   }
   if (scope) requireScope(p, scope);

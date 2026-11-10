@@ -22,6 +22,11 @@ import { formatDate } from "@/components/workspace/helpers";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { MeAccess } from "./admin-portal";
 import { CreateTeam, ensure } from "./create-team";
+import {
+  REAUTH_CANCELLED,
+  useFreshSession,
+  type ReauthCancelled,
+} from "./fresh-session-dialog";
 import { SettingsNavigation } from "./settings-navigation";
 import { StorageSettings } from "./storage-settings";
 
@@ -225,6 +230,7 @@ function TeamSettingsContent() {
   const [inviteRole, setInviteRole] = useState<TeamRole>("recruiter");
   const [roleDrafts, setRoleDrafts] = useState<Record<string, TeamRole>>({});
   const { confirm, dialog } = useConfirm();
+  const freshSession = useFreshSession();
   const canAdmin = role === "owner" || role === "admin";
   // Only a company owner assigns configured roles; nobody else requests them.
   const me = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
@@ -286,7 +292,7 @@ function TeamSettingsContent() {
 
   async function action(
     key: string,
-    work: () => Promise<void>,
+    work: () => Promise<void | ReauthCancelled>,
     message: string,
   ) {
     if (busy) return;
@@ -294,8 +300,8 @@ function TeamSettingsContent() {
     setError("");
     setNotice("");
     try {
-      await work();
-      setNotice(message);
+      // A cancelled re-authentication sent nothing: no notice and no error.
+      if ((await work()) !== REAUTH_CANCELLED) setNotice(message);
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -407,27 +413,34 @@ function TeamSettingsContent() {
       ))
     )
       return;
+    let outcome: unknown;
     await action(
       `member-role-${person.id}`,
       async () => {
         try {
-          await requestJson(team.id, "/api/v1/teams/member-roles", {
-            method: "POST",
-            body: JSON.stringify({ userId: person.userId, roleObjectId }),
-          });
+          outcome = await freshSession.withFreshSession(() =>
+            requestJson(team.id, "/api/v1/teams/member-roles", {
+              method: "POST",
+              body: JSON.stringify({ userId: person.userId, roleObjectId }),
+            }),
+          );
         } catch (e) {
           // The service's own words: the role may be saved even when the team role is not.
           throw e instanceof ClientError ? new Error(e.message) : e;
         } finally {
-          memberRoles.refresh();
-          await load();
+          // A cancelled re-authentication sent nothing, so the rows and the chosen role stay.
+          if (outcome !== REAUTH_CANCELLED) {
+            memberRoles.refresh();
+            await load();
+          }
         }
+        if (outcome === REAUTH_CANCELLED) return REAUTH_CANCELLED;
         if (person.userId === user.id) window.location.reload();
       },
       roleObjectId ? "Configured role saved." : "Configured role cleared.",
     );
     // The row's control is replaced with the new assignment, so focus moves to the outcome.
-    setOutcomeFocus((count) => count + 1);
+    if (outcome !== REAUTH_CANCELLED) setOutcomeFocus((count) => count + 1);
   }
   async function removeMember(person: TeamMember) {
     if (
@@ -469,10 +482,13 @@ function TeamSettingsContent() {
     await action(
       `two-step-${person.id}`,
       async () => {
-        await requestJson(team.id, "/api/v1/teams/two-step-reset", {
-          method: "POST",
-          body: JSON.stringify({ userId: person.userId }),
-        });
+        const outcome = await freshSession.withFreshSession(() =>
+          requestJson(team.id, "/api/v1/teams/two-step-reset", {
+            method: "POST",
+            body: JSON.stringify({ userId: person.userId }),
+          }),
+        );
+        if (outcome === REAUTH_CANCELLED) return REAUTH_CANCELLED;
       },
       `${person.user.name}'s two-step sign-in was reset. They have been signed out everywhere.`,
     );
@@ -512,6 +528,7 @@ function TeamSettingsContent() {
           {notice}
         </div>
       )}
+      {freshSession.dialog}
       <section className="panel">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2>Your teams</h2>

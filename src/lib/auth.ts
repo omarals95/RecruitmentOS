@@ -36,6 +36,7 @@ import {
   canCreateTeam,
   canRegisterEmail,
   isUsableAuthSecret,
+  SESSION_FRESH_AGE_SECONDS,
   TWO_STEP_SETUP_MESSAGE,
   twoStepSetupRequired,
   validateInvitationRole,
@@ -368,7 +369,7 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
     },
     session: {
       expiresIn: 60 * 60 * 24 * 7,
-      freshAge: 60 * 15,
+      freshAge: SESSION_FRESH_AGE_SECONDS,
       cookieCache: { enabled: false },
     },
     rateLimit: {

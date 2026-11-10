@@ -26,6 +26,6 @@ export async function POST(request: Request) {
       const input = await readBody(request, assignmentSchema, 1024);
       return json({ data: await assignMemberRole(p, input, request.headers) });
     },
-    { humanOnly: true },
+    { humanOnly: true, freshSession: true },
   );
 }

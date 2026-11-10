@@ -13,6 +13,6 @@ export async function POST(request: Request, ctx: Context) {
       const number = await publishConfigVersion(p, id, { type: "role" });
       return json({ data: { versionId: id, number } });
     },
-    { humanOnly: true },
+    { humanOnly: true, freshSession: true },
   );
 }
