@@ -12,6 +12,7 @@ export const ADMIN_TABS = [
   { key: "cv-storage", label: "CV storage", level: "team" },
   { key: "speed", label: "Speed", level: "team" },
   { key: "tokens", label: "API tokens", level: "team" },
+  { key: "task-boards", label: "Task boards", level: "team" },
   { key: "roles", label: "Roles & permissions", level: "owner" },
   { key: "organisation", label: "Organisation", level: "organisation" },
   { key: "directory", label: "Directory", level: "directory" },

@@ -17,6 +17,7 @@ import { adminTabs, type AdminTabKey } from "./admin-tabs";
 import { DirectoryTab } from "./directory-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
+import { TaskBoardsTab } from "./task-boards-tab";
 
 /** GET /api/v1/me/access. */
 export type MeAccess = AccessMap & {
@@ -77,7 +78,7 @@ const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
 type TeamTabKey = Exclude<
   AdminTabKey,
-  "roles" | "organisation" | "directory" | "history"
+  "roles" | "organisation" | "directory" | "history" | "task-boards"
 >;
 const teamPanels: Record<
   TeamTabKey,
@@ -205,6 +206,8 @@ export function AdminPortalView({
             <OrganisationTab access={access} />
           ) : current.key === "directory" ? (
             <DirectoryTab access={access} />
+          ) : current.key === "task-boards" ? (
+            <TaskBoardsTab />
           ) : (
             <TeamPanel tab={current.key} />
           )}
