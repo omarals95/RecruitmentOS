@@ -51,6 +51,7 @@ import {
   useWorkspace,
 } from "@/components/workspace/client";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { REAUTH_CANCELLED, useFreshSession } from "./fresh-session-dialog";
 
 type Membership = RoleBody["membership"];
 type FieldKind = (typeof FIELD_RULE_KINDS)[number];
@@ -316,6 +317,7 @@ function RolesPanel() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
+  const { withFreshSession, dialog: freshSessionDialog } = useFreshSession();
   const [headingRef, focusHeading] = useFocusAfter<HTMLHeadingElement>();
   const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   const close = () => {
@@ -374,13 +376,15 @@ function RolesPanel() {
     )
       return;
     const published = await run(() =>
-      requestJson<{ data: { number: number } }>(
-        teamId,
-        `/api/v1/roles/${versionId}/publish`,
-        { method: "POST" },
+      withFreshSession(() =>
+        requestJson<{ data: { number: number } }>(
+          teamId,
+          `/api/v1/roles/${versionId}/publish`,
+          { method: "POST" },
+        ),
       ),
     );
-    if (published) {
+    if (published && published !== REAUTH_CANCELLED) {
       focusNotice();
       setOpen(null);
       setNotice(`${name} is published as version ${published.data.number}.`);
@@ -411,6 +415,7 @@ function RolesPanel() {
           {notice}
         </p>
       )}
+      {freshSessionDialog}
       <RolesList
         roles={roles.data?.data ?? null}
         error={roles.error}
@@ -1153,6 +1158,7 @@ function CompanyAuthority({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
+  const { withFreshSession, dialog: freshSessionDialog } = useFreshSession();
   const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   useEffect(() => {
     if (!teamId) return;
@@ -1196,11 +1202,15 @@ function CompanyAuthority({
     setError("");
     setNotice("");
     try {
-      const result = await requestJson<{ data: { changed: boolean } }>(
-        teamId,
-        "/api/v1/company-authority",
-        { method: "POST", body: JSON.stringify(grant) },
+      const result = await withFreshSession(() =>
+        requestJson<{ data: { changed: boolean } }>(
+          teamId,
+          "/api/v1/company-authority",
+          { method: "POST", body: JSON.stringify(grant) },
+        ),
       );
+      // A cancelled re-authentication sent nothing: the form stays as it was, with no message.
+      if (result === REAUTH_CANCELLED) return;
       // The row's button may be gone after the change, so focus moves to the outcome.
       focusNotice();
       setNotice(
@@ -1231,6 +1241,7 @@ function CompanyAuthority({
         onSubmit={(grant, name) => void submit(grant, name)}
       />
       {dialog}
+      {freshSessionDialog}
     </>
   );
 }

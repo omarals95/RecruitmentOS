@@ -65,6 +65,13 @@ import {
   TeamsPanel,
   type AdminTeamRow,
 } from "../src/components/settings/teams-tab";
+import {
+  FreshSessionDialog,
+  REAUTH_CANCELLED,
+  reauthenticate,
+  retryWithFreshSession,
+  type ReauthClient,
+} from "../src/components/settings/fresh-session-dialog";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -1902,5 +1909,289 @@ describe("teams tab", () => {
   it("shows the no-access text to a recruiter or viewer without company authority", () => {
     for (const teamRole of ["recruiter", "viewer"])
       onlyHeadingAndNoAccess(page(true, access(teamRole, null)));
+  });
+});
+
+// ADM-06 (job 070): the re-authentication dialog for sensitive admin changes.
+describe("re-authentication for sensitive admin changes", () => {
+  const stale = () =>
+    new ClientError(
+      403,
+      "SESSION_NOT_FRESH",
+      "This change needs a recent sign-in. Confirm your password and two-step code, then try again.",
+    );
+  /** A request closure that records the body object it sends each time. */
+  const recording = (outcomes: (() => unknown)[]) => {
+    const body = { userId: "fictional-member", roleObjectId: null };
+    const sent: unknown[] = [];
+    const request = vi.fn(async () => {
+      sent.push(body);
+      return outcomes[sent.length - 1]();
+    });
+    return { body, sent, request };
+  };
+
+  it("asks once after a stale refusal and runs the same request once more", async () => {
+    const { body, sent, request } = recording([
+      () => {
+        throw stale();
+      },
+      () => ({ data: { saved: true } }),
+    ]);
+    const ask = vi.fn(async () => true);
+    expect(await retryWithFreshSession(request, ask)).toEqual({
+      data: { saved: true },
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toBe(body);
+    expect(sent[1]).toBe(body);
+  });
+
+  it("throws the retry's error without asking again", async () => {
+    const { request } = recording([
+      () => {
+        throw stale();
+      },
+      () => {
+        throw stale();
+      },
+    ]);
+    const ask = vi.fn(async () => true);
+    await expect(retryWithFreshSession(request, ask)).rejects.toMatchObject({
+      status: 403,
+      code: "SESSION_NOT_FRESH",
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends as cancelled without a second request when the user cancels", async () => {
+    const { request } = recording([
+      () => {
+        throw stale();
+      },
+    ]);
+    const ask = vi.fn(async () => false);
+    expect(await retryWithFreshSession(request, ask)).toBe(REAUTH_CANCELLED);
+    expect(REAUTH_CANCELLED).toBe("cancelled");
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows any other error without asking", async () => {
+    for (const error of [
+      new ClientError(
+        403,
+        "role_assignment_forbidden",
+        "Only a company owner can assign roles.",
+      ),
+      new ClientError(401, "UNAUTHENTICATED", "Sign in to continue."),
+      new Error("Connection interrupted."),
+    ]) {
+      const ask = vi.fn(async () => true);
+      const request = vi.fn(async () => {
+        throw error;
+      });
+      await expect(retryWithFreshSession(request, ask)).rejects.toBe(error);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(ask).not.toHaveBeenCalled();
+    }
+  });
+
+  type Answer = Awaited<ReturnType<ReauthClient["signIn"]["email"]>>;
+  /** A fake Better Auth client: each call answers with the next queued result. */
+  const fakeClient = (
+    answers: {
+      signIn?: Answer[];
+      verifyTotp?: Answer[];
+      setActive?: Answer[];
+    } = {},
+  ) => {
+    const next = (list: Answer[] | undefined) => async (): Promise<Answer> =>
+      list?.shift() ?? { data: {}, error: null };
+    return {
+      signIn: { email: vi.fn(next(answers.signIn)) },
+      twoFactor: { verifyTotp: vi.fn(next(answers.verifyTotp)) },
+      organization: { setActive: vi.fn(next(answers.setActive)) },
+    };
+  };
+  const input = {
+    email: "portal-user@example.test",
+    password: "fictional-password",
+    code: "123456",
+    teamId: "fictional-team",
+    challenged: false,
+  };
+
+  it("checks the code against Better Auth's challenge without trusting the device, then keeps the page's team", async () => {
+    const client = fakeClient({
+      signIn: [{ data: { twoFactorRedirect: true }, error: null }],
+    });
+    expect(await reauthenticate(client, input)).toEqual({ done: true });
+    expect(client.signIn.email).toHaveBeenCalledWith({
+      email: "portal-user@example.test",
+      password: "fictional-password",
+    });
+    expect(client.twoFactor.verifyTotp).toHaveBeenCalledWith({
+      code: "123456",
+      trustDevice: false,
+    });
+    expect(client.organization.setActive).toHaveBeenCalledWith({
+      organizationId: "fictional-team",
+    });
+  });
+
+  it("shows a wrong password plainly, without checking a code, and never retries the change", async () => {
+    const wrong: Answer = {
+      data: null,
+      error: {
+        status: 401,
+        code: "INVALID_EMAIL_OR_PASSWORD",
+        message: "Invalid email or password",
+      },
+    };
+    const client = fakeClient({ signIn: [wrong, wrong] });
+    expect(await reauthenticate(client, input)).toEqual({
+      done: false,
+      challenged: false,
+      error: { message: "That password is not correct.", field: "password" },
+    });
+    expect(client.twoFactor.verifyTotp).not.toHaveBeenCalled();
+    expect(client.organization.setActive).not.toHaveBeenCalled();
+    const request = vi.fn(async () => {
+      throw stale();
+    });
+    const ask = async () => (await reauthenticate(client, input)).done;
+    expect(await retryWithFreshSession(request, ask)).toBe(REAUTH_CANCELLED);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a wrong code plainly and sends only the code on the next attempt", async () => {
+    const client = fakeClient({
+      signIn: [{ data: { twoFactorRedirect: true }, error: null }],
+      verifyTotp: [
+        {
+          data: null,
+          error: { status: 401, code: "INVALID_CODE", message: "Invalid code" },
+        },
+      ],
+    });
+    expect(await reauthenticate(client, input)).toEqual({
+      done: false,
+      challenged: true,
+      error: { message: "That code is not correct.", field: "code" },
+    });
+    expect(client.organization.setActive).not.toHaveBeenCalled();
+    expect(
+      await reauthenticate(client, {
+        ...input,
+        code: "654321",
+        challenged: true,
+      }),
+    ).toEqual({ done: true });
+    expect(client.signIn.email).toHaveBeenCalledTimes(1);
+    expect(client.twoFactor.verifyTotp).toHaveBeenCalledTimes(2);
+    expect(client.twoFactor.verifyTotp).toHaveBeenLastCalledWith({
+      code: "654321",
+      trustDevice: false,
+    });
+    expect(client.organization.setActive).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the code screen's words for an ended challenge, a lock and a 429", async () => {
+    const refused = (error: NonNullable<Answer["error"]>) =>
+      reauthenticate(fakeClient({ verifyTotp: [{ data: null, error }] }), {
+        ...input,
+        challenged: true,
+      });
+    for (const code of [
+      "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE",
+      "INVALID_TWO_FACTOR_COOKIE",
+    ])
+      expect(await refused({ status: 401, code })).toEqual({
+        done: false,
+        challenged: true,
+        error: { message: "Sign in again.", signInAgain: true },
+      });
+    expect(
+      await refused({ status: 401, code: "ACCOUNT_TEMPORARILY_LOCKED" }),
+    ).toMatchObject({
+      error: { message: "Too many incorrect codes. Try again in 15 minutes." },
+    });
+    expect(
+      await refused({
+        status: 429,
+        code: "TOO_MANY_REQUESTS",
+        message: "Fictional server wait message.",
+      }),
+    ).toMatchObject({ error: { message: "Fictional server wait message." } });
+  });
+
+  it("skips the code when Better Auth does not challenge, as on a trusted device", async () => {
+    const client = fakeClient({
+      signIn: [{ data: { redirect: false, token: "fictional" }, error: null }],
+    });
+    expect(await reauthenticate(client, input)).toEqual({ done: true });
+    expect(client.twoFactor.verifyTotp).not.toHaveBeenCalled();
+    expect(client.organization.setActive).toHaveBeenCalledWith({
+      organizationId: "fictional-team",
+    });
+  });
+
+  const dialog = (twoStepEnabled: boolean) =>
+    renderToStaticMarkup(
+      <FreshSessionDialog
+        email="portal-user@example.test"
+        teamId="fictional-team"
+        twoStepEnabled={twoStepEnabled}
+        client={fakeClient()}
+        onDone={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+  /** The input a label names through its `for`, or "" when there is none. */
+  const field = (markup: string, label: string) => {
+    const id = new RegExp(`<label for="([^"]+)">${label}</label>`).exec(
+      markup,
+    )?.[1];
+    return id
+      ? (new RegExp(`<input [^>]*id="${id}"[^>]*>`).exec(markup)?.[0] ?? "")
+      : "";
+  };
+
+  it("asks for the password and, with two-step sign-in on, the code, with Cancel and Confirm", () => {
+    const markup = dialog(true);
+    expect(markup).toMatch(/<h2 id="[^"]+">Confirm it&#x27;s you<\/h2>/);
+    expect(markup).toContain("This change needs a recent sign-in");
+    const password = field(markup, "Password");
+    expect(password).toContain('type="password"');
+    // HTML attribute names are case-insensitive; React writes them as autoComplete and inputMode.
+    expect(password).toMatch(/ autocomplete="current-password"/i);
+    expect(password).toContain('required=""');
+    const code = field(markup, "Two-step code");
+    expect(code).toMatch(/ autocomplete="one-time-code"/i);
+    expect(code).toMatch(/ inputmode="numeric"/i);
+    expect(code).toContain('required=""');
+    expect(markup).toContain(
+      '<button type="button" class="button secondary">Cancel</button>',
+    );
+    expect(markup).toContain(
+      '<button type="submit" class="button">Confirm</button>',
+    );
+    expect(markup).not.toMatch(/trust/i);
+    expect(markup).not.toContain('role="alert"');
+    const plain = dialog(false);
+    expect(field(plain, "Password")).toContain('type="password"');
+    expect(plain).not.toContain("Two-step code");
+    expect(plain).not.toContain("one-time-code");
+  });
+
+  it("never shows the dialog when a company owner opens Roles & permissions", () => {
+    const markup = render("roles", access("owner", "owner"));
+    expect(markup).toContain("<h2>Company authority</h2>");
+    expect(markup).not.toContain("Confirm it&#x27;s you");
+    expect(markup).not.toContain("You are signed out on this device");
   });
 });
