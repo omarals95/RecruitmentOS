@@ -317,7 +317,7 @@ function RolesPanel() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
-  const { withFreshSession, dialog: freshSessionDialog } = useFreshSession();
+  const freshSession = useFreshSession();
   const [headingRef, focusHeading] = useFocusAfter<HTMLHeadingElement>();
   const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   const close = () => {
@@ -376,7 +376,7 @@ function RolesPanel() {
     )
       return;
     const published = await run(() =>
-      withFreshSession(() =>
+      freshSession.withFreshSession(() =>
         requestJson<{ data: { number: number } }>(
           teamId,
           `/api/v1/roles/${versionId}/publish`,
@@ -415,7 +415,7 @@ function RolesPanel() {
           {notice}
         </p>
       )}
-      {freshSessionDialog}
+      {freshSession.dialog}
       <RolesList
         roles={roles.data?.data ?? null}
         error={roles.error}
@@ -1158,7 +1158,7 @@ function CompanyAuthority({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
-  const { withFreshSession, dialog: freshSessionDialog } = useFreshSession();
+  const freshSession = useFreshSession();
   const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   useEffect(() => {
     if (!teamId) return;
@@ -1202,7 +1202,7 @@ function CompanyAuthority({
     setError("");
     setNotice("");
     try {
-      const result = await withFreshSession(() =>
+      const result = await freshSession.withFreshSession(() =>
         requestJson<{ data: { changed: boolean } }>(
           teamId,
           "/api/v1/company-authority",
@@ -1241,7 +1241,7 @@ function CompanyAuthority({
         onSubmit={(grant, name) => void submit(grant, name)}
       />
       {dialog}
-      {freshSessionDialog}
+      {freshSession.dialog}
     </>
   );
 }

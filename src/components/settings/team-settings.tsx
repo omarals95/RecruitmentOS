@@ -230,7 +230,7 @@ function TeamSettingsContent() {
   const [inviteRole, setInviteRole] = useState<TeamRole>("recruiter");
   const [roleDrafts, setRoleDrafts] = useState<Record<string, TeamRole>>({});
   const { confirm, dialog } = useConfirm();
-  const { withFreshSession, dialog: freshSessionDialog } = useFreshSession();
+  const freshSession = useFreshSession();
   const canAdmin = role === "owner" || role === "admin";
   // Only a company owner assigns configured roles; nobody else requests them.
   const me = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
@@ -418,7 +418,7 @@ function TeamSettingsContent() {
       `member-role-${person.id}`,
       async () => {
         try {
-          outcome = await withFreshSession(() =>
+          outcome = await freshSession.withFreshSession(() =>
             requestJson(team.id, "/api/v1/teams/member-roles", {
               method: "POST",
               body: JSON.stringify({ userId: person.userId, roleObjectId }),
@@ -482,7 +482,7 @@ function TeamSettingsContent() {
     await action(
       `two-step-${person.id}`,
       async () => {
-        const outcome = await withFreshSession(() =>
+        const outcome = await freshSession.withFreshSession(() =>
           requestJson(team.id, "/api/v1/teams/two-step-reset", {
             method: "POST",
             body: JSON.stringify({ userId: person.userId }),
@@ -528,7 +528,7 @@ function TeamSettingsContent() {
           {notice}
         </div>
       )}
-      {freshSessionDialog}
+      {freshSession.dialog}
       <section className="panel">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2>Your teams</h2>
