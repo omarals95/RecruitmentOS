@@ -167,6 +167,8 @@ GRANT EXECUTE ON FUNCTION tenant_context.set_user_active(text, boolean) TO recru
 GRANT EXECUTE ON FUNCTION tenant_context.allows_plan(uuid, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.publish_bracket_version(uuid) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.published_bracket_version() TO recruitmentos_data;
+-- Counts only, for company owners and company admins with organisation (0050).
+GRANT EXECUTE ON FUNCTION tenant_context.job_title_usage(text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.remove_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.scope_is_all() TO recruitmentos_data;

@@ -45,6 +45,7 @@ export const dataRoleHelpers = [
   "tenant_context.allows_plan(uuid,text)",
   "tenant_context.publish_bracket_version(uuid)",
   "tenant_context.published_bracket_version()",
+  "tenant_context.job_title_usage(text)",
   "tenant_context.erase_employee(uuid,text,text)",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",

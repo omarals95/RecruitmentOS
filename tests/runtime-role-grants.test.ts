@@ -441,6 +441,7 @@ describe("split runtime role template", () => {
         "tenant_context.allows_plan(uuid,text)",
         "tenant_context.publish_bracket_version(uuid)",
         "tenant_context.published_bracket_version()",
+        "tenant_context.job_title_usage(text)",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
           kind === "data",
@@ -632,6 +633,7 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.allows_plan(gen_random_uuid(), 'read')",
       "SELECT tenant_context.publish_bracket_version(gen_random_uuid())",
       "SELECT tenant_context.published_bracket_version()",
+      "SELECT * FROM tenant_context.job_title_usage('fictional-title')",
       "SELECT * FROM app.candidate_erasures",
       "SELECT * FROM app.employee_erasures",
       "TRUNCATE app.employee_erasures",
