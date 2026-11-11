@@ -1345,6 +1345,29 @@ export function GET() {
       },
     ),
   };
+  const personShape =
+    '{data:{userId, name, email, status:"active", lastSignInAt, twoStep, signedInDevices, teams:[{team, slug, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, companyAreas, planAccess, authoritySuspended, authoritySince, events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]}}';
+  paths["/api/v1/admin/users/{user}"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read one person of the company for the Admin portal",
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Reads, through the owner-run helper tenant_context.workspace_person, one person with a membership in a team of the workspace; anyone else, an unknown id or a person only in another company included, gets 404 user_not_found. It gives the user id, name, email, status (always active), lastSignInAt (the start of the newest stored session, null when none is stored), whether two-step sign-in is on, signedInDevices (the person's sessions that have not expired), the person's teams in this workspace only with slug, team role and configured role name, and the person's company authority in this workspace (level, areas, plan access, whether it is suspended and since when; all null without company authority). events lists, newest first and at most 50, the configuration changes the person made and the configured role, home unit, company authority and two-step reset changes made to them, each with its time, action code, actor id and name, the configuration type and key (configuration rows only) and the configured role name (role rows only). It never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body. It takes no query parameters: any query key returns 400 invalid_input, and so does an id longer than 128 characters. Nothing is audited. Returns ${personShape}.`,
+      },
+      { "200": { description: personShape } },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "user",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1, maxLength: 128 },
+          },
+        ],
+      },
+    ),
+  };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.
   const roleWriteRule =
     "Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners and admins without company authority included, gets 403 config_forbidden.";

@@ -359,6 +359,37 @@ describe("database identity separation", () => {
     }
   });
 
+  it("allows the data role the workspace person helper and never the identity role (0046)", async () => {
+    const helper = "tenant_context.workspace_person(text)";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("requires both connections to the same explicit database endpoint without query overrides", () => {
     const data =
       "postgresql://data:fake@example.test:5432/neondb?sslmode=require";
