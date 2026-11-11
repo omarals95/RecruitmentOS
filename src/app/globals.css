@@ -3904,3 +3904,198 @@ progress::-moz-progress-bar {
 .assignee-list .checkbox-label {
   overflow-wrap: anywhere;
 }
+
+/* The org tree by units (ADM-22): one nested list, drawn top-down with connector lines when wide
+   and as an indented outline at 720px and narrower. Theme variables only, so dark follows. */
+.org-tree-scroll {
+  overflow: auto;
+  max-width: 100%;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-subtle);
+}
+.org-tree,
+.org-tree-group {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.org-tree {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 32px;
+  width: max-content;
+  min-width: 100%;
+}
+.org-tree-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 6px 0;
+}
+.org-tree > .org-tree-node {
+  padding-top: 0;
+}
+/* Positions stack under their unit; its units sit side by side in the last row. */
+.org-tree-group {
+  position: relative;
+  display: grid;
+  justify-content: center;
+  justify-items: center;
+  align-items: start;
+  padding-top: 20px;
+}
+.org-tree-group::before,
+.org-tree-position::before,
+.org-tree-group > .org-tree-node::before,
+.org-tree-group > .org-tree-node::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  border: 0 solid var(--border-strong);
+}
+.org-tree-group::before {
+  left: 50%;
+  height: 20px;
+  border-left-width: 1.5px;
+}
+.org-tree-position {
+  grid-column: 1 / -1;
+  position: relative;
+  padding-top: 8px;
+}
+.org-tree-position:first-child {
+  padding-top: 0;
+}
+.org-tree-position::before {
+  left: 50%;
+  height: 8px;
+  border-left-width: 1.5px;
+}
+.org-tree-position:first-child::before {
+  display: none;
+}
+/* Each unit in a row draws its half of the bar over the row, and its own line down. */
+.org-tree-group > .org-tree-node::before,
+.org-tree-group > .org-tree-node::after {
+  width: 50%;
+  height: 20px;
+  border-top-width: 1.5px;
+}
+.org-tree-group > .org-tree-node::before {
+  right: 50%;
+}
+.org-tree-group > .org-tree-node::after {
+  left: 50%;
+  border-left-width: 1.5px;
+}
+.org-tree-group > .org-tree-first::before,
+.org-tree-group > .org-tree-only::before {
+  display: none;
+}
+.org-tree-group > .org-tree-last::after,
+.org-tree-group > .org-tree-only::after {
+  border-top-width: 0;
+}
+.org-tree-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.org-tree-unit > .org-tree-box {
+  border-top: 3px solid var(--primary);
+}
+.org-tree-position > .org-tree-box {
+  width: 180px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: default;
+}
+.org-tree-more > .org-tree-box {
+  color: var(--primary-text);
+  font-weight: 700;
+}
+/* A vacant position: dashed, and labelled "Vacant" so colour is never the only sign. */
+.org-tree-vacant > .org-tree-box {
+  border: 1.5px dashed var(--warning);
+}
+.org-tree-vacant-label {
+  color: var(--warning);
+  font-weight: 700;
+}
+.org-tree-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-weight: 700;
+}
+.org-tree-title svg {
+  flex: none;
+  margin-top: 2px;
+}
+.org-tree-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+.org-tree-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+/* The focused treeitem's own box carries the outline, not its whole branch. */
+.org-tree [role="treeitem"]:focus {
+  outline: none;
+}
+.org-tree [role="treeitem"]:focus-visible > .org-tree-box {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .org-tree-scroll {
+    padding: 8px;
+  }
+  .org-tree,
+  .org-tree-group {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    width: auto;
+    min-width: 0;
+  }
+  .org-tree-group {
+    margin: 8px 0 0 8px;
+    padding: 0 0 0 12px;
+    border-left: 1px solid var(--border-strong);
+  }
+  .org-tree-node,
+  .org-tree > .org-tree-node,
+  .org-tree-position {
+    align-items: stretch;
+    padding: 0;
+  }
+  .org-tree-group::before,
+  .org-tree-position::before,
+  .org-tree-group > .org-tree-node::before,
+  .org-tree-group > .org-tree-node::after {
+    display: none;
+  }
+  .org-tree-box,
+  .org-tree-position > .org-tree-box {
+    width: auto;
+  }
+}

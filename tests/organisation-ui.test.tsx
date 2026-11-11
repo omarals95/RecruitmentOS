@@ -41,6 +41,16 @@ import {
   pickerPath,
 } from "../src/components/settings/unit-picker";
 import type { Requester } from "../src/components/workspace/optimistic";
+import {
+  TREE_START,
+  type TreeState,
+} from "../src/components/settings/organisation-tab";
+import {
+  buildTree,
+  flattenTree,
+  resolveFocus,
+  treeKey,
+} from "../src/components/settings/org-tree";
 import type { Action } from "../src/domain/config";
 import type { Employee, Position } from "../src/lib/directory";
 import type { OrgLevel, OrgUnit } from "../src/lib/org";
@@ -785,5 +795,286 @@ describe("directory", () => {
       ).toBe(companyLevel === "owner");
       expect(markup).toContain(">Add employee</button>");
     }
+  });
+});
+
+describe("org tree by units (ADM-22)", () => {
+  const treeView = (state: ChartState, tree: Partial<TreeState> = {}) =>
+    renderToStaticMarkup(
+      <OrgChartPanel
+        levels={levels}
+        chart={state}
+        owner
+        directoryView
+        view="tree"
+        tree={{ ...TREE_START, ...tree }}
+      />,
+    );
+  const withVacancy = (
+    leadVacant: boolean | null | undefined,
+    analystVacant: boolean | null | undefined,
+  ) =>
+    chart({
+      contents: {
+        [holdings.id]: {
+          positions: [
+            { ...lead, vacant: leadVacant },
+            { ...analyst, vacant: analystVacant },
+          ],
+          positionsHasMore: false,
+        },
+      },
+    });
+  /** Each treeitem's opening tag, in document order. */
+  const treeItems = (markup: string) =>
+    [...markup.matchAll(/<li ([^>]*)>/g)].map((match) => match[1]);
+  const attribute = (tag: string, name: string) =>
+    new RegExp(`${name}="([^"]*)"`).exec(tag)?.[1];
+  const toolButton = (label: string, disabled: boolean) =>
+    `<button type="button" class="button secondary small"${disabled ? ' disabled=""' : ""}>${label}</button>`;
+
+  it("switches between List, the default, and Org tree, with Add top-level unit above both", () => {
+    const list = orgChart(true);
+    expect(list).toContain(
+      '<div class="view-toggle" role="group" aria-label="Org chart view"><button type="button" aria-pressed="true">List</button><button type="button" aria-pressed="false">Org tree</button></div>',
+    );
+    expect(list).not.toContain('role="tree"');
+    expect(list).toContain('<ul aria-label="Top-level units"');
+    const tree = treeView(chart());
+    expect(tree).toContain(
+      '<button type="button" aria-pressed="false">List</button><button type="button" aria-pressed="true">Org tree</button>',
+    );
+    expect(tree).toContain(
+      '<ul role="tree" aria-label="Org tree by units" class="org-tree" data-org-tree="" style="zoom:1">',
+    );
+    expect(tree).not.toContain("Top-level units");
+    for (const markup of [list, tree])
+      expect(markup.indexOf(">Add top-level unit</button>")).toBeLessThan(
+        markup.search(/<ul /),
+      );
+    // The tree view has no row actions.
+    for (const label of ["Rename", "Add unit below", "Move", "Archive", "Edit"])
+      expect(tree).not.toContain(`>${label}<`);
+  });
+
+  it("renders a nested tree of treeitems with level, set size, position and expanded state, and no controls inside", () => {
+    const markup = treeView(chart());
+    const items = treeItems(markup);
+    expect(items.every((tag) => tag.startsWith('role="treeitem"'))).toBe(true);
+    expect(
+      items.map((tag) => [
+        attribute(tag, "aria-label"),
+        attribute(tag, "aria-level"),
+        attribute(tag, "aria-setsize"),
+        attribute(tag, "aria-posinset"),
+        attribute(tag, "aria-expanded"),
+      ]),
+    ).toEqual([
+      [
+        "Fictional Holdings, FU-10, Fictional Company, 2 positions",
+        "1",
+        "3",
+        "1",
+        "true",
+      ],
+      ["Fictional Lead, FP-20, Manager", "2", "3", "1", undefined],
+      ["Fictional Analyst, FP-21", "2", "3", "2", undefined],
+      ["Fictional Sales, FU-12, Fictional Division", "2", "3", "3", "false"],
+      ["Sample Group, FU-11, Fictional Company", "1", "3", "2", "false"],
+      ["Show more top-level units", "1", "3", "3", undefined],
+    ]);
+    // One roving tab stop, on the first item until another is focused.
+    expect(items.map((tag) => attribute(tag, "tabindex"))).toEqual([
+      "0",
+      "-1",
+      "-1",
+      "-1",
+      "-1",
+      "-1",
+    ]);
+    expect(
+      treeItems(
+        treeView(chart(), {
+          focused: {
+            key: `position:${lead.id}`,
+            path: [`unit:${holdings.id}`],
+          },
+        }),
+      ).map((tag) => attribute(tag, "tabindex")),
+    ).toEqual(["-1", "0", "-1", "-1", "-1", "-1"]);
+    expect(
+      markup.match(/<ul role="group" class="org-tree-group"/g),
+    ).toHaveLength(1);
+    const tree = markup.slice(markup.indexOf('<ul role="tree"'));
+    expect(tree).not.toMatch(/<button|<a |<input|<select/);
+    expect(markup).toContain(
+      '<span class="org-tree-meta">FP-20 · Manager</span>',
+    );
+    expect(markup).toContain("Loaded: 3 units · 2 positions</p>");
+  });
+
+  it("draws a vacant position dashed with the text Vacant, and counts it", () => {
+    const markup = treeView(withVacancy(false, true));
+    expect(markup).toMatch(
+      /aria-label="Fictional Analyst, FP-21, Vacant"[^>]*class="org-tree-position org-tree-vacant"><div class="org-tree-box"><span class="org-tree-title">Fictional Analyst<\/span><span class="org-tree-meta">FP-21<\/span><span class="org-tree-vacant-label">Vacant<\/span><\/div><\/li>/,
+    );
+    expect(markup).toMatch(
+      /aria-label="Fictional Lead, FP-20, Manager"[^>]*class="org-tree-position">/,
+    );
+    expect(markup.match(/org-tree-vacant"/g)).toHaveLength(1);
+    expect(markup).toContain(
+      'aria-label="Fictional Holdings, FU-10, Fictional Company, 2 positions, 1 vacant"',
+    );
+    expect(markup).toContain(
+      '<p role="status" class="small-text">Loaded: 3 units · 2 positions · 1 vacant</p>',
+    );
+    expect(markup).not.toContain("You need directory access");
+  });
+
+  it("marks nothing Vacant and says once that vacancy needs directory access when it is unknown", () => {
+    for (const unknown of [null, undefined]) {
+      const markup = treeView(withVacancy(unknown, unknown));
+      expect(markup).not.toContain("Vacant");
+      expect(markup).not.toContain("org-tree-vacant");
+      expect(markup).not.toMatch(/\d vacant/);
+      expect(
+        markup.match(
+          /You need directory access to see which positions are vacant\./g,
+        ),
+      ).toHaveLength(1);
+      expect(markup).toContain(
+        '<p role="status" class="small-text">Loaded: 3 units · 2 positions</p>',
+      );
+    }
+  });
+
+  it("says in the status line when Expand all runs, stops at the limit, fails or finishes", () => {
+    const status = (expandAll: TreeState["expandAll"]) =>
+      treeView(chart(), { expandAll });
+    const limit = status({ state: "limit", units: 480 });
+    expect(limit).toContain(
+      '<p role="status" class="small-text">Loaded: 3 units · 2 positions. Expand all stopped at the limit of 500 units. Expand a unit to see the units below it.</p>',
+    );
+    expect(limit).toContain(toolButton("Expand all", false));
+    const running = status({ state: "running", units: 120 });
+    expect(running).toContain(toolButton("Expand all", true));
+    expect(running).toContain(
+      "Expand all is loading units: 120 units loaded so far.",
+    );
+    expect(status({ state: "finished", units: 3 })).toContain(
+      "Expand all finished: 3 units loaded.",
+    );
+    expect(
+      status({ state: "failed", unit: "Fictional Sales", units: 3 }),
+    ).toContain("Expand all stopped because Fictional Sales could not load.");
+    expect(status({ state: "idle" })).not.toContain("Expand all stopped");
+    // A unit that could not load says so in its box and next to the tree.
+    const failed = treeView(
+      chart({
+        expanded: [holdings.id, sample.id],
+        errors: { [`load:${sample.id}`]: "Fictional refusal." },
+      }),
+    );
+    expect(failed).toMatch(
+      /<p class="notice error" role="alert">Could not load (<!-- -->)?Sample Group(<!-- -->)?\. (<!-- -->)?Fictional refusal\.(<!-- -->)? Collapse and expand the unit to try again\.<\/p>/,
+    );
+    expect(failed).toContain(
+      '<span class="org-tree-error">Could not load this unit.</span>',
+    );
+    expect(treeView(chart({ expanded: [holdings.id, sample.id] }))).toMatch(
+      /<span class="org-tree-meta">Loading (<!-- -->)?Sample Group(<!-- -->)?…<\/span>/,
+    );
+  });
+
+  it("moves focus and expands or collapses for every tree key", () => {
+    const items = flattenTree(
+      buildTree(
+        chart(),
+        new Map(levels.map((level) => [level.id, level.name])),
+      ),
+    );
+    const [holdingsKey, leadKey, analystKey, salesKey, sampleKey, moreKey] =
+      items.map((item) => item.key);
+    expect(moreKey).toBe("more:");
+    const key = (current: string, pressed: string) =>
+      treeKey(items, current, pressed);
+    expect(key(holdingsKey, "ArrowDown")).toEqual({ focus: leadKey });
+    expect(key(moreKey, "ArrowDown")).toEqual({ focus: moreKey });
+    expect(key(analystKey, "ArrowUp")).toEqual({ focus: leadKey });
+    expect(key(holdingsKey, "ArrowUp")).toEqual({ focus: holdingsKey });
+    expect(key(salesKey, "Home")).toEqual({ focus: holdingsKey });
+    expect(key(leadKey, "End")).toEqual({ focus: moreKey });
+    // Right expands a collapsed unit, enters an expanded one and does nothing on a position.
+    expect(key(salesKey, "ArrowRight")).toEqual({ toggle: sales });
+    expect(key(holdingsKey, "ArrowRight")).toEqual({ focus: leadKey });
+    expect(key(leadKey, "ArrowRight")).toEqual({});
+    // Left collapses an expanded unit, otherwise moves to the parent unit.
+    expect(key(holdingsKey, "ArrowLeft")).toEqual({ toggle: holdings });
+    expect(key(analystKey, "ArrowLeft")).toEqual({ focus: holdingsKey });
+    expect(key(salesKey, "ArrowLeft")).toEqual({ focus: holdingsKey });
+    expect(key(sampleKey, "ArrowLeft")).toEqual({});
+    // Enter and Space toggle a unit and activate Show more.
+    for (const pressed of ["Enter", " "]) {
+      expect(key(sampleKey, pressed)).toEqual({ toggle: sample });
+      expect(key(holdingsKey, pressed)).toEqual({ toggle: holdings });
+      expect(key(moreKey, pressed)).toEqual({ more: "" });
+      expect(key(leadKey, pressed)).toEqual({});
+    }
+    expect(key(leadKey, "a")).toBeNull();
+    // A hidden focused item gives the tab stop to its nearest visible unit.
+    const collapsed = flattenTree(
+      buildTree(chart({ expanded: [] }), new Map()),
+    );
+    expect(resolveFocus(collapsed, { key: leadKey, path: [holdingsKey] })).toBe(
+      holdingsKey,
+    );
+    expect(resolveFocus(items, { key: analystKey, path: [holdingsKey] })).toBe(
+      analystKey,
+    );
+    expect(resolveFocus(items, null)).toBe(holdingsKey);
+  });
+
+  it("shows no employee name, number or contact fact, even with holders loaded", () => {
+    const held = chart({
+      holdersOpen: [lead.id],
+      holders: {
+        [lead.id]: {
+          rows: [
+            employee(30, "Fictional Holder", {
+              workEmail: "holder@example.test",
+              workPhone: "+00 0000 0000",
+            }),
+          ],
+          page: 1,
+          hasMore: false,
+        },
+      },
+    });
+    const markup = treeView(held);
+    for (const fact of [
+      "Fictional Holder",
+      "EMP-30",
+      "holder@example.test",
+      "+00 0000 0000",
+      "Show employees",
+    ])
+      expect(markup).not.toContain(fact);
+    expect(markup).toContain("Fictional Lead");
+  });
+
+  it("zooms between 50% and 150%, disabling each button at its bound", () => {
+    const at = (zoom: number) => treeView(chart(), { zoom });
+    const low = at(50);
+    expect(low).toContain(toolButton("Zoom out", true));
+    expect(low).toContain(toolButton("Zoom in", false));
+    expect(low).toMatch(/<span class="small-text">50(<!-- -->)?%<\/span>/);
+    expect(low).toContain('style="zoom:0.5"');
+    const high = at(150);
+    expect(high).toContain(toolButton("Zoom out", false));
+    expect(high).toContain(toolButton("Zoom in", true));
+    expect(high).toContain('style="zoom:1.5"');
+    const normal = at(100);
+    for (const label of ["Zoom out", "Zoom in", "Reset zoom", "Export image"])
+      expect(normal).toContain(toolButton(label, false));
   });
 });
