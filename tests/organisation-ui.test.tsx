@@ -149,6 +149,7 @@ const position = (
   code: `FP-${n}`,
   isManager,
   jobRoleId: null,
+  jobTitleKey: null,
   validFrom: "2026-11-01T09:00:00.000Z",
   archivedAt: null,
 });

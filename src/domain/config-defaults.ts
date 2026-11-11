@@ -238,6 +238,7 @@ const fieldLabels: Record<string, string> = {
   privateOwnerId: "Owner",
   completed: "Counts as completed",
   assigneeIds: "Assignees",
+  jobTitleKey: "Job title",
 };
 // The field type by key, checked in this order after the dropdowns; any other key is text.
 const typedKeys: [FieldType, string[]][] = [
@@ -290,7 +291,14 @@ const typedKeys: [FieldType, string[]][] = [
   ],
 ];
 const REQUIRED_KEYS = ["name", "title", "body", "startAt"];
-const READ_ONLY_KEYS = ["rawSource", "evidence", "sourceReviews"];
+// A vacancy's job title is set through the API only until the title picker (ADM-26), so the editor
+// neither renders nor sends it.
+const READ_ONLY_KEYS = [
+  "rawSource",
+  "evidence",
+  "sourceReviews",
+  "jobTitleKey",
+];
 
 /** Today's presentation of one system field of any kind, as RESOURCE_CONFIG lists it. */
 export function systemFieldConfig(kind: RecordKind, key: string) {

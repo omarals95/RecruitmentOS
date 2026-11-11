@@ -71,6 +71,7 @@ const objectTypes: Record<string, string> = {
   role: "Role",
   template: "Template",
   "task-board": "Task board",
+  "job-architecture": "Job architecture",
 };
 const accessActions: Record<string, string> = {
   "role.assigned": "Role assigned",

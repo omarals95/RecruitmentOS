@@ -1791,7 +1791,10 @@ export function GET() {
   const contactRule =
     "workEmail and workPhone are left out of every employee for a role whose directory rule is basic; the owner and admin roles are full.";
   const positionShape =
-    "{id, orgUnitId, title, code, isManager, jobRoleId, validFrom, archivedAt, vacant}";
+    "{id, orgUnitId, title, code, isManager, jobRoleId, jobTitleKey, validFrom, archivedAt, vacant}";
+  const jobTitleRule =
+    "jobTitleKey names a title of the company's published job architecture (GET /api/v1/job-architecture); a key that is not one of its titles, or any key before a version is published, returns 400 invalid_reference and nothing is stored.";
+  const jobTitleKey = { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" };
   const vacantRule =
     "vacant is true when no active, non-archived employee holds the position now, false when one does, and null when your role has no directory view (directory:read), because employees are hidden from you; it adds no employee name or contact fact.";
   const employeeShape =
@@ -1852,7 +1855,7 @@ export function GET() {
       [],
       {
         summary: "Create a position",
-        description: `${positionWriteRule} Send {title, code, orgUnitId} and optionally isManager and jobRoleId. ${directoryTextRule} A jobRoleId must be a job role of your team that is not archived (404 not_found otherwise). A unit that is archived or closed returns 409 directory_state_conflict, and one outside your company 404 not_found; a code another current position uses returns 409 position_code_exists. Reusing the code of an archived position that an employee linked to a user still holds, in another unit, moves that member's home unit, so it needs a company owner (403 directory_owner_required). An unknown key returns 400 invalid_input. ${positionAudit} Returns {data:${positionShape}}.`,
+        description: `${positionWriteRule} Send {title, code, orgUnitId} and optionally isManager, jobRoleId and jobTitleKey. ${directoryTextRule} A jobRoleId must be a job role of your team that is not archived (404 not_found otherwise). ${jobTitleRule} A unit that is archived or closed returns 409 directory_state_conflict, and one outside your company 404 not_found; a code another current position uses returns 409 position_code_exists. Reusing the code of an archived position that an employee linked to a user still holds, in another unit, moves that member's home unit, so it needs a company owner (403 directory_owner_required). An unknown key returns 400 invalid_input. ${positionAudit} Returns {data:${positionShape}}.`,
         requestBody: jsonBody(
           {
             type: "object",
@@ -1864,6 +1867,7 @@ export function GET() {
               orgUnitId: { type: "string", format: "uuid" },
               isManager: { type: "boolean" },
               jobRoleId: { type: "string", format: "uuid" },
+              jobTitleKey,
             },
           },
           {
@@ -1871,6 +1875,7 @@ export function GET() {
             code: "FIN-PAY-1",
             orgUnitId: "00000000-0000-4000-a000-0000000000b1",
             isManager: true,
+            jobTitleKey: "payroll-lead",
           },
         ),
       },
@@ -1883,7 +1888,7 @@ export function GET() {
       [],
       {
         summary: "Update, move or archive a position",
-        description: `${positionWriteRule} Send exactly one of a facts update with one or more of {title, isManager, jobRoleId} (jobRoleId null clears it), {orgUnitId} (move) or {archived: true} (archive); any other shape, including two operations or a code, returns 400 invalid_input. Moving or archiving a position that an employee linked to a user holds changes that member's home unit, so it needs a company owner: a company admin gets 403 directory_owner_required. An archived position, or a target unit that is archived or closed, returns 409 directory_state_conflict; an unknown position, unit or job role returns 404 not_found. ${positionAudit} A move or archive of a held position also writes one scope.home_units_changed row. Archiving is permanent. Returns {data:${positionShape}}.`,
+        description: `${positionWriteRule} Send exactly one of a facts update with one or more of {title, isManager, jobRoleId, jobTitleKey} (null clears jobRoleId or jobTitleKey), {orgUnitId} (move) or {archived: true} (archive); any other shape, including two operations or a code, returns 400 invalid_input. Moving or archiving a position that an employee linked to a user holds changes that member's home unit, so it needs a company owner: a company admin gets 403 directory_owner_required. An archived position, or a target unit that is archived or closed, returns 409 directory_state_conflict; an unknown position, unit or job role returns 404 not_found. ${jobTitleRule} ${positionAudit} A move or archive of a held position also writes one scope.home_units_changed row. Archiving is permanent. Returns {data:${positionShape}}.`,
         requestBody: jsonBody(
           {
             oneOf: [
@@ -1895,6 +1900,7 @@ export function GET() {
                   title: directoryText,
                   isManager: { type: "boolean" },
                   jobRoleId: { type: ["string", "null"], format: "uuid" },
+                  jobTitleKey: { ...jobTitleKey, type: ["string", "null"] },
                 },
               },
               {
@@ -1916,6 +1922,96 @@ export function GET() {
       },
       { "200": { description: `{data:${positionShape}}.` } },
       { sessionOnly: true, params: [idParameter] },
+    ),
+  };
+  // Job architecture (ADM-24): one company configuration object, session only, no MCP tool and no
+  // API token (D13). Every member reads the published version; it holds no pay data.
+  const jobArchitectureWriteRule =
+    "Session only: a signed-in company owner, or a company admin with the organisation area; Bearer tokens, including MCP OAuth tokens, get 403 session_required, and anyone else, team owners and admins without company authority included, gets 403 config_forbidden.";
+  const jobArchitectureBodyRule =
+    "body is the whole job architecture: {families:[{key, name}], grades:[{code, name, order}], titles:[{key, name, familyKey, gradeCode}]}, at most 200 families, 200 grades and 2,000 titles. Keys are 1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit; a grade code is 1 to 20 upper-case letters, digits and hyphens; order is a whole number from 1 to 1000; names are 1 to 120 characters. Family keys, grade codes, grade orders and title keys are each unique, and every title names a family and a grade of the same body. It holds names, codes and order only, never pay. The strict schema refuses any other key, a repeat or a missing family or grade with 400 invalid_input; nothing is stored then.";
+  const jobArchitectureExample = {
+    families: [{ key: "finance", name: "Fictional Finance" }],
+    grades: [
+      { code: "G5", name: "Fictional Associate", order: 5 },
+      { code: "G7", name: "Fictional Lead", order: 7 },
+    ],
+    titles: [
+      {
+        key: "payroll-lead",
+        name: "Fictional Payroll Lead",
+        familyKey: "finance",
+        gradeCode: "G7",
+      },
+    ],
+  };
+  const jobArchitectureShape =
+    "{data:{current:{versionId, number, body}|null, draft:{id, body, note, createdAt}|null}}";
+  const versionIdParameter = { ...idParameter, name: "versionId" };
+  paths["/api/v1/job-architecture"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read the job architecture",
+        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens, including MCP OAuth tokens, get 403 session_required. current is the company's published job architecture (families, grades and titles with their names, codes and order), read from the request context with no statement of its own, or null before the first publish. draft is the pending draft for a company owner or a company admin with the organisation area, and null for everyone else. Nothing is audited. Returns ${jobArchitectureShape}.`,
+      },
+      { "200": { description: jobArchitectureShape } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a job architecture draft",
+        description: `${jobArchitectureWriteRule} Send {body, note?}. The company has one job architecture, always with the key company: the first draft creates it, and later drafts become its next versions. ${jobArchitectureBodyRule} A job architecture that already has a draft returns 409 config_draft_exists. Writes one config.draft_created row, listed in GET /api/v1/config-history. Body at most 512 KiB. Returns 201 {data:{objectId, versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["body"],
+            additionalProperties: false,
+            properties: {
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { body: jobArchitectureExample },
+        ),
+      },
+      { "201": { description: "{data:{objectId, versionId}}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/job-architecture/{versionId}"] = {
+    put: operation(
+      [],
+      {
+        summary: "Replace the job architecture draft's body",
+        description: `${jobArchitectureWriteRule} versionId is the draft's version id. Send {body, note?}. ${jobArchitectureBodyRule} A version of another configuration type returns 404 not_found; a version that is no longer a draft returns 409 config_state_conflict. Nothing is audited. Body at most 512 KiB. Returns {data:{versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["body"],
+            additionalProperties: false,
+            properties: {
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { body: jobArchitectureExample },
+        ),
+      },
+      { "200": { description: "{data:{versionId}}." } },
+      { sessionOnly: true, params: [versionIdParameter] },
+    ),
+  };
+  paths["/api/v1/job-architecture/{versionId}/publish"] = {
+    post: operation(
+      [],
+      {
+        summary: "Publish the job architecture draft",
+        description: `${jobArchitectureWriteRule} versionId is the draft's version id. Publishing makes the draft the current version with the next number, read by every member; older versions stay as they were. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+      },
+      { "200": { description: "{data:{versionId, number}}." } },
+      { sessionOnly: true, params: [versionIdParameter] },
     ),
   };
   paths["/api/v1/employees"] = {

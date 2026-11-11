@@ -67,6 +67,7 @@ import {
 } from "@/domain/config";
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
 import { kindSchemaFor } from "@/lib/config-store";
+import { requireJobTitle } from "@/lib/job-architecture";
 import { publishedTaskBoards } from "@/lib/task-boards";
 
 type DbRecord = typeof records.$inferSelect;
@@ -1718,6 +1719,8 @@ export async function createInside(
 ): Promise<RecordDto> {
   const { principal: p } = ctx;
   validateRelations(kind, input.data);
+  if (kind === "vacancy" && input.data.jobTitleKey !== undefined)
+    requireJobTitle(ctx.access, String(input.data.jobTitleKey));
   await checkReferences(
     tx,
     ctx,
@@ -1948,6 +1951,13 @@ export async function updateRecord(
     const archived = patch.archived ?? !!existing.archivedAt;
     const restoring = !!existing.archivedAt && !archived;
     validateRelations(kind, data);
+    // Only a changed key, so a title removed by a later publish never blocks an unrelated edit.
+    if (
+      kind === "vacancy" &&
+      data.jobTitleKey !== undefined &&
+      data.jobTitleKey !== existing.data.jobTitleKey
+    )
+      requireJobTitle(ctx.access, String(data.jobTitleKey));
     await checkReferences(
       tx,
       ctx,

@@ -90,6 +90,8 @@ A vacancy with a unit comes back with `orgUnitId` and `orgUnitLabel`, the unit a
 
 `PATCH /api/v1/vacancies/{id}` takes `orgUnitId` the same way with the vacancy's `version`; `"orgUnitId": null` removes the unit.
 
+`data.jobTitleKey` is optional: the key of a title of the company's published [job architecture](#job-architecture), such as `"jobTitleKey":"payroll-lead"`. A key that is not one of its titles, or any key before a version is published, answers 400 `invalid_reference` with "jobTitleKey is not a job title of the published job architecture." and nothing is stored. An update checks the key only when it changes, so a vacancy keeps a title a later version removed until you change it; the key can be changed but not cleared. A vacancy without a title has no `jobTitleKey` in `data`. The MCP tools `create_vacancy` and `update_vacancy` take the same key, and `get_vacancy` shows it (`null` when not set).
+
 ## Add a candidate to a vacancy
 
 `POST /api/v1/applications` needs `recruitment:write`. A candidate has at most one active application per vacancy; a second one returns 409 `duplicate_record`. `stage` defaults to `Sourced`.
@@ -286,13 +288,13 @@ The position routes under `/api/v1/positions` and the employee routes under `/ap
 
 The examples use fictional names and ids.
 
-Create a position in a unit. `isManager` and `jobRoleId` (a job role of your team) are optional:
+Create a position in a unit. `isManager`, `jobRoleId` (a job role of your team) and `jobTitleKey` (a title of the published [job architecture](#job-architecture)) are optional:
 
 ```http
 POST /api/v1/positions
 Content-Type: application/json
 
-{"title":"Fictional Payroll Lead","code":"FIN-PAY-1","orgUnitId":"00000000-0000-4000-a000-0000000000b1","isManager":true}
+{"title":"Fictional Payroll Lead","code":"FIN-PAY-1","orgUnitId":"00000000-0000-4000-a000-0000000000b1","isManager":true,"jobTitleKey":"payroll-lead"}
 ```
 
 ```json
@@ -304,6 +306,7 @@ Content-Type: application/json
     "code": "FIN-PAY-1",
     "isManager": true,
     "jobRoleId": null,
+    "jobTitleKey": "payroll-lead",
     "validFrom": "2026-11-09T08:00:00.000Z",
     "archivedAt": null,
     "vacant": true
@@ -313,7 +316,7 @@ Content-Type: application/json
 
 `GET /api/v1/positions?unitId=00000000-0000-4000-a000-0000000000b1` lists the current positions of one unit, ordered by title; leave out `unitId` for every position of the company. `jobRoleId` is shown only to members of the team that owns the job role. `vacant` is `true` when no active, non-archived employee holds the position now and `false` when one does. It is `null` when your role has no directory view (`directory:read`), because employees are hidden from you; the response never names who holds the position. The org tree uses it to draw vacant positions, and every position response, from `GET`, `POST` and `PATCH`, carries it. Change a position with exactly one operation per request on `PATCH /api/v1/positions/{id}`:
 
-- one or more of `{"title","isManager","jobRoleId"}`, where `"jobRoleId":null` clears it;
+- one or more of `{"title","isManager","jobRoleId","jobTitleKey"}`, where `"jobRoleId":null` and `"jobTitleKey":null` clear them;
 - `{"orgUnitId":"<unit id>"}` to move it;
 - `{"archived":true}` to archive it for good.
 
@@ -362,6 +365,7 @@ The list is ordered by display name. For example, `GET /api/v1/employees?search=
 | 409 `employee_user_linked`     | The user is already linked to another employee                                      |
 | 409 `directory_state_conflict` | An archived or closed position, unit or employee                                    |
 | 404 `not_found`                | The unit, level, position, employee, job role or user is not in your company        |
+| 400 `invalid_reference`        | A `jobTitleKey` that is not a title of the published job architecture               |
 
 Every create, update and archive appears in Activity for the team you made it from, with ids and field names only, never a name, number, email or phone. Each owner-only change also records which users' home units changed.
 
@@ -451,6 +455,61 @@ It deletes the employee and their position history, removes the user link (with 
 | 400 `invalid_input`                 | A malformed id or body                    |
 
 See [erasure-runbook.md](erasure-runbook.md#erase-an-employee) for the steps before and after erasing.
+
+## Job architecture
+
+The company's job families, job grades and job titles are one versioned configuration object, edited as drafts and published as numbered versions like roles. Positions and vacancies name a title by its key. It holds names, codes and order only: no salary, pay figure or bracket. The routes need a signed-in browser session; a Bearer token, including an MCP OAuth token, gets 403 `session_required`, and there is no MCP tool.
+
+- **Who writes.** A company owner, or a company admin with the organisation area, creates, edits and publishes. Anyone else, team owners and admins without company authority, recruiters and viewers included, gets 403 `config_forbidden`.
+- **Who reads.** Every signed-in member of a team in the company reads the published version. Only the people who may write it also see the pending draft.
+
+`GET /api/v1/job-architecture` returns the published version (`current`, `null` before the first publish) and the draft (`draft`, `null` for everyone who may not write it, or when there is none):
+
+```json
+{
+  "data": {
+    "current": {
+      "versionId": "00000000-0000-4000-a000-0000000000d1",
+      "number": 1,
+      "body": {
+        "families": [{ "key": "finance", "name": "Fictional Finance" }],
+        "grades": [
+          { "code": "G5", "name": "Fictional Associate", "order": 5 },
+          { "code": "G7", "name": "Fictional Lead", "order": 7 }
+        ],
+        "titles": [
+          {
+            "key": "payroll-lead",
+            "name": "Fictional Payroll Lead",
+            "familyKey": "finance",
+            "gradeCode": "G7"
+          }
+        ]
+      }
+    },
+    "draft": null
+  }
+}
+```
+
+`POST /api/v1/job-architecture` creates a draft with `{"body":{…},"note":"…"}` (`note` optional) and returns 201 `{"data":{"objectId":"…","versionId":"…"}}`. The company has one job architecture, so there is no key to send. The body is always the whole architecture:
+
+- `families`: at most 200 of `{key, name}`;
+- `grades`: at most 200 of `{code, name, order}`, where `code` is 1 to 20 upper-case letters, digits and hyphens, such as `G7`, and `order` a whole number from 1 to 1000;
+- `titles`: at most 2,000 of `{key, name, familyKey, gradeCode}`, each naming a family and a grade of the same body.
+
+Keys are 1 to 63 lowercase letters, digits and hyphens; names are 1 to 120 characters. Family keys, grade codes, grade orders and title keys must each be unique. The strict schema refuses any other key, such as `salary` on a grade, with 400 `invalid_input`; nothing is stored.
+
+`PUT /api/v1/job-architecture/{versionId}` replaces the draft's body and returns `{"data":{"versionId":"…"}}`. `POST /api/v1/job-architecture/{versionId}/publish` publishes the draft as the next version and returns `{"data":{"versionId":"…","number":2}}`; older versions stay as they were. Every draft and publish appears in `GET /api/v1/config-history` as type `job-architecture`, without the body.
+
+| Error                       | When                                                                      |
+| --------------------------- | ------------------------------------------------------------------------- |
+| 403 `session_required`      | A Bearer token, including an MCP OAuth token                              |
+| 403 `config_forbidden`      | Anyone but a company owner, or a company admin with the organisation area |
+| 400 `invalid_input`         | A body outside the schema: an unknown key, a repeat or a bound passed     |
+| 404 `not_found`             | The version is not a job architecture version of your company             |
+| 409 `config_draft_exists`   | A draft is already pending; edit or publish it first                      |
+| 409 `config_state_conflict` | The version is no longer a draft                                          |
 
 ## Organisation import
 

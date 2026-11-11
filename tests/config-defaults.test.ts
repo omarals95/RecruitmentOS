@@ -96,6 +96,7 @@ const fieldLabels: Record<string, string> = {
   privateOwnerId: "Owner",
   completed: "Counts as completed",
   assigneeIds: "Assignees",
+  jobTitleKey: "Job title",
 };
 // Today's keys: the shape without the optional customValues R2b-02 added to every configurable kind
 // but task.
@@ -173,7 +174,12 @@ const TODAY = Object.fromEntries(
           type,
           options,
           required: ["name", "title", "body", "startAt"].includes(key),
-          readOnly: ["rawSource", "evidence", "sourceReviews"].includes(key),
+          readOnly: [
+            "rawSource",
+            "evidence",
+            "sourceReviews",
+            "jobTitleKey",
+          ].includes(key),
         };
       }),
     },
@@ -284,7 +290,11 @@ describe("built-in default kind schemas (R2b-01)", () => {
     for (const kind of CONFIGURABLE_KINDS) {
       expect(keysWhere(kind, "required"), kind).toEqual(required[kind]);
       expect(keysWhere(kind, "readOnly"), kind).toEqual(
-        kind === "candidate" ? ["rawSource", "evidence", "sourceReviews"] : [],
+        kind === "candidate"
+          ? ["rawSource", "evidence", "sourceReviews"]
+          : kind === "vacancy"
+            ? ["jobTitleKey"]
+            : [],
       );
       expect(keysWhere(kind, "sensitive").sort(), kind).toEqual(
         kind === "candidate" ? [...SENSITIVE_CANDIDATE_FIELDS].sort() : [],
@@ -510,5 +520,56 @@ describe("built-in default kind schemas (R2b-01)", () => {
         (key) => candidate[key] !== "hidden",
       ),
     ).toEqual(["name", "jobTitle"]);
+  });
+
+  it("gives the vacancy default exactly one more field, the read-only job title, and no other kind any (ADM-24)", () => {
+    expect(fieldsOf("vacancy").map((field) => field.key)).toEqual([
+      "title",
+      "requisitionId",
+      "department",
+      "location",
+      "employmentType",
+      "workMode",
+      "description",
+      "requirements",
+      "skills",
+      "openings",
+      "status",
+      "hiringManager",
+      "recruiter",
+      "targetDate",
+      "jobTitleKey",
+    ]);
+    expect(
+      fieldsOf("vacancy").find((field) => field.key === "jobTitleKey"),
+    ).toEqual({
+      key: "jobTitleKey",
+      system: true,
+      label: "Job title",
+      type: "text",
+      required: false,
+      readOnly: true,
+      sensitive: false,
+    });
+    expect(
+      Object.fromEntries(
+        CONFIGURABLE_KINDS.map((kind) => [kind, fieldsOf(kind).length]),
+      ),
+    ).toEqual({
+      candidate: 30,
+      "job-role": 8,
+      vacancy: 15,
+      application: 5,
+      task: 8,
+      interview: 8,
+      offer: 9,
+      onboarding: 4,
+      checklist: 6,
+    });
+    for (const kind of CONFIGURABLE_KINDS.filter((name) => name !== "vacancy"))
+      expect(
+        fieldsOf(kind).map((field) => field.key),
+        kind,
+      ).not.toContain("jobTitleKey");
   });
 });
