@@ -62,7 +62,11 @@ import { GET as fileChunkRoute } from "@/app/api/v1/record-files/[id]/chunks/rou
 import { RECRUITER_ROLE } from "@/domain/config-defaults";
 import type { RoleBody } from "@/domain/config";
 import { docxWithText } from "./helpers/cv-fixtures";
-import { customField, insertKindSchema, kindBody } from "./helpers/kind-schemas";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 import { createTestDb, seedIdentity } from "./helpers/db";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 import {
@@ -1580,7 +1584,9 @@ describe("private Blob CV transfer behind a fake client", () => {
         {
           ...structuredClone(RECRUITER_ROLE.body),
           name: "Fictional file-hidden recruiter",
-          fields: { candidate: { customValues: "read", [field.key]: "hidden" } },
+          fields: {
+            candidate: { customValues: "read", [field.key]: "hidden" },
+          },
         } as RoleBody,
         hidden,
       );
@@ -1684,7 +1690,11 @@ describe("private Blob CV transfer behind a fake client", () => {
         [scoped, candidateId],
       ] as const)
         await expect(
-          beginRecordFileUpload(who, fileInput(1000, { recordId }), fake.gateway),
+          beginRecordFileUpload(
+            who,
+            fileInput(1000, { recordId }),
+            fake.gateway,
+          ),
         ).rejects.toMatchObject({
           status: 404,
           code: "RECORD_NOT_FOUND",
