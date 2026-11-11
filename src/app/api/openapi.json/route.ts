@@ -1707,7 +1707,9 @@ export function GET() {
   const contactRule =
     "workEmail and workPhone are left out of every employee for a role whose directory rule is basic; the owner and admin roles are full.";
   const positionShape =
-    "{id, orgUnitId, title, code, isManager, jobRoleId, validFrom, archivedAt}";
+    "{id, orgUnitId, title, code, isManager, jobRoleId, validFrom, archivedAt, vacant}";
+  const vacantRule =
+    "vacant is true when no active, non-archived employee holds the position now, false when one does, and null when your role has no directory view (directory:read), because employees are hidden from you; it adds no employee name or contact fact.";
   const employeeShape =
     "{id, displayName, employeeNumber, status, retentionClass, source, userId, workEmail, workPhone, positions:[{positionId, title, orgUnitId, primary, validFrom}], createdAt, updatedAt, archivedAt}";
   const positionAudit =
@@ -1753,7 +1755,7 @@ export function GET() {
       [],
       {
         summary: "List the current positions",
-        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens get 403 session_required. Returns the current, non-archived positions of your company, or of one unit with unitId, ordered by title then id. jobRoleId is shown only to members of the team that owns the job role and is null otherwise. A unitId that is not a unit of your company returns 404 not_found; any other query key or value returns 400 invalid_input. Returns {data:[${positionShape}], pagination:{page, pageSize, hasMore}}.`,
+        description: `Session only: any signed-in member of a team in the company reads; Bearer tokens get 403 session_required. Returns the current, non-archived positions of your company, or of one unit with unitId, ordered by title then id. jobRoleId is shown only to members of the team that owns the job role and is null otherwise. ${vacantRule} A unitId that is not a unit of your company returns 404 not_found; any other query key or value returns 400 invalid_input. Returns {data:[${positionShape}], pagination:{page, pageSize, hasMore}}.`,
       },
       {
         "200": {

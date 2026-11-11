@@ -15,7 +15,12 @@ import {
   retentionReviewQuery,
   type EMPLOYEE_RETENTION_CLASSES,
 } from "@/domain/directory";
-import { accessContext, authorize, type AccessContext } from "@/lib/authz";
+import {
+  accessContext,
+  authorize,
+  decide,
+  type AccessContext,
+} from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
@@ -31,6 +36,11 @@ export type Position = {
   jobRoleId: string | null;
   validFrom: string;
   archivedAt: string | null;
+  /**
+   * Every response includes it: whether no active, non-archived employee holds the position now;
+   * null without directory view. Optional so rows built before ADM-22 still type-check.
+   */
+  vacant?: boolean | null;
 };
 export type EmployeePosition = {
   positionId: string;
@@ -216,8 +226,20 @@ export function directoryView(
   return basic;
 }
 
-const positionJson = (p: Principal) =>
-  sql`jsonb_build_object('id', p.id, 'orgUnitId', p.org_unit_id, 'title', p.title, 'code', p.code, 'isManager', p.is_manager, 'jobRoleId', case when p.job_role_team_id = ${p.teamId} then p.job_role_id end, 'validFrom', p.valid_from, 'archivedAt', p.archived_at)`;
+/**
+ * vacant: no current position row held by an active, non-archived employee. Null for a context
+ * without directory view, the rule GET /api/v1/employees uses, since the database hides holder rows
+ * from it (allows_directory) and an empty read would look vacant.
+ */
+const positionJson = (p: Principal, access: TenantAccess) => {
+  const vacant = decide(accessContext(p, access), {
+    resource: "directory",
+    action: "view",
+  })
+    ? sql`not exists (select 1 from app.employee_positions ep join app.employees e on e.id = ep.employee_id and e.workspace_id = ep.workspace_id where ep.position_id = p.id and ep.workspace_id = p.workspace_id and ep.valid_to is null and e.archived_at is null and e.status = 'active')`
+    : sql`null::boolean`;
+  return sql`jsonb_build_object('id', p.id, 'orgUnitId', p.org_unit_id, 'title', p.title, 'code', p.code, 'isManager', p.is_manager, 'jobRoleId', case when p.job_role_team_id = ${p.teamId} then p.job_role_id end, 'validFrom', p.valid_from, 'archivedAt', p.archived_at, 'vacant', ${vacant})`;
+};
 // The employee's current position rows, primary first, then by title and id.
 const employeeJson =
   sql.raw(`jsonb_build_object('id', e.id, 'displayName', e.display_name, 'employeeNumber', e.employee_number,
@@ -278,7 +300,7 @@ export async function listPositions(
       found: boolean;
       positions: Position[];
     }>(
-      sql`select ${found} as found, coalesce((select jsonb_agg(page.position order by page.title, page.id) from (select ${positionJson(p)} as position, p.title, p.id from app.positions p where p.workspace_id = ${access.workspaceId}::uuid ${unit} and p.valid_to is null and p.archived_at is null order by p.title, p.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as positions`,
+      sql`select ${found} as found, coalesce((select jsonb_agg(page.position order by page.title, page.id) from (select ${positionJson(p, access)} as position, p.title, p.id from app.positions p where p.workspace_id = ${access.workspaceId}::uuid ${unit} and p.valid_to is null and p.archived_at is null order by p.title, p.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as positions`,
     );
     if (!rows[0].found) throw notFound();
     return {
@@ -304,7 +326,7 @@ export async function createPosition(
     requireOrgWrite(p, access);
     if (jobRoleId) await requireJobRole(tx, p, jobRoleId);
     const { rows } = await tx.execute<{ position: Position }>(
-      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id) select u.workspace_id, u.id, ${title}, ${code}, ${isManager ?? false}, ${jobRoleId ? p.teamId : null}, ${jobRoleId ?? null}::uuid from app.org_units u where u.id = ${orgUnitId}::uuid and u.workspace_id = ${access.workspaceId}::uuid and u.valid_to is null and u.archived_at is null returning ${positionJson(p)} as position`,
+      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id) select u.workspace_id, u.id, ${title}, ${code}, ${isManager ?? false}, ${jobRoleId ? p.teamId : null}, ${jobRoleId ?? null}::uuid from app.org_units u where u.id = ${orgUnitId}::uuid and u.workspace_id = ${access.workspaceId}::uuid and u.valid_to is null and u.archived_at is null returning ${positionJson(p, access)} as position`,
     );
     if (!rows[0]) throw await unitConflict(tx, access, orgUnitId);
     return rows[0].position;
@@ -322,7 +344,7 @@ const updatePositionRow = (
     requireOrgWrite(p, access);
     const set = await change(tx, access);
     const { rows } = await tx.execute<{ position: Position }>(
-      sql`update app.positions p set ${set} where p.id = ${id}::uuid and p.workspace_id = ${access.workspaceId}::uuid and p.valid_to is null and p.archived_at is null returning ${positionJson(p)} as position`,
+      sql`update app.positions p set ${set} where p.id = ${id}::uuid and p.workspace_id = ${access.workspaceId}::uuid and p.valid_to is null and p.archived_at is null returning ${positionJson(p, access)} as position`,
     );
     return (await changed(tx, "positions", id, access, rows)).position;
   });
