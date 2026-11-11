@@ -454,6 +454,7 @@ describe("built-in default kind schemas (R2b-01)", () => {
       companyLevel: null,
       companyAreas: [],
       versions: {},
+      teamArchived: false,
       documents: {},
       roleVersionId: null,
       recordScope: null,

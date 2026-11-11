@@ -1268,6 +1268,71 @@ describe("split runtime role template", () => {
       },
     ]);
   });
+
+  it("grants the data role EXECUTE on the two team archive helpers, the identity role and PUBLIC none (0044)", async () => {
+    await harness.identityDb();
+    await expectDenied([
+      "SELECT tenant_context.set_team_archived(NULL, NULL)",
+      "SELECT * FROM tenant_context.member_archived_teams()",
+    ]);
+    await harness.asSuperuser();
+    for (const [helper, volatility] of [
+      ["tenant_context.set_team_archived(text,boolean)", "v"],
+      ["tenant_context.member_archived_teams()", "s"],
+    ]) {
+      expect(dataRoleHelpers, helper).toContain(helper);
+      expect(identityRoleHelpers, helper).not.toContain(helper);
+      const execute = async (grantee: string) =>
+        (
+          await harness.client.query<{ allowed: boolean }>(
+            "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+            [grantee, helper],
+          )
+        ).rows[0].allowed;
+      expect(await execute(splitRoles.data), helper).toBe(true);
+      expect(await execute(splitRoles.identity), helper).toBe(false);
+      expect(await execute("public"), helper).toBe(false);
+      expect(
+        (
+          await harness.client.query(
+            `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+               p.prosecdef AS definer, p.provolatile AS volatility, p.proconfig AS config
+             FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+            [helper],
+          )
+        ).rows,
+        helper,
+      ).toEqual([
+        {
+          owned: true,
+          definer: true,
+          volatility,
+          config: ["search_path=pg_catalog, pg_temp"],
+        },
+      ]);
+    }
+    // workspace_team_list was dropped and created again; the template grants it again.
+    expect(
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, 'tenant_context.workspace_team_list()', 'EXECUTE') AS allowed",
+          [splitRoles.data],
+        )
+      ).rows[0].allowed,
+    ).toBe(true);
+    // No runtime role gains any write on app.workspace_teams.
+    for (const role of [splitRoles.data, splitRoles.identity])
+      for (const privilege of ["INSERT", "UPDATE", "DELETE"])
+        expect(
+          (
+            await harness.client.query<{ allowed: boolean }>(
+              "SELECT has_table_privilege($1, 'app.workspace_teams', $2) AS allowed",
+              [role, privilege],
+            )
+          ).rows[0].allowed,
+          `${role} ${privilege}`,
+        ).toBe(false);
+  });
 });
 
 describe("split runtime role template refusals", () => {
