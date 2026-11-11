@@ -34,6 +34,7 @@ import {
   createAuthDb,
   createTeam,
   createTestAuth,
+  registerVerified,
   setUpAdmin,
   type Mail,
 } from "./helpers/auth";
@@ -835,5 +836,196 @@ describe("two-step sign-in for company authority under the split runtime roles",
 
   it("never opens the data pool for the lookup", () => {
     expect(pools.data).not.toHaveBeenCalled();
+  });
+});
+
+// ADM-08 (job 076): Invite to teams sends one ordinary Better Auth invitation per chosen team, with
+// the fake mail array only; Better Auth refuses every team where the caller is not owner or admin.
+describe("invitations to several teams through the handler", () => {
+  let h: Awaited<ReturnType<typeof createAuthDb>>;
+  let caller: ReturnType<typeof authCaller>;
+  const mail: Mail[] = [];
+  const teams = { a: "", b: "", c: "", d: "" };
+  let multi = "";
+  const invite = (
+    organizationId: string,
+    email: string,
+    role: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    caller.post(
+      "organization/invite-member",
+      { organizationId, email, role, ...extra },
+      { cookie: multi },
+    );
+  const invitations = (email: string) =>
+    h.pg
+      .query<{ organization_id: string; role: string; status: string }>(
+        "SELECT organization_id, role, status FROM auth.invitation WHERE email = $1 ORDER BY organization_id",
+        [email],
+      )
+      .then((result) => result.rows);
+  const mailTo = (email: string) =>
+    mail.filter(
+      (message) =>
+        message.to === email && message.subject.startsWith("Invitation"),
+    );
+
+  beforeAll(async () => {
+    h = await createAuthDb();
+    caller = authCaller(createTestAuth(h.db, mail));
+    const owner = await setUpAdmin(caller, mail);
+    teams.a = owner.teamId;
+    teams.b = (await createTeam(caller, owner.cookie, "fictional-team-b")).id;
+    teams.c = (await createTeam(caller, owner.cookie, "fictional-team-c")).id;
+    teams.d = (await createTeam(caller, owner.cookie, "fictional-team-d")).id;
+    // The caller: owner of team A, admin of team B, recruiter in team C and not in team D.
+    multi = (
+      await addMember(
+        caller,
+        mail,
+        owner.cookie,
+        teams.a,
+        "multi@example.test",
+        "owner",
+      )
+    ).cookie;
+    for (const [team, role] of [
+      [teams.b, "admin"],
+      [teams.c, "recruiter"],
+    ]) {
+      const sent = await caller.post(
+        "organization/invite-member",
+        { organizationId: team, email: "multi@example.test", role },
+        { cookie: owner.cookie },
+      );
+      expect(sent.status).toBe(200);
+      const accepted = await caller.post(
+        "organization/accept-invitation",
+        { invitationId: ((await sent.json()) as { id: string }).id },
+        { cookie: multi },
+      );
+      expect(accepted.status).toBe(200);
+    }
+    expect(
+      (
+        await h.pg.query<{ organization_id: string; role: string }>(
+          `SELECT m.organization_id, m.role FROM auth.member m JOIN auth."user" u ON u.id = m.user_id
+            WHERE u.email = 'multi@example.test' ORDER BY m.organization_id`,
+        )
+      ).rows,
+    ).toEqual(
+      [
+        { organization_id: teams.a, role: "owner" },
+        { organization_id: teams.b, role: "admin" },
+        { organization_id: teams.c, role: "recruiter" },
+      ].sort((x, y) => x.organization_id.localeCompare(y.organization_id)),
+    );
+  });
+  afterAll(async () => h.pg.close());
+
+  it("sends one invitation and one mail per team, each with its own role", async () => {
+    expect(
+      (await invite(teams.a, "several@example.test", "viewer")).status,
+    ).toBe(200);
+    expect(
+      (await invite(teams.b, "several@example.test", "recruiter")).status,
+    ).toBe(200);
+    expect(await invitations("several@example.test")).toEqual(
+      [
+        { organization_id: teams.a, role: "viewer", status: "pending" },
+        { organization_id: teams.b, role: "recruiter", status: "pending" },
+      ].sort((x, y) => x.organization_id.localeCompare(y.organization_id)),
+    );
+    expect(mailTo("several@example.test")).toHaveLength(2);
+    expect(
+      mailTo("several@example.test").map((message) => message.subject),
+    ).toEqual([
+      "Invitation to Fictional fictional-first-team on RecruitmentOS",
+      "Invitation to Fictional fictional-team-b on RecruitmentOS",
+    ]);
+  });
+
+  it("refuses a forged invitation to a team where the caller is a recruiter or not a member", async () => {
+    for (const team of [teams.c, teams.d]) {
+      const response = await invite(team, "forged@example.test", "viewer");
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBeLessThan(500);
+    }
+    expect(await invitations("forged@example.test")).toEqual([]);
+    expect(mailTo("forged@example.test")).toEqual([]);
+  });
+
+  it("refuses an admin's invitation with the owner role, as today", async () => {
+    expect(
+      (await invite(teams.b, "promoted@example.test", "owner")).status,
+    ).toBe(403);
+    expect(await invitations("promoted@example.test")).toEqual([]);
+    expect(mailTo("promoted@example.test")).toEqual([]);
+    // As owner of team A the same caller may give Owner there.
+    expect(
+      (await invite(teams.a, "promoted@example.test", "owner")).status,
+    ).toBe(200);
+  });
+
+  it("ignores extra company fields in the body and creates only the plain invitation", async () => {
+    const response = await invite(teams.a, "extra@example.test", "viewer", {
+      companyLevel: "owner",
+      areas: ["people"],
+      planAccess: true,
+      roleObjectId: "00000000-0000-4000-a000-0000000000f1",
+    });
+    expect(response.status).toBe(200);
+    const rows = (
+      await h.pg.query(
+        "SELECT * FROM auth.invitation WHERE email = 'extra@example.test'",
+      )
+    ).rows as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    expect(mailTo("extra@example.test")).toHaveLength(1);
+    for (const row of rows) {
+      expect(row).toMatchObject({ organization_id: teams.a, role: "viewer" });
+      const text = JSON.stringify(row);
+      for (const value of [
+        "people",
+        "planAccess",
+        "0000000000f1",
+        "companyLevel",
+      ])
+        expect(text, value).not.toContain(value);
+    }
+  });
+
+  it("gives the invitee exactly the chosen team roles once they accept both", async () => {
+    const cookie = await registerVerified(caller, mail, "several@example.test");
+    const pending = (
+      await h.pg.query<{ id: string }>(
+        "SELECT id FROM auth.invitation WHERE email = 'several@example.test' AND status = 'pending'",
+      )
+    ).rows;
+    expect(pending).toHaveLength(2);
+    for (const { id } of pending)
+      expect(
+        (
+          await caller.post(
+            "organization/accept-invitation",
+            { invitationId: id },
+            { cookie },
+          )
+        ).status,
+      ).toBe(200);
+    expect(
+      (
+        await h.pg.query<{ organization_id: string; role: string }>(
+          `SELECT m.organization_id, m.role FROM auth.member m JOIN auth."user" u ON u.id = m.user_id
+            WHERE u.email = 'several@example.test' ORDER BY m.organization_id`,
+        )
+      ).rows,
+    ).toEqual(
+      [
+        { organization_id: teams.a, role: "viewer" },
+        { organization_id: teams.b, role: "recruiter" },
+      ].sort((x, y) => x.organization_id.localeCompare(y.organization_id)),
+    );
   });
 });

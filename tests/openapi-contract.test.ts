@@ -699,7 +699,8 @@ describe("OpenAPI contract", () => {
     const changes = document.paths["/api/v1/access-changes"].get;
     const teams = document.paths["/api/v1/teams"].get;
     const users = document.paths["/api/v1/admin/users"].get;
-    for (const operation of [access, history, changes, teams, users]) {
+    const person = document.paths["/api/v1/admin/users/{user}"].get;
+    for (const operation of [access, history, changes, teams, users, person]) {
       expect(operation["x-session-only"]).toBe(true);
       expect(operation["x-required-scopes"]).toEqual([]);
       expect(Object.keys(operation.responses)).toEqual(
@@ -762,6 +763,21 @@ describe("OpenAPI contract", () => {
       '"name":"cursor"',
     ])
       expect(JSON.stringify(users)).toContain(text);
+    // ADM-08 (job 076): one person of the company, never team data.
+    expect(Object.keys(person.responses)).toContain("404");
+    for (const text of [
+      "people_forbidden",
+      "user_not_found",
+      "invalid_input",
+      "tenant_context.workspace_person",
+      "signedInDevices, teams:[{team, slug, teamRole, configuredRole}]",
+      "events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]",
+      "never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body",
+      '"name":"user","in":"path"',
+      '"maxLength":128',
+    ])
+      expect(JSON.stringify(person)).toContain(text);
+    expect(JSON.stringify(person)).not.toContain('"in":"query"');
   });
 
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
@@ -1052,6 +1068,7 @@ describe("OpenAPI contract", () => {
         "PUT /api/v1/teams/archive",
         "GET /api/v1/me/archived-teams",
         "GET /api/v1/admin/users",
+        "GET /api/v1/admin/users/{user}",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",

@@ -72,6 +72,8 @@ import {
   type AdminTabKey,
 } from "@/components/settings/admin-tabs";
 import { TeamDetailPortal } from "@/components/settings/team-detail";
+import { UserDetailPortal } from "@/components/settings/user-detail";
+import { userDetailTab } from "@/components/settings/user-detail-tabs";
 import { WorkspaceProvider } from "@/components/workspace/client";
 import {
   authenticateApiToken,
@@ -84,6 +86,7 @@ import { createSplitRoleDb, seedIdentity } from "./helpers/db";
 // Fictional data only: one company workspace with two fictional teams.
 const COMPANY = "00000000-0000-4000-a000-000000000001";
 const DETAIL = "teams/[team]/page.tsx";
+const USER_DETAIL = "users/[user]/page.tsx";
 const ADMIN_DIR = join(process.cwd(), "src/app/app/admin");
 const KEYS = ADMIN_TABS.map((tab) => tab.key);
 // The four old team pages redirect to team detail tabs (tests/admin-redirects.test.ts).
@@ -132,7 +135,8 @@ type Page = (props: {
 
 /**
  * Calls the page file's default export as Next would, for one caller and one key; the team detail
- * page gets `team` (team A unless named) as its params and `tab`, when named, as `?tab=`.
+ * page gets `team` (team A unless named) as its params, the user detail page `user` (the recruiter
+ * unless named), and `tab`, when named, as `?tab=`.
  */
 async function open(
   caller: Caller,
@@ -140,6 +144,7 @@ async function open(
   key: AdminTabKey | "fictional" | null,
   team = "route-team-a",
   tab?: string,
+  user = "route-recruiter",
 ): Promise<Outcome> {
   request.headers = new Headers(
     caller.kind === "bearer"
@@ -160,7 +165,9 @@ async function open(
         ? { tab: key }
         : page === DETAIL
           ? { team }
-          : {};
+          : page === USER_DETAIL
+            ? { user }
+            : {};
     const search: Record<string, string> = tab === undefined ? {} : { tab };
     element = await render({
       params: Promise.resolve(params),
@@ -192,6 +199,19 @@ async function open(
     expect(markup).toContain("<h2>Fictional Test Team</h2>");
     expect(markup).not.toContain(NO_ACCESS);
     expect(markup).not.toContain(NOT_A_MEMBER);
+    return "allowed";
+  }
+  if (result.type === UserDetailPortal) {
+    // The person in the URL and the caller's company level; the person loads in the browser.
+    expect(result.props).toEqual({
+      userId: user,
+      companyLevel: expect.stringMatching(/^(owner|admin)$/),
+      // An unknown key opens Profile.
+      tab: userDetailTab(tab),
+    });
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(markup).toContain('<p role="status">Loading this person…</p>');
+    expect(markup).not.toContain(NO_ACCESS);
     return "allowed";
   }
   // Refused or not a member: one plain sentence, with no sidebar and no tab or team content.
@@ -481,6 +501,59 @@ describe("admin pages check access on the server (TST-002)", () => {
         await open(callers[name], "[tab]/page.tsx", "company-authority"),
         name,
       ).toBe(outcome);
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // ADM-08 (job 076): the user detail page is a sub-page of Users and opens for exactly its callers,
+  // through one access check in the active team, whoever the person in the URL is.
+  it("opens user detail for company owners and the company admin with people only, on every tab (ADM-08)", async () => {
+    for (const tab of [
+      undefined,
+      "profile",
+      "teams",
+      "authority",
+      "security",
+      "activity",
+      "groups",
+    ])
+      for (const [name, outcome] of [
+        ["company owner and team owner", "allowed"],
+        ["company owner as recruiter", "allowed"],
+        ["company admin with people", "allowed"],
+        ["company admin", "refused"],
+        ["company admin with organisation", "refused"],
+        ["team owner", "refused"],
+        ["team A owner", "refused"],
+        ["team admin", "refused"],
+        ["recruiter", "refused"],
+        ["viewer", "refused"],
+        ["no team", "refused"],
+        ["anonymous", "sign-in"],
+        ["bearer", "sign-in"],
+      ] as const)
+        for (const user of [
+          "route-recruiter",
+          "route-owner-c",
+          "fictional-made-up-user",
+        ]) {
+          vi.mocked(withTeam).mockClear();
+          const label = `${name} on ${user} ?tab=${tab ?? ""}`;
+          expect(
+            await open(
+              callers[name],
+              USER_DETAIL,
+              "users",
+              undefined,
+              tab,
+              user,
+            ),
+            label,
+          ).toBe(outcome);
+          expect(withTeam, label).toHaveBeenCalledTimes(
+            outcome === "sign-in" || name === "no team" ? 0 : 1,
+          );
+        }
     expect(authenticateApiToken).not.toHaveBeenCalled();
     expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });

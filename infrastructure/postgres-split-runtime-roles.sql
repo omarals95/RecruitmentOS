@@ -154,6 +154,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.home_unit_changes(timestamp with time z
 GRANT EXECUTE ON FUNCTION tenant_context.role_assignment_changes(timestamp with time zone, integer) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.workspace_team_list() TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.workspace_people(text, text, text, text, text, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.workspace_person(text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_team_archived(text, boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.member_archived_teams() TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
