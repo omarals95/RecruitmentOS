@@ -826,6 +826,7 @@ describe("one workspace person under the split runtime roles", () => {
     "plan_access",
     "authority_suspended",
     "authority_since",
+    "deactivated",
     "events",
   ];
   const PERSON_KEYS = [
@@ -1278,6 +1279,7 @@ describe("one workspace person under the split runtime roles", () => {
         company_areas: ["fields", "organisation"],
         plan_access: true,
         authority_suspended: true,
+        deactivated: false,
       });
       expect(new Date(row.last_sign_in as string).toISOString()).toBe(
         "2026-11-06T09:00:00.000Z",

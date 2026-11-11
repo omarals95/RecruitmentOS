@@ -17,13 +17,13 @@ export type WorkspacePersonRow = {
     configuredRole: string | null;
   }[];
   companyLevel: "owner" | "admin" | null;
-  status: "active" | "invited";
+  status: "active" | "invited" | "deactivated";
   lastSignInAt: string | null;
   twoStep: boolean;
 };
 export type WorkspacePeopleQuery = {
   team?: string;
-  status?: "active" | "invited";
+  status?: "active" | "invited" | "deactivated";
   level?: "owner" | "admin" | "none";
   role?: string;
   /** The sort and row key of the last row shown, from nextCursor. */
@@ -52,7 +52,7 @@ export type WorkspacePerson = {
   userId: string;
   name: string;
   email: string;
-  status: "active";
+  status: "active" | "deactivated";
   lastSignInAt: string | null;
   twoStep: boolean;
   /** Sessions that have not expired. */
@@ -75,13 +75,13 @@ export type WorkspacePerson = {
 };
 
 const PAGE_SIZE = 25;
-const peopleForbidden = () =>
+export const peopleForbidden = () =>
   new ApiError(
     403,
     "people_forbidden",
     "Only a company owner, or a company admin with the People area, can see the users list.",
   );
-const userNotFound = () =>
+export const userNotFound = () =>
   new ApiError(
     404,
     "user_not_found",
@@ -94,7 +94,7 @@ const iso = (value: Date | string | null) =>
  * One withTeam for a signed-in company owner or company admin with the people area; anyone else,
  * and the owner-run helpers' 42501, gets 403 people_forbidden.
  */
-async function withPeopleArea<T>(
+export async function withPeopleArea<T>(
   p: Principal,
   work: (tx: TeamTx, access: TenantAccess) => Promise<T>,
 ): Promise<T> {
@@ -209,9 +209,10 @@ export async function getWorkspacePerson(
           planAccess: boolean | null;
           authoritySuspended: boolean | null;
           authoritySince: Date | string | null;
+          deactivated: boolean;
           events: WorkspacePersonEvent[];
         }>(
-          sql`select user_id as "userId", name, email, last_sign_in as "lastSignInAt", two_step as "twoStep", signed_in_devices as "signedInDevices", teams, company_level as "companyLevel", company_areas as "companyAreas", plan_access as "planAccess", authority_suspended as "authoritySuspended", authority_since as "authoritySince", events from tenant_context.workspace_person(${userId}::text)`,
+          sql`select user_id as "userId", name, email, last_sign_in as "lastSignInAt", two_step as "twoStep", signed_in_devices as "signedInDevices", teams, company_level as "companyLevel", company_areas as "companyAreas", plan_access as "planAccess", authority_suspended as "authoritySuspended", authority_since as "authoritySince", deactivated, events from tenant_context.workspace_person(${userId}::text)`,
         )
       ).rows[0],
   );
@@ -220,7 +221,7 @@ export async function getWorkspacePerson(
     userId: row.userId,
     name: row.name,
     email: row.email,
-    status: "active",
+    status: row.deactivated ? "deactivated" : "active",
     lastSignInAt: iso(row.lastSignInAt),
     twoStep: row.twoStep,
     signedInDevices: row.signedInDevices,

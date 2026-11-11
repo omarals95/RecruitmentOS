@@ -780,6 +780,74 @@ describe("OpenAPI contract", () => {
     expect(JSON.stringify(person)).not.toContain('"in":"query"');
   });
 
+  it("documents deactivation, sign out everywhere and clear lockout as session-only fresh changes (ADM-09)", () => {
+    const status = document.paths["/api/v1/admin/users/{user}/status"].put;
+    const signOut = document.paths["/api/v1/admin/users/{user}/sign-out"].post;
+    const clear =
+      document.paths["/api/v1/admin/users/{user}/clear-lockout"].post;
+    for (const operation of [status, signOut, clear]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining([
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "500",
+        ]),
+      );
+      for (const text of [
+        "session_required",
+        "people_forbidden",
+        "company_owner_required",
+        "Only a company owner can change a company owner or admin.",
+        "SESSION_NOT_FRESH",
+        "cannot_change_self",
+        "user_not_found",
+        "invalid_input",
+        "one user-account activity row",
+        "the person's id only",
+        '"name":"user","in":"path"',
+        '"maxLength":128',
+      ])
+        expect(JSON.stringify(operation), text).toContain(text);
+      expect(JSON.stringify(operation)).not.toContain('"in":"query"');
+    }
+    for (const text of [
+      "{data:{active, changed}}",
+      "user.deactivated or user.reactivated",
+      "last_company_owner",
+      "account_deactivated",
+      "changed false",
+      '"example":{"active":false}',
+      '"additionalProperties":false',
+    ])
+      expect(JSON.stringify(status), text).toContain(text);
+    expect(JSON.stringify(signOut)).toContain("user.signed_out_everywhere");
+    expect(JSON.stringify(signOut)).toContain("{data:{signedOut:true}}");
+    expect(JSON.stringify(clear)).toContain("user.lockout_cleared");
+    expect(JSON.stringify(clear)).toContain("{data:{cleared:true}}");
+    for (const operation of [signOut, clear])
+      expect(operation.requestBody).toBeUndefined();
+    // The list filters and the person read carry the deactivated status.
+    expect(JSON.stringify(document.paths["/api/v1/admin/users"].get)).toContain(
+      '"enum":["active","invited","deactivated"]',
+    );
+    expect(
+      document.paths["/api/v1/admin/users/{user}"].get.responses["200"]
+        .description,
+    ).toContain('status:"active"|"deactivated"');
+    // The shared 403 names the refusal and its exact message.
+    expect(
+      document.paths["/api/v1/candidates"].post.responses["403"].description,
+    ).toContain(
+      'account_deactivated ("Your account has been deactivated. Ask a company owner or admin to reactivate it.")',
+    );
+  });
+
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
     const archive = document.paths["/api/v1/teams/archive"].put;
     const archived = document.paths["/api/v1/me/archived-teams"].get;
@@ -994,12 +1062,15 @@ describe("OpenAPI contract", () => {
         ).not.toContain("jobTitleKey");
   });
 
-  it("documents the recent sign-in rule on exactly the four sensitive admin changes (ADM-06)", () => {
+  it("documents the recent sign-in rule on exactly the seven sensitive admin changes (ADM-06, ADM-09)", () => {
     const guarded = [
       "POST /api/v1/roles/{id}/publish",
       "POST /api/v1/teams/member-roles",
       "POST /api/v1/company-authority",
       "POST /api/v1/teams/two-step-reset",
+      "PUT /api/v1/admin/users/{user}/status",
+      "POST /api/v1/admin/users/{user}/sign-out",
+      "POST /api/v1/admin/users/{user}/clear-lockout",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1069,6 +1140,9 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/me/archived-teams",
         "GET /api/v1/admin/users",
         "GET /api/v1/admin/users/{user}",
+        "PUT /api/v1/admin/users/{user}/status",
+        "POST /api/v1/admin/users/{user}/sign-out",
+        "POST /api/v1/admin/users/{user}/clear-lockout",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",

@@ -510,6 +510,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "workspace-authority",
   "employee-erasure",
   "org-import",
+  "user-account",
 ];
 
 /**

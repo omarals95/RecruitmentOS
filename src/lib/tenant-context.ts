@@ -160,7 +160,15 @@ export async function installTenantContext(
   } catch (error) {
     // The query wrapper carries the bound assertion; surface only the database error.
     const cause = error instanceof DrizzleQueryError ? error.cause : error;
-    if ((cause as { code?: unknown } | undefined)?.code === "42501")
+    const refusal = cause as { code?: unknown; message?: unknown } | undefined;
+    // Only install's deactivation refusal carries its own message; every other refusal is generic.
+    if (refusal?.code === "42501" && refusal.message === "Account deactivated")
+      throw new ApiError(
+        403,
+        "account_deactivated",
+        "Your account has been deactivated. Ask a company owner or admin to reactivate it.",
+      );
+    if (refusal?.code === "42501")
       throw new ApiError(
         403,
         "tenant_context_denied",
