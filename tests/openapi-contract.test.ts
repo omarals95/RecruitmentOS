@@ -848,6 +848,51 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents user anonymisation as a session-only fresh change for company owners, with every refusal and the exact response (ADM-10)", () => {
+    const anonymise =
+      document.paths["/api/v1/admin/users/{user}/anonymise"].post;
+    expect(
+      Object.keys(document.paths["/api/v1/admin/users/{user}/anonymise"]),
+    ).toEqual(["post"]);
+    expect(anonymise["x-session-only"]).toBe(true);
+    expect(anonymise["x-required-scopes"]).toEqual([]);
+    expect(Object.keys(anonymise.responses)).toEqual(
+      expect.arrayContaining(["200", "400", "401", "403", "404", "409", "500"]),
+    );
+    for (const text of [
+      "session_required",
+      "anonymisation_forbidden",
+      "Only a company owner, signed in, can anonymise a user account.",
+      "the people area included",
+      "There is no MCP tool.",
+      "SESSION_NOT_FRESH",
+      "cannot_change_self",
+      "anonymisation_confirmation_mismatch",
+      "case-sensitive",
+      "invalid_input",
+      "user_not_found",
+      "member_of_other_company",
+      "last_team_owner",
+      "last_company_owner",
+      "Former user",
+      "anonymised-<anonymisationId>@invalid",
+      "redacted to its type, time and actor",
+      "the activity the person performed are kept",
+      "user.anonymised",
+      "never the old name or email",
+      "alreadyAnonymised true",
+      "idempotency_mismatch",
+      "the typed name is never stored",
+      "{data:{anonymisationId, alreadyAnonymised, anonymisedAt, removed:{memberships, sessions, apiTokens, twoStep, configuredRoles, recordAssignments, companyAuthority, invitations, activityRedacted}}}",
+      '"example":{"confirmName":"Fictional Dana Sample"}',
+      '"additionalProperties":false',
+      '"name":"user","in":"path"',
+      '"maxLength":128',
+    ])
+      expect(JSON.stringify(anonymise), text).toContain(text);
+    expect(JSON.stringify(anonymise)).not.toContain('"in":"query"');
+  });
+
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
     const archive = document.paths["/api/v1/teams/archive"].put;
     const archived = document.paths["/api/v1/me/archived-teams"].get;
@@ -1118,7 +1163,7 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents the recent sign-in rule on exactly the eight sensitive admin changes (ADM-06, ADM-09, ADM-25)", () => {
+  it("documents the recent sign-in rule on exactly the nine sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10)", () => {
     const guarded = [
       "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
@@ -1128,6 +1173,7 @@ describe("OpenAPI contract", () => {
       "PUT /api/v1/admin/users/{user}/status",
       "POST /api/v1/admin/users/{user}/sign-out",
       "POST /api/v1/admin/users/{user}/clear-lockout",
+      "POST /api/v1/admin/users/{user}/anonymise",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1200,6 +1246,7 @@ describe("OpenAPI contract", () => {
         "PUT /api/v1/admin/users/{user}/status",
         "POST /api/v1/admin/users/{user}/sign-out",
         "POST /api/v1/admin/users/{user}/clear-lockout",
+        "POST /api/v1/admin/users/{user}/anonymise",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",

@@ -10,7 +10,7 @@ import { parseRole } from "./permissions";
 import type { Principal } from "./principal";
 import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 
-const cannotChangeSelf = () =>
+export const cannotChangeSelf = () =>
   new ApiError(
     400,
     "cannot_change_self",
