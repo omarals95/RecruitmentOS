@@ -447,7 +447,7 @@ export const taskBoardBodySchema = z
 export type TaskBoardBody = z.output<typeof taskBoardBodySchema>;
 
 /** A grade code such as G7: 1 to 20 upper-case letters, digits and hyphens. */
-const gradeCode = z.string().regex(/^[A-Z0-9][A-Z0-9-]{0,19}$/);
+export const gradeCode = z.string().regex(/^[A-Z0-9][A-Z0-9-]{0,19}$/);
 const jobArchitectureShape = z
   .object({
     families: z

@@ -511,6 +511,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "employee-erasure",
   "org-import",
   "user-account",
+  "salary-brackets",
 ];
 
 /**

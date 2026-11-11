@@ -2088,6 +2088,104 @@ export function GET() {
       { sessionOnly: true, params: [versionIdParameter] },
     ),
   };
+  // Salary brackets (ADM-25): confidential, session only, never offered to tokens or MCP (D13).
+  const bracketAccessRule =
+    'Session only: Bearer tokens, including MCP OAuth tokens, get 403 session_required. Salary brackets are confidential: the database itself lets only a session holding Plan & pay access (a per-person grant only a company owner gives, themselves included) and the plans:read scope of their team role read them; anyone else, team owners, company admins and company owners without the grant included, gets 403 plan_access_required ("Salary brackets need Plan & pay access, which only a company owner gives."). Brackets are AED fils (whole numbers, 100 fils to the dirham), never offered to API tokens or MCP and never in exports, search, notifications, analytics or activity, which holds the version number only.';
+  const bracketWriteRule = `${bracketAccessRule} Writing also needs plans:write and a company owner, or a company admin with the organisation area; a holder without that authority gets 403 config_forbidden, and an archived team 403 team_archived.`;
+  const bracketBodyRule =
+    'Send {payPeriod?, covers?, effectiveFrom, brackets:[{gradeCode, minimumFils, midpointFils, maximumFils}]}. payPeriod is "monthly" (default) or "annual"; covers is "basic" (default), "basic-housing-transport" or "total-cash"; effectiveFrom is a date (YYYY-MM-DD); at most 200 brackets; amounts are whole fils from 1 to 100,000,000,000. A bracket whose minimum is above its midpoint, or midpoint above its maximum, returns 400 invalid_input ("The minimum must be at most the midpoint, and the midpoint at most the maximum."); any other key or value returns 400 invalid_input. Nothing is stored then.';
+  const bracketBody = {
+    type: "object",
+    required: ["effectiveFrom", "brackets"],
+    additionalProperties: false,
+    properties: {
+      payPeriod: { enum: ["monthly", "annual"] },
+      covers: { enum: ["basic", "basic-housing-transport", "total-cash"] },
+      effectiveFrom: { type: "string", format: "date" },
+      brackets: {
+        type: "array",
+        maxItems: 200,
+        items: {
+          type: "object",
+          required: ["gradeCode", "minimumFils", "midpointFils", "maximumFils"],
+          additionalProperties: false,
+          properties: {
+            gradeCode: {
+              type: "string",
+              pattern: "^[A-Z0-9][A-Z0-9-]{0,19}$",
+            },
+            minimumFils: { type: "integer", minimum: 1, maximum: 1e11 },
+            midpointFils: { type: "integer", minimum: 1, maximum: 1e11 },
+            maximumFils: { type: "integer", minimum: 1, maximum: 1e11 },
+          },
+        },
+      },
+    },
+  };
+  const bracketExample = {
+    effectiveFrom: "2027-01-01",
+    brackets: [
+      {
+        gradeCode: "G5",
+        minimumFils: 1_200_000,
+        midpointFils: 1_500_000,
+        maximumFils: 1_800_000,
+      },
+      {
+        gradeCode: "G7",
+        minimumFils: 2_000_000,
+        midpointFils: 2_500_000,
+        maximumFils: 3_000_000,
+      },
+    ],
+  };
+  const bracketVersionShape =
+    "{versionId, number|null, state, payPeriod, covers, effectiveFrom, createdAt, publishedAt|null, brackets:[{gradeCode, minimumFils, midpointFils, maximumFils}]}";
+  const bracketsShape = `{data:{current:${bracketVersionShape}|null, draft:${bracketVersionShape}|null}}`;
+  paths["/api/v1/salary-brackets"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read the salary brackets",
+        description: `${bracketAccessRule} current is the highest-numbered published version and draft the newest draft, each null when there is none; brackets are ordered by grade code. Nothing is audited. Takes no query parameters. Returns ${bracketsShape}.`,
+      },
+      { "200": { description: bracketsShape } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a salary bracket draft",
+        description: `${bracketWriteRule} ${bracketBodyRule} brackets must hold exactly one bracket for each grade of the published job architecture: a missing, unknown or repeated grade returns 400 invalid_input ("brackets must hold exactly one bracket for each grade of the published job architecture."). Without a published job architecture with at least one grade, 409 job_grades_required. Several drafts may exist. Drafts are not audited. Body at most 64 KiB. Returns 201 {data:${bracketVersionShape}}.`,
+        requestBody: jsonBody(bracketBody, bracketExample),
+      },
+      { "201": { description: `{data:${bracketVersionShape}}.` } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/salary-brackets/{versionId}"] = {
+    put: operation(
+      [],
+      {
+        summary: "Replace a salary bracket draft's settings and figures",
+        description: `${bracketWriteRule} versionId is the draft's version id. ${bracketBodyRule} The grade codes must be exactly the draft's own (400 invalid_input otherwise); to change grades, create a new draft. An unknown version, or one you cannot read, returns 404 not_found; a published version returns 409 bracket_version_published ("A published salary bracket version cannot be changed. Create a new draft instead.") and nothing changes. Nothing is audited. Body at most 64 KiB. Returns {data:${bracketVersionShape}}.`,
+        requestBody: jsonBody(bracketBody, bracketExample),
+      },
+      { "200": { description: `{data:${bracketVersionShape}}.` } },
+      { sessionOnly: true, params: [versionIdParameter] },
+    ),
+  };
+  paths["/api/v1/salary-brackets/{versionId}/publish"] = {
+    post: operation(
+      [],
+      {
+        summary: "Publish a salary bracket draft",
+        description: `${bracketWriteRule} ${freshSessionRule} versionId is the draft's version id. Publishing gives the draft the next version number; earlier versions stay published and unchanged, and nothing is retired. Offers created from then on for a vacancy with a job title keep this version. A draft whose grade codes are no longer those of the published job architecture returns 409 bracket_grades_changed ("The job grades changed since this draft was made. Create a new draft for the current grades."). An unknown version, or one you cannot read, returns 404 not_found; a version that is not a draft returns 409 bracket_version_published. Writes one salary-brackets activity row (salary_brackets.published) holding the version id and number only, shown only to people with company authority. Returns {data:{versionId, number}}.`,
+      },
+      { "200": { description: "{data:{versionId, number}}." } },
+      { sessionOnly: true, params: [versionIdParameter] },
+    ),
+  };
   paths["/api/v1/employees"] = {
     get: operation(
       [],

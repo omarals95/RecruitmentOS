@@ -909,6 +909,8 @@ describe("OpenAPI contract", () => {
       "schema_version_id",
       "typeId",
       "type_id",
+      "payBracketVersionId",
+      "pay_bracket_version_id",
     ])
       expect(text, name).not.toContain(name);
   });
@@ -1062,8 +1064,63 @@ describe("OpenAPI contract", () => {
         ).not.toContain("jobTitleKey");
   });
 
-  it("documents the recent sign-in rule on exactly the seven sensitive admin changes (ADM-06, ADM-09)", () => {
+  it("documents the salary bracket operations as session-only and confidential, with their codes (ADM-25)", () => {
+    const text = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method]);
+    const labels = [
+      ["/api/v1/salary-brackets", "get"],
+      ["/api/v1/salary-brackets", "post"],
+      ["/api/v1/salary-brackets/{versionId}", "put"],
+      ["/api/v1/salary-brackets/{versionId}/publish", "post"],
+    ] as const;
+    for (const [path, method] of labels) {
+      const operation = document.paths[path][method];
+      expect(operation["x-session-only"], path).toBe(true);
+      expect(operation["x-required-scopes"], path).toEqual([]);
+      expect(Object.keys(operation.responses), path).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      for (const code of [
+        "session_required",
+        "plan_access_required",
+        "AED fils",
+        "never offered to API tokens or MCP",
+        "never in exports",
+        "version number only",
+      ])
+        expect(text(path, method), path).toContain(code);
+    }
+    for (const [path, method] of labels.slice(1))
+      for (const code of ["config_forbidden", "team_archived"])
+        expect(text(path, method), path).toContain(code);
+    for (const code of [
+      "invalid_input",
+      "job_grades_required",
+      "The minimum must be at most the midpoint, and the midpoint at most the maximum.",
+      "brackets must hold exactly one bracket for each grade of the published job architecture.",
+      '"additionalProperties":false',
+    ])
+      expect(text("/api/v1/salary-brackets", "post")).toContain(code);
+    for (const code of ["not_found", "bracket_version_published"])
+      for (const [path, method] of labels.slice(2))
+        expect(text(path, method), path).toContain(code);
+    for (const code of [
+      "bracket_grades_changed",
+      "SESSION_NOT_FRESH",
+      "salary_brackets.published",
+      "nothing is retired",
+    ])
+      expect(
+        text("/api/v1/salary-brackets/{versionId}/publish", "post"),
+      ).toContain(code);
+    expect(text("/api/v1/salary-brackets", "get")).toContain(
+      "{data:{current:{versionId, number|null, state, payPeriod, covers, effectiveFrom, createdAt, publishedAt|null, brackets:[{gradeCode, minimumFils, midpointFils, maximumFils}]}|null, draft:",
+    );
+  });
+
+  it("documents the recent sign-in rule on exactly the eight sensitive admin changes (ADM-06, ADM-09, ADM-25)", () => {
     const guarded = [
+      "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
       "POST /api/v1/teams/member-roles",
       "POST /api/v1/company-authority",
@@ -1159,6 +1216,10 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/job-architecture",
         "PUT /api/v1/job-architecture/{versionId}",
         "POST /api/v1/job-architecture/{versionId}/publish",
+        "GET /api/v1/salary-brackets",
+        "POST /api/v1/salary-brackets",
+        "PUT /api/v1/salary-brackets/{versionId}",
+        "POST /api/v1/salary-brackets/{versionId}/publish",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {

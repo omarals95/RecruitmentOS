@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   afterAll,
   afterEach,
@@ -26,6 +28,10 @@ import {
   createConfigDraft,
   publishConfigVersion,
 } from "../src/lib/config-store";
+import {
+  createSalaryBracketDraft,
+  publishSalaryBracketVersion,
+} from "../src/lib/pay-brackets";
 import { referenceFields } from "../src/domain/records";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { mcpHarness, type Result } from "./helpers/mcp";
@@ -1166,6 +1172,120 @@ describe("MCP pipeline tools over real migrations and RLS", () => {
     expect(
       names.filter((name) => /architecture|grade|famil|job_title/.test(name)),
     ).toEqual([]);
+  });
+
+  it("returns no bracket field for a pinned offer and leaves the tool list and the audit allowlist unchanged (ADM-25)", async () => {
+    const writer = await token(["recruitment:write"]);
+    const reader = await token(["recruitment:read"]);
+    // Fictional figures in AED fils; the owner grants themselves Plan & pay access as fixture SQL.
+    const figures = ["3456789", "3756789", "4056789"];
+    await query(
+      "UPDATE app.workspace_admins SET plan_access = true WHERE user_id = $1",
+      [owner.userId],
+    );
+    const architecture = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: "company",
+      body: {
+        families: [{ key: "finance", name: "Fictional Finance" }],
+        grades: [{ code: "G7", name: "Fictional Lead", order: 7 }],
+        titles: [
+          {
+            key: "payroll-lead",
+            name: "Fictional Payroll Lead",
+            familyKey: "finance",
+            gradeCode: "G7",
+          },
+        ],
+      },
+    });
+    await publishConfigVersion(owner, architecture.versionId);
+    const brackets = await createSalaryBracketDraft(owner, {
+      effectiveFrom: "2027-01-01",
+      brackets: [
+        {
+          gradeCode: "G7",
+          minimumFils: Number(figures[0]),
+          midpointFils: Number(figures[1]),
+          maximumFils: Number(figures[2]),
+        },
+      ],
+    });
+    await publishSalaryBracketVersion(owner, brackets.versionId);
+    const vacancy = (
+      await createRecord(owner, "vacancies", {
+        data: {
+          title: "Fictional Pinned Vacancy",
+          jobTitleKey: "payroll-lead",
+        },
+      })
+    ).id;
+    const application = await make.application(owner, vacancy);
+    const created = await call(writer, "create_offer", {
+      idempotencyKey: key(),
+      applicationId: application,
+      title: "Fictional pinned MCP offer",
+    });
+    const offer = data<{ id: string; version: number }>(created);
+    expect(
+      await query(
+        "SELECT pay_bracket_version_id AS pin FROM app.records WHERE id = $1",
+        [offer.id],
+      ),
+    ).toEqual([{ pin: brackets.versionId }]);
+    const updated = await call(writer, "update_offer", {
+      id: offer.id,
+      version: offer.version,
+      status: "Sent",
+    });
+    const listed = await call(reader, "list_offers", {
+      applicationId: application,
+    });
+    expect(data<{ id: string }[]>(listed).map((item) => item.id)).toContain(
+      offer.id,
+    );
+    /** Every key at every depth of a tool result. */
+    const keys = (value: unknown): string[] =>
+      value && typeof value === "object"
+        ? Object.entries(value).flatMap(([name, child]) => [
+            name,
+            ...keys(child),
+          ])
+        : [];
+    for (const result of [created, updated, listed]) {
+      wrapped(result);
+      expect(
+        keys(result.structuredContent).filter((name) => /bracket/i.test(name)),
+      ).toEqual([]);
+      const text = JSON.stringify(result);
+      expect(text).not.toContain(brackets.versionId);
+      for (const figure of figures) expect(text).not.toContain(figure);
+    }
+    // No tool reads or writes brackets (D13), and the audit allowlist is the one 0026 defined.
+    expect(
+      TOOLS.map((item) => item.name).filter((name) =>
+        /bracket|salary|pay|plan/i.test(name),
+      ),
+    ).toEqual([]);
+    const full = await token(SCOPES);
+    expect((await listNames(full)).sort()).toEqual(
+      TOOLS.map((item) => item.name).sort(),
+    );
+    const [{ source }] = await query<{ source: string }>(
+      "SELECT p.prosrc AS source FROM pg_proc p WHERE p.oid = 'tenant_context.audit_mcp_call(text,text)'::regprocedure",
+    );
+    const migration = (name: string) =>
+      readFile(join(process.cwd(), "drizzle", name), "utf8").then((text) =>
+        text.replace(/\r\n/g, "\n"),
+      );
+    const defined =
+      /FUNCTION tenant_context\.audit_mcp_call\(tool text, decision text\)[^$]*\$\$([\s\S]*?)\$\$;/.exec(
+        await migration("0026_mcp_cv_tools.sql"),
+      )![1];
+    expect(source.replace(/\r\n/g, "\n")).toBe(defined);
+    expect(await migration("0048_salary_brackets.sql")).not.toContain(
+      "audit_mcp_call",
+    );
   });
 
   it("completes onboarding and checklist items, declines offers and audits stage and status changes", async () => {
