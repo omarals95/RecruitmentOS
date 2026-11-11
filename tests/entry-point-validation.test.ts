@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, count, eq, sql } from "drizzle-orm";
 vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
@@ -199,6 +200,30 @@ describe("UI, API and importer reject the same invalid writes", () => {
       }),
     ]);
     expect(await total("candidate", invalid)).toBe(0);
+  });
+
+  it("answers an unknown custom field on the default schema in the error shape with a correlation id (R2b-04)", async () => {
+    const name = "Fictional Unknown Custom Value";
+    const response = await send("token", "POST", "/api/v1/candidates", {
+      data: { name, customValues: { [randomUUID()]: "x" } },
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        code: "unknown_custom_field",
+        message: "A custom field is not available in this team.",
+        correlationId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        ),
+      },
+    });
+    expect(response.headers.get("x-correlation-id")).toBe(
+      body.error.correlationId,
+    );
+    expect(
+      await total("candidate", sql`${records.data}->>'name' = ${name}`),
+    ).toBe(0);
   });
 
   it("rejects an archived parent vacancy everywhere and creates no application", async () => {

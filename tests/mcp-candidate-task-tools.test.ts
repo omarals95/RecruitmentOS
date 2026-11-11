@@ -29,6 +29,7 @@ import { NOTICE } from "../src/lib/mcp/results";
 import { SCOPES, roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { createRecord } from "../src/lib/records";
+import { DEFAULT_KIND_SCHEMAS } from "../src/domain/config-defaults";
 import { dubaiToday, referenceFields } from "../src/domain/records";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { ORIGIN, mcpHarness, type Result } from "./helpers/mcp";
@@ -1524,7 +1525,37 @@ describe("MCP candidate, task and collaboration tools over real migrations and R
         .map((item) => item.name)
         .sort(),
     ).toEqual(["create_task", "update_task"]);
+    // A published candidate custom field (R2b-04), written by the owner as an admin writer would.
     const field = randomUUID();
+    const body = structuredClone(DEFAULT_KIND_SCHEMAS.candidate.body);
+    for (const screen of body.screens) screen.fields.push(field);
+    const [object] = await query<{ id: string }>(
+      "INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ('00000000-0000-4000-a000-000000000001', 'kind-schema', 'candidate', $1) RETURNING id",
+      [owner.userId],
+    );
+    const [version] = await query<{ id: string }>(
+      "INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) VALUES ($1, '00000000-0000-4000-a000-000000000001', 'published', 1, $2::jsonb, now()) RETURNING id",
+      [
+        object.id,
+        JSON.stringify({
+          ...body,
+          fields: [
+            ...body.fields,
+            {
+              key: field,
+              system: false,
+              label: "Fictional custom note",
+              type: "short-text",
+              required: false,
+            },
+          ],
+        }),
+      ],
+    );
+    await query(
+      "UPDATE app.config_objects SET current_version_id = $1 WHERE id = $2",
+      [version.id, object.id],
+    );
     const stored = await createRecord(owner, "candidates", {
       data: {
         name: "Custom Values Fictional Candidate",
