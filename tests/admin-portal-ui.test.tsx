@@ -3780,8 +3780,8 @@ describe("user detail", () => {
       new URL("../src/components/settings/user-detail.tsx", import.meta.url),
       "utf8",
     );
-    expect(source).toContain(
-      'role="tablist"\n        aria-label="User details"\n        onKeyDown={tabKeys}',
+    expect(source).toMatch(
+      /role="tablist"\s+aria-label="User details"\s+onKeyDown=\{tabKeys\}/,
     );
     // Five tab buttons, as the tablist renders them.
     const clicked: string[] = [];
