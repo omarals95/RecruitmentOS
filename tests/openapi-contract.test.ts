@@ -305,6 +305,43 @@ describe("OpenAPI contract", () => {
     ]);
   });
 
+  it("documents the file field upload and attachment-only download routes, Blob only (R2b-06)", () => {
+    const write = [
+      "/api/v1/record-files/uploads",
+      "/api/v1/record-files/uploads/{id}/complete",
+    ];
+    for (const path of write)
+      expect(document.paths[path].post["x-required-scopes"], path).toEqual([
+        "cvs:write",
+      ]);
+    for (const path of [
+      "/api/v1/record-files/{id}/manifest",
+      "/api/v1/record-files/{id}/chunks",
+    ]) {
+      expect(document.paths[path].get["x-required-scopes"], path).toEqual([
+        "cvs:read",
+      ]);
+      expect(JSON.stringify(document.paths[path]), path).toContain(
+        "404 FILE_NOT_FOUND",
+      );
+    }
+    const upload = JSON.stringify(document.paths[write[0]]);
+    for (const code of [
+      "FILE_STORAGE_UNSUPPORTED",
+      "FILE_UPLOAD_TICKET_LIMIT",
+      "STORAGE_QUOTA_EXCEEDED",
+      "RECORD_NOT_FOUND",
+      "blob-put-v1",
+    ])
+      expect(upload).toContain(code);
+    expect(upload).not.toContain("s3-form-v1");
+    const chunks = document.paths["/api/v1/record-files/{id}/chunks"].get;
+    expect(JSON.stringify(chunks)).toContain("Content-Disposition: attachment");
+    expect(Object.keys(chunks.responses["200"].content ?? {})).toEqual([
+      "application/octet-stream",
+    ]);
+  });
+
   it("documents the bulk intake routes, their limits and the real upload capability", () => {
     const bulk = {
       "/api/v1/cvs/bulk-batches": "get",
@@ -610,6 +647,7 @@ describe("OpenAPI contract", () => {
       "removed",
       "cvStorage",
       "deleteAfter",
+      "recordFiles",
       "There is no MCP tool",
       "erasure_storage_settlement_failed",
       "whole phrase",

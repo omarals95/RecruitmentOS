@@ -3337,3 +3337,124 @@ describe("upgrade from 0047 to salary brackets", () => {
       ]);
   });
 });
+
+// A team with a ready Blob CV written by the 0048 schema, upgraded through 0049: every record, upload
+// and ledger row keeps every value, app.record_files arrives empty under ENABLE and FORCE RLS with
+// the restrictive record-scope policy, the two widened helpers keep their signature, owner, SECURITY
+// DEFINER and search_path with no PUBLIC EXECUTE, and the marker goes from 26 to 27.
+describe("upgrade from 0048 to record files", () => {
+  const pg = new PGlite();
+  const team = "files-upgrade-team";
+  const user = "files-upgrade-owner";
+  const upload = randomUUID();
+  const state = async () => ({
+    records: (await pg.query("SELECT * FROM app.records ORDER BY id")).rows,
+    uploads: (await pg.query("SELECT * FROM app.uploads ORDER BY id")).rows,
+    usage: (await pg.query("SELECT * FROM app.storage_usage ORDER BY team_id"))
+      .rows,
+    stores: (
+      await pg.query("SELECT * FROM storage_ledger.stores ORDER BY store")
+    ).rows,
+  });
+  let before: Awaited<ReturnType<typeof state>>;
+  let marker: unknown[];
+  beforeAll(async () => {
+    await applyMigrations(pg, "0048_salary_brackets.sql");
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin,two_factor_enabled) VALUES
+        ('${user}','Fictional Upgrade Owner','${user}@example.test',true,true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES ('${team}','Fictional Upgrade Team','${team}','${user}');
+      INSERT INTO app.records(id,team_id,kind,data,created_by) VALUES
+        ('${ids.candidate}','${team}','candidate','{"name":"Fictional Upgrade Candidate"}','${user}');
+      INSERT INTO storage_ledger.stores(provider,store,environment) VALUES ('blob','store_fictionalupgrade','development');
+      INSERT INTO app.storage_usage(team_id) VALUES ('${team}');
+      INSERT INTO app.uploads(id,team_id,candidate_id,original_name,mime_type,size_bytes,status,object_key,storage_provider,storage_environment,storage_store,created_by,expires_at)
+        VALUES ('${upload}','${team}','${ids.candidate}','fictional-upgrade-cv.pdf','application/pdf',1000,'pending','teams/${team}/cvs/${ids.candidate}/${upload}/fictional.pdf','blob','development','store_fictionalupgrade','${user}',now()+interval '15 minutes');
+      UPDATE app.uploads SET status='ready', blob_sha256=repeat('a',64), blob_size_bytes=1000, completed_at=now() WHERE id='${upload}';`);
+    before = await state();
+    marker = (await pg.query("SELECT version FROM db_boundary.storage_schema"))
+      .rows;
+    await applyMigrations(pg);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every record, upload and ledger row and moves the marker from 26 to 27", async () => {
+    expect(marker).toEqual([{ version: 26 }]);
+    expect(before.uploads).toHaveLength(1);
+    expect(before.stores).toMatchObject([{ used_files: 1, reserved_files: 0 }]);
+    expect(await state()).toEqual(before);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 27 }]);
+  });
+
+  it("adds app.record_files empty under ENABLE and FORCE RLS with the team, owner and record-scope policies", async () => {
+    expect(
+      (
+        await pg.query(
+          "SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced FROM pg_class WHERE oid = 'app.record_files'::regclass",
+        )
+      ).rows,
+    ).toEqual([{ enabled: true, forced: true }]);
+    expect(
+      (await pg.query("SELECT count(*)::int AS n FROM app.record_files")).rows,
+    ).toEqual([{ n: 0 }]);
+    expect(
+      (
+        await pg.query<{ name: string; permissive: string; command: string }>(
+          "SELECT policyname AS name, permissive, cmd AS command FROM pg_policies WHERE schemaname = 'app' AND tablename = 'record_files' ORDER BY 1",
+        )
+      ).rows,
+    ).toEqual([
+      { name: "context_insert", permissive: "PERMISSIVE", command: "INSERT" },
+      { name: "context_read", permissive: "PERMISSIVE", command: "SELECT" },
+      { name: "context_update", permissive: "PERMISSIVE", command: "UPDATE" },
+      {
+        name: "ledger_owner_read",
+        permissive: "PERMISSIVE",
+        command: "SELECT",
+      },
+      {
+        name: "ledger_owner_update",
+        permissive: "PERMISSIVE",
+        command: "UPDATE",
+      },
+      { name: "record_scope", permissive: "RESTRICTIVE", command: "ALL" },
+    ]);
+    const [scope] = (
+      await pg.query<{ qual: string; check: string }>(
+        "SELECT qual, with_check AS check FROM pg_policies WHERE schemaname = 'app' AND tablename = 'record_files' AND policyname = 'record_scope'",
+      )
+    ).rows;
+    for (const text of [scope.qual, scope.check])
+      expect(text).toContain("record_in_scope(team_id, record_id)");
+  });
+
+  it("keeps both widened helpers owner-run, SECURITY DEFINER, with a fixed search_path and no PUBLIC EXECUTE", async () => {
+    for (const helper of [
+      "tenant_context.release_blob_charge(text,uuid)",
+      "tenant_context.erase_candidate(uuid,text,text)",
+      "storage_ledger.charge_record_file()",
+      "storage_ledger.settle_record_file()",
+      "storage_ledger.settle_erased_record_file()",
+    ])
+      expect(
+        (
+          await pg.query(
+            `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+               p.prosecdef AS definer, p.proconfig AS config,
+               has_function_privilege('public', p.oid, 'EXECUTE') AS public
+             FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+            [helper],
+          )
+        ).rows,
+        helper,
+      ).toEqual([
+        {
+          owned: true,
+          definer: true,
+          config: ["search_path=pg_catalog, pg_temp"],
+          public: false,
+        },
+      ]);
+  });
+});

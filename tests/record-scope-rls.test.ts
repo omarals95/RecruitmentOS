@@ -687,6 +687,66 @@ describe("record scope in row-level security under the split runtime roles", () 
       expect(await upload(hm, id.cA)).toBeTruthy();
     });
 
+    it("limits record files to records in scope and to the team, and refuses one for an out-of-scope record (R2b-06)", async () => {
+      // A pending Blob record file, inserted directly as the data role after the ledger lock.
+      const recordFile = (p: Principal, recordId: string) =>
+        asContext(p, async (tx) => {
+          await tx.execute(
+            sql`SELECT tenant_context.lock_storage_allocation('blob','development','store_fictionalrls')`,
+          );
+          const { rows } = await tx.execute<{ id: string }>(
+            sql`INSERT INTO app.record_files(id,team_id,record_id,original_name,mime_type,size_bytes,status,object_key,storage_provider,storage_environment,storage_store,created_by,expires_at)
+              VALUES (gen_random_uuid(), ${p.teamId}, ${recordId}::uuid, 'fictional-rls.pdf', 'application/pdf', 10, 'pending', ${`teams/${p.teamId}/files/${recordId}/${randomUUID()}.pdf`}, 'blob', 'development', 'store_fictionalrls', ${p.userId}, now() + interval '15 minutes') RETURNING id`,
+          );
+          return rows[0].id;
+        });
+      const files = async () =>
+        (
+          await look<{ n: number }>(
+            "SELECT count(*)::int AS n FROM app.record_files",
+          )
+        )[0].n;
+      const inScope = await recordFile(owner, id.cA);
+      const outOfScope = await recordFile(owner, id.cB);
+      const visible = (p: Principal) =>
+        sqlAs(p, "SELECT id FROM app.record_files").then((rows) =>
+          sorted(rows),
+        );
+      // The unit-scoped hiring manager reads only the file of the candidate in scope.
+      expect(await visible(hm)).toEqual([inScope]);
+      expect(
+        await sqlAs(
+          hm,
+          `SELECT id FROM app.record_files WHERE id = '${outOfScope}'`,
+        ),
+      ).toEqual([]);
+      expect(
+        await sqlAs(
+          hm,
+          `UPDATE app.record_files SET put_tickets_issued = put_tickets_issued + 1 WHERE id = '${outOfScope}' RETURNING id`,
+        ),
+      ).toEqual([]);
+      // It cannot insert one for the out-of-scope candidate, and can for the one in scope.
+      const count = await files();
+      await expect(recordFile(hm, id.cB)).rejects.toMatchObject({
+        cause: { code: "42501" },
+      });
+      expect(await files()).toBe(count);
+      const own = await recordFile(hm, id.cA);
+      expect(await visible(hm)).toEqual([inScope, own].sort());
+      // A scope-all member reads every file of the team; another team's context reads none.
+      expect(await visible(recruiter)).toEqual(
+        [inScope, outOfScope, own].sort(),
+      );
+      expect(await visible(ownerX)).toEqual([]);
+      expect(
+        await sqlAs(
+          ownerX,
+          `UPDATE app.record_files SET put_tickets_issued = put_tickets_issued + 1 WHERE id = '${inScope}' RETURNING id`,
+        ),
+      ).toEqual([]);
+    });
+
     it("answers the hiring manager's unit move with 403 record_out_of_scope and leaves the vacancy unchanged", async () => {
       const before = await getRecord(owner, "vacancies", id.vA);
       await expect(
