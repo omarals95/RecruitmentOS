@@ -52,6 +52,9 @@
  *   out-of-scope record, or insert activity or an upload for one, and reads, changes and deletes
  *   no other actor's app.idempotency row nor writes one under another actor's key. The team B
  *   owner, who holds no company authority, cannot call tenant_context.workspace_team_list (0041).
+ *   Neither the team B owner nor a company admin without the people area (the team C owner, given
+ *   the organisation area by the owner for that check and then removed) can call
+ *   tenant_context.workspace_people (0042).
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -4037,6 +4040,71 @@ async function runChecks(run: Run) {
       );
       return probe.all(["setup", access.companyLevel === null], denial(listed));
     });
+  });
+
+  // The team B owner, who holds no company authority, gets no workspace people list (0042).
+  await check("workspace-people-team-b-owner-denied", async (probe) => {
+    probe.at("setup");
+    return transaction(data, async () => {
+      probe.at("install");
+      const { access } = await installAs(data, signer, p.ownerB);
+      probe.at("outcome");
+      const listed = await attempt(
+        data,
+        "SELECT * FROM tenant_context.workspace_people(NULL, NULL, NULL, NULL, NULL, NULL)",
+      );
+      return probe.all(["setup", access.companyLevel === null], denial(listed));
+    });
+  });
+
+  // The team C owner, made a company admin with the organisation area only for this check, gets no
+  // workspace people list either: it needs the people area (0042).
+  await check("workspace-people-admin-without-people-denied", async (probe) => {
+    probe.at("setup");
+    const granted = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{organisation}')",
+      [COMPANY_WORKSPACE, f.users.c1],
+    );
+    let pass: boolean;
+    try {
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.ownerC);
+        probe.at("outcome");
+        const listed = await attempt(
+          data,
+          "SELECT * FROM tenant_context.workspace_people(NULL, NULL, NULL, NULL, NULL, NULL)",
+        );
+        return probe.all(
+          [
+            "setup",
+            access.companyLevel === "admin" &&
+              access.companyAreas.join(",") === "organisation",
+          ],
+          denial(listed),
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.c1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all(
+        ["setup", granted.rowCount === 1],
+        [
+          "end-state",
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.c1],
+          )) === 0,
+        ],
+      )
+    );
   });
 
   // A token context of the company owner, holding every scope, writes no member role and gets no
