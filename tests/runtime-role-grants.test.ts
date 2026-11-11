@@ -147,6 +147,8 @@ const configTables = ["config_objects", "config_versions", "config_layouts"];
 const orgTables = ["org_levels", "org_units", "org_unit_closure"];
 /** Positions, employees and their positions; no runtime delete (0034). */
 const directoryTables = ["positions", "employees", "employee_positions"];
+/** Salary brackets under Plan & pay access; no runtime delete (0048). */
+const bracketTables = ["salary_bracket_versions", "salary_brackets"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -196,6 +198,13 @@ const expectedData = {
     "app.member_roles": ["DELETE", "INSERT", "SELECT", "UPDATE"],
     // Record assignments, written only through the two owner-run helpers (0037).
     "app.record_assignments": ["SELECT"],
+    // Salary brackets under allows_plan and the immutability guard: no runtime delete (0048).
+    ...Object.fromEntries(
+      bracketTables.map((table) => [
+        `app.${table}`,
+        ["INSERT", "SELECT", "UPDATE"],
+      ]),
+    ),
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -427,6 +436,9 @@ describe("split runtime role template", () => {
         "tenant_context.audit_mcp_cv_read(text,uuid)",
         "tenant_context.set_workspace_authority(text,text,text[],boolean)",
         "tenant_context.allows_workspace_admin(uuid,text)",
+        "tenant_context.allows_plan(uuid,text)",
+        "tenant_context.publish_bracket_version(uuid)",
+        "tenant_context.published_bracket_version()",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
           kind === "data",
@@ -551,7 +563,9 @@ describe("split runtime role template", () => {
         ...orgTables,
         ...directoryTables,
         "member_roles",
+        ...bracketTables,
       ].map((table) => `TRUNCATE app.${table}`),
+      ...bracketTables.map((table) => `DELETE FROM app.${table}`),
       ...workspaceWrites,
       `SET ROLE ${splitRoles.identity}`,
       `SET ROLE ${splitRoles.owner}`,
@@ -609,10 +623,13 @@ describe("split runtime role template", () => {
       "SELECT * FROM tenant_context.config_history(NULL, NULL, 50)",
       ...workspaceTables.map((table) => `SELECT * FROM app.${table}`),
       ...workspaceWrites,
-      ...[...configTables, ...orgTables].flatMap((table) => [
+      ...[...configTables, ...orgTables, ...bracketTables].flatMap((table) => [
         `SELECT * FROM app.${table}`,
         `DELETE FROM app.${table}`,
       ]),
+      "SELECT tenant_context.allows_plan(gen_random_uuid(), 'read')",
+      "SELECT tenant_context.publish_bracket_version(gen_random_uuid())",
+      "SELECT tenant_context.published_bracket_version()",
       "SELECT * FROM app.candidate_erasures",
       "SELECT * FROM app.employee_erasures",
       "TRUNCATE app.employee_erasures",

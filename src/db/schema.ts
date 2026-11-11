@@ -55,6 +55,8 @@ export const records = appSchema.table(
     schemaVersionId: uuid("schema_version_id"),
     /** The record's type; never written until type assignment (R2b-11). */
     typeId: uuid("type_id"),
+    /** An offer's salary bracket version, set once at create (ADM-25); never returned or exported. */
+    payBracketVersionId: uuid("pay_bracket_version_id"),
   },
   (t) => [
     unique("records_team_id_id_key").on(t.teamId, t.id),
