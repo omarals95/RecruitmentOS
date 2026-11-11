@@ -61,6 +61,13 @@
  *   context of that team then stores only read scopes, so a member's record insert and the
  *   owner's task-board insert are refused, a team admin cannot call the helper, and after the
  *   owner restores the team the same inserts succeed (0044).
+ *   Neither runtime role can insert, update or delete app.workspace_users, even under the company
+ *   owner's session. While the team A recruiter is deactivated, tenant_context.install refuses
+ *   their session context with 42501 on the data and the identity role alike, and accepts it
+ *   again once they are reactivated. A company admin without the people area (the team B owner,
+ *   given the organisation area for that check) cannot call tenant_context.set_user_active, and
+ *   with the people area cannot deactivate the company owner, while they can deactivate a member
+ *   without company authority (rolled back) (0047).
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -108,7 +115,9 @@
  *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role,
  *   and once an admin and restores the role. The team A owner's session archives and restores
  *   team A once, writing two team-archive activity rows there; if the restore did not run, the
- *   owner clears the two archive columns.
+ *   owner clears the two archive columns. As the owner it briefly marks the team A recruiter
+ *   deactivated in app.workspace_users and reactivates them, and briefly makes the team B owner a
+ *   company admin, removing the row in that check.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -2050,6 +2059,7 @@ async function runChecks(run: Run) {
         `SELECT (SELECT string_agg(row_to_json(w)::text, ',' ORDER BY w.id) FROM app.workspaces w) AS workspaces,
           (SELECT string_agg(row_to_json(t)::text, ',' ORDER BY t.team_id) FROM app.workspace_teams t) AS teams,
           (SELECT string_agg(row_to_json(a)::text, ',' ORDER BY a.workspace_id, a.user_id) FROM app.workspace_admins a) AS admins,
+          (SELECT string_agg(row_to_json(u)::text, ',' ORDER BY u.workspace_id, u.user_id) FROM app.workspace_users u) AS users,
           (SELECT count(*) FROM app.activity WHERE team_id LIKE $1 AND kind = 'workspace-authority')::int AS audits`,
         [f.pattern],
       );
@@ -2080,6 +2090,16 @@ async function runChecks(run: Run) {
       [f.pattern],
     ],
     ["DELETE FROM app.workspace_admins WHERE user_id LIKE $1", [f.pattern]],
+    // Deactivation is written only by tenant_context.set_user_active (0047).
+    [
+      "INSERT INTO app.workspace_users(workspace_id,user_id,deactivated_at,deactivated_by) VALUES($1::uuid,$2,now(),$3)",
+      [COMPANY_WORKSPACE, f.users.a2, f.users.a1],
+    ],
+    [
+      "UPDATE app.workspace_users SET deactivated_at = now(), deactivated_by = $2 WHERE user_id LIKE $1",
+      [f.pattern, f.users.a1],
+    ],
+    ["DELETE FROM app.workspace_users WHERE user_id LIKE $1", [f.pattern]],
   ];
   await check("workspace-write-denied", async (probe) => {
     const before = await workspaceRows();
@@ -5184,6 +5204,138 @@ async function runChecks(run: Run) {
     }
     probe.at("end-state");
     return pass && probe.all(["end-state", (await archivedRows()) === 0]);
+  });
+
+  // A deactivated person gets no context (0047): while the owner marks the team A recruiter
+  // deactivated, install refuses their session on both roles; once reactivated it is accepted.
+  const installOutcome = async (db: Db, principal: Principal) => {
+    const assertion = await assertionFor(db, signer, principal);
+    return attempt(db, installSql, [assertion.payload, assertion.signature]);
+  };
+  const deactivatedRows = () =>
+    count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.workspace_users WHERE user_id LIKE $1 AND deactivated_at IS NOT NULL",
+      [f.pattern],
+    );
+  await check("deactivated-context-denied", async (probe) => {
+    const installs = async () => ({
+      data: await transaction(data, () => installOutcome(data, p.memberA)),
+      identity: await transaction(identity, () =>
+        installOutcome(identity, p.memberA),
+      ),
+    });
+    probe.at("setup");
+    const active = await installs();
+    let pass: boolean;
+    try {
+      const marked = await owner.query(
+        "INSERT INTO app.workspace_users(workspace_id,user_id,deactivated_at,deactivated_by) VALUES($1::uuid,$2,now(),$3)",
+        [COMPANY_WORKSPACE, f.users.a2, f.users.a1],
+      );
+      probe.at("outcome");
+      const refused = await installs();
+      probe.at("positive-control");
+      const cleared = await owner.query(
+        "UPDATE app.workspace_users SET deactivated_at = NULL, deactivated_by = NULL WHERE user_id = $1",
+        [f.users.a2],
+      );
+      const restored = await installs();
+      pass = probe.all(
+        outcomeIs(active.data.ok, active.data, "setup"),
+        outcomeIs(active.identity.ok, active.identity, "setup"),
+        ["setup", marked.rowCount === 1],
+        failsWith(refused.data, "42501"),
+        failsWith(refused.identity, "42501"),
+        ["positive-control", cleared.rowCount === 1],
+        outcomeIs(restored.data.ok, restored.data, "positive-control"),
+        outcomeIs(restored.identity.ok, restored.identity, "positive-control"),
+      );
+    } finally {
+      await owner
+        .query("DELETE FROM app.workspace_users WHERE user_id = $1", [
+          f.users.a2,
+        ])
+        .catch(() => {});
+    }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await deactivatedRows()) === 0]);
+  });
+
+  // tenant_context.set_user_active (0047) needs a company owner, or a company admin with the people
+  // area for a person without company authority. The team B owner, a company admin only for this
+  // check, is refused on the team B member without people, and with people on the company owner,
+  // while with people the same session deactivates the team B member (rolled back).
+  await check("user-active-company-admin-denied", async (probe) => {
+    const asTeamBOwner = (target: string) =>
+      transaction(data, async () => {
+        const { access } = await installAs(data, signer, p.ownerB);
+        return {
+          access,
+          outcome: await attempt(
+            data,
+            "SELECT tenant_context.set_user_active($1, false) AS changed",
+            [target],
+          ),
+        };
+      });
+    const setAreas = (areas: string) =>
+      owner.query(
+        "UPDATE app.workspace_admins SET areas = $3::text[] WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.b1, areas],
+      );
+    probe.at("setup");
+    const granted = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{organisation}')",
+      [COMPANY_WORKSPACE, f.users.b1],
+    );
+    let pass: boolean;
+    try {
+      probe.at("outcome");
+      const withoutPeople = await asTeamBOwner(f.users.b2);
+      const changed = await setAreas("{people}");
+      const onOwner = await asTeamBOwner(f.users.a1);
+      probe.at("positive-control");
+      const onMember = await asTeamBOwner(f.users.b2);
+      pass = probe.all(
+        ["setup", granted.rowCount === 1 && changed.rowCount === 1],
+        [
+          "setup",
+          withoutPeople.access.companyLevel === "admin" &&
+            onOwner.access.companyAreas.join(",") === "people",
+        ],
+        failsWith(withoutPeople.outcome, "42501"),
+        failsWith(onOwner.outcome, "42501"),
+        outcomeIs(
+          onMember.outcome.ok && onMember.outcome.rows[0]?.changed === true,
+          onMember.outcome,
+          "positive-control",
+        ),
+      );
+    } finally {
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await count(
+          owner,
+          "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+          [f.users.b1],
+        )) === 0 &&
+          (await deactivatedRows()) === 0 &&
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.activity WHERE team_id LIKE $1 AND kind = 'user-account'",
+            [f.pattern],
+          )) === 0,
+      ])
+    );
   });
 }
 
