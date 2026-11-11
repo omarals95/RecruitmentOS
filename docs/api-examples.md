@@ -16,7 +16,7 @@ Tokens expire after 30 days by default; a shorter or longer duration up to 365 d
 | `cvs:write`         | Reserve, upload and complete a CV upload                                                    |
 | `imports:write`     | Preserve legacy import identifiers and source metadata; owner/admin only                    |
 
-The scopes `directory:read`, `directory:write`, `plans:read` and `plans:write` are owner/admin membership ceilings for the coming company directory and recruitment plan: they cannot be chosen for API tokens (a request with one answers 400 `invalid_token_request`, as for an unknown scope) or offered to MCP clients, and they grant no access yet.
+The scopes `directory:read`, `directory:write`, `plans:read` and `plans:write` are owner/admin membership ceilings for the company directory, salary brackets and the coming recruitment plan: they cannot be chosen for API tokens (a request with one answers 400 `invalid_token_request`, as for an unknown scope) or offered to MCP clients. The plan scopes open salary brackets only in a browser session that also holds the Plan & pay access grant (see [Salary brackets](#salary-brackets)).
 
 Write scopes do not implicitly grant the corresponding read scope. Every CV read (`/api/v1/candidates/{id}/cvs`, `/download`, `/manifest`, `/chunks`) needs `candidates:read` as well as `cvs:read`, and returns 403 `scope_required` without it. API tokens created with `cvs:read` but without `candidates:read` get 403 `scope_required` on every CV read and must be replaced by a token with both. A comment on a candidate is candidate data: without `candidates:read`, `GET /api/v1/comments` leaves it out of the list and its total, `GET /api/v1/comments/{id}` answers 404, and `POST /api/v1/comments` with a candidate `parentRecordId` answers 400 `invalid_reference`, as for a missing record; with `candidates:read` but no `candidates:write`, that `POST` answers 403. Choose both when an integration needs to read its results. A viewer can create a read-only token. A recruiter cannot request import privileges. AI integrations are explicit clients: RecruitmentOS does not send candidate records to an AI provider automatically.
 
@@ -522,6 +522,154 @@ Keys are 1 to 63 lowercase letters, digits and hyphens; names are 1 to 120 chara
 | 404 `not_found`             | The version is not a job architecture version of your company             |
 | 409 `config_draft_exists`   | A draft is already pending; edit or publish it first                      |
 | 409 `config_state_conflict` | The version is no longer a draft                                          |
+
+## Salary brackets
+
+Salary brackets give each job grade of the published job architecture a minimum, midpoint and maximum in AED fils (whole numbers, 100 fils to the dirham), versioned like the job architecture. They are confidential: the database lets only a signed-in session holding **Plan & pay access** (a per-person grant only a company owner gives, themselves included) and the `plans:read` scope of their team role read them. A Bearer token, including an MCP OAuth token, gets 403 `session_required`; there is no MCP tool, and brackets never appear in exports, search, notifications, analytics or activity, which holds the version number only.
+
+- **Who reads.** A grant holder in a team where their role gives `plans:read` (a team owner or admin, or a configured role that keeps it). Anyone else, team owners, company admins and company owners without the grant included, gets 403 `plan_access_required`.
+
+- **Who writes.** A grant holder with `plans:write` who is a company owner, or a company admin with the organisation area. A holder without that authority gets 403 `config_forbidden`; in an archived team, 403 `team_archived`.
+
+The examples assume a local development server and a session cookie held in `RECRUITMENTOS_SESSION_COOKIE`; never put a real session cookie in a script, log or chat. Every write also sends the application's `Origin`. The ids and figures are fictional.
+
+`GET /api/v1/salary-brackets` returns the highest-numbered published version (`current`) and the newest draft (`draft`), each `null` when there is none, with the brackets ordered by grade code:
+
+```bash
+
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/salary-brackets" \
+
+  -H "Cookie: $RECRUITMENTOS_SESSION_COOKIE"
+
+```
+
+```json
+{
+  "data": {
+    "current": {
+      "versionId": "00000000-0000-4000-a000-0000000000e1",
+
+      "number": 1,
+
+      "state": "published",
+
+      "payPeriod": "monthly",
+
+      "covers": "basic",
+
+      "effectiveFrom": "2027-01-01",
+
+      "createdAt": "2026-11-11T08:00:00.000+00:00",
+
+      "publishedAt": "2026-11-11T08:05:00.000+00:00",
+
+      "brackets": [
+        {
+          "gradeCode": "G5",
+
+          "minimumFils": 1200000,
+
+          "midpointFils": 1500000,
+
+          "maximumFils": 1800000
+        },
+
+        {
+          "gradeCode": "G7",
+
+          "minimumFils": 2000000,
+
+          "midpointFils": 2500000,
+
+          "maximumFils": 3000000
+        }
+      ]
+    },
+
+    "draft": null
+  }
+}
+```
+
+`POST /api/v1/salary-brackets` creates a draft with exactly one bracket for each grade of the published job architecture and returns it with 201. `payPeriod` is `monthly` (default) or `annual`; `covers` is `basic` (default, basic salary only), `basic-housing-transport` or `total-cash`; both are stored on the version and shown with every bracket. Several drafts may exist.
+
+```bash
+
+curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/salary-brackets" \
+
+  -H "Cookie: $RECRUITMENTOS_SESSION_COOKIE" \
+
+  -H "Origin: $RECRUITMENTOS_URL" \
+
+  -H "Content-Type: application/json" \
+
+  -d '{"effectiveFrom":"2027-01-01","brackets":[{"gradeCode":"G5","minimumFils":1200000,"midpointFils":1500000,"maximumFils":1800000},{"gradeCode":"G7","minimumFils":2000000,"midpointFils":2500000,"maximumFils":3000000}]}'
+
+```
+
+`PUT /api/v1/salary-brackets/{versionId}` replaces a draft's settings and figures with the same body and returns the draft; the grade codes must be the draft's own. To change grades, create a new draft.
+
+```bash
+
+curl --fail-with-body -X PUT "$RECRUITMENTOS_URL/api/v1/salary-brackets/00000000-0000-4000-a000-0000000000e2" \
+
+  -H "Cookie: $RECRUITMENTOS_SESSION_COOKIE" \
+
+  -H "Origin: $RECRUITMENTOS_URL" \
+
+  -H "Content-Type: application/json" \
+
+  -d '{"payPeriod":"annual","effectiveFrom":"2027-01-01","brackets":[{"gradeCode":"G5","minimumFils":14400000,"midpointFils":18000000,"maximumFils":21600000},{"gradeCode":"G7","minimumFils":24000000,"midpointFils":30000000,"maximumFils":36000000}]}'
+
+```
+
+`POST /api/v1/salary-brackets/{versionId}/publish` publishes the draft as the next version and returns `{"data":{"versionId":"…","number":2}}`. It needs a recent sign-in: a session older than 15 minutes gets 403 `SESSION_NOT_FRESH` and nothing is published. Earlier versions stay published and unchanged; nothing is retired. An offer created afterwards for a vacancy with a job title keeps this version, which its response never shows.
+
+```bash
+
+curl --fail-with-body -X POST "$RECRUITMENTOS_URL/api/v1/salary-brackets/00000000-0000-4000-a000-0000000000e2/publish" \
+
+  -H "Cookie: $RECRUITMENTOS_SESSION_COOKIE" \
+
+  -H "Origin: $RECRUITMENTOS_URL"
+
+```
+
+A Bearer token is refused before any data is read:
+
+```bash
+
+curl "$RECRUITMENTOS_URL/api/v1/salary-brackets" \
+
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"
+
+# 403 {"error":{"code":"session_required",...}}
+
+```
+
+| Error | When |
+
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+
+| 403 `session_required` | A Bearer token, including an MCP OAuth token |
+
+| 403 `plan_access_required` | No Plan & pay access, or no `plans:read` (read) or `plans:write` (write) in your role |
+
+| 403 `config_forbidden` | A write by a holder who is neither a company owner nor a company admin with the organisation area |
+
+| 403 `team_archived` | A write from an archived team |
+
+| 403 `SESSION_NOT_FRESH` | Publishing with a session older than 15 minutes |
+
+| 400 `invalid_input` | A minimum above its midpoint or a midpoint above its maximum, a grade missing, unknown or repeated, grades other than the draft's on edit, or a body outside the schema |
+
+| 404 `not_found` | An unknown version, one of another company, or one you cannot read |
+
+| 409 `job_grades_required` | No published job architecture with at least one grade |
+
+| 409 `bracket_version_published` | The version is published and cannot be changed; create a new draft |
+
+| 409 `bracket_grades_changed` | The job grades changed since the draft was made; create a new draft for the current grades |
 
 ## Organisation import
 

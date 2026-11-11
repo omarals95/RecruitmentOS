@@ -121,6 +121,9 @@ GRANT SELECT, INSERT, UPDATE ON TABLE app.positions TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.employees TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.employee_positions TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.member_roles TO recruitmentos_data;
+-- Salary brackets under allows_plan and the immutability guard; no runtime delete (0048).
+GRANT SELECT, INSERT, UPDATE ON TABLE app.salary_bracket_versions TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE ON TABLE app.salary_brackets TO recruitmentos_data;
 -- Read only: assignments are written only through tenant_context.add_assignment and remove_assignment.
 GRANT SELECT ON TABLE app.record_assignments TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
@@ -159,6 +162,9 @@ GRANT EXECUTE ON FUNCTION tenant_context.workspace_person(text) TO recruitmentos
 GRANT EXECUTE ON FUNCTION tenant_context.set_team_archived(text, boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.member_archived_teams() TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_user_active(text, boolean) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.allows_plan(uuid, text) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.publish_bracket_version(uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.published_bracket_version() TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.remove_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.scope_is_all() TO recruitmentos_data;

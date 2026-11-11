@@ -1911,6 +1911,12 @@ export async function createInside(
         archivedAt: input.archived ? now : null,
         orgUnitId: input.orgUnitId ?? null,
         schemaVersionId: schema?.versionId ?? null,
+        // An offer for a vacancy with a job title keeps the bracket version published when it
+        // was made, in this statement; tenant_context.published_bracket_version returns an id only.
+        payBracketVersionId:
+          kind === "offer" && !imported
+            ? sql`(select tenant_context.published_bracket_version() from ${records} a join ${records} v on v.team_id = a.team_id and v.id = a.vacancy_id where a.team_id = ${p.teamId} and a.id = ${refs.applicationId}::uuid and v.data->>'jobTitleKey' is not null)`
+            : null,
       })
       .returning(readColumns(ctx)),
   );

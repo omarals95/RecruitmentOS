@@ -14,9 +14,18 @@ vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
 import { POST as exportRoute } from "../src/app/api/v1/[resource]/export/route";
 import { schema, type AppDb } from "../src/db";
 import { activity } from "../src/db/schema";
+import { JOB_ARCHITECTURE_KEY } from "../src/domain/config";
 import { authenticateApiToken } from "../src/lib/api-tokens";
 import { getVerifiedSession } from "../src/lib/auth-session";
+import {
+  createConfigDraft,
+  publishConfigVersion,
+} from "../src/lib/config-store";
 import { withTeam } from "../src/lib/db-team";
+import {
+  createSalaryBracketDraft,
+  publishSalaryBracketVersion,
+} from "../src/lib/pay-brackets";
 import type { Principal } from "../src/lib/principal";
 import {
   EXPORT_FILTER_KEYS,
@@ -359,6 +368,86 @@ describe("server-side record export over real migrations and RLS", () => {
       );
     }
     expect(await exportRows(owner.teamId)).toHaveLength(before);
+  });
+
+  it("exports a pinned offer with no bracket column, key, version id or figure (ADM-25)", async () => {
+    // Fictional figures in AED fils; the owner grants themselves Plan & pay access as fixture SQL.
+    const figures = ["4321987", "5321987", "6321987"];
+    await asSuperuser(() =>
+      fixture.client.exec(
+        "UPDATE app.workspace_admins SET plan_access = true WHERE user_id = 'export-owner'",
+      ),
+    );
+    const { versionId: architecture } = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: JOB_ARCHITECTURE_KEY,
+      body: {
+        families: [{ key: "finance", name: "Fictional Finance" }],
+        grades: [{ code: "G7", name: "Fictional Lead", order: 7 }],
+        titles: [
+          {
+            key: "payroll-lead",
+            name: "Fictional Payroll Lead",
+            familyKey: "finance",
+            gradeCode: "G7",
+          },
+        ],
+      },
+    });
+    await publishConfigVersion(owner, architecture, {
+      type: "job-architecture",
+    });
+    const draft = await createSalaryBracketDraft(owner, {
+      effectiveFrom: "2027-01-01",
+      brackets: [
+        {
+          gradeCode: "G7",
+          minimumFils: Number(figures[0]),
+          midpointFils: Number(figures[1]),
+          maximumFils: Number(figures[2]),
+        },
+      ],
+    });
+    await publishSalaryBracketVersion(owner, draft.versionId);
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional Pinned Vacancy", jobTitleKey: "payroll-lead" },
+    });
+    const candidate = await createRecord(owner, "candidates", {
+      data: { name: "Pinned Offer Person" },
+    });
+    const application = await createRecord(owner, "applications", {
+      candidateId: candidate.id,
+      vacancyId: vacancy.id,
+      data: { stage: "Offer" },
+    });
+    const offer = await createRecord(owner, "offers", {
+      applicationId: application.id,
+      data: { title: "Fictional pinned offer", amount: "21000" },
+    });
+    expect(
+      await asSuperuser(
+        async () =>
+          (
+            await fixture.client.query(
+              "SELECT pay_bracket_version_id AS pin FROM app.records WHERE id = $1",
+              [offer.id],
+            )
+          ).rows,
+      ),
+    ).toEqual([{ pin: draft.versionId }]);
+    signIn(owner);
+    const response = await post("/api/v1/offers/export");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-export-rows")).toBe("1");
+    const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+      await response.arrayBuffer(),
+    );
+    expect(text).toContain('"Fictional pinned offer"');
+    expect(text).not.toMatch(/bracket/i);
+    expect(text).not.toContain(draft.versionId);
+    for (const figure of figures) expect(text).not.toContain(figure);
+    const audit = JSON.stringify(await exportRows(owner.teamId));
+    expect(audit).not.toMatch(/bracket/i);
   });
 });
 

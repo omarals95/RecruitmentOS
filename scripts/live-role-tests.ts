@@ -68,6 +68,12 @@
  *   given the organisation area for that check) cannot call tenant_context.set_user_active, and
  *   with the people area cannot deactivate the company owner, while they can deactivate a member
  *   without company authority (rolled back) (0047).
+ *   Salary brackets (0048): on one owner-written draft version with one bracket, the team B owner
+ *   and a company owner without Plan & pay access read no version or bracket and cannot insert a
+ *   draft, update the fixture or call tenant_context.publish_bracket_version; a grant holder whose
+ *   context lacks plans:write reads the fixture but writes nothing; and the team A owner holding
+ *   the grant and both plan scopes reads it, inserts a draft and edits it (rolled back), while
+ *   an API token of theirs holding every scope reads and writes nothing.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -117,7 +123,10 @@
  *   team A once, writing two team-archive activity rows there; if the restore did not run, the
  *   owner clears the two archive columns. As the owner it briefly marks the team A recruiter
  *   deactivated in app.workspace_users and reactivates them, and briefly makes the team B owner a
- *   company admin, removing the row in that check.
+ *   company admin, removing the row in that check. In each salary bracket check it writes one draft
+ *   bracket version, created_by the team A owner, with one bracket, removing both in that check,
+ *   and briefly sets the Plan & pay access of the team A or team C owner, setting it back; the
+ *   last of them briefly adds one more API token holding every scope for the team A owner.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -252,6 +261,8 @@ const DIRECTORY_TABLES = [
 ] as const;
 /** The employee erasure tombstones (0036), owner-only under FORCE RLS with no DELETE policy. */
 const ERASURE_TABLES = ["employee_erasures"] as const;
+/** Salary brackets (0048), under FORCE RLS with allows_plan policies and no runtime delete. */
+const BRACKET_TABLES = ["salary_bracket_versions", "salary_brackets"] as const;
 /** The one company workspace every team maps to. */
 const COMPANY_WORKSPACE = "00000000-0000-4000-a000-000000000001";
 const ALL_SCOPES = [...SCOPES];
@@ -660,6 +671,8 @@ function fixtureTables(f: Fixtures, variant: Variant) {
       [f.pattern],
     ],
     ["app.config_objects", "key LIKE $1 OR team_id LIKE $1", [f.pattern]],
+    // Fixture bracket versions by their fixture creator (0048); brackets cascade from them.
+    ["app.salary_bracket_versions", "created_by LIKE $1", [f.pattern]],
     // Fixture position rows by their employee, employees by number and positions by code.
     [
       "app.employee_positions",
@@ -796,6 +809,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           // their users.
           "app.member_roles",
           "app.config_objects",
+          "app.salary_bracket_versions",
           "app.employee_positions",
           "app.employees",
           "app.employee_erasures",
@@ -836,6 +850,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
         ...ORG_TABLES,
         ...DIRECTORY_TABLES,
         ...ERASURE_TABLES,
+        ...BRACKET_TABLES,
       ],
     ],
   );
@@ -848,7 +863,8 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           CONFIG_TABLES.length +
           ORG_TABLES.length +
           DIRECTORY_TABLES.length +
-          ERASURE_TABLES.length &&
+          ERASURE_TABLES.length +
+          BRACKET_TABLES.length &&
       rows[0].trigger === "O",
     error: failure ?? "assertion",
   };
@@ -5336,6 +5352,271 @@ async function runChecks(run: Run) {
           )) === 0,
       ])
     );
+  });
+
+  // Salary brackets (0048) are read only by a session holding Plan & pay access and plans:read, and
+  // written only with plans:write by a company owner or admin with organisation who holds the grant.
+  // Each check runs on one owner-written draft version with one bracket, created_by the team A owner,
+  // and removes it; a grant changed for a check is set back to what it was.
+  const bracketFixture = async () =>
+    (
+      await owner.query(
+        "INSERT INTO app.salary_bracket_versions(workspace_id,effective_from,created_by) VALUES($1::uuid,'2027-01-01',$2) RETURNING id::text AS id",
+        [COMPANY_WORKSPACE, f.users.a1],
+      )
+    ).rows[0].id as string;
+  const withBrackets = async <T>(work: (version: string) => Promise<T>) => {
+    const version = await bracketFixture();
+    try {
+      await owner.query(
+        "INSERT INTO app.salary_brackets(version_id,workspace_id,grade_code,minimum_fils,midpoint_fils,maximum_fils) VALUES($1::uuid,$2::uuid,'G7',1000000,1500000,2000000)",
+        [version, COMPANY_WORKSPACE],
+      );
+      return await work(version);
+    } finally {
+      await owner
+        .query("DELETE FROM app.salary_bracket_versions WHERE id = $1::uuid", [
+          version,
+        ])
+        .catch(() => {});
+    }
+  };
+  /** Runs work with the user's Plan & pay access set to held, then sets it back. */
+  const withGrant = async <T>(
+    user: string,
+    held: boolean,
+    work: () => Promise<T>,
+  ) => {
+    const before = (
+      await owner.query(
+        "SELECT plan_access FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, user],
+      )
+    ).rows[0]?.plan_access as boolean | undefined;
+    const setGrant = (value: boolean) =>
+      owner.query(
+        "UPDATE app.workspace_admins SET plan_access = $3 WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, user, value],
+      );
+    if (before === undefined) return { set: false, value: await work() };
+    await setGrant(held);
+    try {
+      return { set: true, value: await work() };
+    } finally {
+      await setGrant(before).catch(() => {});
+    }
+  };
+  /** What a context reads of the fixture, and its draft insert, update and publish, rolled back. */
+  const bracketProbe = (principal: Principal, version: string) =>
+    transaction(data, async () => {
+      const { access } = await installAs(data, signer, principal);
+      const read = await attempt(
+        data,
+        "SELECT (SELECT count(*) FROM app.salary_bracket_versions WHERE id = $1::uuid)::int AS versions, (SELECT count(*) FROM app.salary_brackets WHERE version_id = $1::uuid)::int AS brackets",
+        [version],
+      );
+      const insert = await attempt(
+        data,
+        "INSERT INTO app.salary_bracket_versions(workspace_id,effective_from) VALUES($1::uuid,'2027-02-01')",
+        [COMPANY_WORKSPACE],
+      );
+      const update = await attempt(
+        data,
+        "UPDATE app.salary_bracket_versions SET pay_period = 'annual' WHERE id = $1::uuid",
+        [version],
+      );
+      const publish = await attempt(
+        data,
+        "SELECT tenant_context.publish_bracket_version($1::uuid) AS number",
+        [version],
+      );
+      return { access, read, insert, update, publish };
+    });
+  const readsNone = (outcome: Outcome) =>
+    outcomeIs(
+      outcome.ok &&
+        outcome.rows[0]?.versions === 0 &&
+        outcome.rows[0]?.brackets === 0,
+      outcome,
+    );
+  const readsFixture = (outcome: Outcome, phase: Phase = "outcome") =>
+    outcomeIs(
+      outcome.ok &&
+        outcome.rows[0]?.versions === 1 &&
+        outcome.rows[0]?.brackets === 1,
+      outcome,
+      phase,
+    );
+  const fixtureUnchanged = async (version: string) =>
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.salary_bracket_versions WHERE id = $1::uuid AND state = 'draft' AND pay_period = 'monthly' AND number IS NULL",
+      [version],
+    )) === 1;
+  const bracketsGone = async () =>
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.salary_bracket_versions WHERE created_by LIKE $1",
+      [f.pattern],
+    )) === 0 &&
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.activity WHERE team_id LIKE $1 AND kind = 'salary-brackets'",
+      [f.pattern],
+    )) === 0;
+
+  // The team B owner holds no company authority, so no grant: reads nothing and writes nothing,
+  // while the team A owner holding the grant reads the same fixture.
+  await check("salary-brackets-team-b-owner-denied", async (probe) => {
+    probe.at("setup");
+    const pass = await withBrackets(async (version) => {
+      probe.at("outcome");
+      const denied = await bracketProbe(p.ownerB, version);
+      probe.at("positive-control");
+      const holder = await withGrant(f.users.a1, true, () =>
+        bracketProbe(p.ownerA, version),
+      );
+      return probe.all(
+        ["setup", denied.access.companyLevel === null && holder.set],
+        readsNone(denied.read),
+        denial(denied.insert),
+        leftAlone(denied.update),
+        denial(denied.publish),
+        readsFixture(holder.value.read, "positive-control"),
+        ["end-state", await fixtureUnchanged(version)],
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", await bracketsGone()]);
+  });
+
+  // A company owner who has not granted themselves Plan & pay access reads and writes nothing; with
+  // the grant the same session reads the fixture.
+  await check("salary-brackets-owner-without-grant-denied", async (probe) => {
+    probe.at("setup");
+    const pass = await withBrackets(async (version) => {
+      probe.at("outcome");
+      const denied = await withGrant(f.users.c1, false, () =>
+        bracketProbe(p.ownerC, version),
+      );
+      probe.at("positive-control");
+      const granted = await withGrant(f.users.c1, true, () =>
+        bracketProbe(p.ownerC, version),
+      );
+      return probe.all(
+        ["setup", denied.set && denied.value.access.companyLevel === "owner"],
+        readsNone(denied.value.read),
+        denial(denied.value.insert),
+        leftAlone(denied.value.update),
+        denial(denied.value.publish),
+        readsFixture(granted.value.read, "positive-control"),
+        ["end-state", await fixtureUnchanged(version)],
+      );
+    });
+    probe.at("end-state");
+    return pass && probe.all(["end-state", await bracketsGone()]);
+  });
+
+  // A grant holder whose context lacks plans:write reads the fixture but inserts, updates and
+  // publishes nothing.
+  await check(
+    "salary-brackets-holder-without-plans-write-denied",
+    async (probe) => {
+      probe.at("setup");
+      const pass = await withBrackets(async (version) => {
+        probe.at("outcome");
+        const readOnly = await withGrant(f.users.a1, true, () =>
+          bracketProbe(
+            {
+              ...p.ownerA,
+              scopes: ALL_SCOPES.filter((scope) => scope !== "plans:write"),
+            },
+            version,
+          ),
+        );
+        return probe.all(
+          [
+            "setup",
+            readOnly.set &&
+              readOnly.value.access.companyLevel === "owner" &&
+              !readOnly.value.access.scopes.includes("plans:write"),
+          ],
+          readsFixture(readOnly.value.read),
+          denial(readOnly.value.insert),
+          leftAlone(readOnly.value.update),
+          denial(readOnly.value.publish),
+          ["end-state", await fixtureUnchanged(version)],
+        );
+      });
+      probe.at("end-state");
+      return pass && probe.all(["end-state", await bracketsGone()]);
+    },
+  );
+
+  // The team A owner, a company owner holding the grant and both plan scopes, reads the fixture,
+  // inserts a draft and edits the fixture's pay period (rolled back); an API token of theirs holding
+  // every scope, the plan scopes included, reads and writes nothing.
+  await check("salary-brackets-holder-reads", async (probe) => {
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-brackets`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    const token: Principal = {
+      team: f.teams.a,
+      actor: f.users.a1,
+      auth: "token",
+      token: tokenId,
+      scopes: ALL_SCOPES,
+    };
+    let pass: boolean;
+    try {
+      pass = await withBrackets(async (version) => {
+        probe.at("outcome");
+        const holder = await withGrant(f.users.a1, true, async () => ({
+          session: await bracketProbe(p.ownerA, version),
+          token: await bracketProbe(token, version),
+        }));
+        const { session, token: viaToken } = holder.value;
+        return probe.all(
+          [
+            "setup",
+            stored.rowCount === 1 &&
+              holder.set &&
+              session.access.companyLevel === "owner" &&
+              viaToken.access.scopes.includes("plans:read"),
+          ],
+          readsFixture(session.read),
+          outcomeIs(
+            session.insert.ok && session.insert.count === 1,
+            session.insert,
+          ),
+          outcomeIs(
+            session.update.ok && session.update.count === 1,
+            session.update,
+          ),
+          readsNone(viaToken.read),
+          denial(viaToken.insert),
+          leftAlone(viaToken.update),
+          denial(viaToken.publish),
+          ["end-state", await fixtureUnchanged(version)],
+        );
+      });
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+    }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", await bracketsGone()]);
   });
 }
 
