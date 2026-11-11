@@ -74,6 +74,11 @@
  *   context lacks plans:write reads the fixture but writes nothing; and the team A owner holding
  *   the grant and both plan scopes reads it, inserts a draft and edits it (rolled back), while
  *   an API token of theirs holding every scope reads and writes nothing.
+ *   Record files (0049): the data role holds SELECT, INSERT and UPDATE on app.record_files and no
+ *   DELETE or TRUNCATE, and the identity role nothing. Under the unit-limited context of the team A
+ *   recruiter, direct SQL reads no fixture record file of the out-of-scope candidate and cannot
+ *   insert one for it, while it can for the vacancy in scope; the team A owner reads it, and a team
+ *   B owner context reads no record file of team A.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -84,8 +89,8 @@
  *   process environment. It never loads an env file.
  * - It writes only fictional fixtures under a random run prefix: users, three teams, members and
  *   API tokens as the owner or the identity role; candidates, a vacancy, saved views, candidate
- *   states, reminder reads, idempotency, activity, pending uploads and bulk intake batches and
- *   items as the data role under signed contexts; fixture stores and read leases as the owner. The
+ *   states, reminder reads, idempotency, activity, pending uploads, pending record files and bulk
+ *   intake batches and items as the data role under signed contexts; fixture stores and read leases as the owner. The
  *   owner-run triggers map each fixture team to the company workspace and, in the open bootstrap
  *   variant, make the fixture initial administrator company owner. As the owner it also removes
  *   and restores one fixture team's workspace mapping and makes one fixture user company owner,
@@ -233,6 +238,7 @@ const APP_TABLES = [
   "candidate_states",
   "activity",
   "uploads",
+  "record_files",
   "storage_usage",
   "idempotency",
   "notification_reads",
@@ -278,6 +284,11 @@ const CEILING_SCOPES = [
 const INSERT_UPLOAD = `INSERT INTO app.uploads(team_id,candidate_id,original_name,mime_type,size_bytes,object_key,
     storage_provider,storage_environment,storage_store,created_by,expires_at)
   VALUES($1,$2,$3,'application/pdf',$4,$5,'blob','development',$6,$7,now() + interval '1 hour') RETURNING id::text AS id`;
+
+/** A pending Blob record file (0049), with the same parameters as INSERT_UPLOAD; $2 is the record. */
+const INSERT_RECORD_FILE = `INSERT INTO app.record_files(id,team_id,record_id,original_name,mime_type,size_bytes,status,object_key,
+    storage_provider,storage_environment,storage_store,created_by,expires_at)
+  VALUES(gen_random_uuid(),$1,$2,$3,'application/pdf',$4,'pending',$5,'blob','development',$6,$7,now() + interval '15 minutes') RETURNING id::text AS id`;
 
 function refuse(reason: string, after = "Nothing was contacted."): number {
   console.error(`Refused: ${reason} ${after}`);
@@ -583,6 +594,7 @@ type TeamRows = {
   vacancy: string;
   savedView: string;
   upload: string;
+  recordFile: string;
   batch: string;
   item: string;
 };
@@ -643,6 +655,12 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     ["app.bulk_intake_batches", ...team],
     [
       "app.uploads",
+      "team_id LIKE $1 OR storage_store = ANY($2::text[])",
+      [f.pattern, Object.values(f.stores)],
+    ],
+    // Fixture record files by team or fixture store (0049); removed before their records.
+    [
+      "app.record_files",
       "team_id LIKE $1 OR storage_store = ANY($2::text[])",
       [f.pattern, Object.values(f.stores)],
     ],
@@ -773,6 +791,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           "bulk_intake_items",
           "bulk_intake_batches",
           "uploads",
+          "record_files",
           "candidate_states",
           "notification_reads",
           "idempotency",
@@ -1204,6 +1223,17 @@ async function seedTeam(
           actor,
         ])
       ).rows[0].id as string;
+      const recordFile = (
+        await data.query(INSERT_RECORD_FILE, [
+          team,
+          candidate,
+          `${f.prefix}-${label}-file.pdf`,
+          UPLOAD_BYTES,
+          `${f.prefix}/${label}/files/file.pdf`,
+          f.stores.seed,
+          actor,
+        ])
+      ).rows[0].id as string;
       // One unexpired recovery batch and its reviewed item, holding file metadata and a hash only.
       const batch = (
         await data.query(
@@ -1226,7 +1256,7 @@ async function seedTeam(
           ],
         )
       ).rows[0].id as string;
-      return { candidate, vacancy, savedView, upload, batch, item };
+      return { candidate, vacancy, savedView, upload, recordFile, batch, item };
     },
     true,
   );
@@ -1308,6 +1338,18 @@ async function runChecks(run: Run) {
             `${f.prefix}-cross.pdf`,
             UPLOAD_BYTES,
             `${f.prefix}/cross/cv.pdf`,
+            f.stores.seed,
+            f.users.a1,
+          ],
+        ],
+        [
+          INSERT_RECORD_FILE,
+          [
+            B,
+            b.candidate,
+            `${f.prefix}-cross-file.pdf`,
+            UPLOAD_BYTES,
+            `${f.prefix}/cross/file.pdf`,
             f.stores.seed,
             f.users.a1,
           ],
@@ -1398,6 +1440,14 @@ async function runChecks(run: Run) {
           "outcome",
           (await count(
             data,
+            "SELECT count(*)::int AS n FROM app.record_files WHERE id = $1",
+            [b.recordFile],
+          )) === 0,
+        ],
+        [
+          "outcome",
+          (await count(
+            data,
             "SELECT count(*)::int AS n FROM app.bulk_intake_batches WHERE id = $1",
             [b.batch],
           )) === 0,
@@ -1422,6 +1472,11 @@ async function runChecks(run: Run) {
           [b.upload],
         ],
         ["DELETE FROM app.uploads WHERE id = $1", [b.upload]],
+        [
+          "UPDATE app.record_files SET original_name = original_name WHERE id = $1",
+          [b.recordFile],
+        ],
+        ["DELETE FROM app.record_files WHERE id = $1", [b.recordFile]],
         [
           "UPDATE app.bulk_intake_batches SET expires_at = expires_at WHERE id = $1",
           [b.batch],
@@ -2067,6 +2122,63 @@ async function runChecks(run: Run) {
       );
     }),
   );
+
+  // Record files (0049): SELECT, INSERT and UPDATE for the data role, no DELETE or TRUNCATE, and
+  // nothing for the identity role.
+  await check("record-files-grants", async (probe) => {
+    // Read by the owner for each runtime role: the identity role cannot even resolve the table.
+    const privileges = async (db: Db) => {
+      const role = (await db.query("SELECT current_user AS name")).rows[0].name;
+      const { rows } = await owner.query(
+        `SELECT has_table_privilege($1, 'app.record_files', 'SELECT') AS "select",
+          has_table_privilege($1, 'app.record_files', 'INSERT') AS "insert",
+          has_table_privilege($1, 'app.record_files', 'UPDATE') AS "update",
+          has_table_privilege($1, 'app.record_files', 'DELETE') AS "delete",
+          has_table_privilege($1, 'app.record_files', 'TRUNCATE') AS "truncate"`,
+        [role],
+      );
+      return JSON.stringify(rows[0]);
+    };
+    probe.at("outcome");
+    const dataGrants = await privileges(data);
+    const identityGrants = await privileges(identity);
+    const deleted = await transaction(data, async () => {
+      await installAs(data, signer, p.ownerA);
+      return attempt(data, "DELETE FROM app.record_files WHERE id = $1", [
+        a.recordFile,
+      ]);
+    });
+    const read = await transaction(identity, async () => {
+      await installAs(identity, signer, p.ownerA);
+      return attempt(identity, "SELECT count(*) FROM app.record_files");
+    });
+    return probe.all(
+      [
+        "outcome",
+        dataGrants ===
+          JSON.stringify({
+            select: true,
+            insert: true,
+            update: true,
+            delete: false,
+            truncate: false,
+          }),
+      ],
+      [
+        "outcome",
+        identityGrants ===
+          JSON.stringify({
+            select: false,
+            insert: false,
+            update: false,
+            delete: false,
+            truncate: false,
+          }),
+      ],
+      denial(deleted),
+      denial(read),
+    );
+  });
 
   // The company workspace tables (0028): the owner, its triggers and its helper write them.
   const workspaceRows = () =>
@@ -4880,6 +4992,79 @@ async function runChecks(run: Run) {
           "positive-control",
           all.records === 2 && all.assignments === 2 && all.upload.ok,
         ],
+      );
+    });
+    return scopedEnd(probe, pass);
+  });
+
+  // Record files (0049) under the same unit-scoped context: none of the out-of-scope candidate is
+  // read or can be inserted, one for the vacancy in scope can; the team A owner reads the fixture
+  // file and a team B owner context reads no record file of team A. Every write is rolled back.
+  await check("record-files-scope-direct-sql", async (probe) => {
+    const recordFile = (recordId: string, userId: string, key: string) =>
+      attempt(data, INSERT_RECORD_FILE, [
+        f.teams.a,
+        recordId,
+        `${f.prefix}-scope-file.pdf`,
+        UPLOAD_BYTES,
+        `${f.prefix}/scope/files/${key}.pdf`,
+        f.stores.seed,
+        userId,
+      ]);
+    const fixtureFile = () =>
+      count(
+        data,
+        "SELECT count(*)::int AS n FROM app.record_files WHERE id = $1::uuid",
+        [a.recordFile],
+      );
+    const pass = await withUnitScopedMember(probe, "rls-files", async () => {
+      const scoped = await transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.memberA);
+        await data.query(
+          "SELECT tenant_context.lock_storage_allocation('blob','development',$1)",
+          [f.stores.seed],
+        );
+        probe.at("outcome");
+        const read = await attempt(
+          data,
+          "SELECT count(*)::int AS n FROM app.record_files WHERE team_id = $1 AND record_id = $2::uuid",
+          [f.teams.a, a.candidate],
+        );
+        const changed = await attempt(
+          data,
+          "UPDATE app.record_files SET original_name = original_name WHERE id = $1::uuid",
+          [a.recordFile],
+        );
+        const other = await recordFile(a.candidate, f.users.a2, "other");
+        probe.at("positive-control");
+        const own = await recordFile(a.vacancy, f.users.a2, "own");
+        return [
+          outcomeIs(read.ok && read.rows[0]?.n === 0, read),
+          leftAlone(changed),
+          denial(other),
+          outcomeIs(own.ok && own.count === 1, own, "positive-control"),
+        ] as Condition[];
+      });
+      const all = await transaction(data, async () => {
+        await installAs(data, signer, p.ownerA);
+        return fixtureFile();
+      });
+      const otherTeam = await transaction(data, async () => {
+        await installAs(data, signer, p.ownerB);
+        return {
+          file: await fixtureFile(),
+          team: await count(
+            data,
+            "SELECT count(*)::int AS n FROM app.record_files WHERE team_id = $1",
+            [f.teams.a],
+          ),
+        };
+      });
+      return probe.all(
+        ...scoped,
+        ["positive-control", all === 1],
+        ["outcome", otherTeam.file === 0 && otherTeam.team === 0],
       );
     });
     return scopedEnd(probe, pass);
