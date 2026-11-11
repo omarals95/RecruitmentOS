@@ -1441,7 +1441,7 @@ describe("company authority panel", () => {
       expect(control).toContain('checked=""');
       const described = / aria-describedby="([^"]+)"/.exec(control!)?.[1];
       expect(markup).toContain(
-        `${control}Plan &amp; pay access</label><small id="${described}" class="muted">For confidential recruitment plan figures and salary brackets. Neither exists yet, so this opens nothing today. Only a company owner gives it, one person at a time.</small>`,
+        `${control}Plan &amp; pay access</label><small id="${described}" class="muted">For confidential salary brackets. Recruitment plan figures do not exist yet. Only a company owner gives it, one person at a time.</small>`,
       );
       expect(markup.match(/role="switch"/g)).toHaveLength(1);
     }
