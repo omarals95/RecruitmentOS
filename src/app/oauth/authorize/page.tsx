@@ -2,11 +2,13 @@ import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ShieldCheck } from "lucide-react";
+import { getIdentityDb } from "@/db";
 import { OAuthConsent } from "@/components/auth/oauth-consent";
 import { getAuthOptions } from "@/lib/auth";
 import { canCreateTeam, twoStepSetupRequired } from "@/lib/auth-policy";
 import { getSession } from "@/lib/auth-session";
 import { checkAuthorizeRequest, consentTeams } from "@/lib/oauth";
+import { companyAuthorityHeld } from "@/lib/two-step";
 
 function Card({
   title,
@@ -110,6 +112,11 @@ export default async function Authorize({
       twoStepSetupRequired(
         false,
         teams.map((team) => team.role),
+        await companyAuthorityHeld(
+          await getIdentityDb(),
+          identity.user,
+          teams.map((team) => ({ teamId: team.id, role: team.role })),
+        ),
       )
     )
       redirect(`/two-step-setup?next=${here}`);

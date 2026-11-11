@@ -44,6 +44,7 @@ import {
 import { cleanClientName } from "./client-name";
 import { clientIpHeader, keyedRateLimitHash } from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
+import { companyAuthorityHeld } from "./two-step";
 
 export type AuthOptions = {
   configured: boolean;
@@ -564,7 +565,7 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
             message:
               "The authenticator key is shown only once, during setup. Turn two-step sign-in off and on again to add a new authenticator.",
           });
-        // Owners and admins without two-step sign-in may only set it up or sign out.
+        // Team or company owners and admins without two-step sign-in may only set it up or sign out.
         const gated =
           !TWO_STEP_SETUP_PATHS.has(ctx.path) &&
           Boolean(ctx.getCookie(ctx.context.authCookies.sessionToken.name));
@@ -573,13 +574,14 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
           : undefined;
         if (session && !session.user.twoFactorEnabled) {
           const memberships = await db
-            .select({ role: member.role })
+            .select({ teamId: member.organizationId, role: member.role })
             .from(member)
             .where(eq(member.userId, session.user.id));
           if (
             twoStepSetupRequired(
               false,
               memberships.map((row) => row.role),
+              await companyAuthorityHeld(db, session.user, memberships),
             )
           )
             throw new APIError("FORBIDDEN", {

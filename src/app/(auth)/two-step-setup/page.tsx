@@ -8,6 +8,7 @@ import { getAuthOptions } from "@/lib/auth";
 import { twoStepSetupRequired } from "@/lib/auth-policy";
 import { getSession } from "@/lib/auth-session";
 import { safeNext } from "@/lib/safe-next";
+import { companyAuthorityHeld } from "@/lib/two-step";
 
 export const dynamic = "force-dynamic";
 export default async function TwoStepSetupPage({
@@ -23,7 +24,7 @@ export default async function TwoStepSetupPage({
   if (identity.user.twoFactorEnabled) redirect(next);
   const db = await getIdentityDb();
   const memberships = await db
-    .select({ role: member.role })
+    .select({ teamId: member.organizationId, role: member.role })
     .from(member)
     .where(eq(member.userId, identity.user.id));
   return (
@@ -32,6 +33,7 @@ export default async function TwoStepSetupPage({
       required={twoStepSetupRequired(
         false,
         memberships.map((row) => row.role),
+        await companyAuthorityHeld(db, identity.user, memberships),
       )}
       next={next}
     />

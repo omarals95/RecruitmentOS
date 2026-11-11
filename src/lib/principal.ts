@@ -8,6 +8,7 @@ import {
   authenticateOAuthAccessToken,
 } from "./api-tokens";
 import { clientIp } from "./client-ip";
+import { companyAuthorityHeld } from "./two-step";
 import { ApiError } from "./errors";
 import {
   parseRole,
@@ -69,6 +70,14 @@ export async function requirePrincipal(
       twoStepSetupRequired(
         identity.user.twoFactorEnabled,
         memberships.map((row) => row.role),
+        await companyAuthorityHeld(
+          db,
+          identity.user,
+          memberships.map((row) => ({
+            teamId: row.organizationId,
+            role: row.role,
+          })),
+        ),
       )
     )
       throw new ApiError(

@@ -2,11 +2,12 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { expect } from "vitest";
-import type { AppDb } from "@/db";
+import { applyMigrations, type AppDb } from "@/db";
 import { symmetricEncrypt } from "better-auth/crypto";
 import { eq } from "drizzle-orm";
 import { authTables, twoFactor, user } from "@/db/auth-schema";
 import { createAuth, type AppAuth } from "@/lib/auth";
+import { installTenantContextKey } from "@/lib/tenant-context";
 import { base32Decode } from "../../scripts/totp";
 
 export const ORIGIN = "http://localhost:3000";
@@ -16,26 +17,45 @@ export const PASSWORD = "a-long-fictional-password";
 export const TEST_SECRET = "fictional-test-secret-with-at-least-32-characters";
 export type Mail = { to: string; subject: string; text: string };
 
+/**
+ * Every migration and the fictional tenant context key, and what the identity runtime role may use
+ * to install a session context: the two-step gate reads company authority that way for a member
+ * without two-step (companyAuthorityHeld). Run before the restricted role is set.
+ */
+export async function applyWorkspaceSchema(pg: PGlite, role: string) {
+  await applyMigrations(pg);
+  await installTenantContextKey(pg);
+  return `
+    GRANT USAGE ON SCHEMA tenant_context, db_boundary TO ${role};
+    GRANT SELECT ON db_boundary.connection_marker TO ${role};
+    GRANT EXECUTE ON FUNCTION tenant_context.install(text,text,text[]) TO ${role};`;
+}
+
 // The real identity migrations, run as a restricted nonowner role like tests/auth-flows.test.ts.
-export async function createAuthDb() {
+// With workspace, every migration, so the two-step gate can read company authority.
+export async function createAuthDb(options: { workspace?: boolean } = {}) {
   const pg = new PGlite();
   let sql = "";
-  for (const file of [
-    "0000_auth.sql",
-    "0003_initial_admin.sql",
-    "0004_protect_initial_admin_claim.sql",
-    "0022_two_step_sign_in.sql",
-  ])
-    sql +=
-      (await readFile(
-        new URL(`../../drizzle/${file}`, import.meta.url),
-        "utf8",
-      )) + "\n";
+  if (!options.workspace)
+    for (const file of [
+      "0000_auth.sql",
+      "0003_initial_admin.sql",
+      "0004_protect_initial_admin_claim.sql",
+      "0022_two_step_sign_in.sql",
+    ])
+      sql +=
+        (await readFile(
+          new URL(`../../drizzle/${file}`, import.meta.url),
+          "utf8",
+        )) + "\n";
+  const grants = options.workspace
+    ? await applyWorkspaceSchema(pg, "identity_flow_runtime")
+    : "";
   await pg.exec(`${sql}
     CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
     GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
     GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;
-    GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
+    GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;${grants}
     SET ROLE identity_flow_runtime;`);
   const db = drizzle(pg, { schema: authTables }) as unknown as AppDb;
   const count = async (query: string, params: unknown[] = []) =>

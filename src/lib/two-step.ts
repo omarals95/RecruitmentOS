@@ -1,8 +1,9 @@
 import { DrizzleQueryError, inArray, sql } from "drizzle-orm";
-import { getIdentityDb } from "@/db";
+import { getIdentityDb, type AppDb } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
 import { member } from "@/db/auth-schema";
 import { ApiError } from "./errors";
+import { parseRole } from "./permissions";
 import type { Principal } from "./principal";
 import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 
@@ -93,4 +94,37 @@ export async function resetMemberTwoStep(
       throw error;
     }
   });
+}
+
+/**
+ * Whether the two-step gate counts company authority for this user (twoStepSetupRequired's third
+ * input): true when they have two-step off, no team role that already requires it, at least one
+ * membership, and an unsuspended company authority row. The identity role cannot read
+ * app.workspace_admins, so the row is read as the companyLevel tenant_context.install derives for a
+ * session context in one of their teams, in one transaction on db, the identity pool (one workspace
+ * per environment, so any team gives the same answer). An error propagates: the request fails,
+ * never "not required".
+ */
+export async function companyAuthorityHeld(
+  db: AppDb,
+  user: { id: string; twoFactorEnabled?: boolean | null },
+  memberships: readonly { teamId: string; role: string }[],
+): Promise<boolean> {
+  if (
+    user.twoFactorEnabled ||
+    !memberships.length ||
+    memberships.some((row) => row.role === "owner" || row.role === "admin")
+  )
+    return false;
+  const principal: Principal = {
+    userId: user.id,
+    teamId: memberships[0].teamId,
+    role: parseRole(memberships[0].role),
+    scopes: [],
+    authType: "session",
+  };
+  const access = await withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+    installTenantContext(tx, principal, snapshot),
+  );
+  return access.companyLevel !== null;
 }
