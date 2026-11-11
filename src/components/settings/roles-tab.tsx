@@ -184,7 +184,7 @@ const scopeLabels: Record<RecordScope, string> = {
   unit: "My org unit and below",
   assigned: "Assigned records",
 };
-export const areaLabels: Record<GrantableArea, string> = {
+const areaLabels: Record<GrantableArea, string> = {
   fields: "Record fields",
   workflows: "Workflows",
   boards: "Boards",

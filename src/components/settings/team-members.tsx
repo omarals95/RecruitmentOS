@@ -128,7 +128,7 @@ export function teamRequests(
 }
 
 /** The team roles the caller may give: only an owner gives Owner. */
-export function rolesFor(role: string | null): TeamRole[] {
+function rolesFor(role: string | null): TeamRole[] {
   return role === "owner"
     ? ["owner", "admin", "recruiter", "viewer"]
     : ["admin", "recruiter", "viewer"];
