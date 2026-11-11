@@ -65,6 +65,19 @@ import {
   TeamsPanel,
   type AdminTeamRow,
 } from "../src/components/settings/teams-tab";
+import { NOT_A_MEMBER } from "../src/components/settings/admin-tabs";
+import {
+  TeamDetail,
+  TeamDetailPortal,
+  type TeamDetailProps,
+} from "../src/components/settings/team-detail";
+import {
+  MembersTable,
+  TeamMembers,
+  teamRequests,
+  type TeamClient,
+  type TeamMember,
+} from "../src/components/settings/team-members";
 import {
   FreshSessionDialog,
   REAUTH_CANCELLED,
@@ -1828,7 +1841,7 @@ describe("teams tab", () => {
       </WorkspaceProvider>,
     );
 
-  it("lists name, identifier, created date and access, with Open on the active team and Switch on another managed team", () => {
+  it("lists name, identifier, created date and access, with Open to its detail page on every team the caller owns or administers", () => {
     const markup = renderToStaticMarkup(<TeamsPanel rows={rows} error="" />);
     expect(markup).toContain("<h2>Teams</h2>");
     expect(markup).toMatch(
@@ -1849,14 +1862,14 @@ describe("teams tab", () => {
     expect(alpha).toContain(created);
     expect(alpha).toContain('data-label="Your access">Owner<');
     expect(alpha).toContain(
-      '<a class="button secondary" href="/app/admin/members">Open<span class="sr-only"> Fictional Alpha</span></a>',
+      '<a class="button secondary" href="/app/admin/teams/fictional-alpha-id">Open<span class="sr-only"> Fictional Alpha</span></a>',
     );
     expect(alpha).not.toContain("<button");
     expect(bravo).toContain('data-label="Your access">Admin<');
     expect(bravo).toContain(
-      '<button type="button" class="button secondary">Switch and open<span class="sr-only"> Fictional Bravo</span></button>',
+      '<a class="button secondary" href="/app/admin/teams/fictional-bravo-id">Open<span class="sr-only"> Fictional Bravo</span></a>',
     );
-    expect(bravo).not.toContain("<a ");
+    expect(bravo).not.toContain("<button");
     // Not a member, Recruiter and Viewer rows are text only: no link, button or other control.
     expect(charlie).toContain('data-label="Team">Fictional Charlie<');
     expect(charlie).toContain('data-label="Identifier">fictional-charlie<');
@@ -1868,13 +1881,15 @@ describe("teams tab", () => {
       expect(text).not.toMatch(/<a |<button|<input|<select/);
   });
 
-  it("waits every Switch button while an action runs", () => {
-    const markup = renderToStaticMarkup(
-      <TeamsPanel rows={rows} error="" busy="switch-fictional-bravo-id" />,
-    );
-    expect(markup).toContain(
-      '<button type="button" class="button secondary" disabled="">Switching…<span class="sr-only"> Fictional Bravo</span></button>',
-    );
+  it("opens another team's detail page by link, never switching the active team", () => {
+    const markup = renderToStaticMarkup(<TeamsPanel rows={rows} error="" />);
+    expect(markup).not.toMatch(/Switch|<button/);
+    expect(
+      [...markup.matchAll(/href="([^"]+)"/g)].map((link) => link[1]),
+    ).toEqual([
+      "/app/admin/teams/fictional-alpha-id",
+      "/app/admin/teams/fictional-bravo-id",
+    ]);
   });
 
   it("shows the loading and error states plainly", () => {
@@ -1909,6 +1924,354 @@ describe("teams tab", () => {
   it("shows the no-access text to a recruiter or viewer without company authority", () => {
     for (const teamRole of ["recruiter", "viewer"])
       onlyHeadingAndNoAccess(page(true, access(teamRole, null)));
+  });
+});
+
+// ADM-03 (job 072): one team's detail page with its Members and Settings tabs.
+describe("team detail", () => {
+  // Another fictional team than the active one, which the server allowed.
+  const other = { id: "fictional-other-team", name: "Fictional Other Team" };
+  const detail = (
+    props: Partial<TeamDetailProps> = {},
+    value: MeAccess | null = access("owner", "owner"),
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortalView
+          tab="teams"
+          access={value}
+          denied={false}
+          error=""
+          detail={
+            <TeamDetail
+              team={other}
+              role="owner"
+              companyLevel="owner"
+              tab="members"
+              {...props}
+            />
+          }
+        />
+      </WorkspaceProvider>,
+    );
+  const tabs = (markup: string) =>
+    [...markup.matchAll(/<button [^>]*role="tab"[^>]*>([^<]+)<\/button>/g)].map(
+      (match) => [match[0], match[1]],
+    );
+
+  it("shows the shell, the team's name and a tablist with exactly Members and Settings", () => {
+    const markup = detail();
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(sidebar(markup)).toContain(
+      '<a aria-current="page" href="/app/admin/teams">Teams</a>',
+    );
+    expect(content(markup)).toContain("<h2>Fictional Other Team</h2>");
+    expect(markup).toContain(
+      '<div class="tabs" role="tablist" aria-label="Team details">',
+    );
+    const found = tabs(markup);
+    expect(found.map(([, label]) => label)).toEqual(["Members", "Settings"]);
+    expect(found[0][0]).toBe(
+      '<button type="button" role="tab" id="team-tab-members" aria-controls="team-panel-members" tabindex="0" aria-selected="true">Members</button>',
+    );
+    expect(found[1][0]).toBe(
+      '<button type="button" role="tab" id="team-tab-settings" aria-controls="team-panel-settings" tabindex="-1" aria-selected="false">Settings</button>',
+    );
+    expect(markup).toContain(
+      '<div role="tabpanel" id="team-panel-members" aria-labelledby="team-tab-members" tabindex="0" class="stack">',
+    );
+    // No page of a later item: no CV storage, Speed, Task boards or Activity tab.
+    for (const later of ["CV storage", "Speed", "Task boards", "Activity"])
+      expect(content(markup)).not.toContain(later);
+  });
+
+  it("opens Settings with the rename form when asked, and Members otherwise", () => {
+    const settings = detail({ tab: "settings" });
+    expect(tabs(settings)[1][0]).toContain('aria-selected="true"');
+    expect(settings).toContain('id="team-panel-settings"');
+    expect(settings).toMatch(
+      /<label class="field"><span>Team name<\/span><input required="" maxLength="100" value="Fictional Other Team"\/><\/label>/,
+    );
+    expect(settings).toContain(
+      '<button type="submit" class="button" disabled="">Save team name</button>',
+    );
+    expect(settings).not.toContain("Prepare task board");
+    expect(settings).not.toContain("<h2>Members</h2>");
+    const members = detail();
+    expect(members).toContain("<h2>Members</h2>");
+    expect(members).not.toContain("Save team name");
+  });
+
+  it("holds the members list and the invite form for an owner or admin of the team", () => {
+    for (const role of ["owner", "admin"]) {
+      const markup = detail({ role });
+      expect(markup, role).toContain("<h2>Members</h2>");
+      expect(markup, role).toContain("<p>Loading members…</p>");
+      expect(markup, role).toContain("Invite a colleague</h2>");
+      expect(markup, role).toContain(">Send invitation</button>");
+      expect(
+        markup.includes('<option value="owner">owner</option>'),
+        role,
+      ).toBe(role === "owner");
+    }
+  });
+
+  it("shows the detail even when the active team's access lists no page", () => {
+    const markup = detail({}, access("recruiter", null));
+    expect(markup).not.toContain(NO_ACCESS);
+    expect(sidebarHrefs(markup)).toEqual(["/app/admin"]);
+    expect(markup).not.toContain('aria-current="page"');
+    expect(content(markup)).toContain("<h2>Fictional Other Team</h2>");
+    expect(content(markup)).toContain("<h2>Members</h2>");
+  });
+
+  it("loads the active team's access for the sidebar and shows the detail meanwhile", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TeamDetailPortal
+          team={other}
+          role="admin"
+          companyLevel={null}
+          tab="members"
+        />
+      </WorkspaceProvider>,
+    );
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(sidebarHrefs(markup)).toEqual(["/app/admin"]);
+    expect(content(markup)).toContain("<h2>Fictional Other Team</h2>");
+    expect(markup).not.toContain(NO_ACCESS);
+  });
+
+  it("shows only the heading and the not-a-member text, with no team data", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortalView
+          tab="teams"
+          access={null}
+          denied
+          error=""
+          refusal={NOT_A_MEMBER}
+        />
+      </WorkspaceProvider>,
+    );
+    expect(NOT_A_MEMBER).toBe("You are not a member of this team");
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(markup).toContain("<p>You are not a member of this team</p>");
+    expect(markup).not.toContain(NO_ACCESS);
+    expect(markup).not.toMatch(/<nav|<h2|<table|role="status"|role="tab/);
+  });
+
+  const people: TeamMember[] = [
+    {
+      id: "fictional-member-owner",
+      role: "owner",
+      userId: workspace.user.id,
+      user: {
+        id: workspace.user.id,
+        name: "Fictional Portal User",
+        email: "portal-user@example.test",
+      },
+    },
+    {
+      id: "fictional-member-recruiter",
+      role: "recruiter",
+      userId: "fictional-recruiter",
+      user: {
+        id: "fictional-recruiter",
+        name: "Fictional Recruiter",
+        email: "recruiter@example.test",
+      },
+    },
+  ];
+  const table = (companyOwner: boolean, role = "owner") =>
+    renderToStaticMarkup(
+      <MembersTable
+        members={people}
+        userId={workspace.user.id}
+        role={role}
+        companyOwner={companyOwner}
+        memberRoles={{
+          data: {
+            assignments: [],
+            roles: [
+              {
+                roleObjectId: "fictional-role",
+                name: "Fictional reader",
+                membership: "viewer",
+              },
+            ],
+          },
+          error: "",
+        }}
+        busy={false}
+        roleDrafts={{}}
+        onDraft={() => {}}
+        onChangeRole={() => {}}
+        onRemove={() => {}}
+        onResetTwoStep={() => {}}
+        onSaveMemberRole={() => {}}
+      />,
+    );
+
+  it("lists the members with team roles, the last owner rule and row actions", () => {
+    const markup = table(false);
+    expect(markup).toContain(
+      '<div class="table-wrap"><table class="data-table settings-table">',
+    );
+    expect(markup).toContain(
+      '<strong>Fictional Portal User</strong> (you)<br/><span class="muted">portal-user@example.test</span>',
+    );
+    expect(markup).toContain('<small class="muted">Last owner</small>');
+    expect(markup).toContain(
+      '<span class="sr-only">Role for Fictional Recruiter</span>',
+    );
+    expect(markup.match(/>Save role<\/button>/g)).toHaveLength(2);
+    expect(markup.match(/>Remove<\/button>/g)).toHaveLength(2);
+    // Reset two-step sign-in for team owners, never on their own row.
+    expect(markup.match(/>Reset two-step sign-in<\/button>/g)).toHaveLength(1);
+    expect(table(false, "admin")).not.toContain("Reset two-step sign-in");
+  });
+
+  it("shows the Configured role column only to a company owner", () => {
+    const owner = table(true);
+    expect(owner).toContain("<th>Configured role</th>");
+    expect(owner).toContain("Team owners keep the Owner role");
+    expect(owner).toContain(
+      '<span class="sr-only">Configured role for Fictional Recruiter</span>',
+    );
+    expect(table(false)).not.toContain("Configured role");
+    for (const companyLevel of ["admin", null]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <TeamMembers team={other} role="owner" companyLevel={companyLevel} />
+        </WorkspaceProvider>,
+      );
+      expect(markup, String(companyLevel)).not.toContain("Configured role");
+    }
+  });
+
+  type Call = { name: string; body: unknown };
+  /** A fake Better Auth organization client that records every call and answers with success. */
+  const fakeTeamClient = () => {
+    const calls: Call[] = [];
+    const answer = (name: string) => async (body: unknown) => {
+      calls.push({ name, body });
+      return { data: { members: [], invitations: [] }, error: null };
+    };
+    const client = {
+      getFullOrganization: answer("getFullOrganization"),
+      update: answer("update"),
+      inviteMember: answer("inviteMember"),
+      updateMemberRole: answer("updateMemberRole"),
+      removeMember: answer("removeMember"),
+      cancelInvitation: answer("cancelInvitation"),
+    } as unknown as TeamClient;
+    return { client, calls };
+  };
+
+  it("names the page's team, not the active one, in every Better Auth call", async () => {
+    const { client, calls } = fakeTeamClient();
+    const requests = teamRequests(other.id, client);
+    await requests.details();
+    await requests.rename("Fictional Renamed Team");
+    await requests.invite("invitee@example.test", "recruiter");
+    await requests.changeRole("fictional-member-recruiter", "viewer");
+    await requests.remove("fictional-member-recruiter");
+    await requests.cancelInvitation("fictional-invitation");
+    expect(calls).toEqual([
+      {
+        name: "getFullOrganization",
+        body: { query: { organizationId: other.id } },
+      },
+      {
+        name: "update",
+        body: {
+          organizationId: other.id,
+          data: { name: "Fictional Renamed Team" },
+        },
+      },
+      {
+        name: "inviteMember",
+        body: {
+          email: "invitee@example.test",
+          role: "recruiter",
+          organizationId: other.id,
+        },
+      },
+      {
+        name: "updateMemberRole",
+        body: {
+          memberId: "fictional-member-recruiter",
+          role: "viewer",
+          organizationId: other.id,
+        },
+      },
+      {
+        name: "removeMember",
+        body: {
+          memberIdOrEmail: "fictional-member-recruiter",
+          organizationId: other.id,
+        },
+      },
+      // Better Auth checks the invitation against its own team.
+      {
+        name: "cancelInvitation",
+        body: { invitationId: "fictional-invitation" },
+      },
+    ]);
+    expect(JSON.stringify(calls)).not.toContain(workspace.team.id);
+  });
+
+  it("sends X-Team-Id for the page's team on the configured-role and two-step requests, also on the retry after Confirm it's you", async () => {
+    const sent: { method: string; path: string; team: string | null }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          team: new Headers(init.headers).get("X-Team-Id"),
+        });
+        return answers.shift() ?? json(200, { data: {} });
+      }),
+    );
+    try {
+      const requests = teamRequests(other.id);
+      await requests.memberRoles();
+      await requests.resetTwoStep("fictional-recruiter");
+      answers.push(
+        json(403, {
+          error: {
+            code: "SESSION_NOT_FRESH",
+            message: "This change needs a recent sign-in.",
+          },
+        }),
+      );
+      const ask = vi.fn(async () => true);
+      await retryWithFreshSession(
+        () => requests.saveMemberRole("fictional-recruiter", "fictional-role"),
+        ask,
+      );
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(sent).toEqual([
+        { method: "GET", path: "/api/v1/teams/member-roles", team: other.id },
+        {
+          method: "POST",
+          path: "/api/v1/teams/two-step-reset",
+          team: other.id,
+        },
+        { method: "POST", path: "/api/v1/teams/member-roles", team: other.id },
+        { method: "POST", path: "/api/v1/teams/member-roles", team: other.id },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

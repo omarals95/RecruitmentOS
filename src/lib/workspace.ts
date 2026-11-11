@@ -17,6 +17,27 @@ export interface WorkspaceContext {
   canCreateTeam: boolean;
 }
 export async function getWorkspaceContext(): Promise<WorkspaceContext> {
+  return (await readWorkspace()).context;
+}
+/** getWorkspaceContext, and the signed-in user's membership of one team: null when not a member. */
+export async function getTeamWorkspaceContext(teamId: string): Promise<
+  WorkspaceContext & {
+    member: { team: { id: string; name: string }; role: Role } | null;
+  }
+> {
+  const { context, memberships } = await readWorkspace();
+  const found = memberships.find((m) => m.team.id === teamId);
+  return {
+    ...context,
+    member: found
+      ? {
+          team: { id: found.team.id, name: found.team.name },
+          role: parseRole(found.role),
+        }
+      : null,
+  };
+}
+async function readWorkspace() {
   if (!getAuthOptions().configured) throw new Error("SETUP_REQUIRED");
   const identity = await getSession(await headers());
   if (!identity) redirect("/sign-in");
@@ -38,7 +59,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
     memberships.find(
       (m) => m.team.id === identity.session.activeOrganizationId,
     ) ?? memberships[0];
-  return {
+  const context: WorkspaceContext = {
     user: {
       id: identity.user.id,
       name: identity.user.name,
@@ -55,4 +76,5 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
       memberships.map((m) => m.role),
     ),
   };
+  return { context, memberships };
 }
