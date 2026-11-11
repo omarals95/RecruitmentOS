@@ -56,7 +56,7 @@
  *   owner, who holds no company authority, cannot call tenant_context.workspace_team_list (0041).
  *   Neither the team B owner nor a company admin without the people area (the team C owner, given
  *   the organisation area by the owner for that check and then removed) can call
- *   tenant_context.workspace_people (0042) or tenant_context.workspace_person (0043).
+ *   tenant_context.workspace_people (0042) or tenant_context.workspace_person (0046).
  *   A team owner's session archives their team through tenant_context.set_team_archived; every
  *   context of that team then stores only read scopes, so a member's record insert and the
  *   owner's task-board insert are refused, a team admin cannot call the helper, and after the
@@ -4118,7 +4118,7 @@ async function runChecks(run: Run) {
   });
 
   // The team B owner, who holds no company authority, reads no workspace person, not even a member
-  // of their own team (0043).
+  // of their own team (0046).
   await check("workspace-person-team-b-owner-denied", async (probe) => {
     probe.at("setup");
     return transaction(data, async () => {
@@ -4135,7 +4135,7 @@ async function runChecks(run: Run) {
   });
 
   // The team C owner, made a company admin with the organisation area only for this check, reads
-  // no workspace person either: it needs the people area (0043).
+  // no workspace person either: it needs the people area (0046).
   await check("workspace-person-admin-without-people-denied", async (probe) => {
     probe.at("setup");
     const granted = await owner.query(

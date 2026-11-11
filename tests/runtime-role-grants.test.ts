@@ -1334,7 +1334,7 @@ describe("split runtime role template", () => {
         ).toBe(false);
   });
 
-  it("grants the data role EXECUTE on the workspace person helper, the identity role and PUBLIC none (0043)", async () => {
+  it("grants the data role EXECUTE on the workspace person helper, the identity role and PUBLIC none (0046)", async () => {
     await harness.identityDb();
     await expectDenied([
       "SELECT * FROM tenant_context.workspace_person('fictional-person')",

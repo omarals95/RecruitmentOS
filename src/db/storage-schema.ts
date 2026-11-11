@@ -6,10 +6,10 @@ import { ApiError } from "../lib/errors";
  * tenant context, versioned configuration store, explicit scope ceiling, configuration versions
  * through install, organisation hierarchy, positions and employees, configured member roles,
  * employee erasure and retention, record scope and assignment, record scope row-level security,
- * record pin, workspace team list, workspace people, company authority two-step, team archive and
- * job architecture schema this code was written for (`0045_job_architecture.sql`).
+ * record pin, workspace team list, workspace people, company authority two-step, team archive, job
+ * architecture and workspace person schema this code was written for (`0046_workspace_person.sql`).
  */
-export const STORAGE_SCHEMA_VERSION = 23;
+export const STORAGE_SCHEMA_VERSION = 24;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {

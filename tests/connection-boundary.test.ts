@@ -359,7 +359,7 @@ describe("database identity separation", () => {
     }
   });
 
-  it("allows the data role the workspace person helper and never the identity role (0043)", async () => {
+  it("allows the data role the workspace person helper and never the identity role (0046)", async () => {
     const helper = "tenant_context.workspace_person(text)";
     expect(dataRoleHelpers).toContain(helper);
     expect(identityRoleHelpers).not.toContain(helper);

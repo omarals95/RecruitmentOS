@@ -1,11 +1,11 @@
--- Workspace person (ADM-08, job 076). Apply after 0042_workspace_people.sql, then rerun
--- infrastructure/postgres-split-runtime-roles.sql, which grants the data role EXECUTE on
--- tenant_context.workspace_person; the identity role gets nothing. The Admin portal's user detail
+-- Workspace person (ADM-08, job 080, rework of job 076). Apply after 0045_job_architecture.sql,
+-- then rerun infrastructure/postgres-split-runtime-roles.sql, which grants the data role EXECUTE
+-- on tenant_context.workspace_person; the identity role gets nothing. The Admin portal's user detail
 -- page shows company owners and company admins with people one person of the workspace: profile,
 -- teams and roles in this workspace, company authority, the two-step flag, a count of signed-in
 -- devices and up to 50 configuration and access-change events, by ids, codes and names only (D1,
 -- TST-005: never team data). No table, policy, trigger or other function changes. The storage
--- schema marker goes to 21, so startup refuses a database without this migration.
+-- schema marker goes to 24, so startup refuses a database without this migration.
 
 -- Company owner sessions and company admin sessions holding people only (42501 otherwise); a null,
 -- empty or over-long id is 22023. Zero rows when the person has no membership in a team of the
@@ -94,4 +94,4 @@ END $$;
 REVOKE ALL ON FUNCTION tenant_context.workspace_person(text) FROM PUBLIC;
 
 -- The code now calls the helper; startup refuses a database without it.
-UPDATE db_boundary.storage_schema SET version = 21;
+UPDATE db_boundary.storage_schema SET version = 24;
