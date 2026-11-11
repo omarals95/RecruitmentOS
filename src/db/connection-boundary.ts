@@ -41,6 +41,7 @@ export const dataRoleHelpers = [
   "tenant_context.workspace_person(text)",
   "tenant_context.set_team_archived(text,boolean)",
   "tenant_context.member_archived_teams()",
+  "tenant_context.set_user_active(text,boolean)",
   "tenant_context.erase_employee(uuid,text,text)",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",
@@ -55,6 +56,7 @@ export const identityRoleHelpers = [
   "tenant_context.audit_token(text,text)",
   "tenant_context.audit_grant_reuse(text,text)",
   "tenant_context.reset_two_step(text)",
+  "tenant_context.user_account_action(text,text)",
 ];
 
 // Indirect privileged access is forbidden except the allowlisted, owner-controlled helpers
