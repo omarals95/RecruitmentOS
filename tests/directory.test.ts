@@ -2108,6 +2108,139 @@ describe("positions and employees under the split runtime roles", () => {
       expect(staff.filter((person) => person.left).length).toBeGreaterThan(5);
     });
   });
+
+  describe("position vacancy (ADM-22)", () => {
+    /** A company admin with the organisation area whose team role has no directory view. */
+    let orgRecruiter: Principal;
+    let unitV: string;
+    const desk = (title: string, code: string) =>
+      position(owner, title, code, unitV);
+    /** A new fictional employee holding the position now. */
+    async function place(
+      positionId: string,
+      extra: Record<string, unknown> = {},
+    ) {
+      const person = await employee(owner, extra);
+      await setEmployeePositions(owner, person.id, {
+        positions: [{ positionId, primary: true }],
+      });
+      return person;
+    }
+    const vacancy = async (p: Principal) => {
+      const response = await call(
+        listPositionsRoute,
+        "GET",
+        `/api/v1/positions?unitId=${unitV}`,
+        { as: p },
+      );
+      expect(response.status).toBe(200);
+      return Object.fromEntries(
+        (response.body.data as Position[]).map((row) => [row.code, row.vacant]),
+      );
+    };
+
+    beforeAll(async () => {
+      const db: AppDb = await harness.asOwner();
+      orgRecruiter = await seedIdentity(db, {
+        userId: "dir-org-recruiter",
+        teamId: "dir-team-b",
+        role: "recruiter",
+      });
+      await harness.client.exec(
+        `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','dir-org-recruiter','admin','{organisation}');`,
+      );
+      unitV = (
+        await createOrgUnit(owner, {
+          name: "Fictional Vacancy Unit",
+          code: "DIR-V",
+          levelId: levels[0].id,
+        })
+      ).id;
+    });
+
+    it("lists a position as vacant unless an active, non-archived employee holds it now, and null without directory view", async () => {
+      await desk("Fictional Empty Desk", "VAC-EMPTY");
+      const archivedOnly = await desk("Fictional Archived Desk", "VAC-ARCH");
+      const leftOnly = await desk("Fictional Left Desk", "VAC-LEFT");
+      const endedOnly = await desk("Fictional Ended Desk", "VAC-END");
+      const held = await desk("Fictional Held Desk", "VAC-HELD");
+      await archiveEmployee(owner, (await place(archivedOnly.id)).id);
+      await place(leftOnly.id, { status: "left" });
+      const ended = await place(endedOnly.id);
+      await setEmployeePositions(owner, ended.id, { positions: [] });
+      await place(held.id);
+      // An active holder of another position in the unit leaves the empty desk vacant.
+      const known = {
+        "VAC-EMPTY": true,
+        "VAC-ARCH": true,
+        "VAC-LEFT": true,
+        "VAC-END": true,
+        "VAC-HELD": false,
+      };
+      for (const p of [owner, teamAdminA, orgAdmin])
+        expect(await vacancy(p), p.userId).toEqual(known);
+      // The database hides holder rows from these callers, so vacancy is unknown, never true.
+      for (const p of [recruiter, orgRecruiter])
+        expect(await vacancy(p), p.userId).toEqual(
+          Object.fromEntries(Object.keys(known).map((code) => [code, null])),
+        );
+      expect(
+        (await listPositions(recruiter, { unitId: unitV })).data.every(
+          (row) => Object.hasOwn(row, "vacant") && row.vacant === null,
+        ),
+      ).toBe(true);
+    });
+
+    it("carries vacant on POST and PATCH responses the same way", async () => {
+      const created = await call(
+        createPositionRoute,
+        "POST",
+        "/api/v1/positions",
+        {
+          as: owner,
+          body: {
+            title: "Fictional New Desk",
+            code: "VAC-NEW",
+            orgUnitId: unitV,
+          },
+        },
+      );
+      expect(created.status).toBe(201);
+      expect(created.body.data.vacant).toBe(true);
+      const made = created.body.data as Position;
+      await place(made.id);
+      const patch = (p: Principal, title: string) =>
+        call(patchPositionRoute, "PATCH", `/api/v1/positions/${made.id}`, {
+          as: p,
+          id: made.id,
+          body: { title },
+        });
+      const renamed = await patch(owner, "Fictional New Desk Renamed");
+      expect(renamed.status).toBe(200);
+      expect(renamed.body.data.vacant).toBe(false);
+      const adminMade = await call(
+        createPositionRoute,
+        "POST",
+        "/api/v1/positions",
+        {
+          as: orgRecruiter,
+          body: {
+            title: "Fictional Admin New Desk",
+            code: "VAC-ADMIN",
+            orgUnitId: unitV,
+          },
+        },
+      );
+      expect(adminMade.status).toBe(201);
+      expect(adminMade.body.data).toHaveProperty("vacant", null);
+      const adminRenamed = await patch(orgRecruiter, "Fictional Desk Again");
+      expect(adminRenamed.status).toBe(200);
+      expect(adminRenamed.body.data).toHaveProperty("vacant", null);
+      expect(
+        (await updatePosition(orgAdmin, made.id, { isManager: true })).vacant,
+      ).toBe(false);
+    });
+  });
 });
 
 describe("one directory page in database round trips", () => {

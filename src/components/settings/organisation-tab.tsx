@@ -7,7 +7,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type FocusEvent,
   type FormEvent,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
@@ -19,11 +21,36 @@ import {
   teamRequester,
   useWorkspace,
 } from "@/components/workspace/client";
+import { saveBlob } from "@/components/workspace/helpers";
 import type { Requester } from "@/components/workspace/optimistic";
 import type { Employee, Position } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
 import { OrgImportPanel } from "./org-import-panel";
+import {
+  ZOOM_MAX,
+  ZOOM_MIN,
+  ZOOM_STEP,
+  buildTree,
+  countsText,
+  drawLayout,
+  expandAll,
+  expandMessage,
+  exportScale,
+  flattenTree,
+  imageFilename,
+  resolveFocus,
+  treeCounts,
+  treeKey,
+  treeLayout,
+  unitCounts,
+  zoomTo,
+  type ExpandStatus,
+  type MoreNode,
+  type TreeFocus,
+  type TreeNode,
+  type UnitNode,
+} from "./org-tree";
 import { UnitPicker } from "./unit-picker";
 
 export interface Page<T> {
@@ -82,6 +109,30 @@ export interface ChartHandlers {
   archiveUnit: (unit: OrgUnit) => void;
   archivePosition: (position: Position) => void;
 }
+export type ChartView = "list" | "tree";
+/** The tree view's own state (ADM-22); the tab holds it and the view renders it from props. */
+export interface TreeState {
+  zoom: number;
+  /** The treeitem holding the tab stop; null is the first item. */
+  focused: TreeFocus | null;
+  expandAll: ExpandStatus;
+  exportFailed: boolean;
+}
+export interface TreeHandlers {
+  view: (view: ChartView) => void;
+  /** Makes the item the tab stop; with move, focus goes to it too. */
+  focus: (node: TreeNode, move?: boolean) => void;
+  expandAll: () => void;
+  collapseAll: () => void;
+  zoom: (zoom: number) => void;
+  exportImage: () => void;
+}
+export const TREE_START: TreeState = {
+  zoom: 100,
+  focused: null,
+  expandAll: { state: "idle" },
+  exportFailed: false,
+};
 
 export const LEVELS_PATH = "/api/v1/org-units/levels";
 export const CHART_PAGE_SIZE = 100;
@@ -178,6 +229,13 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
   const [loadError, setLoadError] = useState("");
   const [chart, setChart] = useState<ChartState>(EMPTY_CHART);
   const [form, setForm] = useState<OrgForm | null>(null);
+  const [view, setView] = useState<ChartView>("list");
+  const [tree, setTree] = useState<TreeState>(TREE_START);
+  const moveTreeFocus = useRef(false);
+  const levelNames = useMemo(
+    () => new Map((levels ?? []).map((level) => [level.id, level.name])),
+    [levels],
+  );
   const { confirm, dialog } = useConfirm();
   const patch = (change: (current: ChartState) => Partial<ChartState>) =>
     setChart((current) => ({ ...current, ...change(current) }));
@@ -232,6 +290,25 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         "[data-org-add-top]",
       ],
     });
+
+  // Focus follows a key or a click to the tree's tab stop. When a collapse hides the focused item,
+  // the view moves the tab stop to its nearest visible unit, and focus follows if it was lost.
+  useEffect(() => {
+    if (view !== "tree") return;
+    const element = document.querySelector<HTMLElement>(
+      '[data-org-tree] [tabindex="0"]',
+    );
+    const lost =
+      !!tree.focused &&
+      document.activeElement === document.body &&
+      element?.dataset.orgTreeKey !== tree.focused.key;
+    if (!element || !(moveTreeFocus.current || lost)) return;
+    moveTreeFocus.current = false;
+    element.focus({ preventScroll: true });
+    element
+      .querySelector(".org-tree-box")
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [view, chart, tree.focused]);
 
   /** After an import: the levels and the top level again, with every unit collapsed. */
   async function reloadChart() {
@@ -401,6 +478,83 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
     },
   };
 
+  const opened = (ids: string[], id: string) =>
+    ids.includes(id) ? ids : [...ids, id];
+  const treeHandlers: TreeHandlers = {
+    view: setView,
+    focus(node, move = false) {
+      if (move) moveTreeFocus.current = true;
+      setTree((current) =>
+        current.focused?.key === node.key && !move
+          ? current
+          : { ...current, focused: { key: node.key, path: node.path } },
+      );
+    },
+    expandAll() {
+      void runExpandAll();
+    },
+    collapseAll() {
+      patch(() => ({ expanded: [] }));
+    },
+    zoom(zoom) {
+      setTree((current) => ({ ...current, zoom: zoomTo(zoom) }));
+    },
+    exportImage() {
+      const failed = () =>
+        setTree((current) => ({ ...current, exportFailed: true }));
+      const layout = treeLayout(buildTree(chart, levelNames));
+      const scale = exportScale(layout);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(layout.width * scale));
+      canvas.height = Math.max(1, Math.floor(layout.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) return failed();
+      drawLayout(context, layout, scale);
+      canvas.toBlob((blob) => {
+        if (!blob) return failed();
+        setTree((current) => ({ ...current, exportFailed: false }));
+        saveBlob(imageFilename(new Date()), blob);
+      }, "image/png");
+    },
+  };
+  /** Expand all through loadUnit; each result goes into the chart as an expand would put it. */
+  async function runExpandAll() {
+    if (!request || tree.expandAll.state === "running") return;
+    const progress = (units: number) =>
+      setTree((current) => ({
+        ...current,
+        expandAll: { state: "running", units },
+      }));
+    progress(treeCounts(chart).units);
+    const result = await expandAll(chart, (id) => loadUnit(request, id), {
+      loaded(unit, units, positions) {
+        patch((current) => ({
+          lists: { ...current.lists, [unit.id]: unitList(units) },
+          contents: {
+            ...current.contents,
+            [unit.id]: {
+              positions: positions.data,
+              positionsHasMore: positions.pagination.hasMore,
+            },
+          },
+          expanded: opened(current.expanded, unit.id),
+          errors: without(current.errors, `load:${unit.id}`),
+        }));
+      },
+      expanded(unit) {
+        patch((current) => ({ expanded: opened(current.expanded, unit.id) }));
+      },
+      failed(unit, error) {
+        patch((current) => ({
+          expanded: opened(current.expanded, unit.id),
+          errors: { ...current.errors, [`load:${unit.id}`]: humanError(error) },
+        }));
+      },
+      progress,
+    });
+    setTree((current) => ({ ...current, expandAll: result }));
+  }
+
   async function archive(
     key: string,
     path: string,
@@ -551,7 +705,9 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         chart={chart}
         owner={owner}
         directoryView={directoryView}
-        on={handlers}
+        view={view}
+        tree={tree}
+        on={{ ...handlers, ...treeHandlers }}
       />
       <OrgImportPanel
         request={request}
@@ -785,19 +941,26 @@ interface ChartContext {
   on: Partial<ChartHandlers>;
 }
 
-/** The org chart as a nested list; each unit's button expands it in place. */
+/**
+ * The org chart, as a nested list where each unit's button expands it in place, or as the org tree
+ * by units (ADM-22). Both read the same chart state.
+ */
 export function OrgChartPanel({
   levels,
   chart,
   owner,
   directoryView,
+  view = "list",
+  tree = TREE_START,
   on = {},
 }: {
   levels: OrgLevel[];
   chart: ChartState;
   owner: boolean;
   directoryView: boolean;
-  on?: Partial<ChartHandlers>;
+  view?: ChartView;
+  tree?: TreeState;
+  on?: Partial<ChartHandlers & TreeHandlers>;
 }) {
   const ctx: ChartContext = {
     levelNames: new Map(levels.map((level) => [level.id, level.name])),
@@ -815,6 +978,22 @@ export function OrgChartPanel({
         loads when you open it.
       </p>
       <div className="row">
+        <div className="view-toggle" role="group" aria-label="Org chart view">
+          <button
+            type="button"
+            aria-pressed={view === "list"}
+            onClick={() => on.view?.("list")}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            aria-pressed={view === "tree"}
+            onClick={() => on.view?.("tree")}
+          >
+            Org tree
+          </button>
+        </div>
         <button
           type="button"
           className="button"
@@ -832,10 +1011,298 @@ export function OrgChartPanel({
         <p role="status">Loading the org chart…</p>
       ) : !top.units.length ? (
         <p className="muted">No units yet. Add a top-level unit first.</p>
+      ) : view === "tree" ? (
+        <OrgTreeView
+          chart={chart}
+          levels={levels}
+          zoom={tree.zoom}
+          focused={tree.focused}
+          expandAll={tree.expandAll}
+          exportFailed={tree.exportFailed}
+          on={on}
+        />
       ) : (
         <UnitTree listKey="" label="Top-level units" ctx={ctx} />
       )}
     </section>
+  );
+}
+
+/**
+ * The org tree by units (ADM-22): a read-only nested list with tree keyboard navigation, drawn
+ * top-down when wide and as an outline when narrow. No names of people and no contact facts.
+ */
+export function OrgTreeView({
+  chart,
+  levels,
+  zoom,
+  focused,
+  expandAll,
+  exportFailed = false,
+  on = {},
+}: {
+  chart: ChartState;
+  levels: OrgLevel[];
+  zoom: number;
+  focused: TreeFocus | null;
+  expandAll: ExpandStatus;
+  exportFailed?: boolean;
+  on?: Partial<ChartHandlers & TreeHandlers>;
+}) {
+  const nodes = buildTree(
+    chart,
+    new Map(levels.map((level) => [level.id, level.name])),
+  );
+  const items = flattenTree(nodes);
+  const stop = resolveFocus(items, focused);
+  const counts = treeCounts(chart);
+  const message = expandMessage(expandAll);
+  const failures = items.filter(
+    (item): item is UnitNode =>
+      item.kind === "unit" && item.failed && item.expanded,
+  );
+  const listErrors = items.filter(
+    (item): item is MoreNode =>
+      item.kind === "more" && !!chart.errors[`list:${item.listKey}`],
+  );
+  function onKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = (event.target as HTMLElement).dataset.orgTreeKey;
+    const move = key && treeKey(items, key, event.key);
+    if (!move) return;
+    event.preventDefault();
+    if (move.toggle) on.toggle?.(move.toggle);
+    if (move.more !== undefined) on.more?.(move.more);
+    const target = items.find((item) => item.key === move.focus);
+    if (target) on.focus?.(target, true);
+  }
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      <div className="row" style={{ gap: 8 }}>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={expandAll.state === "running"}
+          onClick={() => on.expandAll?.()}
+        >
+          Expand all
+        </button>
+        <button
+          type="button"
+          className="button secondary small"
+          onClick={() => on.collapseAll?.()}
+        >
+          Collapse all
+        </button>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={zoom <= ZOOM_MIN}
+          onClick={() => on.zoom?.(zoom - ZOOM_STEP)}
+        >
+          Zoom out
+        </button>
+        <span className="small-text">{zoom}%</span>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={zoom >= ZOOM_MAX}
+          onClick={() => on.zoom?.(zoom + ZOOM_STEP)}
+        >
+          Zoom in
+        </button>
+        <button
+          type="button"
+          className="button secondary small"
+          onClick={() => on.zoom?.(100)}
+        >
+          Reset zoom
+        </button>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={!counts.units}
+          onClick={() => on.exportImage?.()}
+        >
+          Export image
+        </button>
+      </div>
+      <p role="status" className="small-text">
+        {message ? `${countsText(counts)}. ${message}` : countsText(counts)}
+      </p>
+      {counts.unknown && (
+        <p className="muted small-text">
+          You need directory access to see which positions are vacant.
+        </p>
+      )}
+      {exportFailed && (
+        <p className="notice error" role="alert">
+          Could not make the image. Collapse some units and try again.
+        </p>
+      )}
+      {failures.map((item) => (
+        <p key={item.key} className="notice error" role="alert">
+          Could not load {item.unit.name}.{" "}
+          {chart.errors[`load:${item.unit.id}`]} Collapse and expand the unit to
+          try again.
+        </p>
+      ))}
+      {listErrors.map((item) => (
+        <p key={item.key} className="notice error" role="alert">
+          {chart.errors[`list:${item.listKey}`]}
+        </p>
+      ))}
+      <div className="org-tree-scroll">
+        <ul
+          role="tree"
+          aria-label="Org tree by units"
+          className="org-tree"
+          data-org-tree=""
+          style={{ zoom: zoom / 100 }}
+          onKeyDown={onKeyDown}
+        >
+          {nodes.map((node) => (
+            <OrgTreeItem
+              key={node.key}
+              node={node}
+              edge=""
+              stop={stop}
+              on={on}
+            />
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/** first, last or only among a group's units, for the connector lines. */
+const edgeOf = (index: number, count: number) =>
+  count === 1
+    ? " org-tree-only"
+    : index === 0
+      ? " org-tree-first"
+      : index === count - 1
+        ? " org-tree-last"
+        : "";
+
+function OrgTreeItem({
+  node,
+  edge,
+  stop,
+  on,
+}: {
+  node: TreeNode;
+  edge: string;
+  stop: string | null;
+  on: Partial<ChartHandlers & TreeHandlers>;
+}) {
+  const item = {
+    role: "treeitem",
+    "aria-level": node.level,
+    "aria-setsize": node.setSize,
+    "aria-posinset": node.posInSet,
+    "aria-label": node.label,
+    tabIndex: node.key === stop ? 0 : -1,
+    "data-org-tree-key": node.key,
+    onFocus: (event: FocusEvent) => {
+      if (event.target === event.currentTarget) on.focus?.(node);
+    },
+  };
+  if (node.kind === "position") {
+    const { position } = node;
+    const vacant = position.vacant === true;
+    return (
+      <li
+        {...item}
+        className={`org-tree-position${vacant ? " org-tree-vacant" : ""}`}
+      >
+        <div className="org-tree-box" onClick={() => on.focus?.(node, true)}>
+          <span className="org-tree-title">{position.title}</span>
+          <span className="org-tree-meta">
+            {position.isManager ? `${position.code} · Manager` : position.code}
+          </span>
+          {vacant && <span className="org-tree-vacant-label">Vacant</span>}
+        </div>
+      </li>
+    );
+  }
+  if (node.kind === "more")
+    return (
+      <li {...item} className={`org-tree-node org-tree-more${edge}`}>
+        <div
+          className="org-tree-box"
+          onClick={() => {
+            on.focus?.(node, true);
+            on.more?.(node.listKey);
+          }}
+        >
+          {node.busy ? "Loading more units…" : node.label}
+        </div>
+      </li>
+    );
+  const { unit } = node;
+  const Chevron = node.expanded ? ChevronDown : ChevronRight;
+  const row = node.children.filter((child) => child.kind !== "position");
+  return (
+    <li
+      {...item}
+      aria-expanded={node.expanded}
+      className={`org-tree-node org-tree-unit${edge}`}
+    >
+      <div
+        className="org-tree-box"
+        onClick={() => {
+          on.focus?.(node, true);
+          on.toggle?.(unit);
+        }}
+      >
+        <span className="org-tree-title">
+          <Chevron size={14} aria-hidden="true" />
+          {unit.name}
+        </span>
+        <span className="org-tree-meta">
+          {unit.code} · {node.levelName}
+        </span>
+        {node.positions !== null && (
+          <span className="org-tree-meta">{unitCounts(node)}</span>
+        )}
+        {node.loading && (
+          <span className="org-tree-meta">Loading {unit.name}…</span>
+        )}
+        {node.failed && (
+          <span className="org-tree-error">Could not load this unit.</span>
+        )}
+        {node.expanded && node.positionsHasMore && (
+          <span className="org-tree-meta">
+            Only the first {POSITIONS_PAGE_SIZE} positions are listed.
+          </span>
+        )}
+      </div>
+      {node.children.length > 0 && (
+        <ul
+          role="group"
+          className="org-tree-group"
+          style={{
+            gridTemplateColumns: `repeat(${Math.max(row.length, 1)}, auto)`,
+          }}
+        >
+          {node.children.map((child) => (
+            <OrgTreeItem
+              key={child.key}
+              node={child}
+              edge={
+                child.kind === "position"
+                  ? ""
+                  : edgeOf(row.indexOf(child), row.length)
+              }
+              stop={stop}
+              on={on}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
   );
 }
 

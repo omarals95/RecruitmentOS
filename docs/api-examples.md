@@ -305,12 +305,13 @@ Content-Type: application/json
     "isManager": true,
     "jobRoleId": null,
     "validFrom": "2026-11-09T08:00:00.000Z",
-    "archivedAt": null
+    "archivedAt": null,
+    "vacant": true
   }
 }
 ```
 
-`GET /api/v1/positions?unitId=00000000-0000-4000-a000-0000000000b1` lists the current positions of one unit, ordered by title; leave out `unitId` for every position of the company. `jobRoleId` is shown only to members of the team that owns the job role. Change a position with exactly one operation per request on `PATCH /api/v1/positions/{id}`:
+`GET /api/v1/positions?unitId=00000000-0000-4000-a000-0000000000b1` lists the current positions of one unit, ordered by title; leave out `unitId` for every position of the company. `jobRoleId` is shown only to members of the team that owns the job role. `vacant` is `true` when no active, non-archived employee holds the position now and `false` when one does. It is `null` when your role has no directory view (`directory:read`), because employees are hidden from you; the response never names who holds the position. The org tree uses it to draw vacant positions, and every position response, from `GET`, `POST` and `PATCH`, carries it. Change a position with exactly one operation per request on `PATCH /api/v1/positions/{id}`:
 
 - one or more of `{"title","isManager","jobRoleId"}`, where `"jobRoleId":null` clears it;
 - `{"orgUnitId":"<unit id>"}` to move it;
