@@ -32,6 +32,10 @@ import {
   type ReauthCancelled,
 } from "./fresh-session-dialog";
 import { teamRequests } from "./team-members";
+import {
+  UserAnonymisationDialog,
+  UserAnonymisedPanel,
+} from "./user-anonymisation";
 import { USER_DETAIL_TABS, type UserDetailTab } from "./user-detail-tabs";
 import { levels, statuses, teamRoles } from "./users-tab";
 
@@ -50,6 +54,8 @@ export const EVENT_LIMIT = 50;
 /** The Security tab's account actions (ADM-09). */
 export type AccountAction =
   "deactivate" | "reactivate" | "sign-out" | "clear-lockout";
+export const ANONYMISE_OWNER_ONLY =
+  "Only a company owner can anonymise an account.";
 
 /**
  * Admin > Users > one person: the shell and sidebar of the active team, as on every admin page,
@@ -88,6 +94,9 @@ export function UserDetail({ userId, companyLevel, tab }: UserDetailProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [anonymising, setAnonymising] = useState(false);
+  // The anonymised person's name: the detail area then shows only the success panel.
+  const [anonymised, setAnonymised] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
   const freshSession = useFreshSession();
   const outcome = useRef<HTMLDivElement>(null);
@@ -178,6 +187,7 @@ export function UserDetail({ userId, companyLevel, tab }: UserDetailProps) {
     if (done) setOutcomeFocus((count) => count + 1);
   }
 
+  if (anonymised !== null) return <UserAnonymisedPanel name={anonymised} />;
   if (!loaded) return <p role="status">Loading this person…</p>;
   if (!person)
     return <UserDetailRefusal status={loaded.status} error={loaded.error} />;
@@ -195,7 +205,20 @@ export function UserDetail({ userId, companyLevel, tab }: UserDetailProps) {
         outcomeRef={outcome}
         onReset={() => void reset()}
         onAccountAction={(action) => void account(action)}
+        onAnonymise={() => setAnonymising(true)}
       />
+      {anonymising && teamId && (
+        <UserAnonymisationDialog
+          teamId={teamId}
+          target={{ id: person.userId, name: person.name }}
+          withFreshSession={freshSession.withFreshSession}
+          onCancel={() => setAnonymising(false)}
+          onAnonymised={() => {
+            setAnonymising(false);
+            setAnonymised(person.name);
+          }}
+        />
+      )}
       {freshSession.dialog}
       {dialog}
     </>
@@ -285,6 +308,20 @@ export function accountActions(
   return companyOwner || person.companyLevel === null
     ? "allowed"
     : "owner-only";
+}
+
+/**
+ * Who sees the Security tab's Anonymise account section: never on the caller's own page; a company
+ * owner gets the action on anyone else; a company admin with people gets only the owner-only
+ * sentence.
+ */
+export function anonymiseAction(
+  person: Pick<WorkspacePerson, "userId">,
+  callerId: string,
+  companyOwner: boolean,
+): "allowed" | "owner-only" | "none" {
+  if (person.userId === callerId) return "none";
+  return companyOwner ? "allowed" : "owner-only";
 }
 
 /**
@@ -398,7 +435,7 @@ export function eventLabel(event: WorkspacePersonEvent) {
 
 /**
  * The loaded person: name, the five tabs and the open tab's panel. Read only but for Reset and the
- * Security tab's account actions.
+ * Security tab's account actions and Anonymise account.
  */
 export function UserDetailView({
   person,
@@ -412,6 +449,7 @@ export function UserDetailView({
   outcomeRef,
   onReset = () => {},
   onAccountAction = () => {},
+  onAnonymise = () => {},
 }: {
   person: WorkspacePerson;
   tab: UserDetailTab;
@@ -427,6 +465,8 @@ export function UserDetailView({
   outcomeRef?: Ref<HTMLDivElement>;
   onReset?: () => void;
   onAccountAction?: (action: AccountAction) => void;
+  /** Opens the typed-name dialog (ADM-10). */
+  onAnonymise?: () => void;
 }) {
   const [current, setCurrent] = useState(tab);
   return (
@@ -471,12 +511,14 @@ export function UserDetailView({
             person={person}
             canReset={canReset && person.userId !== callerId}
             actions={accountActions(person, callerId, companyOwner)}
+            anonymise={anonymiseAction(person, callerId, companyOwner)}
             busy={busy}
             error={error}
             notice={notice}
             outcomeRef={outcomeRef}
             onReset={onReset}
             onAccountAction={onAccountAction}
+            onAnonymise={onAnonymise}
           />
         ) : (
           <ActivityTab person={person} />
@@ -629,22 +671,26 @@ function SecurityTab({
   person,
   canReset,
   actions,
+  anonymise,
   busy,
   error,
   notice,
   outcomeRef,
   onReset,
   onAccountAction,
+  onAnonymise,
 }: {
   person: WorkspacePerson;
   canReset: boolean;
   actions: ReturnType<typeof accountActions>;
+  anonymise: ReturnType<typeof anonymiseAction>;
   busy: boolean;
   error: string;
   notice: string;
   outcomeRef?: Ref<HTMLDivElement>;
   onReset: () => void;
   onAccountAction: (action: AccountAction) => void;
+  onAnonymise: () => void;
 }) {
   const deactivated = person.status === "deactivated";
   return (
@@ -744,6 +790,32 @@ function SecurityTab({
           )
         )}
       </section>
+      {anonymise !== "none" && (
+        <section className="panel stack">
+          <h3>Anonymise account</h3>
+          {anonymise === "allowed" ? (
+            <>
+              <p>
+                Permanently replaces this person&apos;s name and email with a
+                placeholder and removes their access to every team of your
+                company. This cannot be undone.
+              </p>
+              <div className="row">
+                <button
+                  type="button"
+                  className="button danger"
+                  disabled={busy}
+                  onClick={onAnonymise}
+                >
+                  Anonymise account
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="muted">{ANONYMISE_OWNER_ONLY}</p>
+          )}
+        </section>
+      )}
     </>
   );
 }
