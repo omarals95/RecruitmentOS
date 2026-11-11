@@ -17,9 +17,10 @@ import {
   type FieldConfig,
 } from "@/domain/records";
 import { Dialog } from "@/components/ui/dialog";
+import { JobTitlePicker } from "@/components/settings/job-title-picker";
 import { UnitPicker } from "@/components/settings/unit-picker";
 import type { ActionResource } from "@/domain/config";
-import type { AccessMap } from "@/lib/authz";
+import type { MeAccess } from "@/lib/authz";
 import {
   ClientError,
   useApi,
@@ -38,7 +39,12 @@ import {
   toDubaiInput,
   fromDubaiInput,
 } from "./helpers";
-import { assigneeInput, recordMutation, customValueDefaults } from "./mutation";
+import {
+  assigneeInput,
+  recordMutation,
+  customValueDefaults,
+  vacancyTitleInput,
+} from "./mutation";
 import { startSpeedTimer } from "./speed-log";
 import { useTeamMembers, type TeamMember } from "./team-members";
 
@@ -144,9 +150,22 @@ export function RecordEditor({
   const assigneesChanged =
     assigneeInput(savedAssignees, assignees).assigneeIds !== undefined;
   const members = useTeamMembers(teamId, resource === "tasks");
-  const access = useApi<{ data: AccessMap }>(
-    resource === "tasks" ? "/api/v1/me/access" : null,
+  const access = useApi<{ data: MeAccess }>(
+    resource === "tasks" || (resource === "vacancies" && request)
+      ? "/api/v1/me/access"
+      : null,
   );
+  // Vacancies only: the job title as saved and as chosen. The role's field rule hides the picker
+  // or shows the title as text; once saved, a title can be changed but not cleared.
+  const [savedTitle] = useState(() =>
+    record && typeof dataOf(record).jobTitleKey === "string"
+      ? (dataOf(record).jobTitleKey as string)
+      : "",
+  );
+  const [titleKey, setTitleKey] = useState(savedTitle);
+  const [titleError, setTitleError] = useState("");
+  const titleRule = access.data?.data.fields.vacancy?.jobTitleKey;
+  const titleChanged = titleKey !== savedTitle;
   // A role that hides assigneeIds leaves it out of the record, so the picker is left out too.
   const assigneesShown =
     resource === "tasks" &&
@@ -170,6 +189,7 @@ export function RecordEditor({
   useUnsavedWork(
     saving ||
       unitChanged ||
+      titleChanged ||
       assigneesChanged ||
       JSON.stringify([values, refs]) !== opened,
   );
@@ -197,6 +217,7 @@ export function RecordEditor({
     setError("");
     setFieldErrors({});
     setUnitError("");
+    setTitleError("");
     const submitted =
       resource === "tasks"
         ? {
@@ -213,6 +234,14 @@ export function RecordEditor({
       // Sent only when they changed, so a save that leaves them alone never touches them.
       ...(resource === "vacancies" && unitChanged
         ? { orgUnitId: orgUnit?.id ?? null }
+        : {}),
+      ...(resource === "vacancies"
+        ? {
+            data: {
+              ...mutation.data,
+              ...vacancyTitleInput(savedTitle || undefined, titleKey),
+            },
+          }
         : {}),
       ...(resource === "tasks"
         ? {
@@ -277,6 +306,16 @@ export function RecordEditor({
           "This unit is not a current unit of your company. Choose another unit, or remove the org unit.",
         );
         setError("Please review the org unit.");
+      } else if (
+        titleChanged &&
+        e instanceof ClientError &&
+        e.code === "invalid_reference" &&
+        e.message.startsWith("jobTitleKey")
+      ) {
+        setTitleError(
+          "This job title is not in the published job architecture. Choose another job title.",
+        );
+        setError("Please review the job title.");
       } else setError(humanError(e));
       setTimeout(() => errorRef.current?.focus(), 0);
     } finally {
@@ -488,6 +527,21 @@ export function RecordEditor({
                 selected={assignees}
                 onChange={setAssignees}
                 fieldError={fieldErrors.assigneeIds}
+              />
+            )}
+            {resource === "vacancies" && request && titleRule !== "hidden" && (
+              <JobTitlePicker
+                request={request}
+                access={access.data?.data}
+                value={titleKey}
+                onChange={(key) => {
+                  setTitleKey(key);
+                  setTitleError("");
+                }}
+                allowNone={!savedTitle}
+                readOnly={titleRule === "read"}
+                disabled={pending}
+                error={titleError}
               />
             )}
             {resource === "vacancies" && request && (

@@ -27,6 +27,7 @@ import type { Employee, Position, ReportingPerson } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
 import { JobArchitecturePanel } from "./job-architecture-panel";
+import { JobTitlePicker } from "./job-title-picker";
 import { OrgImportPanel } from "./org-import-panel";
 import {
   ZOOM_MAX,
@@ -107,6 +108,8 @@ export interface OrgValues {
   code: string;
   levelId: string;
   isManager: boolean;
+  /** A position's chosen job title key; "" is no job title. */
+  jobTitleKey: string;
   /** The chosen unit of a move; null is the top level. */
   target: OrgUnit | null;
 }
@@ -223,6 +226,15 @@ export const loadReports = (
 /** Show employees on a position: one page of the people who hold it. */
 export const loadHolders = (request: Requester, positionId: string, page = 1) =>
   request<Page<Employee>>(holdersPath(positionId, page));
+/**
+ * A position's job title to send: nothing when it is unchanged, so a saved key a newer version
+ * removed is never sent again; null clears it.
+ */
+export const positionTitleInput = (
+  saved: string | null,
+  chosen: string,
+): { jobTitleKey?: string | null } =>
+  chosen === (saved ?? "") ? {} : { jobTitleKey: chosen || null };
 export const EMPTY_CHART: ChartState = {
   lists: {},
   contents: {},
@@ -872,6 +884,7 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
           code: values.code,
           orgUnitId: current.unit.id,
           isManager: values.isManager,
+          ...positionTitleInput(null, values.jobTitleKey),
         });
         await reloadPositions(current.unit.id);
         break;
@@ -880,7 +893,14 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
           request,
           `/api/v1/positions/${current.position.id}`,
           "PATCH",
-          { title: values.name, isManager: values.isManager },
+          {
+            title: values.name,
+            isManager: values.isManager,
+            ...positionTitleInput(
+              current.position.jobTitleKey,
+              values.jobTitleKey,
+            ),
+          },
         );
         await reloadPositions(current.position.orgUnitId);
         break;
@@ -938,6 +958,7 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         <OrgFormDialog
           form={form}
           levels={levels ?? []}
+          access={access}
           request={request}
           onSubmit={(values) => submit(form, values)}
           onClose={() => setForm(null)}
@@ -2128,12 +2149,14 @@ const formTitles: Record<OrgForm["kind"], [string, string]> = {
 function OrgFormDialog({
   form,
   levels,
+  access,
   request,
   onSubmit,
   onClose,
 }: {
   form: OrgForm;
   levels: OrgLevel[];
+  access: MeAccess;
   request: Requester;
   onSubmit: (values: OrgValues) => Promise<void>;
   onClose: () => void;
@@ -2150,6 +2173,8 @@ function OrgFormDialog({
     code: "",
     levelId: "",
     isManager: form.kind === "edit-position" && form.position.isManager,
+    jobTitleKey:
+      form.kind === "edit-position" ? (form.position.jobTitleKey ?? "") : "",
     target: null,
   }));
   const [busy, setBusy] = useState(false);
@@ -2249,6 +2274,16 @@ function OrgFormDialog({
               ))}
           </select>
         </label>
+      )}
+      {positional && (
+        <JobTitlePicker
+          request={request}
+          access={access}
+          value={values.jobTitleKey}
+          allowNone
+          disabled={busy}
+          onChange={(jobTitleKey) => set({ jobTitleKey })}
+        />
       )}
       {positional && (
         <label className="checkbox-label">

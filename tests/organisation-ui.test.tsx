@@ -25,6 +25,7 @@ import {
   loadChart,
   loadHolders,
   loadUnit,
+  positionTitleInput,
   type ChartState,
 } from "../src/components/settings/organisation-tab";
 import {
@@ -73,7 +74,11 @@ import {
   AMOUNT_ERROR,
   BRACKET_ORDER_ERROR,
   CONFIDENTIAL_NOTICE,
+  JOB_ARCHITECTURE_PATH,
+  JOB_TITLE_USAGE_PATH,
   JobArchitectureView,
+  JobFormView,
+  SALARY_BRACKETS_PATH,
   SalaryBracketsForm,
   aedToFils,
   bracketPrefill,
@@ -83,14 +88,27 @@ import {
   gradesInOrder,
   loadJobArchitecture,
   loadSalaryBrackets,
+  nextBody,
   saveJobArchitecture,
   saveSalaryBrackets,
+  stepTitleSave,
   type BracketState,
   type JobArchitectureState,
+  type JobForm,
+  type JobValues,
   type JobView,
 } from "../src/components/settings/job-architecture-panel";
+import {
+  JobTitlePickerView,
+  NO_BRACKETS,
+  loadJobTitleChoices,
+} from "../src/components/settings/job-title-picker";
 import { tabKeys } from "../src/components/ui/tab-keys";
 import type { JobArchitectureBody } from "../src/domain/config";
+import type {
+  JobArchitecture,
+  JobTitleUsage,
+} from "../src/lib/job-architecture";
 import type { SalaryBracketVersion } from "../src/lib/pay-brackets";
 
 // Fictional people, units and ids only (R2a-16, job 058).
@@ -2087,5 +2105,313 @@ describe("job architecture (ADM-26)", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("job title picker and grade-change impact (ADM-27)", () => {
+  // Fictional families, grades, titles, counts and AED figures only (job 088).
+  const body: JobArchitectureBody = {
+    families: [{ key: "finance", name: "Fictional Finance" }],
+    grades: [
+      { code: "G7", name: "Fictional Senior", order: 7 },
+      { code: "G5", name: "Fictional Associate", order: 5 },
+    ],
+    titles: [
+      {
+        key: "payroll-lead",
+        name: "Fictional Payroll Lead",
+        familyKey: "finance",
+        gradeCode: "G7",
+      },
+      {
+        key: "people-partner",
+        name: "Fictional People Partner",
+        familyKey: "finance",
+        gradeCode: "G5",
+      },
+    ],
+  };
+  const current: JobArchitecture = { versionId: id(90), number: 4, body };
+  const bracketVersion: SalaryBracketVersion = {
+    versionId: id(91),
+    number: 2,
+    state: "published",
+    payPeriod: "monthly",
+    covers: "basic",
+    effectiveFrom: "2027-01-01",
+    createdAt: "2026-11-12T09:00:00.000Z",
+    publishedAt: "2026-11-12T10:00:00.000Z",
+    brackets: [
+      {
+        gradeCode: "G7",
+        minimumFils: 1_234_500,
+        midpointFils: 1_500_050,
+        maximumFils: 1_800_000,
+      },
+    ],
+  };
+  const FIGURES = ["12,345", "15,000.50", "18,000"];
+  const owner = access("owner", "owner", { organisation: true });
+  const orgAdmin = access("recruiter", "admin", { organisation: true });
+  const holder = access("owner", "owner", {
+    organisation: true,
+    planAccess: { read: true, write: false },
+  });
+  const picker = (
+    props: Partial<Parameters<typeof JobTitlePickerView>[0]> = {},
+  ) =>
+    renderToStaticMarkup(
+      <JobTitlePickerView
+        current={current}
+        value="payroll-lead"
+        allowNone
+        {...props}
+      />,
+    );
+  type Sent = { method: string; path: string; body: unknown };
+  /** Records each request and answers it as the API would, with the given usage counts. */
+  function recording(
+    usage: JobTitleUsage = { positions: 2, openVacancies: 1, openOffers: 1 },
+  ) {
+    const sent: Sent[] = [];
+    const request = (async (path: string, init?: RequestInit) => {
+      sent.push({
+        method: init?.method ?? "GET",
+        path,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (path === JOB_ARCHITECTURE_PATH)
+        return { data: { current, draft: null } };
+      if (path === SALARY_BRACKETS_PATH)
+        return { data: { current: bracketVersion, draft: null } };
+      if (path.startsWith(JOB_TITLE_USAGE_PATH)) return { data: usage };
+      return { data: { versionId: id(92) } };
+    }) as Requester;
+    return { sent, request };
+  }
+
+  it("shows the title's grade and no bracket without Plan & pay access, and requests no brackets", async () => {
+    const markup = picker();
+    expect(markup).toMatch(/<label for="[^"]+">Job title<\/label><select/);
+    expect(markup).toContain('<option value="">No job title</option>');
+    expect(markup).toContain(
+      '<option value="payroll-lead" selected="">Fictional Payroll Lead · G7</option>',
+    );
+    expect(markup).toContain("Grade: G7 · Fictional Senior");
+    expect(markup).toMatch(/aria-describedby="[^"]+-details"/);
+    expect(markup).toContain('aria-live="polite"');
+    for (const text of ["Salary bracket", "AED", ...FIGURES])
+      expect(markup, text).not.toContain(text);
+    // Titles are sorted by name.
+    expect(markup.indexOf("Fictional Payroll Lead")).toBeLessThan(
+      markup.indexOf("Fictional People Partner"),
+    );
+    expect(picker({ value: "" })).toContain("No job title chosen.");
+    for (const value of [owner, orgAdmin]) {
+      const { sent, request } = recording();
+      expect(await loadJobTitleChoices(request, value)).toEqual({
+        current,
+        brackets: null,
+      });
+      expect(sent.map((item) => item.path)).toEqual([JOB_ARCHITECTURE_PATH]);
+    }
+  });
+
+  it("shows the bracket line only to a holder, with the empty and missing cases", async () => {
+    const { sent, request } = recording();
+    const choices = await loadJobTitleChoices(request, holder);
+    expect(sent.map((item) => item.path)).toEqual([
+      "/api/v1/job-architecture",
+      "/api/v1/salary-brackets",
+    ]);
+    expect(choices.brackets).toEqual(bracketVersion);
+    expect(picker({ brackets: choices.brackets })).toContain(
+      "Salary bracket: AED 12,345 to AED 18,000 a month, midpoint AED 15,000.50 · basic salary only · version 2",
+    );
+    const other = picker({ value: "people-partner", brackets: bracketVersion });
+    expect(other).toContain("Grade: G5 · Fictional Associate");
+    expect(other).toContain("No salary bracket for this grade.");
+    expect(other).not.toContain("AED");
+    expect(picker({ brackets: NO_BRACKETS })).toContain(
+      "No salary brackets are published yet.",
+    );
+    // Read-only: the title and grade, and for a holder the bracket, as text with no select.
+    const readOnly = picker({ readOnly: true, brackets: bracketVersion });
+    expect(readOnly).not.toContain("<select");
+    expect(readOnly).toContain("Fictional Payroll Lead");
+    expect(readOnly).toContain("Grade: G7 · Fictional Senior");
+    expect(readOnly).toContain("Salary bracket: AED 12,345");
+  });
+
+  it("keeps an unknown saved key selected and explains a missing architecture", () => {
+    expect(picker({ value: "payroll-director" })).toContain(
+      '<option value="payroll-director" selected="">payroll-director (not in the published job architecture)</option>',
+    );
+    expect(picker({ value: "payroll-director" })).not.toContain("Grade:");
+    const none = picker({ current: null });
+    expect(none).toContain(
+      "No job architecture is published yet, so no job title can be chosen.",
+    );
+    expect(none).toContain("payroll-lead");
+    expect(none).not.toContain("<select");
+  });
+
+  it("sends a position's job title only when it changed, and null to clear it", () => {
+    expect(positionTitleInput(null, "")).toEqual({});
+    expect(positionTitleInput("payroll-lead", "payroll-lead")).toEqual({});
+    expect(positionTitleInput(null, "payroll-lead")).toEqual({
+      jobTitleKey: "payroll-lead",
+    });
+    expect(positionTitleInput("payroll-lead", "")).toEqual({
+      jobTitleKey: null,
+    });
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/organisation-tab.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const dialog = source.slice(source.indexOf("function OrgFormDialog("));
+    expect(dialog).toMatch(
+      /<JobTitlePicker\s+request=\{request\}\s+access=\{access\}/,
+    );
+    expect(dialog.indexOf("<JobTitlePicker")).toBeLessThan(
+      dialog.indexOf("Manager position"),
+    );
+  });
+
+  describe("a title's grade change", () => {
+    const state: JobArchitectureState = {
+      current,
+      draft: {
+        id: id(93),
+        body,
+        note: null,
+        createdAt: "2026-11-12T09:00:00.000Z",
+      },
+    };
+    const form: JobForm = { kind: "title", title: body.titles[0] };
+    const values: JobValues = {
+      name: "Fictional Payroll Lead",
+      key: "",
+      code: "",
+      order: "",
+      familyKey: "finance",
+      gradeCode: "G5",
+    };
+    const next = nextBody(body, form, values);
+    const usagePath = "/api/v1/job-architecture/usage?titleKey=payroll-lead";
+
+    it("first asks only for the usage, then saves the draft on confirmation", async () => {
+      const { sent, request } = recording();
+      const first = await stepTitleSave(
+        request,
+        state,
+        form,
+        values,
+        next,
+        null,
+      );
+      expect(first).toEqual({
+        usage: { positions: 2, openVacancies: 1, openOffers: 1 },
+      });
+      expect(sent.map((item) => item.path)).toEqual([usagePath]);
+      // Cancel after the first step: nothing was written.
+      expect(sent.filter((item) => item.method !== "GET")).toEqual([]);
+      sent.length = 0;
+      const usage = "usage" in first ? first.usage : null;
+      expect(
+        await stepTitleSave(request, state, form, values, next, usage),
+      ).toEqual({ saved: true });
+      expect(sent.map((item) => `${item.method} ${item.path}`)).toEqual([
+        `PUT /api/v1/job-architecture/${id(93)}`,
+      ]);
+      expect(
+        (sent[0].body as { body: JobArchitectureBody }).body.titles[0],
+      ).toEqual({ ...body.titles[0], gradeCode: "G5" });
+      sent.length = 0;
+      await stepTitleSave(
+        request,
+        { current, draft: null },
+        form,
+        values,
+        next,
+        usage,
+      );
+      expect(sent.map((item) => `${item.method} ${item.path}`)).toEqual([
+        "POST /api/v1/job-architecture",
+      ]);
+    });
+
+    it("saves in one step without a grade change or when adding a title", async () => {
+      const renamed = {
+        ...values,
+        name: "Fictional Payroll Head",
+        gradeCode: "G7",
+      };
+      const added: JobForm = { kind: "title", title: null };
+      const newTitle = {
+        ...values,
+        name: "Fictional Payroll Clerk",
+        key: "payroll-clerk",
+      };
+      for (const [stepForm, stepValues] of [
+        [form, renamed],
+        [added, newTitle],
+      ] as const) {
+        const { sent, request } = recording();
+        expect(
+          await stepTitleSave(
+            request,
+            state,
+            stepForm,
+            stepValues,
+            nextBody(body, stepForm, stepValues),
+            null,
+          ),
+        ).toEqual({ saved: true });
+        expect(sent.map((item) => `${item.method} ${item.path}`)).toEqual([
+          `PUT /api/v1/job-architecture/${id(93)}`,
+        ]);
+      }
+    });
+
+    it("shows the impact notice with the counts and Change grade and save", () => {
+      const impact = {
+        usage: { positions: 2, openVacancies: 1, openOffers: 1 },
+        from: "G7",
+        to: "G5",
+      };
+      const markup = renderToStaticMarkup(
+        <JobFormView form={form} body={body} values={values} impact={impact} />,
+      );
+      expect(markup).toContain(
+        '<p tabindex="-1" class="notice" role="status">Changing Fictional Payroll Lead from G7 to G5 affects 2 positions, 1 open vacancy and 1 open offer across the company. They follow the new grade once the job architecture is published.</p>',
+      );
+      expect(markup).toContain(
+        '<button type="submit" class="button">Change grade and save</button>',
+      );
+      expect(markup).toContain(">Cancel</button>");
+      const zero = renderToStaticMarkup(
+        <JobFormView
+          form={form}
+          body={body}
+          values={values}
+          impact={{
+            ...impact,
+            usage: { positions: 0, openVacancies: 0, openOffers: 0 },
+          }}
+        />,
+      );
+      expect(zero).toContain(
+        "No current position, open vacancy or open offer uses Fictional Payroll Lead. The new grade applies once the job architecture is published.",
+      );
+      const before = renderToStaticMarkup(
+        <JobFormView form={form} body={body} values={values} />,
+      );
+      expect(before).not.toContain('class="notice"');
+      expect(before).toContain(">Save job title</button>");
+    });
   });
 });

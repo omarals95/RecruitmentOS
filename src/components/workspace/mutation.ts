@@ -57,6 +57,16 @@ export function assigneeInput(
     selected.some((userId) => !saved.includes(userId));
   return changed ? { assigneeIds: [...selected] } : {};
 }
+/**
+ * A vacancy's job title for its save: sent only when another title was chosen, so a save never
+ * re-sends a saved key a newer version removed. The API cannot clear it, so "" is never sent.
+ */
+export function vacancyTitleInput(
+  saved: string | undefined,
+  chosen: string,
+): { jobTitleKey?: string } {
+  return chosen && chosen !== saved ? { jobTitleKey: chosen } : {};
+}
 export function personalStateMutation(state: {
   version: number;
   shortlisted: boolean;
