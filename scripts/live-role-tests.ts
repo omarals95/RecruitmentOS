@@ -12,7 +12,9 @@
  *   refuses a signed payload with an extra workspace or company field and a team without a
  *   workspace mapping, and returns the mapped workspace with no company level, areas or plan access
  *   for a team owner without company authority. A company authority grant and a concurrent removal
- *   of the target's last membership never leave unsuspended authority for a user in no team.
+ *   of the target's last membership never leave unsuspended authority for a user in no team, and a
+ *   company owner's grant of a level to a member without two-step sign-in is refused and writes
+ *   nothing.
  *   A context reads no configuration row of another workspace, the data role cannot insert a
  *   config activity row and tenant_context.audit_config refuses a duplicate publish audit, and a
  *   team owner without company authority cannot write company configuration (direct SQL or
@@ -4830,9 +4832,10 @@ async function runChecks(run: Run) {
   // the target's last membership: whichever commits second waits for the first.
   await check("workspace-authority-race", async (probe) => {
     probe.at("setup");
+    // Targets use two-step sign-in, which a company level needs (0043).
     const target = async (userId: string, memberId: string) => {
       await owner.query(
-        `INSERT INTO auth."user"(id,name,email,email_verified) VALUES($1,$2,$3,true)`,
+        `INSERT INTO auth."user"(id,name,email,email_verified,two_factor_enabled) VALUES($1,$2,$3,true,true)`,
         [userId, `Fictional user ${f.prefix}`, `${userId}@example.test`],
       );
       await owner.query(
@@ -4945,6 +4948,41 @@ async function runChecks(run: Run) {
           removedThenGranted.length === 0,
       ],
     );
+  });
+
+  // 0043: a company level needs two-step sign-in. After the race, whose company owner row it uses:
+  // the data role, under the fixture company owner's session context, grants admin to the team B
+  // member without two-step or a company authority row and is refused with RQ017, writing no row
+  // and no activity.
+  await check("workspace-authority-two-step-required", async (probe) => {
+    const before = await workspaceRows();
+    const twoStepOff = await count(
+      owner,
+      `SELECT count(*)::int AS n FROM auth."user" u JOIN auth.member m ON m.user_id = u.id
+        WHERE u.id = $1 AND m.organization_id = $2 AND NOT u.two_factor_enabled
+          AND NOT EXISTS (SELECT 1 FROM app.workspace_admins a WHERE a.user_id = u.id)`,
+      [f.users.b2, f.teams.b],
+    );
+    const pass = await transaction(
+      data,
+      async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.ownerC);
+        probe.at("outcome");
+        const refused = await attempt(
+          data,
+          "SELECT tenant_context.set_workspace_authority($1,'admin',ARRAY['fields'],false)",
+          [f.users.b2],
+        );
+        return probe.all(
+          ["setup", twoStepOff === 1 && access.companyLevel === "owner"],
+          failsWith(refused, "RQ017"),
+        );
+      },
+      true,
+    );
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await workspaceRows()) === before]);
   });
 }
 

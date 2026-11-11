@@ -36,6 +36,7 @@ vi.mock("next/navigation", () => ({
 import { applyMigrations, schema, type AppDb } from "@/db";
 import { getAuth, getAuthOptions } from "@/lib/auth";
 import { requirePrincipal } from "@/lib/principal";
+import { installTenantContextKey } from "@/lib/tenant-context";
 import { getWorkspaceContext } from "@/lib/workspace";
 import CreateAdmin from "../src/app/(auth)/create-admin/page";
 import { stubHostedReadiness } from "./helpers/readiness";
@@ -45,6 +46,9 @@ describe("identity-only operations use the identity pool", () => {
   let db: AppDb;
   beforeAll(async () => {
     await applyMigrations(pg);
+    await installTenantContextKey(pg);
+    // A recruiter without two-step or company authority: the two-step gate's company authority
+    // lookup runs, and must use the identity pool too.
     await pg.exec(`
       INSERT INTO auth."user"(id,name,email,email_verified,initial_admin)
         VALUES('fictional-user','Fictional User','fictional@example.test',true,true);
@@ -52,6 +56,7 @@ describe("identity-only operations use the identity pool", () => {
         VALUES('fictional-team','Fictional Team','fictional-team','fictional-user');
       INSERT INTO auth.member(id,organization_id,user_id,role)
         VALUES('fictional-member','fictional-team','fictional-user','recruiter');
+      DELETE FROM app.workspace_admins WHERE user_id='fictional-user';
     `);
     db = drizzle(pg, { schema }) as unknown as AppDb;
     route.identity.mockImplementation(async () => db);

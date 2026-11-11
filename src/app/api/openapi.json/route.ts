@@ -1505,7 +1505,7 @@ export function GET() {
     ),
   };
   const authorityShape =
-    "{data:[{userId, name, level:owner|admin, areas, planAccess, suspended}]}";
+    "{data:[{userId, name, level:owner|admin, areas, planAccess, suspended, twoStep, since}]}";
   const authorityAreas = [
     "fields",
     "workflows",
@@ -1519,7 +1519,7 @@ export function GET() {
       [],
       {
         summary: "List company owners and admins",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 authority_forbidden. Lists every company owner and admin of the workspace, owners first and then by name, with their display name, areas, plan access and whether they are suspended because they left every team of the company. Nothing is audited. Returns ${authorityShape}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 authority_forbidden. Lists every company owner and admin of the workspace, owners first and then by name, with their display name, areas, plan access, whether they are suspended because they left every team of the company, whether they use two-step sign-in (twoStep) and when their authority was last granted, changed or restored (since, ISO time). Nothing is audited. Returns ${authorityShape}.`,
       },
       { "200": { description: authorityShape } },
       { sessionOnly: true },
@@ -1528,7 +1528,7 @@ export function GET() {
       [],
       {
         summary: "Grant, change or remove a person's company authority",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else gets 403 authority_forbidden. ${freshSessionRule} Send {userId, level:null} to remove, {userId, level:"owner", areas:[], planAccess} or {userId, level:"admin", areas, planAccess} with areas a unique subset of ${authorityAreas.join(", ")}. Anything else, including roles, ai, plan or home-units as an area or an unknown key, returns 400 invalid_input. Removing or demoting the last company owner returns 409 last_company_owner; a grant to someone in no team of the company returns 409 not_in_company. Re-sending the grant of a suspended person who has rejoined a team restores it. Each change writes one workspace-authority activity row (workspace_authority.changed) to your team with the person's id and the grant before and after; changed is false, and nothing is written, when nothing changes. Body at most 1024 bytes. Returns {data:{changed}}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else gets 403 authority_forbidden. ${freshSessionRule} Send {userId, level:null} to remove, {userId, level:"owner", areas:[], planAccess} or {userId, level:"admin", areas, planAccess} with areas a unique subset of ${authorityAreas.join(", ")}. Anything else, including roles, ai, plan or home-units as an area or an unknown key, returns 400 invalid_input. Removing or demoting the last company owner returns 409 last_company_owner; a grant to someone in no team of the company returns 409 not_in_company; a grant of a level to someone without two-step sign-in returns 409 authority_two_step_required (removal is always allowed). Re-sending the grant of a suspended person who has rejoined a team restores it. Each change writes one workspace-authority activity row (workspace_authority.changed) to your team with the person's id and the grant before and after; changed is false, and nothing is written, when nothing changes. Body at most 1024 bytes. Returns {data:{changed}}.`,
         requestBody: jsonBody(
           {
             oneOf: [

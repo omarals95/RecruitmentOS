@@ -840,6 +840,13 @@ describe("OpenAPI contract", () => {
     expect(text("/api/v1/company-authority", "get")).toContain(
       "authority_forbidden",
     );
+    // ADM-16 (job 077): two-step state and since date, and the two-step refusal.
+    expect(text("/api/v1/company-authority", "get")).toContain(
+      "suspended, twoStep, since}",
+    );
+    expect(text("/api/v1/company-authority", "post")).toContain(
+      "a grant of a level to someone without two-step sign-in returns 409 authority_two_step_required",
+    );
   });
 
   it("documents the recent sign-in rule on exactly the four sensitive admin changes (ADM-06)", () => {

@@ -11,14 +11,15 @@ import {
   type Mail,
 } from "./helpers/auth";
 
-// Better Auth's handler over the identity migrations, run as the restricted identity role.
+// Better Auth's handler over every migration, run as the restricted identity role: the gate reads
+// company authority for a member without two-step.
 describe("two-step sign-in through the Better Auth handler", () => {
   const mail: Mail[] = [];
   let h: Awaited<ReturnType<typeof createAuthDb>>;
   let caller: ReturnType<typeof authCaller>;
   let owner = { cookie: "", teamId: "", secret: "" };
   beforeAll(async () => {
-    h = await createAuthDb();
+    h = await createAuthDb({ workspace: true });
     caller = authCaller(createTestAuth(h.db, mail));
     const setup = await setUpAdmin(caller, mail);
     owner = {

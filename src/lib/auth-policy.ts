@@ -33,14 +33,19 @@ export const SESSION_FRESH_AGE_SECONDS = 60 * 15;
 
 export const TWO_STEP_SETUP_MESSAGE =
   "Set up two-step sign-in to continue. Owners and admins must use it.";
-/** Owners and admins in any team must use two-step sign-in; callers pass live values only. */
+/**
+ * Owners and admins in any team, and company owners and admins with an unsuspended row, must use
+ * two-step sign-in; callers pass live values only (companyAuthority from companyAuthorityHeld).
+ */
 export function twoStepSetupRequired(
   twoFactorEnabled: boolean | null | undefined,
   roles: readonly string[],
+  companyAuthority: boolean,
 ): boolean {
   return (
     !twoFactorEnabled &&
-    roles.some((role) => role === "owner" || role === "admin")
+    (roles.some((role) => role === "owner" || role === "admin") ||
+      companyAuthority)
   );
 }
 

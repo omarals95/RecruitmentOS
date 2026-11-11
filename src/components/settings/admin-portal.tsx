@@ -19,6 +19,7 @@ import {
   type AdminTab,
   type AdminTabKey,
 } from "./admin-tabs";
+import { CompanyAuthorityTab } from "./company-authority-tab";
 import { DirectoryTab } from "./directory-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
@@ -179,8 +180,10 @@ export function AdminPortalView({
                 <ConfigHistory />
                 {access.companyLevel === "owner" && <RecentAccessChanges />}
               </>
+            ) : current.key === "company-authority" ? (
+              <CompanyAuthorityTab onAccessChanged={onAccessChanged} />
             ) : current.key === "roles" ? (
-              <RolesTab onAccessChanged={onAccessChanged} />
+              <RolesTab />
             ) : current.key === "organisation" ? (
               <OrganisationTab access={access} />
             ) : current.key === "directory" ? (

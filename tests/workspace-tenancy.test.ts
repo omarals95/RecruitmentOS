@@ -1,10 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Only the 0043 describe routes these, for the service; the others use the harness directly.
+const pools = vi.hoisted(() => ({ data: vi.fn(), identity: vi.fn() }));
+vi.mock("@/db", async (original) => ({
+  ...(await original<typeof import("@/db")>()),
+  getDb: pools.data,
+  getIdentityDb: pools.identity,
+}));
+
 import type { AppDb, TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
 import { builtInRoleFor } from "@/domain/config-defaults";
+import { setCompanyAuthority } from "@/lib/company-authority";
 import type { Principal } from "@/lib/principal";
 import { installTenantContext } from "@/lib/tenant-context";
 import {
@@ -617,7 +627,7 @@ describe("company workspace authority under the split runtime roles", () => {
   it("removes a deleted user's company authority without error", async () => {
     const db = await harness.asOwner();
     await db.execute(
-      sql`insert into auth."user"(id,name,email,email_verified) values ('ws-leaver','Fictional Leaver','ws-leaver@example.test',true)`,
+      sql`insert into auth."user"(id,name,email,email_verified,two_factor_enabled) values ('ws-leaver','Fictional Leaver','ws-leaver@example.test',true,true)`,
     );
     await db.execute(
       sql`insert into auth.member(id,organization_id,user_id,role) values ('ws-leaver:ws-team-a','ws-team-a','ws-leaver','recruiter')`,
@@ -921,5 +931,129 @@ describe("the signed context derives the workspace and company authority (R2a-02
         "versions",
         "workspaceId",
       ]);
+  });
+});
+
+// ADM-16 (job 077, 0043): the helper refuses any company level for a person without two-step
+// sign-in, after every earlier refusal, and always allows removal.
+describe("company authority needs two-step sign-in (0043)", () => {
+  let harness: Harness;
+  let look: ReturnType<typeof inspector>;
+  let owner: Principal;
+  const TWO_STEP_REQUIRED =
+    "This person must set up two-step sign-in before they can hold company authority. Ask them to turn it on in My profile, then try again.";
+
+  const setAuthority = (
+    target: string,
+    level: string | null,
+    areas: string[] | null,
+    plan: boolean | null,
+  ) =>
+    asContext(harness, owner, async (tx) => {
+      const { rows } = await tx.execute<{ changed: boolean }>(
+        sql`select tenant_context.set_workspace_authority(${target}::text, ${level}::text, ${arrayLiteral(areas)}::text[], ${plan}::boolean) as changed`,
+      );
+      return rows[0].changed;
+    });
+  const activity = () =>
+    look.query<{ n: number }>("SELECT count(*)::int AS n FROM app.activity");
+  /** RQ017 from direct SQL as the data role, with no authority or activity row changed. */
+  async function refused(call: () => Promise<unknown>) {
+    const admins = await look.admins();
+    const rows = await activity();
+    await expect(call()).rejects.toMatchObject({ cause: { code: "RQ017" } });
+    expect(await look.admins()).toEqual(admins);
+    expect(await activity()).toEqual(rows);
+  }
+  const twoStep = (userId: string, on: boolean) =>
+    look.query(`UPDATE auth."user" SET two_factor_enabled = $2 WHERE id = $1`, [
+      userId,
+      on,
+    ]);
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    look = inspector(harness);
+    const db: AppDb = await harness.asOwner();
+    owner = await seedIdentity(db, { userId: "tsa-owner", teamId: "tsa-team" });
+    for (const userId of ["tsa-member", "tsa-holder"])
+      await seedIdentity(db, {
+        userId,
+        teamId: "tsa-team",
+        role: "recruiter",
+        twoFactorEnabled: false,
+      });
+    // An existing holder without two-step, as an upgraded database may hold, written by the owner.
+    await db.execute(
+      sql`insert into app.workspace_admins(workspace_id,user_id,level,areas,plan_access) values (${COMPANY}, 'tsa-holder', 'admin', '{fields}', false)`,
+    );
+  });
+  afterAll(async () => harness?.close());
+
+  it("refuses an owner or admin level for a member without two-step, by direct SQL", async () => {
+    await refused(() => setAuthority("tsa-member", "owner", [], false));
+    await refused(() => setAuthority("tsa-member", "admin", ["fields"], true));
+  });
+
+  it("grants the same member once two-step is on, with one audit row", async () => {
+    await twoStep("tsa-member", true);
+    const audits = (await look.audits()).length;
+    expect(await setAuthority("tsa-member", "admin", ["fields"], true)).toBe(
+      true,
+    );
+    expect(
+      (await look.admins()).find((row) => row.user_id === "tsa-member"),
+    ).toMatchObject({ level: "admin", areas: ["fields"], plan_access: true });
+    expect(await look.audits()).toHaveLength(audits + 1);
+  });
+
+  it("refuses a change or a re-send to a holder without two-step, and allows removal with one audit row", async () => {
+    await refused(() =>
+      setAuthority("tsa-holder", "admin", ["fields", "people"], false),
+    );
+    await refused(() => setAuthority("tsa-holder", "admin", ["fields"], false));
+    const audits = await look.audits();
+    expect(await setAuthority("tsa-holder", null, null, null)).toBe(true);
+    expect(
+      (await look.admins()).map((row) => row.user_id).includes("tsa-holder"),
+    ).toBe(false);
+    expect(await look.audits()).toHaveLength(audits.length + 1);
+    expect((await look.audits()).at(-1)?.metadata).toMatchObject({
+      targetUserId: "tsa-holder",
+      before: { level: "admin", areas: ["fields"] },
+      after: null,
+    });
+  });
+
+  it("answers 409 authority_two_step_required through the service, writing nothing", async () => {
+    await twoStep("tsa-member", false);
+    const admins = await look.admins();
+    const rows = await activity();
+    for (const input of [
+      {
+        userId: "tsa-member",
+        level: "admin" as const,
+        areas: ["fields" as const],
+        planAccess: false,
+      },
+      {
+        userId: "tsa-holder",
+        level: "owner" as const,
+        areas: [],
+        planAccess: false,
+      },
+    ])
+      await expect(
+        setCompanyAuthority(owner, input),
+        input.userId,
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "authority_two_step_required",
+        message: TWO_STEP_REQUIRED,
+      });
+    expect(await look.admins()).toEqual(admins);
+    expect(await activity()).toEqual(rows);
   });
 });

@@ -7,6 +7,7 @@ import { canCreateTeam, twoStepSetupRequired } from "./auth-policy";
 import { getIdentityDb } from "@/db";
 import { member, organization } from "@/db/auth-schema";
 import { parseRole, type Role } from "./permissions";
+import { companyAuthorityHeld } from "./two-step";
 import { workspaceEnvironment } from "./build-info";
 export { workspaceEnvironment };
 export interface WorkspaceContext {
@@ -52,6 +53,11 @@ async function readWorkspace() {
     twoStepSetupRequired(
       identity.user.twoFactorEnabled,
       memberships.map((m) => m.role),
+      await companyAuthorityHeld(
+        db,
+        identity.user,
+        memberships.map((m) => ({ teamId: m.team.id, role: m.role })),
+      ),
     )
   )
     redirect("/two-step-setup?next=/app");

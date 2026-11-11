@@ -1,13 +1,35 @@
-import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Only the company authority gate describe routes these; the others never call them.
+const pools = vi.hoisted(() => ({ data: vi.fn(), identity: vi.fn() }));
+vi.mock("@/db", async (original) => ({
+  ...(await original<typeof import("@/db")>()),
+  getDb: pools.data,
+  getIdentityDb: pools.identity,
+}));
+vi.mock("@/lib/auth-session", () => ({
+  getSession: vi.fn(),
+  getVerifiedSession: vi.fn(),
+}));
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/navigation", () => ({
+  redirect: (url: string) => {
+    throw new Error(`redirect:${url}`);
+  },
+}));
+
 import type { AppDb } from "../src/db";
 import { authTables } from "../src/db/auth-schema";
 import { createAuth } from "../src/lib/auth";
+import { getSession, getVerifiedSession } from "../src/lib/auth-session";
 import { changeTeamRole } from "../src/lib/member-roles";
+import { requirePrincipal } from "../src/lib/principal";
+import { getWorkspaceContext } from "../src/lib/workspace";
 import {
   addMember,
+  applyWorkspaceSchema,
   authCaller,
   createAuthDb,
   createTeam,
@@ -15,6 +37,7 @@ import {
   setUpAdmin,
   type Mail,
 } from "./helpers/auth";
+import { createSplitRoleDb } from "./helpers/db";
 
 describe("Better Auth verified invite-only flows", () => {
   const pg = new PGlite();
@@ -51,39 +74,17 @@ describe("Better Auth verified invite-only flows", () => {
         body: JSON.stringify(body),
       }),
     );
-  beforeAll(async () =>
-    pg.exec(
-      (await readFile(
-        new URL("../drizzle/0000_auth.sql", import.meta.url),
-        "utf8",
-      )) +
-        "\n" +
-        (await readFile(
-          new URL("../drizzle/0003_initial_admin.sql", import.meta.url),
-          "utf8",
-        )) +
-        "\n" +
-        (await readFile(
-          new URL(
-            "../drizzle/0004_protect_initial_admin_claim.sql",
-            import.meta.url,
-          ),
-          "utf8",
-        )) +
-        "\n" +
-        (await readFile(
-          new URL("../drizzle/0022_two_step_sign_in.sql", import.meta.url),
-          "utf8",
-        )) +
-        `
+  // Every migration: the two-step gate reads company authority for the invited recruiter.
+  beforeAll(async () => {
+    const grants = await applyWorkspaceSchema(pg, "identity_flow_runtime");
+    await pg.exec(`
           CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
           GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
           GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;
-          GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;
+          GRANT SELECT,INSERT,UPDATE,DELETE ON auth."user",auth.organization,auth.session,auth.account,auth.verification,auth.two_factor,auth.member,auth.invitation,auth.rate_limit,auth.api_tokens,auth.api_rate_limits TO identity_flow_runtime;${grants}
           SET ROLE identity_flow_runtime;
-        `,
-    ),
-  );
+        `);
+  });
   afterAll(async () => pg.close());
   it("executes the identity flow under a restricted nonowner role", async () => {
     const result = await pg.query<{
@@ -505,7 +506,7 @@ describe("owner role and team creation through the handler", () => {
       )
     ).rows[0]?.role;
   beforeAll(async () => {
-    h = await createAuthDb();
+    h = await createAuthDb({ workspace: true });
     caller = authCaller(createTestAuth(h.db, mail));
     ({ cookie: ownerCookie, teamId } = await setUpAdmin(caller, mail));
     admin = await addMember(
@@ -667,5 +668,172 @@ describe("owner role and team creation through the handler", () => {
       true,
     );
     expect(await roleOf(recruiter.memberId)).toBe("recruiter");
+  });
+});
+
+// ADM-16 (job 077): company owners and admins with an unsuspended row must use two-step sign-in,
+// at Better Auth, the API and pages alike, on the split runtime roles with fictional people.
+describe("two-step sign-in for company authority under the split runtime roles", () => {
+  const COMPANY = "00000000-0000-4000-a000-000000000001";
+  const ORIGIN = "http://localhost:3000";
+  const mail: Mail[] = [];
+  let harness: Awaited<ReturnType<typeof createSplitRoleDb>>;
+  let caller: ReturnType<typeof authCaller>;
+  let teamId = "";
+  type Person = { id: string; cookie: string };
+  const people: Record<
+    "companyAdmin" | "plain" | "suspended" | "teamOwner",
+    Person
+  > = {
+    companyAdmin: { id: "", cookie: "" },
+    plain: { id: "", cookie: "" },
+    suspended: { id: "", cookie: "" },
+    teamOwner: { id: "", cookie: "" },
+  };
+  /** As the PGlite superuser, which bypasses RLS: only to arrange and inspect. */
+  const superuser = async <T>(text: string, params: unknown[] = []) => {
+    await harness.asSuperuser();
+    return (await harness.client.query<T>(text, params)).rows;
+  };
+  /** The session lookups return the person's live identity row. */
+  async function signedIn(userId: string) {
+    const [row] = await superuser<{
+      name: string;
+      email: string;
+      two_factor_enabled: boolean | null;
+    }>(
+      `SELECT name, email, two_factor_enabled FROM auth."user" WHERE id = $1`,
+      [userId],
+    );
+    const identity = {
+      user: {
+        id: userId,
+        name: row.name,
+        email: row.email,
+        emailVerified: true,
+        twoFactorEnabled: row.two_factor_enabled,
+      },
+      session: { activeOrganizationId: teamId, createdAt: new Date() },
+    };
+    vi.mocked(getSession).mockResolvedValue(identity as never);
+    vi.mocked(getVerifiedSession).mockResolvedValue(identity as never);
+  }
+  /** The three gates: a Better Auth endpoint, requirePrincipal and getWorkspaceContext. */
+  async function gates(person: Person) {
+    await harness.identityDb();
+    const response = await caller.get(
+      `${ORIGIN}/api/auth/organization/list`,
+      person.cookie,
+    );
+    const betterAuth = response.ok
+      ? response.status
+      : `${response.status} ${((await response.json()) as { code: string }).code}`;
+    await signedIn(person.id);
+    const api = await requirePrincipal(
+      new Request(ORIGIN, { headers: { "x-team-id": teamId } }),
+    ).then(
+      (principal) => principal.userId,
+      (error: { status: number; code: string }) =>
+        `${error.status} ${error.code}`,
+    );
+    const page = await getWorkspaceContext().then(
+      (context) => context.user.id,
+      (error: Error) => error.message,
+    );
+    return { betterAuth, api, page };
+  }
+  const gated = {
+    betterAuth: "403 two_step_setup_required",
+    api: "403 two_step_setup_required",
+    page: "redirect:/two-step-setup?next=/app",
+  };
+  const passes = (userId: string) => ({
+    betterAuth: 200,
+    api: userId,
+    page: userId,
+  });
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.identity.mockImplementation(harness.identityDb);
+    pools.data.mockImplementation(async () => {
+      throw new Error("The two-step gate must not use the data pool");
+    });
+    vi.stubEnv("DATABASE_MODE", "pglite");
+    vi.stubEnv("ALLOW_LOCAL_DB", "true");
+    vi.stubEnv("BETTER_AUTH_URL", ORIGIN);
+    vi.stubEnv("BETTER_AUTH_SECRET", "fictional-valid-test-secret-0123456789");
+    vi.stubEnv("BOOTSTRAP_OWNER_EMAIL", "owner@example.test");
+    vi.stubEnv(
+      "BOOTSTRAP_SETUP_TOKEN",
+      "fictional-bootstrap-secret-0123456789abcdefghi",
+    );
+    vi.stubEnv("DEV_MAIL_MODE", "console");
+    caller = authCaller(createTestAuth(await harness.identityDb(), mail));
+    const admin = await setUpAdmin(caller, mail);
+    teamId = admin.teamId;
+    for (const [key, email] of [
+      ["companyAdmin", "ca-company-admin@example.test"],
+      ["plain", "ca-plain@example.test"],
+      ["suspended", "ca-suspended@example.test"],
+      ["teamOwner", "ca-team-owner@example.test"],
+    ] as const) {
+      await harness.identityDb();
+      const added = await addMember(
+        caller,
+        mail,
+        admin.cookie,
+        teamId,
+        email,
+        "recruiter",
+      );
+      const [{ id }] = await superuser<{ id: string }>(
+        `SELECT id FROM auth."user" WHERE email = $1`,
+        [email],
+      );
+      people[key] = { id, cookie: added.cookie };
+    }
+    // Rows an upgraded database may hold for people without two-step: one active, one suspended.
+    await superuser(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ($1,$2,'admin','{fields}')`,
+      [COMPANY, people.companyAdmin.id],
+    );
+    await superuser(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,suspended_at) VALUES ($1,$2,'owner','{}',now())`,
+      [COMPANY, people.suspended.id],
+    );
+    await superuser(
+      `UPDATE auth.member SET role = 'owner' WHERE user_id = $1`,
+      [people.teamOwner.id],
+    );
+  });
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await harness?.close();
+  });
+
+  it("sends a company admin without two-step to set it up at Better Auth, the API and pages", async () => {
+    expect(await gates(people.companyAdmin)).toEqual(gated);
+  });
+
+  it("lets the same company admin through once two-step is on", async () => {
+    await harness.identityDb();
+    const { cookie } = await caller.enableTwoStep(people.companyAdmin.cookie);
+    expect(await gates({ id: people.companyAdmin.id, cookie })).toEqual(
+      passes(people.companyAdmin.id),
+    );
+  });
+
+  it("leaves a plain recruiter and a suspended holder without two-step ungated", async () => {
+    expect(await gates(people.plain)).toEqual(passes(people.plain.id));
+    expect(await gates(people.suspended)).toEqual(passes(people.suspended.id));
+  });
+
+  it("still gates a team owner without two-step", async () => {
+    expect(await gates(people.teamOwner)).toEqual(gated);
+  });
+
+  it("never opens the data pool for the lookup", () => {
+    expect(pools.data).not.toHaveBeenCalled();
   });
 });
