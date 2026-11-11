@@ -12,7 +12,7 @@ export function ensure(result: { error?: { message?: string } | null }) {
       result.error.message || "The action could not be completed.",
     );
 }
-function slugFor(value: string) {
+export function slugFor(value: string) {
   return value
     .trim()
     .toLowerCase()

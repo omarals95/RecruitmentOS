@@ -26,6 +26,7 @@ import type { Requester } from "@/components/workspace/optimistic";
 import type { Employee, Position, ReportingPerson } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
+import { JobArchitecturePanel } from "./job-architecture-panel";
 import { OrgImportPanel } from "./org-import-panel";
 import {
   ZOOM_MAX,
@@ -280,7 +281,7 @@ const plainList = {
 
 /**
  * The Organisation tab (R2a-16), for company owners and company admins with the organisation area:
- * levels, and an org chart that loads one level at a time. Moving and archiving units and moving
+ * levels, an org chart that loads one level at a time and the job architecture (ADM-26). Moving and archiving units and moving
  * positions are offered to company owners only; the service and the database refuse them anyway.
  */
 export function OrganisationTab({ access }: { access: MeAccess }) {
@@ -927,6 +928,7 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         people={people}
         on={{ ...handlers, ...treeHandlers, ...peopleHandlers }}
       />
+      <JobArchitecturePanel access={access} request={request} />
       <OrgImportPanel
         request={request}
         owner={owner}
