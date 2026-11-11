@@ -2,13 +2,12 @@
 
 import { useState } from "react";
 import { Info } from "lucide-react";
-import { useWorkspace } from "@/components/workspace/client";
 import { appVersion, formatBuildTime, versionDetails } from "@/lib/app-version";
-import { SettingsNavigation } from "./settings-navigation";
+import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
 
 /** Every signed-in member: the version and build of this deployment, nothing secret. */
 export function AboutSettings() {
-  const { role } = useWorkspace();
+  const adminPortal = useAdminPortalLink();
   return (
     <div className="stack settings-page">
       <header className="page-heading">
@@ -21,7 +20,7 @@ export function AboutSettings() {
         </div>
         <Info size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation active="about" role={role} />
+      <SettingsNavigation active="about" adminPortal={adminPortal} />
       <AboutPanel />
     </div>
   );

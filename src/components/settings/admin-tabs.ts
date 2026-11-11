@@ -1,4 +1,5 @@
 import type { AccessMap } from "@/lib/authz";
+import type { TeamDetailTab } from "./team-detail-tabs";
 
 /** The plain refusal on every admin page; server pages import it, so it lives outside "use client". */
 export const NO_ACCESS = "You do not have access to this page";
@@ -19,11 +20,12 @@ export const ADMIN_GROUPS = [
 export type AdminGroup = (typeof ADMIN_GROUPS)[number];
 
 /**
- * The Admin portal pages that exist today, one row per page, ordered by group. Team pages follow the
- * team role; History follows company authority, Roles & permissions the company owner level only
- * (D1), Organisation a company owner or a company admin with the organisation area, and Directory
- * the role's directory view action, so a team role never yields any of them and company authority
- * never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
+ * The Admin portal pages that exist today, one row per page, ordered by group. API tokens, the one
+ * team page left here, follows the team role (a team's Members, CV storage, Speed and Task boards
+ * are tabs of its detail page under Teams); History follows company authority, Roles & permissions
+ * the company owner level only (D1), Organisation a company owner or a company admin with the
+ * organisation area, and Directory the role's directory view action, so a team role never yields
+ * any of them and company authority never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
  * other team by name only, never its data. Users follows a company owner or a company admin with
  * the people area (D20): everyone in every team by name, email, teams and roles, never team data. A
@@ -45,38 +47,6 @@ export const ADMIN_TABS = [
     group: "People",
     description:
       "See the teams you manage and create a team; company owners and admins also see every other team by name.",
-  },
-  {
-    key: "members",
-    label: "Members",
-    level: "team",
-    group: "People",
-    description:
-      "Invite people to this team, set each member's team role and remove members.",
-  },
-  {
-    key: "cv-storage",
-    label: "CV storage",
-    level: "team",
-    group: "People",
-    description:
-      "Set this team's CV storage limit and upload rate limit, and whether connected AI apps can read CV contents.",
-  },
-  {
-    key: "speed",
-    label: "Speed",
-    level: "team",
-    group: "People",
-    description:
-      "See how long common actions and API requests take for this team.",
-  },
-  {
-    key: "task-boards",
-    label: "Task boards",
-    level: "team",
-    group: "People",
-    description:
-      "Choose which of this team's buckets each task board shows as its columns.",
   },
   {
     key: "organisation",
@@ -140,9 +110,25 @@ export function isAdminTab(key: string): key is AdminTabKey {
 }
 
 /**
+ * The old team pages under /app/admin and the team detail tab each one redirects to, on the current
+ * team (IMP-001), so bookmarks keep working.
+ */
+export const OLD_TEAM_PAGES: Record<string, TeamDetailTab> = {
+  members: "members",
+  "cv-storage": "cv-storage",
+  speed: "speed",
+  "task-boards": "task-boards",
+};
+
+/** The team detail tab an old /app/admin key now lives on, or null for any other key. */
+export function oldTeamPage(key: string): TeamDetailTab | null {
+  return Object.hasOwn(OLD_TEAM_PAGES, key) ? OLD_TEAM_PAGES[key] : null;
+}
+
+/**
  * The pages the caller may open, in table order, from GET /api/v1/me/access: teamRole,
  * companyLevel, and the company areas and directory actions of the access state (never
- * member.role).
+ * member.role). The Admin portal link in personal settings shows when this lists any page.
  */
 export function adminTabs({
   teamRole,

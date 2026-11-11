@@ -15,6 +15,7 @@ import {
   LOADING_SNAPSHOT,
   type CacheIdentity,
   type CacheSnapshot,
+  type DataCache,
   type Loader,
 } from "./data-cache";
 import type { Requester } from "./optimistic";
@@ -146,7 +147,10 @@ export async function requestJson<T>(
     }
     if (!response.ok) throw errorFromBody(response.status, body);
     // The duplicate lookup is a read-only POST, so it must not refresh open views.
-    if (teamId && entry.write) dataCache.afterWrite(teamId, path, body);
+    if (teamId && entry.write) {
+      dataCache.afterWrite(teamId, path, body);
+      teamCache.afterWrite(teamId, path, body);
+    }
     if (typeof window !== "undefined" && entry.write)
       window.dispatchEvent(
         new CustomEvent("recruitmentos:data-changed", {
@@ -271,6 +275,48 @@ export function useSwitchNotice() {
 export const dataCache = createDataCache((teamId, path, signal) =>
   requestJson(teamId, path, { signal }),
 );
+/**
+ * Reads of a TeamScope's team, such as Admin > Teams > team for a team that may not be the active
+ * one. They keep their own cache because an identity change drops every other team's entries from
+ * dataCache, those of a scope just mounted included.
+ */
+const teamCache = createDataCache((teamId, path, signal) =>
+  requestJson(teamId, path, { signal }),
+);
+const TeamScopeContext = createContext<string | null>(null);
+/** Every read below, and useTeamId, name this team instead of the active one. */
+export function TeamScope({
+  teamId,
+  children,
+}: {
+  teamId: string;
+  children: ReactNode;
+}) {
+  return (
+    <TeamScopeContext.Provider value={teamId}>
+      {children}
+    </TeamScopeContext.Provider>
+  );
+}
+/** The team a component's reads and writes name: its TeamScope's team, else the active team. */
+export function useTeamId(): string | null {
+  const scoped = useContext(TeamScopeContext);
+  const { team } = useWorkspace();
+  return scoped ?? team?.id ?? null;
+}
+/** The cache and identity a read uses: a TeamScope's team in teamCache, else the active team. */
+export function useQueryScope(): {
+  cache: DataCache;
+  identity: CacheIdentity | null;
+} {
+  const scoped = useContext(TeamScopeContext);
+  const { user, team } = useWorkspace();
+  const teamId = scoped ?? team?.id;
+  return {
+    cache: scoped ? teamCache : dataCache,
+    identity: teamId ? { userId: user.id, teamId } : null,
+  };
+}
 /** requestJson for one team, in the shape the optimistic actions take. */
 export function teamRequester(teamId: string): Requester {
   return <T,>(path: string, init?: RequestInit) =>
@@ -279,6 +325,7 @@ export function teamRequester(teamId: string): Requester {
 /** Team switch and sign-out: nothing cached for one team may be shown in another. */
 export function clearWorkspaceCache() {
   dataCache.clear();
+  teamCache.clear();
   speedLog()?.clear();
 }
 /**
@@ -286,41 +333,41 @@ export function clearWorkspaceCache() {
  * single GET for reads such as the whole-vacancy board; keep it stable with useCallback.
  */
 export function useCachedQuery<T>(path: string | null, load?: Loader) {
-  const { user, team } = useWorkspace();
-  const userId = user.id;
-  const teamId = team?.id;
+  const { cache, identity } = useQueryScope();
+  const userId = identity?.userId;
+  const teamId = identity?.teamId;
   const enabled = !!path && !!teamId;
   const subscribe = useCallback(
     (listener: () => void) =>
       enabled
-        ? dataCache.subscribe(
-            { userId, teamId: teamId! },
+        ? cache.subscribe(
+            { userId: userId!, teamId: teamId! },
             path!,
             listener,
             load,
           )
         : () => {},
-    [enabled, userId, teamId, path, load],
+    [cache, enabled, userId, teamId, path, load],
   );
   const getSnapshot = useCallback(
     () =>
       enabled
-        ? dataCache.getSnapshot({ userId, teamId: teamId! }, path!)
+        ? cache.getSnapshot({ userId: userId!, teamId: teamId! }, path!)
         : DISABLED_SNAPSHOT,
-    [enabled, userId, teamId, path],
+    [cache, enabled, userId, teamId, path],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, () =>
     enabled ? LOADING_SNAPSHOT : DISABLED_SNAPSHOT,
   ) as CacheSnapshot<T>;
   const refresh = useCallback(() => {
     if (enabled)
-      void dataCache.revalidate({ userId, teamId: teamId! }, path!, true);
-  }, [enabled, userId, teamId, path]);
+      void cache.revalidate({ userId: userId!, teamId: teamId! }, path!, true);
+  }, [cache, enabled, userId, teamId, path]);
   const setData = useCallback(
     (data: T | null) => {
-      if (enabled) dataCache.set({ userId, teamId: teamId! }, path!, data);
+      if (enabled) cache.set({ userId: userId!, teamId: teamId! }, path!, data);
     },
-    [enabled, userId, teamId, path],
+    [cache, enabled, userId, teamId, path],
   );
   return { ...snapshot, refresh, setData };
 }

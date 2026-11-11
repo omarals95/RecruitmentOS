@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+import type { TeamDetailTab } from "@/components/settings/team-detail-tabs";
 import { meAccess, type MeAccess } from "./authz";
 import { withTeam } from "./db-team";
 import { roleScopes, type Role } from "./permissions";
@@ -58,4 +60,15 @@ export async function teamPageAccess(teamId: string): Promise<TeamPageAccess> {
   return access?.companyLevel === "owner" || access?.companyLevel === "admin"
     ? { state: "not-a-member" }
     : { state: "refused" };
+}
+
+/**
+ * The old team pages (IMP-001): an owner or admin of the current team goes to that tab of its
+ * detail page, through the same teamPageAccess check. Anyone else returns here, and the old page
+ * renders what it gave them before; without a session readWorkspace() sends them to /sign-in.
+ */
+export async function redirectToTeamTab(tab: TeamDetailTab): Promise<void> {
+  const { team } = await getWorkspaceContext();
+  if (team && (await teamPageAccess(team.id)).state === "allowed")
+    redirect(`/app/admin/teams/${encodeURIComponent(team.id)}?tab=${tab}`);
 }

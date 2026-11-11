@@ -1,4 +1,6 @@
 import { SpeedSettings } from "@/components/settings/speed-settings";
-export default function SpeedSettingsPage() {
+import { redirectToTeamTab } from "@/lib/admin-access";
+export default async function SpeedSettingsPage() {
+  await redirectToTeamTab("speed");
   return <SpeedSettings />;
 }

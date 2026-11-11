@@ -1,9 +1,9 @@
 "use client";
 
 import { Gauge } from "lucide-react";
-import { useApi, useWorkspace } from "@/components/workspace/client";
+import { useApi } from "@/components/workspace/client";
 import { formatNumber } from "@/components/workspace/helpers";
-import { SettingsNavigation } from "./settings-navigation";
+import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
 
 export interface SpeedRow {
   kind: "action" | "route";
@@ -19,13 +19,12 @@ const ms = (value: number | null | undefined) =>
     ? "Not reported"
     : `${formatNumber(value)} ms`;
 
-/** Owners and admins: typical and slow times per action and API route, last 30 days. */
+/**
+ * /app/settings/speed for a caller who is not an owner or admin of the current team, since the
+ * server sends owners and admins to the team detail Speed tab.
+ */
 export function SpeedSettings() {
-  const { team, role } = useWorkspace();
-  const canView = role === "owner" || role === "admin";
-  const result = useApi<{ data: SpeedRow[] }>(
-    team && canView ? "/api/v1/teams/speed" : null,
-  );
+  const adminPortal = useAdminPortalLink();
   return (
     <div className="stack settings-page">
       <header className="page-heading">
@@ -38,16 +37,18 @@ export function SpeedSettings() {
         </div>
         <Gauge size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation active="speed" role={role} />
-      {!canView || !team ? (
-        <p className="notice" role="status">
-          Only team owners and admins can view speed timings.
-        </p>
-      ) : (
-        <SpeedPanel rows={result.data?.data ?? null} error={result.error} />
-      )}
+      <SettingsNavigation adminPortal={adminPortal} />
+      <p className="notice" role="status">
+        Only team owners and admins can view speed timings.
+      </p>
     </div>
   );
+}
+
+/** The team detail Speed tab: typical and slow times per action and API route, last 30 days. */
+export function SpeedTab() {
+  const result = useApi<{ data: SpeedRow[] }>("/api/v1/teams/speed");
+  return <SpeedPanel rows={result.data?.data ?? null} error={result.error} />;
 }
 
 export function SpeedPanel({
@@ -61,6 +62,7 @@ export function SpeedPanel({
   const routes = rows?.filter((row) => row.kind === "route") ?? [];
   return (
     <section className="panel stack">
+      <h2>Speed</h2>
       <p className="muted">
         This panel holds the last 30 days of timings and route names only, with
         no names, ids or content. Typical is the median; slow is the 95th

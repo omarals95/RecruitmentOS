@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceProvider } from "../src/components/workspace/client";
+import {
+  TeamScope,
+  WorkspaceProvider,
+} from "../src/components/workspace/client";
 import { SettingsNavigation } from "../src/components/settings/settings-navigation";
 import {
   deviceListMessage,
@@ -20,12 +23,14 @@ import { TokenSettings } from "../src/components/settings/token-settings";
 import {
   formatStorageBytes,
   parseStorageAmount,
+  StorageSettings,
   StorageSettingsForm,
   type StorageSettingsData,
 } from "../src/components/settings/storage-settings";
 import {
   SpeedPanel,
   SpeedSettings,
+  SpeedTab,
 } from "../src/components/settings/speed-settings";
 import { AboutSettings } from "../src/components/settings/about-settings";
 import { rules } from "./helpers/css";
@@ -44,14 +49,51 @@ const workspace = {
 };
 
 describe("settings navigation", () => {
+  const links = (markup: string) =>
+    [...markup.matchAll(/<a [^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(
+      (match) => [match[1], match[2]],
+    );
   it("marks one current tab with the primary button style", () => {
-    const markup = renderToStaticMarkup(<SettingsNavigation active="team" />);
+    const markup = renderToStaticMarkup(
+      <SettingsNavigation active="api-tokens" adminPortal={false} />,
+    );
     const current = [...markup.matchAll(/<a [^>]*>/g)]
       .map((match) => match[0])
       .filter((tag) => tag.includes('aria-current="page"'));
     expect(current).toHaveLength(1);
-    expect(current[0]).toContain('href="/app/settings/team"');
+    expect(current[0]).toContain('href="/app/settings/api-tokens"');
     expect(current[0]).not.toMatch(/class="[^"]*secondary/);
+  });
+  // ADM-04 (job 075): Team & access and Speed left personal settings.
+  it("lists only My profile, API tokens and About, in that order", () => {
+    for (const active of ["profile", "api-tokens", "about", undefined] as const)
+      expect(
+        links(
+          renderToStaticMarkup(
+            <SettingsNavigation active={active} adminPortal={false} />,
+          ),
+        ),
+        String(active),
+      ).toEqual([
+        ["/app/settings/profile", "My profile"],
+        ["/app/settings/api-tokens", "API tokens"],
+        ["/app/settings/about", "About"],
+      ]);
+  });
+  it("marks no section on the Team & access and Speed pages", () => {
+    for (const [name, page] of [
+      ["Team & access", <TeamSettings key="team" />],
+      ["Speed", <SpeedSettings key="speed" />],
+    ] as const) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={{ ...workspace, role: "recruiter" }}>
+          {page}
+        </WorkspaceProvider>,
+      );
+      expect(markup, name).toContain('aria-label="Settings sections"');
+      expect(markup, name).not.toContain('aria-current="page"');
+      expect(markup, name).not.toMatch(/href="\/app\/settings\/(team|speed)"/);
+    }
   });
   it("gives the current tab primary colours and no surface override", () => {
     const all = [
@@ -136,17 +178,52 @@ describe("CV storage settings", () => {
     expect(formatStorageBytes(10_000_000_000_000)).toBe("10,000 GB");
   });
 
-  it("shows the CV storage panel only to owners and admins", () => {
+  it("shows the CV storage panel on the team detail tab, for the page's team", () => {
     const sentence = "These are application limits, not hard provider caps.";
-    for (const role of ["owner", "admin", "recruiter", "viewer"]) {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TeamScope teamId="fictional-other-team">
+          <StorageSettings busy="" onAction={async () => {}} />
+        </TeamScope>
+      </WorkspaceProvider>,
+    );
+    expect(markup).toContain('<section class="panel" id="cv-storage">');
+    expect(markup).toContain("CV storage</h2>");
+    expect(markup).toContain(sentence);
+    expect(markup).toContain(
+      '<p role="status">Loading CV storage settings…</p>',
+    );
+  });
+
+  // ADM-04 (job 075): rename, Prepare task board and CV storage live on team detail now.
+  it("shows Team & access without CV storage, rename or Prepare task board for every role", () => {
+    for (const value of [
+      ...["owner", "admin", "recruiter", "viewer"].map((role) => ({
+        ...workspace,
+        role,
+      })),
+      { ...workspace, team: null, role: null },
+    ]) {
       const markup = renderToStaticMarkup(
-        <WorkspaceProvider value={{ ...workspace, role }}>
+        <WorkspaceProvider value={value}>
           <TeamSettings />
         </WorkspaceProvider>,
       );
-      const admin = role === "owner" || role === "admin";
-      expect(markup.includes("CV storage</h2>"), role).toBe(admin);
-      expect(markup.includes(sentence), role).toBe(admin);
+      const label = String(value.role);
+      expect(markup, label).toContain("<h1>Team &amp; access</h1>");
+      expect(markup, label).toContain("<h2>Your teams</h2>");
+      expect(markup, label).not.toContain("CV storage");
+      expect(markup, label).not.toContain("application limits");
+      expect(markup, label).not.toContain('value="Fictional Team"');
+      expect(markup, label).not.toContain("Save team name");
+      expect(markup, label).not.toContain("Prepare task board");
+      if (value.team) {
+        expect(markup, label).toContain("<h2>Fictional Team</h2>");
+        expect(markup, label).toContain(
+          "You can view team membership. An owner or admin can change access and invitations.",
+        );
+        expect(markup, label).toContain("<h2>Members</h2>");
+      } else expect(markup, label).not.toContain("<h2>Members</h2>");
     }
   });
 
@@ -262,29 +339,43 @@ describe("CV storage settings", () => {
 });
 
 describe("speed settings", () => {
-  const speedLinks = (role: string | null) =>
-    renderToStaticMarkup(
-      <SettingsNavigation active="team" role={role} />,
-    ).includes('href="/app/settings/speed"');
-  it("lists Speed in the settings navigation for owners and admins only", () => {
-    expect(speedLinks("owner")).toBe(true);
-    expect(speedLinks("admin")).toBe(true);
-    expect(speedLinks("recruiter")).toBe(false);
-    expect(speedLinks("viewer")).toBe(false);
-    expect(speedLinks(null)).toBe(false);
+  it("lists no Speed in the settings navigation, whatever the Admin portal link", () => {
+    for (const adminPortal of [true, false])
+      expect(
+        renderToStaticMarkup(
+          <SettingsNavigation active="profile" adminPortal={adminPortal} />,
+        ),
+      ).not.toContain('href="/app/settings/speed"');
   });
-  it("tells recruiters and viewers who opens the page that only owners and admins can view it", () => {
-    for (const role of ["recruiter", "viewer"]) {
+  // Owners and admins of the current team are redirected to the team detail Speed tab.
+  it("tells recruiters, viewers and people with no team who open the page that only owners and admins can view it", () => {
+    for (const value of [
+      { ...workspace, role: "recruiter" },
+      { ...workspace, role: "viewer" },
+      { ...workspace, team: null, role: null },
+    ]) {
       const markup = renderToStaticMarkup(
-        <WorkspaceProvider value={{ ...workspace, role }}>
+        <WorkspaceProvider value={value}>
           <SpeedSettings />
         </WorkspaceProvider>,
       );
+      expect(markup).toContain("<h1>Speed</h1>");
       expect(markup).toContain(
-        "Only team owners and admins can view speed timings.",
+        '<p class="notice" role="status">Only team owners and admins can view speed timings.</p>',
       );
-      expect(markup).not.toMatch(/<input|<select|<table/);
+      expect(markup).not.toMatch(/<input|<select|<table|<button/);
     }
+  });
+  it("shows the Speed tab's panel, for the page's team, while its timings load", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TeamScope teamId="fictional-other-team">
+          <SpeedTab />
+        </TeamScope>
+      </WorkspaceProvider>,
+    );
+    expect(markup).toContain('<section class="panel stack"><h2>Speed</h2>');
+    expect(markup).toContain('<p role="status">Loading speed timings…</p>');
   });
   it("shows typical and slow times with sample counts, db times for routes and what is kept", () => {
     const markup = renderToStaticMarkup(
@@ -354,15 +445,16 @@ describe("speed settings", () => {
 });
 
 describe("admin portal link", () => {
-  it("lists the Admin portal after the sections for owners and admins only, never as current", () => {
-    for (const role of ["owner", "admin", "recruiter", "viewer", null]) {
+  // The rule over every team role and company level is in tests/admin-portal-ui.test.tsx.
+  it("lists the Admin portal after the sections when the caller can open an admin page, never as current", () => {
+    for (const adminPortal of [true, false]) {
       const markup = renderToStaticMarkup(
-        <SettingsNavigation active="team" role={role} />,
+        <SettingsNavigation active="about" adminPortal={adminPortal} />,
       );
       const link = /<a [^>]*href="\/app\/admin"[^>]*>Admin portal<\/a>/.exec(
         markup,
       );
-      expect(!!link, String(role)).toBe(role === "owner" || role === "admin");
+      expect(!!link, String(adminPortal)).toBe(adminPortal);
       if (!link) continue;
       expect(link[0]).not.toContain("aria-current");
       expect(link[0]).toMatch(/class="button secondary"/);
@@ -371,17 +463,29 @@ describe("admin portal link", () => {
       );
     }
   });
+  it("hides the link while the access loads, for every team role", () => {
+    for (const role of ["owner", "admin", "recruiter", "viewer"])
+      for (const page of [
+        <AboutSettings key="about" />,
+        <TokenSettings key="tokens" />,
+        <ProfileSettings
+          key="profile"
+          providers={{ google: false, microsoft: false }}
+        />,
+      ])
+        expect(
+          renderToStaticMarkup(
+            <WorkspaceProvider value={{ ...workspace, role }}>
+              {page}
+            </WorkspaceProvider>,
+          ),
+          role,
+        ).not.toContain('href="/app/admin"');
+  });
 });
 
 describe("about settings", () => {
   afterEach(() => vi.unstubAllEnvs());
-  it("lists About in the settings navigation for every role", () => {
-    for (const role of ["owner", "admin", "recruiter", "viewer", null])
-      expect(
-        renderToStaticMarkup(<SettingsNavigation active="team" role={role} />),
-        String(role),
-      ).toContain('href="/app/settings/about"');
-  });
   it("shows version, build, commit, environment and UTC build time with Copy details to any member", () => {
     vi.stubEnv("NEXT_PUBLIC_APP_VERSION", "1.0.0");
     vi.stubEnv("NEXT_PUBLIC_APP_BUILD", "20261108.1430");
