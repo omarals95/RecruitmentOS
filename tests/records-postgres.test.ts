@@ -19,6 +19,7 @@ import {
 import type { Principal } from "@/lib/principal";
 import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { assignMemberRole } from "@/lib/member-roles";
+import { archiveOrgUnit, createOrgLevel, createOrgUnit } from "@/lib/org";
 import {
   DEFAULT_KIND_SCHEMAS,
   INTERVIEWER_ROLE,
@@ -27,12 +28,10 @@ import {
 } from "@/domain/config-defaults";
 import {
   CONFIGURABLE_KINDS,
-  kindSchemaBodySchema,
   type ConfigurableKind,
   type KindSchemaBody,
   type RoleBody,
 } from "@/domain/config";
-import type { CustomField, CustomFieldType } from "@/domain/field-types";
 import {
   TASK_LINK_KINDS,
   type RecordDto,
@@ -50,6 +49,11 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 
 describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   let fixture: Awaited<ReturnType<typeof createTestDb>>;
@@ -2625,76 +2629,15 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   });
 });
 
-// Kind schemas as an admin writer would publish them until R2b-09 adds a route.
-type ScreenAction = KindSchemaBody["screens"][number]["action"];
-const WORKSPACE = "00000000-0000-4000-a000-000000000001";
-/** A fictional custom field definition; a fresh key unless one is given. */
-const customField = (
-  label: string,
-  type: CustomFieldType,
-  extra: Record<string, unknown> = {},
-  key: string = randomUUID(),
-) =>
-  ({
-    key,
-    system: false,
-    label,
-    type,
-    required: false,
-    ...extra,
-  }) as CustomField;
-/**
- * The kind's default body plus the given custom fields, each listed on every screen unless
- * `screens` names the custom keys of a screen.
- */
-const kindBody = (
-  kind: ConfigurableKind,
-  custom: CustomField[],
-  screens: Partial<Record<ScreenAction, string[]>> = {},
-) => {
-  const body = structuredClone(
-    DEFAULT_KIND_SCHEMAS[kind].body,
-  ) as KindSchemaBody;
-  body.fields.push(...custom);
-  for (const screen of body.screens)
-    screen.fields.push(
-      ...(screens[screen.action] ?? custom.map((field) => field.key)),
-    );
-  return body;
-};
 /** Publishes the body as the kind's next current version, as the database owner; its version id. */
 async function publishKindSchema(
   fixture: Awaited<ReturnType<typeof createTestDb>>,
   createdBy: string,
   body: KindSchemaBody,
 ): Promise<string> {
-  const text = JSON.stringify(kindSchemaBodySchema.parse(body));
   await fixture.client.exec("RESET ROLE");
   try {
-    const objectId =
-      (
-        await fixture.client.query<{ id: string }>(
-          "SELECT id FROM app.config_objects WHERE workspace_id = $1 AND team_id IS NULL AND type = 'kind-schema' AND key = $2",
-          [WORKSPACE, body.kind],
-        )
-      ).rows[0]?.id ??
-      (
-        await fixture.client.query<{ id: string }>(
-          "INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ($1, 'kind-schema', $2, $3) RETURNING id",
-          [WORKSPACE, body.kind, createdBy],
-        )
-      ).rows[0].id;
-    const versionId = (
-      await fixture.client.query<{ id: string }>(
-        "INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) SELECT $1, $2, 'published', coalesce(max(number), 0) + 1, $3::jsonb, now() FROM app.config_versions WHERE object_id = $1 RETURNING id",
-        [objectId, WORKSPACE, text],
-      )
-    ).rows[0].id;
-    await fixture.client.query(
-      "UPDATE app.config_objects SET current_version_id = $1 WHERE id = $2",
-      [versionId, objectId],
-    );
-    return versionId;
+    return await insertKindSchema(fixture.client, createdBy, body);
   } finally {
     await fixture.client.exec("SET ROLE recruitment_test_runtime");
   }
@@ -3735,5 +3678,380 @@ describe("dynamic validation of custom values with real PostgreSQL migrations an
         data: { email: "" },
       }),
     ).rejects.toMatchObject(required);
+  });
+});
+
+// Person, org unit and lookup fields (R2b-05, job 084), on a database of its own so the kind schemas
+// published here reach no other case. The person member cases run under the split runtime roles in
+// tests/org-scope.test.ts.
+describe("person, org unit and lookup references with real PostgreSQL migrations and RLS", () => {
+  const OTHER = "00000000-0000-4000-a000-000000000002";
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal, sibling: Principal, outsider: Principal;
+  let levelId: string;
+  let unit: string, spare: string, archivedUnit: string, otherUnit: string;
+  /** Fixture setup or inspection as the database owner, outside RLS. */
+  const asOwner = async <T>(work: () => Promise<T>): Promise<T> => {
+    await fixture.client.exec("RESET ROLE");
+    try {
+      return await work();
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+  };
+  const stored = (id: string) =>
+    asOwner(
+      async () =>
+        (
+          await fixture.client.query<{
+            data: Record<string, unknown>;
+            version: number;
+          }>("SELECT data, version FROM app.records WHERE id = $1", [id])
+        ).rows[0],
+    );
+  const named = (kind: string, key: string, value: string) =>
+    asOwner(
+      async () =>
+        (
+          await fixture.client.query<{ total: number }>(
+            "SELECT count(*)::int AS total FROM app.records WHERE kind = $1 AND data->>$2 = $3",
+            [kind, key, value],
+          )
+        ).rows[0].total,
+    );
+  const newUnit = async (p: Principal, level: string, code: string) =>
+    (
+      await createOrgUnit(p, {
+        name: `Fictional ${code} unit`,
+        code,
+        levelId: level,
+      })
+    ).id;
+  /** The refusal a write answers, as its status, code and message only. */
+  const refusalOf = async (write: Promise<unknown>) => {
+    const error = await write.then(
+      () => expect.fail("The write was accepted."),
+      (error: { status: number; code: string; message: string }) => error,
+    );
+    return { status: error.status, code: error.code, message: error.message };
+  };
+  const unitRefusal = (label: string) => ({
+    status: 400,
+    code: "invalid_reference",
+    message: `${label} does not reference a current unit of this company.`,
+  });
+  const lookupRefusal = (label: string) => ({
+    status: 400,
+    code: "invalid_reference",
+    message: `${label} does not reference the expected record in this team.`,
+  });
+  // A candidate and a job role, each with a unit, a lookup and a person field.
+  const fields = {
+    candidate: {
+      unit: customField("Fictional candidate unit", "org-unit"),
+      lookup: customField("Fictional candidate vacancy", "lookup", {
+        target: "vacancy",
+      }),
+      person: customField("Fictional candidate sponsor", "person"),
+    },
+    "job-role": {
+      unit: customField("Fictional role unit", "org-unit"),
+      lookup: customField("Fictional role candidate", "lookup", {
+        target: "candidate",
+      }),
+      person: customField("Fictional role sponsor", "person"),
+    },
+  };
+  const kinds = [
+    ["candidate", "candidates", "name"],
+    ["job-role", "job-roles", "title"],
+  ] as const;
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db, {
+      userId: "reference-owner",
+      teamId: "reference-team",
+    });
+    await seedIdentity(fixture.db, {
+      userId: "reference-colleague",
+      teamId: "reference-team",
+      role: "recruiter",
+    });
+    sibling = await seedIdentity(fixture.db, {
+      userId: "reference-sibling",
+      teamId: "reference-sibling-team",
+    });
+    outsider = await seedIdentity(fixture.db, {
+      userId: "reference-outsider",
+      teamId: "reference-outsider-team",
+    });
+    // A second fictional company holding only the outsider's team.
+    await fixture.client.exec(`
+      INSERT INTO app.workspaces(id,name) VALUES ('${OTHER}','Fictional Other Company');
+      UPDATE app.workspace_teams SET workspace_id = '${OTHER}' WHERE team_id = 'reference-outsider-team';
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level) VALUES ('${OTHER}','reference-outsider','owner');
+    `);
+    await enforceTestRls(fixture.db);
+    levelId = (
+      await createOrgLevel(owner, {
+        name: "Fictional reference level",
+        depth: 0,
+      })
+    ).id;
+    unit = await newUnit(owner, levelId, "REF-1");
+    spare = await newUnit(owner, levelId, "REF-2");
+    archivedUnit = await newUnit(owner, levelId, "REF-3");
+    await archiveOrgUnit(owner, archivedUnit);
+    const otherLevel = await createOrgLevel(outsider, {
+      name: "Fictional other reference level",
+      depth: 0,
+    });
+    otherUnit = await newUnit(outsider, otherLevel.id, "REF-OTHER");
+    for (const [kind] of kinds)
+      await publishKindSchema(
+        fixture,
+        owner.userId,
+        kindBody(kind, Object.values(fields[kind])),
+      );
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+
+  it("stores a current unit of the company and refuses an unknown, archived or other company's unit on each kind", async () => {
+    for (const [kind, resource, title] of kinds) {
+      const field = fields[kind].unit;
+      const created = await createRecord(owner, resource, {
+        data: {
+          [title]: `Fictional ${kind} with a unit`,
+          customValues: { [field.key]: unit },
+        },
+      });
+      expect(created.data, kind).toMatchObject({
+        customValues: { [field.key]: unit },
+      });
+      const moved = await updateRecord(owner, resource, created.id, {
+        version: 1,
+        data: { customValues: { [field.key]: spare } },
+      });
+      expect(moved.data, kind).toMatchObject({
+        customValues: { [field.key]: spare },
+      });
+      const before = await stored(created.id);
+      expect(before.data.customValues, kind).toEqual({ [field.key]: spare });
+      for (const value of [randomUUID(), archivedUnit, otherUnit]) {
+        expect(
+          await refusalOf(
+            updateRecord(owner, resource, created.id, {
+              version: 2,
+              data: { customValues: { [field.key]: value } },
+            }),
+          ),
+          `${kind} ${value}`,
+        ).toEqual(unitRefusal(field.label));
+        const name = `Fictional ${kind} refused unit ${value}`;
+        expect(
+          await refusalOf(
+            createRecord(owner, resource, {
+              data: { [title]: name, customValues: { [field.key]: value } },
+            }),
+          ),
+          `${kind} ${value}`,
+        ).toEqual(unitRefusal(field.label));
+        expect(await named(kind, title, name)).toBe(0);
+      }
+      expect(await stored(created.id), kind).toEqual(before);
+      // A value of the wrong shape still answers the R2b-04 refusal first.
+      expect(
+        await refusalOf(
+          updateRecord(owner, resource, created.id, {
+            version: 2,
+            data: { customValues: { [field.key]: "REF-1" } },
+          }),
+        ),
+      ).toEqual({
+        status: 400,
+        code: "invalid_custom_value",
+        message: `Invalid value for ${field.label}.`,
+      });
+    }
+  });
+
+  it("stores a lookup to a record of the target kind in the team and refuses the wrong kind, another team's record and an unknown id alike", async () => {
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional looked-up vacancy" },
+    });
+    const candidate = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Looked-up Candidate" },
+    });
+    const role = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional unrelated role" },
+    });
+    // The sibling team shares the company; its records are still another team's.
+    const targets = {
+      candidate: {
+        own: vacancy.id,
+        other: (
+          await createRecord(sibling, "vacancies", {
+            data: { title: "Fictional sibling vacancy" },
+          })
+        ).id,
+        wrongKind: role.id,
+      },
+      "job-role": {
+        own: candidate.id,
+        other: (
+          await createRecord(sibling, "candidates", {
+            data: { name: "Fictional Sibling Candidate" },
+          })
+        ).id,
+        wrongKind: vacancy.id,
+      },
+    };
+    for (const [kind, resource, title] of kinds) {
+      const field = fields[kind].lookup;
+      const { own, other, wrongKind } = targets[kind];
+      const created = await createRecord(owner, resource, {
+        data: {
+          [title]: `Fictional ${kind} with a lookup`,
+          customValues: { [field.key]: own },
+        },
+      });
+      expect(created.data, kind).toMatchObject({
+        customValues: { [field.key]: own },
+      });
+      const before = await stored(created.id);
+      const refusals = [];
+      for (const value of [wrongKind, other, randomUUID()]) {
+        refusals.push(
+          await refusalOf(
+            updateRecord(owner, resource, created.id, {
+              version: 1,
+              data: { customValues: { [field.key]: value } },
+            }),
+          ),
+        );
+        const name = `Fictional ${kind} refused lookup ${value}`;
+        refusals.push(
+          await refusalOf(
+            createRecord(owner, resource, {
+              data: { [title]: name, customValues: { [field.key]: value } },
+            }),
+          ),
+        );
+        expect(await named(kind, title, name)).toBe(0);
+      }
+      expect(refusals, kind).toEqual(Array(6).fill(lookupRefusal(field.label)));
+      expect(await stored(created.id), kind).toEqual(before);
+    }
+    // An archived target is refused as archived, except on an imported archived write.
+    const field = fields.candidate.lookup;
+    await updateRecord(owner, "vacancies", vacancy.id, {
+      version: 1,
+      archived: true,
+    });
+    expect(
+      await refusalOf(
+        createRecord(owner, "candidates", {
+          data: {
+            name: "Fictional Archived Lookup Candidate",
+            customValues: { [field.key]: vacancy.id },
+          },
+        }),
+      ),
+    ).toEqual({
+      status: 400,
+      code: "archived_reference",
+      message: `${field.label} references an archived record.`,
+    });
+    const imported = await createRecord(owner, "candidates", {
+      archived: true,
+      importMeta: { workbook: "Fictional.xlsx" },
+      data: {
+        name: "Fictional Imported Lookup Candidate",
+        customValues: { [field.key]: vacancy.id },
+      },
+    });
+    expect(imported.data).toMatchObject({
+      customValues: { [field.key]: vacancy.id },
+    });
+  });
+
+  it("keeps a person, unit or lookup value that is no longer valid on an unrelated edit", async () => {
+    const { unit: unitField, lookup, person } = fields.candidate;
+    const kept = await newUnit(owner, levelId, "REF-KEPT");
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional kept vacancy" },
+    });
+    const values = {
+      [unitField.key]: kept,
+      [lookup.key]: vacancy.id,
+      [person.key]: "reference-colleague",
+    };
+    const created = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Kept Candidate", customValues: values },
+    });
+    expect((await stored(created.id)).data.customValues).toEqual(values);
+    // The unit and the vacancy are archived and the colleague leaves the team.
+    await archiveOrgUnit(owner, kept);
+    await updateRecord(owner, "vacancies", vacancy.id, {
+      version: 1,
+      archived: true,
+    });
+    await asOwner(() =>
+      fixture.client.query(
+        "DELETE FROM auth.member WHERE organization_id = 'reference-team' AND user_id = 'reference-colleague'",
+      ),
+    );
+    const edited = await updateRecord(owner, "candidates", created.id, {
+      version: 1,
+      data: { name: "Fictional Renamed Kept Candidate" },
+    });
+    expect(edited.data).toMatchObject({ customValues: values });
+    const resent = await updateRecord(owner, "candidates", created.id, {
+      version: 2,
+      data: { phone: "+971 50 333 3333", customValues: values },
+    });
+    expect(resent.data).toMatchObject({ customValues: values });
+    expect((await stored(created.id)).data.customValues).toEqual(values);
+    // Changing one of them again is checked.
+    expect(
+      await refusalOf(
+        updateRecord(owner, "candidates", created.id, {
+          version: 3,
+          data: {
+            customValues: { ...values, [person.key]: "reference-sibling" },
+          },
+        }),
+      ),
+    ).toEqual({
+      status: 400,
+      code: "invalid_reference",
+      message: `${person.label} must be a member of this team.`,
+    });
+  });
+
+  it("writes a kind on the built-in default schema exactly as before", async () => {
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional default vacancy" },
+      orgUnitId: unit,
+    });
+    expect(vacancy.data).not.toHaveProperty("customValues");
+    const edited = await updateRecord(owner, "vacancies", vacancy.id, {
+      version: 1,
+      data: { title: "Fictional renamed default vacancy" },
+    });
+    expect(edited).toMatchObject({ version: 2, orgUnitId: unit });
+    expect(edited.data).not.toHaveProperty("customValues");
+    expect((await stored(vacancy.id)).data).not.toHaveProperty("customValues");
+    await expect(
+      createRecord(owner, "vacancies", {
+        data: {
+          title: "Fictional default custom vacancy",
+          customValues: { [fields.candidate.unit.key]: unit },
+        },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "unknown_custom_field" });
   });
 });

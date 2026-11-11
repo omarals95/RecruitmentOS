@@ -24,8 +24,13 @@ import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
 import { GET as listOrgUnitsRoute } from "@/app/api/v1/org-units/route";
 import { GET as listPositionsRoute } from "@/app/api/v1/positions/route";
 import { GET as listEmployeesRoute } from "@/app/api/v1/employees/route";
-import { createOrgLevel, type OrgLevel } from "@/lib/org";
+import { createOrgLevel, createOrgUnit, type OrgLevel } from "@/lib/org";
 import { createTestDb, seedApiToken, seedIdentity } from "./helpers/db";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 import { listStoredTools } from "@/lib/mcp/tools";
 import { runWithServerTiming } from "@/lib/server-timing";
 
@@ -775,5 +780,72 @@ describe("database round trips per request", () => {
       expect(read.roundTrips, cold ? "cold" : "warm").toBe(6);
       expect(configBodyCache.ids()).toContain(versionId);
     }
+  });
+
+  // R2b-05 (job 084): changed org unit and lookup values add one statement together; a person value
+  // is read through the identity pool only when it changes.
+  it("adds one round trip for a changed org unit and lookup, none for an unchanged person, and pins a person change", async () => {
+    const sponsor = await seedIdentity(fixture.db, {
+      userId: "budget-sponsor",
+      teamId: owner.teamId,
+      role: "recruiter",
+    });
+    const level = await createOrgLevel(owner, {
+      name: "Fictional budget reference level",
+      depth: 7,
+    });
+    const unit = await createOrgUnit(owner, {
+      name: "Fictional budget reference unit",
+      code: "BUDGET-REF",
+      levelId: level.id,
+    });
+    const role = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional budget looked-up role" },
+    });
+    const code = customField("Fictional budget code", "short-text");
+    const unitField = customField("Fictional budget unit", "org-unit");
+    const roleField = customField("Fictional budget role", "lookup", {
+      target: "job-role",
+    });
+    const person = customField("Fictional budget sponsor", "person");
+    await insertKindSchema(
+      fixture.client,
+      owner.userId,
+      kindBody("vacancy", [code, unitField, roleField, person]),
+    );
+    let values: Record<string, unknown> = {
+      [code.key]: "Fictional code 1",
+      [person.key]: owner.userId,
+    };
+    let current = await createRecord(owner, "vacancies", {
+      data: {
+        title: "Fictional budget referencing vacancy",
+        customValues: values,
+      },
+    });
+    const patch = async (change: Record<string, unknown>) => {
+      values = { ...values, ...change };
+      const result = await call(
+        "PATCH",
+        `/api/v1/vacancies/${current.id}`,
+        { resource: "vacancies", id: current.id },
+        { version: current.version, data: { customValues: values } },
+      );
+      expect(result.status).toBe(200);
+      expect(result.body.data.data).toMatchObject({ customValues: values });
+      current = result.body.data;
+      return result.roundTrips;
+    };
+    // A vacancy write with no reference or uniqueness lookup, as the unit move above.
+    const shortText = await patch({ [code.key]: "Fictional code 2" });
+    expect(shortText).toBe(9);
+    expect(
+      await patch({ [unitField.key]: unit.id, [roleField.key]: role.id }),
+    ).toBe(shortText + 1);
+    // The stored person value is sent again unchanged beside a short-text change.
+    expect(await patch({ [code.key]: "Fictional code 3" })).toBe(shortText);
+    // 9 + 7: the first attempt runs up to the person check and rolls back (BEGIN, deadlines,
+    // install, lock, read, ROLLBACK), then one identity query, then the write runs once in full.
+    expect(await patch({ [person.key]: sponsor.userId })).toBe(16);
   });
 });
