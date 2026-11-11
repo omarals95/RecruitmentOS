@@ -2102,6 +2102,23 @@ export function GET() {
       { sessionOnly: true, params: pageParams },
     ),
   };
+  const reportingShape =
+    "{id, displayName, title, unitName, otherPositions, reports}";
+  paths["/api/v1/employees/reporting-lines"] = {
+    get: operation(
+      [],
+      {
+        summary: "List one level of the org tree by people",
+        description: `Session only, read only; Bearer tokens, including MCP OAuth tokens, get 403 session_required, and there is no MCP tool. Needs a role with the directory page and directory view (directory:read); anyone else gets 403 directory_forbidden. Reporting lines are derived, never stored: the people are the active, non-archived employees holding a current position. A person's own unit is the unit of their manager position nearest the top, otherwise of their primary position, otherwise of their first position by title. Their manager is the first current holder, by display name, of a manager position (isManager) in the nearest unit at or above their own unit that has one, skipping units where they hold a manager position themselves; a person with no such unit is a root. Without managerId it returns the roots; with managerId the people reporting to that employee, by display name then id. A managerId that is not an employee of your company returns 404 not_found; an employee with no reports, including a left or archived one, returns an empty page; any other query key or value returns 400 invalid_input. title and unitName are those of the position their own unit comes from, otherPositions counts their other current positions and reports the people reporting to them. Rows carry exactly these keys under either directory rule: no work email, phone, employee number, user or status. Returns {data:[${reportingShape}], pagination:{page, pageSize, hasMore}}.`,
+      },
+      {
+        "200": {
+          description: `{data:[${reportingShape}], pagination:{page, pageSize, hasMore}}.`,
+        },
+      },
+      { sessionOnly: true, params: [uuidQuery("managerId"), ...pageParams] },
+    ),
+  };
   // The body is the raw workbook, not JSON, so it is described by x-request-body rather than requestBody.
   const importBody = {
     required: true,

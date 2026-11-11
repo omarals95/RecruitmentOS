@@ -1,11 +1,11 @@
-import type { Position } from "@/lib/directory";
+import type { Position, ReportingPerson } from "@/lib/directory";
 import type { OrgUnit } from "@/lib/org";
-import type { ChartState, Page } from "./organisation-tab";
+import type { ChartState, Page, PeopleState } from "./organisation-tab";
 
 /*
  * The org tree by units (ADM-22): a second, read-only presentation of what the org chart has
  * loaded. Pure and React-free: the visible tree, its counts, Expand all, the keyboard moves and the
- * layout the image export draws.
+ * layout the image export draws. The org tree by people (ADM-23) reuses them for person nodes.
  */
 
 /** Expand all never leaves more units than this in the chart. */
@@ -17,12 +17,12 @@ export const ZOOM_MAX = 150;
 export const ZOOM_STEP = 25;
 
 interface NodeBase {
-  /** Unique in the tree: "unit:", "position:" or "more:" and the id or list key. */
+  /** Unique in the tree: "unit:", "position:", "person:" or "more:" and the id or list key. */
   key: string;
   level: number;
   setSize: number;
   posInSet: number;
-  /** The keys of the units above, top first. */
+  /** The keys of the units, or the people, above, top first. */
   path: string[];
   /** The accessible name. */
   label: string;
@@ -48,7 +48,15 @@ export type MoreNode = NodeBase & {
   listKey: string;
   busy: boolean;
 };
-export type TreeNode = UnitNode | PositionNode | MoreNode;
+/** A person of the org tree by people; only one with reports expands. */
+export type PersonNode = NodeBase & {
+  kind: "person";
+  person: ReportingPerson;
+  expanded: boolean;
+  loading: boolean;
+  failed: boolean;
+};
+export type TreeNode = UnitNode | PositionNode | MoreNode | PersonNode;
 /** The roving tab stop: an item's key and the keys of the units above it. */
 export type TreeFocus = Pick<NodeBase, "key" | "path">;
 
@@ -208,6 +216,114 @@ export function treeCounts(chart: Pick<ChartState, "lists" | "contents">) {
 export const countsText = (counts: ReturnType<typeof treeCounts>) =>
   `Loaded: ${plural(counts.units, "unit")} · ${plural(counts.positions, "position")}${counts.vacant !== null ? ` · ${counts.vacant} vacant` : ""}`;
 
+type PeopleData = Pick<PeopleState, "lists" | "expanded" | "errors" | "busy">;
+
+/** "1 person" or "N people". */
+export const peopleText = (count: number) =>
+  count === 1 ? "1 person" : `${count} people`;
+/** The box lines under the name: "title · unit", then the counts that are not zero. */
+export const personDetails = (person: ReportingPerson) => [
+  `${person.title} · ${person.unitName}`,
+  ...(person.otherPositions
+    ? [`+${plural(person.otherPositions, "more position")}`]
+    : []),
+  ...(person.reports ? [plural(person.reports, "direct report")] : []),
+];
+function personLabel(
+  node: Pick<PersonNode, "person" | "loading" | "failed">,
+): string {
+  const { person } = node;
+  return [
+    person.displayName,
+    person.title,
+    person.unitName,
+    ...(person.otherPositions
+      ? [`and ${plural(person.otherPositions, "more position")}`]
+      : []),
+    ...(person.reports ? [plural(person.reports, "direct report")] : []),
+    ...(node.loading ? ["loading"] : []),
+    ...(node.failed ? ["could not load"] : []),
+  ].join(", ");
+}
+
+/**
+ * The visible org tree by people from the loaded levels: each person, then (once expanded and
+ * loaded) the people reporting to them and a Show more item, depth first in the loaded order.
+ */
+export function buildPeopleTree(people: PeopleData): TreeNode[] {
+  return peopleGroup(people, "", "", [], 1);
+}
+
+function peopleGroup(
+  people: PeopleData,
+  listKey: string,
+  managerName: string,
+  path: string[],
+  level: number,
+): TreeNode[] {
+  const list = people.lists[listKey];
+  const rows = list?.people ?? [];
+  const setSize = rows.length + (list?.hasMore ? 1 : 0);
+  const nodes: TreeNode[] = rows.map((person, index) => {
+    const key = `person:${person.id}`;
+    const expanded = person.reports > 0 && people.expanded.includes(person.id);
+    const loaded = !!people.lists[person.id];
+    const failed = expanded && !!people.errors[`load:${person.id}`];
+    const node = {
+      key,
+      level,
+      setSize,
+      posInSet: index + 1,
+      path,
+      kind: "person" as const,
+      person,
+      expanded,
+      loading: expanded && !loaded && !failed,
+      failed,
+    };
+    return {
+      ...node,
+      label: personLabel(node),
+      children:
+        expanded && loaded
+          ? peopleGroup(
+              people,
+              person.id,
+              person.displayName,
+              [...path, key],
+              level + 1,
+            )
+          : [],
+    };
+  });
+  if (list?.hasMore)
+    nodes.push({
+      key: `more:${listKey}`,
+      level,
+      setSize,
+      posInSet: setSize,
+      path,
+      children: [],
+      kind: "more",
+      listKey,
+      busy: people.busy.includes(`list:${listKey}`),
+      label: listKey
+        ? `Show more people reporting to ${managerName}`
+        : "Show more top-level people",
+    });
+  return nodes;
+}
+
+/** Every person in the loaded levels. */
+export const peopleCount = (people: Pick<PeopleState, "lists">) =>
+  Object.values(people.lists).reduce(
+    (sum, list) => sum + list.people.length,
+    0,
+  );
+
+export const peopleCountsText = (count: number) =>
+  `Loaded: ${peopleText(count)}`;
+
 export type ExpandStatus =
   | { state: "idle" }
   | { state: "running"; units: number }
@@ -299,8 +415,104 @@ export async function expandAll(
       : { state: "finished", units };
 }
 
-/** What a key does: the item to focus, the unit to expand or collapse, the list to show more of. */
-export type TreeMove = { focus?: string; toggle?: OrgUnit; more?: string };
+export type PeopleExpandStatus =
+  | { state: "idle" }
+  | { state: "running"; people: number }
+  | { state: "finished"; people: number }
+  | { state: "limit"; people: number }
+  | { state: "failed"; person: string; people: number };
+
+export function peopleExpandMessage(status: PeopleExpandStatus) {
+  switch (status.state) {
+    case "idle":
+      return "";
+    case "running":
+      return `Expand all is loading people: ${peopleText(status.people)} loaded so far.`;
+    case "finished":
+      return `Expand all finished: ${peopleText(status.people)} loaded.`;
+    case "limit":
+      return `Expand all stopped at the limit of ${EXPAND_ALL_LIMIT} people. Expand a person to see who reports to them.`;
+    case "failed":
+      return `Expand all stopped because the people reporting to ${status.person} could not load.`;
+  }
+}
+
+export interface PeopleExpandEvents {
+  /** A person's first page of reports fits: add it and expand the person. */
+  loaded: (person: ReportingPerson, reports: Page<ReportingPerson>) => void;
+  /** A person whose reports were loaded before Expand all is expanded. */
+  expanded: (person: ReportingPerson) => void;
+  failed: (person: ReportingPerson, error: unknown) => void;
+  progress: (people: number) => void;
+}
+
+/**
+ * expandAll for the org tree by people: breadth first from the loaded people, only people with
+ * reports, at most EXPAND_ALL_PARALLEL loads at a time, never through Show more. A person whose
+ * reports would take the loaded people over EXPAND_ALL_LIMIT is not added and stays collapsed; no
+ * further load starts, and results still arriving are added only if they fit. The first load error
+ * also stops it.
+ */
+export async function expandAllPeople(
+  people: Pick<PeopleState, "lists">,
+  load: (managerId: string) => Promise<Page<ReportingPerson>>,
+  on: Partial<PeopleExpandEvents> = {},
+): Promise<PeopleExpandStatus> {
+  let count = peopleCount(people);
+  let stop: "limit" | ReportingPerson | null = null;
+  const queue = [...(people.lists[""]?.people ?? [])];
+  const running = new Set<Promise<void>>();
+  while (running.size || (queue.length && !stop)) {
+    while (queue.length && running.size < EXPAND_ALL_PARALLEL && !stop) {
+      const person = queue.shift()!;
+      if (!person.reports) continue;
+      const below = people.lists[person.id];
+      if (below) {
+        on.expanded?.(person);
+        queue.push(...below.people);
+        continue;
+      }
+      const task: Promise<void> = load(person.id)
+        .then(
+          (page) => {
+            if (count + page.data.length > EXPAND_ALL_LIMIT) {
+              stop ??= "limit";
+              return;
+            }
+            count += page.data.length;
+            on.loaded?.(person, page);
+            on.progress?.(count);
+            queue.push(...page.data);
+          },
+          (error) => {
+            stop ??= person;
+            on.failed?.(person, error);
+          },
+        )
+        .finally(() => running.delete(task));
+      running.add(task);
+    }
+    if (running.size) await Promise.race(running);
+  }
+  // The callbacks above set it; control flow analysis cannot see that.
+  const ended = stop as "limit" | ReportingPerson | null;
+  return ended === "limit"
+    ? { state: "limit", people: count }
+    : ended
+      ? { state: "failed", person: ended.displayName, people: count }
+      : { state: "finished", people: count };
+}
+
+/**
+ * What a key does: the item to focus, the unit or person to expand or collapse, the list to show
+ * more of.
+ */
+export type TreeMove = {
+  focus?: string;
+  toggle?: OrgUnit;
+  togglePerson?: ReportingPerson;
+  more?: string;
+};
 
 /**
  * The WAI-ARIA tree keys on the visible items. Null for a key the tree does not use; an empty move
@@ -324,15 +536,24 @@ export function treeKey(
     case "End":
       return { focus: items[items.length - 1].key };
     case "ArrowRight":
+      if (item.kind === "person") {
+        if (!item.person.reports) return {};
+        if (!item.expanded) return { togglePerson: item.person };
+        return item.children.length ? { focus: item.children[0].key } : {};
+      }
       if (item.kind !== "unit") return {};
       if (!item.expanded) return { toggle: item.unit };
       return item.children.length ? { focus: item.children[0].key } : {};
     case "ArrowLeft":
       if (item.kind === "unit" && item.expanded) return { toggle: item.unit };
+      if (item.kind === "person" && item.expanded)
+        return { togglePerson: item.person };
       return item.path.length ? { focus: item.path[item.path.length - 1] } : {};
     case "Enter":
     case " ":
       if (item.kind === "unit") return { toggle: item.unit };
+      if (item.kind === "person")
+        return item.person.reports ? { togglePerson: item.person } : {};
       if (item.kind === "more") return { more: item.listKey };
       return {};
     default:
@@ -340,7 +561,10 @@ export function treeKey(
   }
 }
 
-/** The tab stop: the focused item while visible, else its nearest visible unit, else the first item. */
+/**
+ * The tab stop: the focused item while visible, else its nearest visible unit or person, else the
+ * first item.
+ */
 export function resolveFocus(
   items: TreeNode[],
   focused: TreeFocus | null,
@@ -359,6 +583,7 @@ export const LAYOUT = {
   width: 200,
   unit: 66,
   position: 46,
+  person: 84,
   more: 36,
   gapX: 16,
   gapY: 32,
@@ -401,11 +626,14 @@ const boxLines = (node: TreeNode): string[] =>
             ...(node.position.vacant === true ? ["Vacant"] : []),
           ].join(" · "),
         ]
-      : [node.label];
+      : node.kind === "person"
+        ? [node.person.displayName, ...personDetails(node.person)]
+        : [node.label];
 
 /**
  * The tree as drawn top-down: each unit's box with its positions stacked under it, and its units
- * side by side below, centred over them. Boxes never overlap.
+ * side by side below, centred over them; a person's reports side by side below them. Boxes never
+ * overlap.
  */
 export function treeLayout(nodes: TreeNode[]): TreeLayout {
   const { width: W, gapX, gapY, stack, margin } = LAYOUT;
@@ -441,12 +669,13 @@ export function treeLayout(nodes: TreeNode[]): TreeLayout {
     const width = widths.get(node)!;
     const x = left + (width - W) / 2;
     const centre = x + W / 2;
-    if (node.kind !== "unit") {
+    if (node.kind === "position" || node.kind === "more") {
       box(node, x, top, node.kind === "more" ? LAYOUT.more : LAYOUT.position);
       return;
     }
-    box(node, x, top, LAYOUT.unit);
-    let y = top + LAYOUT.unit;
+    const height = node.kind === "unit" ? LAYOUT.unit : LAYOUT.person;
+    box(node, x, top, height);
+    let y = top + height;
     for (const child of node.children)
       if (child.kind === "position") {
         lines.push([centre, y, centre, y + stack]);
@@ -526,9 +755,13 @@ export function drawLayout(
     context.fillStyle = "#ffffff";
     context.fillRect(item.x, item.y, item.width, item.height);
     context.setLineDash(item.dashed ? [6, 4] : []);
-    context.strokeStyle =
-      item.kind === "unit" ? "#4338ca" : item.dashed ? "#88520c" : "#5b6474";
-    context.lineWidth = item.kind === "unit" ? 2 : 1;
+    const main = item.kind === "unit" || item.kind === "person";
+    context.strokeStyle = main
+      ? "#4338ca"
+      : item.dashed
+        ? "#88520c"
+        : "#5b6474";
+    context.lineWidth = main ? 2 : 1;
     context.strokeRect(item.x, item.y, item.width, item.height);
     context.setLineDash([]);
     item.lines.forEach((text, index) => {
@@ -547,6 +780,6 @@ export function drawLayout(
   }
 }
 
-/** org-tree-by-units-YYYY-MM-DD.png, by the local date. */
-export const imageFilename = (now: Date) =>
-  `org-tree-by-units-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}.png`;
+/** org-tree-by-units-YYYY-MM-DD.png, or org-tree-by-people-…, by the local date. */
+export const imageFilename = (now: Date, tree: "units" | "people" = "units") =>
+  `org-tree-by-${tree}-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}.png`;

@@ -12,6 +12,7 @@ import {
   positionInput,
   positionListQuery,
   positionMove,
+  reportingLinesQuery,
   retentionReviewQuery,
   type EMPLOYEE_RETENTION_CLASSES,
 } from "@/domain/directory";
@@ -75,6 +76,22 @@ export type RetentionReviewRow = {
   leftAt: string;
   retentionClass: (typeof EMPLOYEE_RETENTION_CLASSES)[number];
   archivedAt: string | null;
+};
+/**
+ * One person of the org tree by people (ADM-23): no contact fact, employee number, user or status,
+ * whatever the caller's directory rule.
+ */
+export type ReportingPerson = {
+  id: string;
+  displayName: string;
+  /** The title of the position their own unit comes from. */
+  title: string;
+  /** The name of that position's unit. */
+  unitName: string;
+  /** Their other current positions. */
+  otherPositions: number;
+  /** The people whose manager they are. */
+  reports: number;
 };
 export type HomeUnitChange = {
   occurredAt: string;
@@ -474,6 +491,93 @@ export async function listEmployees(
         page,
         pageSize,
         hasMore: rows[0].employees.length > pageSize,
+      },
+    };
+  });
+}
+
+/**
+ * One level of the org tree by people (ADM-23), derived in one statement with no stored manager.
+ * People are the active, non-archived employees holding a current position. A person's own unit is
+ * that of their manager position nearest the top, else of their primary position, else of their
+ * first position by title. Their manager is the first current holder, by display name, of a
+ * manager position in the nearest unit at or above it that has one, skipping the units where they
+ * hold a manager position themselves; with none they are a root. Without managerId it returns the
+ * roots, with it that employee's reports; 404 for an employee outside the workspace. Needs the
+ * directory page and directory view; rows stay under allows_directory.
+ */
+export async function listReportingLines(
+  p: Principal,
+  options: z.input<typeof reportingLinesQuery> = {},
+): Promise<Page<ReportingPerson>> {
+  const { managerId, page, pageSize } = reportingLinesQuery.parse(options);
+  return inDirectory(p, directoryForbidden, async (tx, access) => {
+    try {
+      authorize(accessContext(p, access), {
+        page: "directory",
+        resource: "directory",
+        action: "view",
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw directoryForbidden();
+      throw error;
+    }
+    const workspace = sql`${access.workspaceId}::uuid`;
+    const found = managerId
+      ? sql`exists (select 1 from app.employees e where e.id = ${managerId}::uuid and e.workspace_id = ${workspace})`
+      : sql`true`;
+    const level = managerId
+      ? sql`l.manager_id = ${managerId}::uuid`
+      : sql`l.manager_id is null`;
+    // Two jsonb maps, each unit's ancestors nearest first and each unit's current manager holders
+    // by name, keep every person's walk a lookup, so the plan holds without table statistics.
+    const { rows } = await tx.execute<{
+      found: boolean;
+      people: ReportingPerson[];
+    }>(
+      sql`with held as (
+          select ep.employee_id, ep.position_id, ep."primary", h.title, h.org_unit_id, h.is_manager, e.display_name
+          from app.employee_positions ep
+          join app.positions h on h.id = ep.position_id and h.workspace_id = ep.workspace_id
+          join app.employees e on e.id = ep.employee_id and e.workspace_id = ep.workspace_id
+          where ep.workspace_id = ${workspace} and ep.valid_to is null and h.valid_to is null and h.archived_at is null
+            and e.status = 'active' and e.archived_at is null),
+        maps as (
+          select coalesce((select jsonb_object_agg(x.unit_id, x.ancestors) from (
+              select c.descendant_id as unit_id, jsonb_agg(c.ancestor_id order by c.depth) as ancestors
+              from app.org_unit_closure c where c.workspace_id = ${workspace} group by c.descendant_id) x), '{}'::jsonb) as ancestry,
+            coalesce((select jsonb_object_agg(x.unit_id, x.holders) from (
+              select held.org_unit_id as unit_id, jsonb_agg(held.employee_id order by held.display_name, held.employee_id) as holders
+              from held where held.is_manager group by held.org_unit_id) x), '{}'::jsonb) as heads),
+        own as (
+          select distinct on (held.employee_id) held.employee_id as id, held.display_name, held.title, held.org_unit_id as unit_id,
+            count(*) over (partition by held.employee_id) as holdings
+          from held
+          order by held.employee_id, held.is_manager desc,
+            case when held.is_manager then (select jsonb_array_length(m.ancestry -> held.org_unit_id::text) from maps m) end,
+            held."primary" desc, held.title, held.position_id),
+        lines as (
+          select o.id, o.display_name, o.title, o.unit_id, o.holdings,
+            (select (maps.heads -> a.unit_id) ->> 0 from jsonb_array_elements_text(maps.ancestry -> o.unit_id::text) with ordinality a(unit_id, n)
+              where maps.heads ? a.unit_id and not (maps.heads -> a.unit_id) ? o.id::text order by a.n limit 1)::uuid as manager_id
+          from own o cross join maps),
+        counts as materialized (
+          select coalesce(jsonb_object_agg(x.manager_id, x.reports), '{}'::jsonb) as reports from (
+            select l.manager_id, count(*) as reports from lines l where l.manager_id is not null group by l.manager_id) x)
+        select ${found} as found, coalesce((select jsonb_agg(page.person order by page.display_name, page.id) from (
+          select jsonb_build_object('id', l.id, 'displayName', l.display_name, 'title', l.title,
+            'unitName', (select u.name from app.org_units u where u.id = l.unit_id and u.workspace_id = ${workspace}),
+            'otherPositions', l.holdings - 1, 'reports', coalesce((counts.reports ->> l.id::text)::integer, 0)) as person, l.display_name, l.id
+          from lines l cross join counts
+          where ${level} order by l.display_name, l.id limit ${pageSize + 1} offset ${(page - 1) * pageSize}) page), '[]'::jsonb) as people`,
+    );
+    if (!rows[0].found) throw notFound();
+    return {
+      data: rows[0].people.slice(0, pageSize),
+      pagination: {
+        page,
+        pageSize,
+        hasMore: rows[0].people.length > pageSize,
       },
     };
   });

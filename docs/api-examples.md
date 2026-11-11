@@ -365,6 +365,32 @@ The list is ordered by display name. For example, `GET /api/v1/employees?search=
 
 Every create, update and archive appears in Activity for the team you made it from, with ids and field names only, never a name, number, email or phone. Each owner-only change also records which users' home units changed.
 
+### Reporting lines
+
+One level of the org tree by people. It needs a role with the Directory page and directory view (`directory:read`); anyone else gets 403 `directory_forbidden`. Without `managerId` it returns the people at the top; with it, the people reporting to that employee:
+
+```http
+GET /api/v1/employees/reporting-lines?managerId=00000000-0000-4000-a000-0000000000e1&page=1&pageSize=100
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000e3",
+      "displayName": "Fictional Robin Sample",
+      "title": "Fictional Payroll Clerk",
+      "unitName": "Fictional Payroll",
+      "otherPositions": 1,
+      "reports": 0
+    }
+  ],
+  "pagination": { "page": 1, "pageSize": 100, "hasMore": false }
+}
+```
+
+A person reports to the first holder, by name, of a manager position in their own unit, or in the nearest unit above with a current holder, skipping units where they hold a manager position themselves; nothing is stored. Only active, non-archived employees with a current position appear, ordered by display name, and every row has exactly these six keys under either directory rule. A `managerId` outside your company returns 404 `not_found`, an employee with no reports an empty page, and any other query key 400 `invalid_input`.
+
 ### Employee erasure and the retention review
 
 Both are for company owners only, signed in. Company admins, team owners without company authority and every other member get 403; a Bearer token gets 403 `session_required`. There is no MCP tool.
