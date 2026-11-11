@@ -56,6 +56,11 @@ import {
 } from "@/app/api/v1/employees/route";
 import { PATCH as patchEmployeeRoute } from "@/app/api/v1/employees/[id]/route";
 import { PUT as putPositionsRoute } from "@/app/api/v1/employees/[id]/positions/route";
+import { GET as reportingLinesRoute } from "@/app/api/v1/employees/reporting-lines/route";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
+import { withTeam } from "@/lib/db-team";
+import type { ReportingPerson } from "@/lib/directory";
+import { assignMemberRole } from "@/lib/member-roles";
 import {
   createSplitRoleDb,
   createTestDb,
@@ -2241,6 +2246,199 @@ describe("positions and employees under the split runtime roles", () => {
       ).toBe(false);
     });
   });
+
+  describe("reporting lines access (ADM-23)", () => {
+    const KEYS = [
+      "displayName",
+      "id",
+      "otherPositions",
+      "reports",
+      "title",
+      "unitName",
+    ];
+    /** Members holding configured admin-membership roles, and a company admin without directory view. */
+    let basic: Principal, noPage: Principal, orgOnly: Principal;
+    let chief: Employee, staffer: Employee, desk: Position;
+    const lines = (p: Principal, query = "") =>
+      call(
+        reportingLinesRoute as Handler,
+        "GET",
+        `/api/v1/employees/reporting-lines${query}`,
+        { as: p },
+      );
+
+    beforeAll(async () => {
+      const db: AppDb = await harness.asOwner();
+      basic = await seedIdentity(db, {
+        userId: "dir-lines-basic",
+        teamId: "dir-team-a",
+        role: "admin",
+      });
+      noPage = await seedIdentity(db, {
+        userId: "dir-lines-no-page",
+        teamId: "dir-team-a",
+        role: "admin",
+      });
+      orgOnly = await seedIdentity(db, {
+        userId: "dir-lines-org-recruiter",
+        teamId: "dir-team-b",
+        role: "recruiter",
+      });
+      await harness.client.exec(
+        `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','dir-lines-org-recruiter','admin','{organisation}');`,
+      );
+      for (const [member, key, body] of [
+        [
+          basic,
+          "lines-basic",
+          {
+            ...structuredClone(ADMIN_ROLE.body),
+            name: "Fictional basic directory role",
+            directoryRule: "basic",
+          },
+        ],
+        [
+          noPage,
+          "lines-no-page",
+          {
+            ...structuredClone(ADMIN_ROLE.body),
+            name: "Fictional role without the directory page",
+            pages: ADMIN_ROLE.body.pages.filter((page) => page !== "directory"),
+          },
+        ],
+      ] as const) {
+        const role = await createConfigDraft(owner, {
+          type: "role",
+          key,
+          body,
+        });
+        await publishConfigVersion(owner, role.versionId);
+        await assignMemberRole(
+          owner,
+          { userId: member.userId, roleObjectId: role.objectId },
+          new Headers(),
+        );
+      }
+      const unit = (
+        await createOrgUnit(owner, {
+          name: "Fictional Lines Unit",
+          code: "DIR-LINES",
+          levelId: levels[0].id,
+        })
+      ).id;
+      const head = await createPosition(owner, {
+        title: "Fictional Lines Head",
+        code: "LINES-HEAD",
+        orgUnitId: unit,
+        isManager: true,
+      });
+      desk = await position(owner, "Fictional Lines Desk", "LINES-DESK", unit);
+      chief = await employee(owner, {
+        workEmail: "lines.chief@example.test",
+        workPhone: "+00 000 0001",
+      });
+      staffer = await employee(owner, {
+        workEmail: "lines.staffer@example.test",
+        workPhone: "+00 000 0002",
+      });
+      await setEmployeePositions(owner, chief.id, {
+        positions: [{ positionId: head.id, primary: true }],
+      });
+      await setEmployeePositions(owner, staffer.id, {
+        positions: [{ positionId: desk.id, primary: true }],
+      });
+    });
+
+    it("gives a company owner and a basic directory role the six keys only, and no contact fact or employee number", async () => {
+      // The configured role is basic: the directory itself leaves its contact keys out.
+      const listed = await listEmployees(basic, { positionId: desk.id });
+      expect(listed.data.map((row) => row.id)).toEqual([staffer.id]);
+      expect(Object.hasOwn(listed.data[0], "workEmail")).toBe(false);
+      const seeded = await look<{
+        work_email: string | null;
+        work_phone: string | null;
+        employee_number: string;
+      }>(
+        "SELECT work_email, work_phone, employee_number FROM app.employees WHERE workspace_id = $1",
+        [COMPANY],
+      );
+      const contacts = seeded.flatMap((row) =>
+        [row.work_email, row.work_phone].filter(
+          (fact): fact is string => !!fact,
+        ),
+      );
+      expect(contacts).toContain("lines.chief@example.test");
+      for (const p of [owner, basic]) {
+        const roots = await lines(p, "?pageSize=200");
+        const level = await lines(p, `?managerId=${chief.id}`);
+        for (const response of [roots, level]) {
+          expect(response.status, p.userId).toBe(200);
+          expect(response.roundTrips).toBeLessThanOrEqual(6);
+          for (const row of response.body.data as ReportingPerson[])
+            expect(Object.keys(row).sort()).toEqual(KEYS);
+          const text = JSON.stringify(response.body);
+          for (const fact of [
+            ...contacts,
+            ...seeded.map((row) => row.employee_number),
+          ])
+            expect(text, p.userId).not.toContain(fact);
+        }
+        expect(
+          (roots.body.data as ReportingPerson[]).find(
+            (row) => row.id === chief.id,
+          ),
+        ).toEqual({
+          id: chief.id,
+          displayName: chief.displayName,
+          title: "Fictional Lines Head",
+          unitName: "Fictional Lines Unit",
+          otherPositions: 0,
+          reports: 1,
+        });
+        expect(level.body.data).toEqual([
+          {
+            id: staffer.id,
+            displayName: staffer.displayName,
+            title: "Fictional Lines Desk",
+            unitName: "Fictional Lines Unit",
+            otherPositions: 0,
+            reports: 0,
+          },
+        ]);
+      }
+    });
+
+    it("refuses a recruiter, a company admin without directory view and a role without the directory page", async () => {
+      // The role without the page still has directory view: only the page check refuses it.
+      expect((await listEmployees(noPage)).data.length).toBeGreaterThan(0);
+      await expect(listEmployees(orgOnly)).rejects.toMatchObject({
+        status: 403,
+        code: "directory_forbidden",
+      });
+      for (const p of [recruiter, orgOnly, noPage])
+        for (const query of ["", `?managerId=${chief.id}`]) {
+          const response = await lines(p, query);
+          expect(
+            [response.status, response.body.error?.code],
+            p.userId,
+          ).toEqual([403, "directory_forbidden"]);
+          expect(response.body.data).toBeUndefined();
+        }
+    });
+
+    it("answers a Bearer token with 403 session_required", async () => {
+      const response = await call(
+        reportingLinesRoute as Handler,
+        "GET",
+        "/api/v1/employees/reporting-lines",
+        { bearer: true },
+      );
+      expect([response.status, response.body.error.code]).toEqual([
+        403,
+        "session_required",
+      ]);
+    });
+  });
 });
 
 describe("one directory page in database round trips", () => {
@@ -2300,5 +2498,459 @@ describe("one directory page in database round trips", () => {
       "Fictional Person 3",
     ]);
     expect(response.roundTrips).toBeLessThanOrEqual(6);
+  });
+});
+
+describe("reporting lines from manager positions (ADM-23)", () => {
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  const units: Record<string, string> = {};
+  const desks: Record<string, string> = {};
+  /** Each fictional person's id by first name. */
+  const people: Record<string, string> = {};
+  const lines = async (query: string) => {
+    const response = await call(
+      reportingLinesRoute as Handler,
+      "GET",
+      `/api/v1/employees/reporting-lines${query}`,
+      { as: owner },
+    );
+    return { ...response, rows: response.body.data as ReportingPerson[] };
+  };
+  /** One whole level as first names: the roots, or the reports of the named person. */
+  const level = async (name?: string) => {
+    const response = await lines(
+      name ? `?managerId=${people[name]}&pageSize=200` : "?pageSize=200",
+    );
+    expect(response.status, name).toBe(200);
+    expect(response.body.pagination.hasMore).toBe(false);
+    return response.rows.map((row) =>
+      row.displayName.replace("Fictional ", ""),
+    );
+  };
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    pools.data.mockImplementation(async () => fixture.db);
+    pools.identity.mockImplementation(async () => fixture.db);
+    owner = await seedIdentity(fixture.db, {
+      userId: "lines-owner",
+      teamId: "lines-team",
+    });
+    const levels: OrgLevel[] = [];
+    for (const depth of [0, 1, 2, 3])
+      levels.push(
+        await createOrgLevel(owner, {
+          name: `Fictional lines level ${depth}`,
+          depth,
+        }),
+      );
+    // Three trees: R with S and its teams, Q with no manager position, and the crossed X and Y.
+    for (const [key, depth, parent] of [
+      ["R", 0, null],
+      ["S", 1, "R"],
+      ["T1", 2, "S"],
+      ["T2", 2, "S"],
+      ["T3", 2, "S"],
+      ["T4", 2, "S"],
+      ["U", 3, "T1"],
+      ["W", 2, "S"],
+      ["V", 1, "R"],
+      ["Z", 1, "R"],
+      ["Q", 0, null],
+      ["Q1", 1, "Q"],
+      ["X", 0, null],
+      ["Y", 1, "X"],
+    ] as const)
+      units[key] = (
+        await createOrgUnit(owner, {
+          name: `Fictional ${key} Unit`,
+          code: `LINES-${key}`,
+          levelId: levels[depth].id,
+          ...(parent ? { parentId: units[parent] } : {}),
+        })
+      ).id;
+    for (const [key, unit, isManager] of [
+      ["RM", "R", true],
+      ["SM", "S", true],
+      ["S1", "S", false],
+      ["T1M", "T1", true],
+      ["T1D", "T1", false],
+      ["T2M", "T2", true],
+      ["T2D", "T2", false],
+      ["T3M", "T3", true],
+      ["T3D", "T3", false],
+      ["T4M", "T4", true],
+      ["T4D", "T4", false],
+      ["UD", "U", false],
+      ["WM", "W", true],
+      ["WD", "W", false],
+      ["VM", "V", true],
+      ["ZM", "Z", true],
+      ["ZD", "Z", false],
+      ["QD", "Q", false],
+      ["Q1D", "Q1", false],
+      ["XM", "X", true],
+      ["XD", "X", false],
+      ["YM", "Y", true],
+      ["YD", "Y", false],
+    ] as const)
+      desks[key] = (
+        await createPosition(owner, {
+          title: `Fictional ${key} Desk`,
+          code: `LINES-${key}`,
+          orgUnitId: units[unit],
+          isManager,
+        })
+      ).id;
+    let serial = 0;
+    const person = async (
+      name: string,
+      holds: [string, boolean][],
+      extra: Record<string, unknown> = {},
+    ) => {
+      serial++;
+      const created = await createEmployee(owner, {
+        displayName: `Fictional ${name}`,
+        employeeNumber: `LINES-${serial}`,
+        workEmail: `lines.${serial}@example.test`,
+        workPhone: `+00 000 ${String(serial).padStart(4, "0")}`,
+        ...extra,
+      });
+      if (holds.length)
+        await setEmployeePositions(owner, created.id, {
+          positions: holds.map(([key, primary]) => ({
+            positionId: desks[key],
+            primary,
+          })),
+        });
+      people[name] = created.id;
+      return created;
+    };
+    await person("Ava", [["RM", true]]);
+    await person("Ben", [["SM", true]]);
+    await person("Cara", [["S1", true]]);
+    // T1's manager position has no holder, T2's only a left one, T3's only an archived one and
+    // T4's only an ended row; U has no manager position at all.
+    await person("Dan", [["T1D", true]]);
+    await person("Eve", [["T2D", true]]);
+    await person("Lefty", [["T2M", true]], { status: "left" });
+    await person("Finn", [["T3D", true]]);
+    await archiveEmployee(owner, (await person("Archie", [["T3M", true]])).id);
+    await person("Gus", [["T4D", true]]);
+    const ended = await person("Ted", [["T4M", true]]);
+    await setEmployeePositions(owner, ended.id, { positions: [] });
+    await person("Hal", [["UD", true]]);
+    await person("Kim", [
+      ["S1", true],
+      ["QD", false],
+    ]);
+    // Manager positions in V (below R) and W (below S): V is nearer the top, though W is primary.
+    await person("Lou", [
+      ["WM", true],
+      ["VM", false],
+    ]);
+    await person("Max", [["WD", true]]);
+    await person("Pia", [["ZM", true]]);
+    await person("Quin", [["ZM", true]]);
+    await person("Rex", [["ZD", true]]);
+    await person("Ivy", [["QD", true]]);
+    await person("Jon", [["Q1D", true]]);
+    // Crossed: Nora's primary is in X and she manages Y below it; Otto's is in Y and he manages X.
+    await person("Nora", [
+      ["XD", true],
+      ["YM", false],
+    ]);
+    await person("Otto", [
+      ["YD", true],
+      ["XM", false],
+    ]);
+    await person("Nobody", []);
+  });
+  afterAll(async () => fixture?.close());
+
+  it("reports to the holder of the unit's manager position, and a manager to the one of the unit above", async () => {
+    expect(await level("Ben")).toContain("Cara");
+    expect(await level("Ava")).toContain("Ben");
+    expect((await lines("?pageSize=200")).roundTrips).toBeLessThanOrEqual(6);
+  });
+
+  it("skips a manager position with no current holder to the nearest unit above that has one", async () => {
+    // T1 has no holder, T2 only a left one, T3 only an archived one, T4 only an ended row; U is two
+    // units below S.
+    expect(await level("Ben")).toEqual([
+      "Cara",
+      "Dan",
+      "Eve",
+      "Finn",
+      "Gus",
+      "Hal",
+      "Kim",
+    ]);
+  });
+
+  it("makes the top manager and everyone in a tree with no manager position roots", async () => {
+    expect(await level()).toEqual(["Ava", "Ivy", "Jon", "Otto"]);
+  });
+
+  it("places a person with several positions once, by the primary one or the manager position nearest the top, with no loop", async () => {
+    const everyone = new Map<string, ReportingPerson>();
+    const managerOf = new Map<string, string | null>();
+    const crawl = async (managerId: string | null) => {
+      const response = await lines(
+        managerId ? `?managerId=${managerId}&pageSize=200` : "?pageSize=200",
+      );
+      for (const row of response.rows) {
+        expect(everyone.has(row.id), row.displayName).toBe(false);
+        everyone.set(row.id, row);
+        managerOf.set(row.id, managerId);
+        if (row.reports) await crawl(row.id);
+      }
+    };
+    await crawl(null);
+    const named = (name: string) => everyone.get(people[name])!;
+    expect(named("Kim")).toMatchObject({
+      title: "Fictional S1 Desk",
+      unitName: "Fictional S Unit",
+      otherPositions: 1,
+    });
+    expect(managerOf.get(people.Kim)).toBe(people.Ben);
+    expect(named("Lou")).toMatchObject({
+      title: "Fictional VM Desk",
+      unitName: "Fictional V Unit",
+      otherPositions: 1,
+      reports: 1,
+    });
+    expect(await level("Ava")).toEqual(["Ben", "Lou", "Pia", "Quin"]);
+    expect(await level("Lou")).toEqual(["Max"]);
+    // The crossed pair: Nora reports to Otto, who is a root; each appears once.
+    expect(named("Nora")).toMatchObject({
+      title: "Fictional YM Desk",
+      unitName: "Fictional Y Unit",
+      otherPositions: 1,
+    });
+    expect(managerOf.get(people.Nora)).toBe(people.Otto);
+    expect(managerOf.get(people.Otto)).toBeNull();
+    expect(named("Otto")).toMatchObject({ unitName: "Fictional X Unit" });
+    // Every person holding a current position, exactly once.
+    expect([...everyone.values()].map((row) => row.displayName).sort()).toEqual(
+      [
+        "Ava",
+        "Ben",
+        "Cara",
+        "Dan",
+        "Eve",
+        "Finn",
+        "Gus",
+        "Hal",
+        "Ivy",
+        "Jon",
+        "Kim",
+        "Lou",
+        "Max",
+        "Nora",
+        "Otto",
+        "Pia",
+        "Quin",
+        "Rex",
+      ].map((name) => `Fictional ${name}`),
+    );
+  });
+
+  it("takes the first holder by display name when a manager position has two", async () => {
+    expect(await level("Pia")).toEqual(["Rex"]);
+    expect(await level("Quin")).toEqual([]);
+  });
+
+  it("leaves left, archived and position-less employees out of every level and makes them nobody's manager", async () => {
+    for (const name of ["Lefty", "Archie", "Ted", "Nobody"]) {
+      const response = await lines(`?managerId=${people[name]}`);
+      expect(response.status, name).toBe(200);
+      expect(response.rows, name).toEqual([]);
+    }
+    const shown = new Set<string>();
+    for (const name of [undefined, "Ava", "Ben", "Lou", "Pia", "Otto"])
+      for (const row of await level(name)) shown.add(row);
+    for (const name of ["Lefty", "Archie", "Ted", "Nobody"])
+      expect(shown.has(name), name).toBe(false);
+  });
+
+  it("counts each person's reports as the rows of their level, in name order with paging", async () => {
+    for (const name of [undefined, ...Object.keys(people)]) {
+      const response = await lines(
+        name ? `?managerId=${people[name]}&pageSize=200` : "?pageSize=200",
+      );
+      for (const row of response.rows) {
+        const below = await lines(`?managerId=${row.id}&pageSize=200`);
+        expect(below.rows.length, row.displayName).toBe(row.reports);
+      }
+      const names = response.rows.map((row) => row.displayName);
+      expect(names).toEqual([...names].sort());
+    }
+    const paged: string[] = [];
+    for (const page of [1, 2, 3]) {
+      const response = await lines(
+        `?managerId=${people.Ben}&page=${page}&pageSize=3`,
+      );
+      expect(response.body.pagination).toEqual({
+        page,
+        pageSize: 3,
+        hasMore: page < 3,
+      });
+      paged.push(...response.rows.map((row) => row.displayName));
+    }
+    expect(paged).toEqual(
+      ["Cara", "Dan", "Eve", "Finn", "Gus", "Hal", "Kim"].map(
+        (name) => `Fictional ${name}`,
+      ),
+    );
+    expect((await lines("?page=1&pageSize=4")).body.pagination.hasMore).toBe(
+      false,
+    );
+  });
+
+  it("answers 404 for an unknown manager and 400 for an unknown query key or value", async () => {
+    const unknown = await lines(
+      "?managerId=00000000-0000-4000-a000-00000000dead",
+    );
+    expect([unknown.status, unknown.body.error.code]).toEqual([
+      404,
+      "not_found",
+    ]);
+    expect(unknown.body.data).toBeUndefined();
+    for (const query of [
+      "?unitId=00000000-0000-4000-a000-00000000dead",
+      "?managerId=not-a-uuid",
+      "?pageSize=201",
+      "?page=0",
+    ]) {
+      const response = await lines(query);
+      expect([response.status, response.body.error.code], query).toEqual([
+        400,
+        "invalid_input",
+      ]);
+    }
+  });
+});
+
+describe("the org tree by people at scale (ADM-23)", () => {
+  // A fictional 2,000-employee company on 420 units across six levels.
+  const COUNTS = [2, 8, 30, 80, 120, 180];
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  const timed = async (query: string) => {
+    const started = performance.now();
+    const response = await call(
+      reportingLinesRoute as Handler,
+      "GET",
+      `/api/v1/employees/reporting-lines${query}`,
+      { as: owner },
+    );
+    const ms = performance.now() - started;
+    expect(response.status, query).toBe(200);
+    return { ...response, ms, rows: response.body.data as ReportingPerson[] };
+  };
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    pools.data.mockImplementation(async () => fixture.db);
+    pools.identity.mockImplementation(async () => fixture.db);
+    owner = await seedIdentity(fixture.db, {
+      userId: "lines-scale-owner",
+      teamId: "lines-scale-team",
+    });
+    const levels: OrgLevel[] = [];
+    for (const depth of COUNTS.keys())
+      levels.push(
+        await createOrgLevel(owner, {
+          name: `Fictional scale level ${depth}`,
+          depth,
+        }),
+      );
+    // Each unit's parent is the previous level's unit at its index modulo that level's size.
+    const tree: string[][] = [];
+    for (const [depth, count] of COUNTS.entries()) {
+      const parents = depth === 0 ? [] : tree[depth - 1];
+      const parent = parents.length
+        ? sql`(${`{${parents.join(",")}}`}::uuid[])[1 + g % ${sql.raw(String(parents.length))}]`
+        : sql`null::uuid`;
+      tree.push(
+        await withTeam(owner, async (tx, access) => {
+          const { rows } = await tx.execute<{ id: string }>(sql`
+            insert into app.org_units(workspace_id, parent_id, level_id, name, code)
+            select ${access.workspaceId}::uuid, ${parent}, ${levels[depth].id}::uuid,
+              ${`Fictional scale unit ${depth}-`} || g, ${`LINES-SCALE-${depth}-`} || g
+            from generate_series(0, ${sql.raw(String(count - 1))}) g order by g returning id`);
+          return rows.map((row) => row.id);
+        }),
+      );
+    }
+    const units = tree.flat();
+    await withTeam(owner, async (tx, access) => {
+      // A manager position in nine units of ten, and one desk in every unit.
+      const { rows: heads } = await tx.execute<{ id: string }>(sql`
+        insert into app.positions(workspace_id, org_unit_id, title, code, is_manager)
+        select ${access.workspaceId}::uuid, u, 'Fictional scale manager ' || n, 'LINES-SCALE-HEAD-' || n, true
+        from unnest(${`{${units.join(",")}}`}::uuid[]) with ordinality t(u, n) where n % 10 <> 0 order by n
+        returning id`);
+      const { rows: seats } = await tx.execute<{ id: string }>(sql`
+        insert into app.positions(workspace_id, org_unit_id, title, code)
+        select ${access.workspaceId}::uuid, u, 'Fictional scale desk ' || n, 'LINES-SCALE-DESK-' || n
+        from unnest(${`{${units.join(",")}}`}::uuid[]) with ordinality t(u, n) order by n
+        returning id`);
+      const { rows: staff } = await tx.execute<{ id: string }>(sql`
+        insert into app.employees(workspace_id, display_name, employee_number, work_email)
+        select ${access.workspaceId}::uuid, 'Fictional Scale Person ' || lpad(n::text, 4, '0'), 'LINES-SCALE-EMP-' || n,
+          'scale.' || n || '@example.test'
+        from generate_series(1, 2000) n order by n returning id`);
+      // One manager position in six stays vacant; everyone else sits at a desk, every 25th at two.
+      const held = heads.filter((_, index) => index % 6 !== 5);
+      const rows: [string, string, boolean][] = [];
+      staff.forEach((person, index) => {
+        const first =
+          index < held.length
+            ? held[index].id
+            : seats[(index - held.length) % seats.length].id;
+        rows.push([person.id, first, true]);
+        const second = seats[(index * 7 + 3) % seats.length].id;
+        if (index % 25 === 0 && second !== first)
+          rows.push([person.id, second, false]);
+      });
+      await tx.execute(sql`
+        insert into app.employee_positions(employee_id, position_id, workspace_id, "primary")
+        select e, p, ${access.workspaceId}::uuid, f
+        from unnest(${`{${rows.map((row) => row[0]).join(",")}}`}::uuid[], ${`{${rows.map((row) => row[1]).join(",")}}`}::uuid[], ${`{${rows.map((row) => row[2]).join(",")}}`}::boolean[]) t(e, p, f)`);
+    });
+  });
+  afterAll(async () => fixture?.close());
+
+  it("loads the roots, a top manager's level and a mid-tree manager's level each in under 1 s and 6 round trips", async () => {
+    // One warm-up request first, so one-off start-up cost is not measured.
+    await timed("?page=1&pageSize=100");
+    const roots = await timed("?page=1&pageSize=100");
+    const top = roots.rows.find((row) => row.reports > 0)!;
+    expect(top).toBeDefined();
+    const topLevel = await timed(`?managerId=${top.id}&page=1&pageSize=100`);
+    // Two levels of managers further down, to the middle of the tree.
+    let middle = topLevel.rows.find((row) => row.reports > 0)!;
+    for (const _step of [1, 2]) {
+      const below = await timed(`?managerId=${middle.id}&page=1&pageSize=100`);
+      middle = below.rows.find((row) => row.reports > 0) ?? middle;
+    }
+    const midLevel = await timed(`?managerId=${middle.id}&page=1&pageSize=100`);
+    const measured = { roots, topLevel, midLevel };
+    for (const [name, result] of Object.entries(measured)) {
+      expect(result.rows.length, name).toBeGreaterThan(0);
+      expect(result.ms, name).toBeLessThan(1000);
+      expect(result.roundTrips, name).toBeLessThanOrEqual(6);
+    }
+    console.log(
+      `Org tree by people, 2,000 fictional employees: ${Object.entries(measured)
+        .map(
+          ([name, result]) =>
+            `${name} ${result.ms.toFixed(0)} ms, ${result.roundTrips} round trips, ${result.rows.length} rows`,
+        )
+        .join("; ")}`,
+    );
   });
 });

@@ -906,6 +906,7 @@ describe("OpenAPI contract", () => {
         "PUT /api/v1/employees/{id}/positions",
         "POST /api/v1/employees/{id}/erasure",
         "GET /api/v1/employees/retention-review",
+        "GET /api/v1/employees/reporting-lines",
         "POST /api/v1/org-import/dry-run",
         "POST /api/v1/org-import/apply",
         "GET /api/v1/me/access",

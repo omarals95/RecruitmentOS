@@ -114,3 +114,7 @@ export const employeeListQuery = z
   })
   .strict();
 export const retentionReviewQuery = z.object({ page, pageSize }).strict();
+/** One level of the org tree by people (ADM-23): the roots, or the people reporting to managerId. */
+export const reportingLinesQuery = z
+  .object({ managerId: z.uuid().optional(), page, pageSize })
+  .strict();
