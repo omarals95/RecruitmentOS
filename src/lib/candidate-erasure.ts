@@ -1,6 +1,6 @@
 import { and, DrizzleQueryError, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { uploads } from "@/db/schema";
+import { recordFiles, uploads } from "@/db/schema";
 import type { BlobGateway } from "@/lib/blob-storage";
 import {
   DELETE_GRACE_MS,
@@ -30,6 +30,7 @@ export const ERASURE_COUNTS = [
   "savedViewsCleared",
   "bulkItems",
   "cvFiles",
+  "recordFiles",
   "activityRedacted",
   "notificationReads",
   "idempotencyKeys",
@@ -41,7 +42,10 @@ export type CandidateErasure = {
   erasedAt: string;
   /** Null when the candidate was already erased by an earlier call. */
   removed: ErasureCounts | null;
-  /** This erasure's Blob CV files: deleted, still waiting, and when the last waiting one may go. */
+  /**
+   * This erasure's Blob CV files and record files together: deleted, still waiting, and when the
+   * last waiting one may go.
+   */
   cvStorage: { deleted: number; waiting: number; deleteAfter: string | null };
 };
 type HelperResult = {
@@ -88,8 +92,9 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
 }
 
 /**
- * The deletion pass for this erasure's Blob CVs, after the erasure committed: delete, confirm by
- * head, then release, each only once the upload's last ticket expired at least 10 minutes ago.
+ * The deletion pass for this erasure's Blob CVs and record files, after the erasure committed:
+ * delete, confirm by head, then release, each only once the file's last ticket expired at least
+ * 10 minutes ago.
  * No Blob gateway (another provider or no setup) skips it; a failure leaves the files for a later
  * cleanup. Neither changes the erasure's outcome.
  */
@@ -121,25 +126,29 @@ async function deleteErasedCvs(
   }
 }
 
+/** One statement over both tables: the erasure's Blob CV files and its record files. */
 async function cvStorageOf(
   p: Principal,
   erasureId: string,
 ): Promise<CandidateErasure["cvStorage"]> {
-  const [row] = await withTeam(p, (tx) =>
-    tx
-      .select({
-        deleted: sql<number>`count(*) filter (where ${uploads.blobDeletedAt} is not null)`,
-        waiting: sql<number>`count(*) filter (where ${uploads.blobDeletedAt} is null)`,
-        lastExpiry: sql<Date | null>`max(${uploads.expiresAt}) filter (where ${uploads.blobDeletedAt} is null)`,
-      })
-      .from(uploads)
-      .where(
-        and(
-          eq(uploads.teamId, p.teamId),
-          eq(uploads.erasureId, erasureId),
-          eq(uploads.storageProvider, "blob"),
-        ),
-      ),
+  const files = sql`(select ${uploads.blobDeletedAt} as deleted_at, ${uploads.expiresAt} as expires_at from ${uploads} where ${and(
+    eq(uploads.teamId, p.teamId),
+    eq(uploads.erasureId, erasureId),
+    eq(uploads.storageProvider, "blob"),
+  )} union all select ${recordFiles.blobDeletedAt}, ${recordFiles.expiresAt} from ${recordFiles} where ${and(
+    eq(recordFiles.teamId, p.teamId),
+    eq(recordFiles.erasureId, erasureId),
+  )})`;
+  const {
+    rows: [row],
+  } = await withTeam(p, (tx) =>
+    tx.execute<{
+      deleted: number | string;
+      waiting: number | string;
+      lastExpiry: Date | string | null;
+    }>(
+      sql`select count(*) filter (where f.deleted_at is not null) as deleted, count(*) filter (where f.deleted_at is null) as waiting, max(f.expires_at) filter (where f.deleted_at is null) as "lastExpiry" from ${files} f`,
+    ),
   );
   const lastExpiry = row?.lastExpiry ? new Date(row.lastExpiry) : null;
   return {
