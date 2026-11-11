@@ -17,6 +17,10 @@ import {
   updateRecord,
 } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
+import {
+  beginRecordFileUpload,
+  completeRecordFileUpload,
+} from "@/lib/record-files";
 import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { assignMemberRole } from "@/lib/member-roles";
 import { archiveOrgUnit, createOrgLevel, createOrgUnit } from "@/lib/org";
@@ -49,6 +53,7 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import { fakeBlob } from "./helpers/fake-blob";
 import {
   customField,
   insertKindSchema,
@@ -4053,5 +4058,193 @@ describe("person, org unit and lookup references with real PostgreSQL migrations
         },
       }),
     ).rejects.toMatchObject({ status: 400, code: "unknown_custom_field" });
+  });
+});
+
+// File fields (R2b-06, job 087), on a database of its own so the kind schema published here reaches
+// no other case. A file value must be the id of a ready, unerased record file of the same team and
+// record; the files go through the record file service behind the fake Blob client.
+describe("file field references with real PostgreSQL migrations and RLS", () => {
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal, outsider: Principal;
+  const field = customField("Fictional certificate", "file");
+  const pdf = Buffer.from("%PDF-1.7\nfictional file field\n%%EOF");
+  const fake = fakeBlob();
+  /** Fixture setup or inspection as the database owner, outside RLS. */
+  const asOwner = async <T>(work: () => Promise<T>): Promise<T> => {
+    await fixture.client.exec("RESET ROLE");
+    try {
+      return await work();
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+  };
+  const stored = (id: string) =>
+    asOwner(
+      async () =>
+        (
+          await fixture.client.query<{
+            data: Record<string, unknown>;
+            version: number;
+          }>("SELECT data, version FROM app.records WHERE id = $1", [id])
+        ).rows[0],
+    );
+  const candidate = async (p: Principal, name: string) =>
+    (await createRecord(p, "candidates", { data: { name } })).id;
+  /** A pending record file of the record; with `ready`, its bytes validated and settled. */
+  async function file(p: Principal, recordId: string, ready = true) {
+    const reserved = await beginRecordFileUpload(
+      p,
+      {
+        recordId,
+        originalName: "fictional-certificate.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: pdf.length,
+        clientUploadId: randomUUID(),
+      },
+      fake.gateway,
+    );
+    if (!ready) return reserved.data.id;
+    const key = await asOwner(
+      async () =>
+        (
+          await fixture.client.query<{ object_key: string }>(
+            "SELECT object_key FROM app.record_files WHERE id = $1",
+            [reserved.data.id],
+          )
+        ).rows[0].object_key,
+    );
+    fake.objects.set(key, { bytes: pdf, mimeType: "application/pdf" });
+    return (await completeRecordFileUpload(p, reserved.data.id, fake.gateway))
+      .id;
+  }
+  const refusal = {
+    status: 400,
+    code: "invalid_reference",
+    message: `${field.label} does not reference the expected record in this team.`,
+  };
+  const refusalOf = async (write: Promise<unknown>) => {
+    const error = await write.then(
+      () => expect.fail("The write was accepted."),
+      (error: { status: number; code: string; message: string }) => error,
+    );
+    return { status: error.status, code: error.code, message: error.message };
+  };
+  const update = (id: string, version: number, value: unknown, data = {}) =>
+    updateRecord(owner, "candidates", id, {
+      version,
+      data: { ...data, customValues: { [field.key]: value } },
+    });
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db, {
+      userId: "file-owner",
+      teamId: "file-team",
+    });
+    // Another team of the same fictional company, so the same kind schema applies.
+    outsider = await seedIdentity(fixture.db, {
+      userId: "file-outsider",
+      teamId: "file-outsider-team",
+    });
+    await enforceTestRls(fixture.db);
+    await publishKindSchema(
+      fixture,
+      owner.userId,
+      kindBody("candidate", [field]),
+    );
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+
+  it("stores a ready file of the record on update and refuses a random id, a pending file, another record's file and another team's file with the record unchanged", async () => {
+    const id = await candidate(owner, "Fictional File Candidate");
+    const ready = await file(owner, id);
+    const updated = await update(id, 1, ready);
+    expect(updated.data).toMatchObject({
+      customValues: { [field.key]: ready },
+    });
+    const before = await stored(id);
+    expect(before.data.customValues).toEqual({ [field.key]: ready });
+    const otherRecord = await file(
+      owner,
+      await candidate(owner, "Fictional Other File Candidate"),
+    );
+    const otherTeam = await file(
+      outsider,
+      await candidate(outsider, "Fictional Outsider File Candidate"),
+    );
+    const pending = await file(owner, id, false);
+    const refusals = [];
+    for (const value of [randomUUID(), pending, otherRecord, otherTeam])
+      refusals.push(await refusalOf(update(id, 2, value)));
+    expect(refusals).toEqual(Array(4).fill(refusal));
+    expect(await stored(id)).toEqual(before);
+    // A value that is not a uuid still answers the shape refusal first.
+    await expect(update(id, 2, "fictional.pdf")).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_custom_value",
+    });
+    // Clearing the value needs no file.
+    const cleared = await update(id, 2, null);
+    expect(cleared.data).toMatchObject({ customValues: { [field.key]: null } });
+  });
+
+  it("refuses every file value on create, where no record owns a file yet", async () => {
+    const id = await candidate(owner, "Fictional Source Candidate");
+    const ready = await file(owner, id);
+    for (const value of [ready, randomUUID()])
+      expect(
+        await refusalOf(
+          createRecord(owner, "candidates", {
+            data: {
+              name: "Fictional Refused File Candidate",
+              customValues: { [field.key]: value },
+            },
+          }),
+        ),
+      ).toEqual(refusal);
+    expect(
+      await asOwner(
+        async () =>
+          (
+            await fixture.client.query(
+              "SELECT id FROM app.records WHERE data->>'name' = 'Fictional Refused File Candidate'",
+            )
+          ).rows,
+      ),
+    ).toEqual([]);
+    // An empty value is no reference.
+    const created = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Empty File Candidate",
+        customValues: { [field.key]: "" },
+      },
+    });
+    expect(created.data).toMatchObject({ customValues: { [field.key]: "" } });
+  });
+
+  it("keeps an existing file value unchecked on an unrelated edit", async () => {
+    const id = await candidate(owner, "Fictional Kept File Candidate");
+    const ready = await file(owner, id);
+    await update(id, 1, ready);
+    // The file is moved to another record by the owner, so the stored value no longer checks.
+    const elsewhere = await candidate(owner, "Fictional Elsewhere Candidate");
+    await asOwner(() =>
+      fixture.client.query(
+        "UPDATE app.record_files SET record_id = $1 WHERE id = $2",
+        [elsewhere, ready],
+      ),
+    );
+    const edited = await updateRecord(owner, "candidates", id, {
+      version: 2,
+      data: { name: "Fictional Renamed Kept File Candidate" },
+    });
+    expect(edited.data).toMatchObject({ customValues: { [field.key]: ready } });
+    const resent = await update(id, 3, ready, { phone: "+971 50 444 4444" });
+    expect(resent.data).toMatchObject({ customValues: { [field.key]: ready } });
+    // Changing it again is checked.
+    expect(await refusalOf(update(id, 4, randomUUID()))).toEqual(refusal);
   });
 });

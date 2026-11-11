@@ -19,6 +19,7 @@ import {
   candidateStates,
   idempotency,
   recordAssignments,
+  recordFiles,
   records,
 } from "@/db/schema";
 import { getIdentityDb, type TeamTx } from "@/db";
@@ -801,11 +802,13 @@ async function withMembers<T>(
 }
 /**
  * Checks the references of the added or changed values checkKindValues returned (architecture 1.5
- * item 7): each non-empty value of an active person, org unit or lookup field. A person must be in
- * `members`; with "ask" it throws MembersNeeded before any statement. Org units and lookups are
- * read together in at most one statement: a current unit of the caller's company, and a record of
- * the field's target kind in the caller's team and record scope. A lookup to anything else, or to
- * a kind the caller may not view, is refused exactly as a missing parent.
+ * item 7): each non-empty value of an active person, org unit, lookup or file field. A person must
+ * be in `members`; with "ask" it throws MembersNeeded before any statement. Org units, lookups and
+ * files are read together in at most one statement: a current unit of the caller's company, a
+ * record of the field's target kind in the caller's team and record scope, and a ready, unerased
+ * file of the record being written (`recordId`, R2b-06). A lookup to anything else, or to a kind the
+ * caller may not view, and any other file are refused exactly as a missing parent; on a create there
+ * is no record yet, so every file value is refused without a statement.
  */
 async function checkFieldReferences(
   tx: TeamTx,
@@ -814,17 +817,26 @@ async function checkFieldReferences(
   changed: Data,
   members: Members,
   allowArchived: boolean,
+  recordId?: string,
 ) {
   const values = schema.body.fields.flatMap((field) =>
     !field.system &&
     !field.archived &&
     (field.type === "person" ||
       field.type === "org-unit" ||
-      field.type === "lookup") &&
+      field.type === "lookup" ||
+      field.type === "file") &&
     !isEmpty(changed[field.key])
       ? [{ field, value: changed[field.key] as string }]
       : [],
   );
+  const files = values.flatMap(({ field, value }) =>
+    field.type === "file" ? [value] : [],
+  );
+  if (files.length && !recordId)
+    throw missingReference(
+      values.find(({ field }) => field.type === "file")!.field.label,
+    );
   const people = values.filter(({ field }) => field.type === "person");
   if (people.length && members === "ask")
     throw new MembersNeeded([...new Set(people.map(({ value }) => value))]);
@@ -866,6 +878,11 @@ async function checkFieldReferences(
           ),
         )}`,
     ),
+    ...(files.length
+      ? [
+          sql`select f.id::text as id, 'file'::text as kind, false as archived from ${recordFiles} f where f.team_id = ${ctx.principal.teamId} and f.record_id = ${recordId}::uuid and f.status = 'ready' and f.erasure_id is null and f.id = any(${sql.param(files)}::uuid[])`,
+        ]
+      : []),
   ];
   const found = new Map(
     parts.length
@@ -886,6 +903,8 @@ async function checkFieldReferences(
         "invalid_reference",
         `${field.label} does not reference a current unit of this company.`,
       );
+    if (field.type === "file" && !found.has(`file:${value}`))
+      throw missingReference(field.label);
     if (field.type !== "lookup") continue;
     const archived = found.get(`${field.target}:${value}`);
     if (archived === undefined) throw missingReference(field.label);
@@ -2291,6 +2310,7 @@ async function updateOnce(
         changed,
         members,
         imported && archived,
+        existing.id,
       );
     if (kind === "task-field")
       await checkFieldCompatibility(tx, ctx, existing, data, archived);

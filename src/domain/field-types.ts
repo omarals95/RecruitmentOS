@@ -287,8 +287,9 @@ export const customFieldSchema = customFieldShape
     },
   );
 
-// One non-empty value of the field. Person, org unit, file and lookup check the shape only; person,
-// org unit and lookup references are checked by the records service, file references by R2b-06.
+// One non-empty value of the field. Person, org unit, file and lookup check the shape only; their
+// references (a file value is the id of a record file of the record) are checked by the records
+// service.
 function filledValue(field: CustomField): z.ZodType {
   switch (field.type) {
     case "short-text":
