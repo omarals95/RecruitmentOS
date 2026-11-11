@@ -19,7 +19,7 @@ describe("two-step sign-in through the Better Auth handler", () => {
   let caller: ReturnType<typeof authCaller>;
   let owner = { cookie: "", teamId: "", secret: "" };
   beforeAll(async () => {
-    h = await createAuthDb({ workspace: true });
+    h = await createAuthDb();
     caller = authCaller(createTestAuth(h.db, mail));
     const setup = await setUpAdmin(caller, mail);
     owner = {

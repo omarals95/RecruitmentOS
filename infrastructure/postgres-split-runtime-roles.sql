@@ -110,6 +110,7 @@ GRANT SELECT, INSERT, UPDATE ON TABLE app.speed_sample_budgets TO recruitmentos_
 GRANT SELECT ON TABLE app.workspaces TO recruitmentos_data;
 GRANT SELECT ON TABLE app.workspace_teams TO recruitmentos_data;
 GRANT SELECT ON TABLE app.workspace_admins TO recruitmentos_data;
+GRANT SELECT ON TABLE app.workspace_users TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_objects TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_versions TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.config_layouts TO recruitmentos_data;
@@ -157,6 +158,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.workspace_people(text, text, text, text
 GRANT EXECUTE ON FUNCTION tenant_context.workspace_person(text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.set_team_archived(text, boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.member_archived_teams() TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.set_user_active(text, boolean) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.remove_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.scope_is_all() TO recruitmentos_data;
@@ -167,7 +169,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.context_actor_key() TO recruitmentos_da
 
 -- recruitmentos_identity: Better Auth and API token tables, the OAuth tables (DELETE only for the
 -- expired-row purge; no UPDATE on clients), the setup marker read-only, the connection marker and
--- the four identity helpers.
+-- the five identity helpers.
 GRANT USAGE ON SCHEMA auth TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA tenant_context TO recruitmentos_identity;
 GRANT USAGE ON SCHEMA db_boundary TO recruitmentos_identity;
@@ -191,6 +193,7 @@ GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitm
 GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text, text) TO recruitmentos_identity;
 GRANT EXECUTE ON FUNCTION tenant_context.reset_two_step(text) TO recruitmentos_identity;
+GRANT EXECUTE ON FUNCTION tenant_context.user_account_action(text, text) TO recruitmentos_identity;
 
 -- A revoke by a role that does not own the database or the public schema only warns; refuse instead.
 DO $closed$

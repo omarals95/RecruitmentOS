@@ -24,7 +24,7 @@ import {
 export type { WorkspacePersonRow };
 export type UserFilters = {
   team: string;
-  status: "" | "active" | "invited";
+  status: "" | "active" | "invited" | "deactivated";
   level: "" | "owner" | "admin" | "none";
   role: string;
 };
@@ -39,6 +39,11 @@ export const teamRoles: Record<string, string> = {
   admin: "Admin",
   recruiter: "Recruiter",
   viewer: "Viewer",
+};
+export const statuses: Record<WorkspacePersonRow["status"], string> = {
+  active: "Active",
+  invited: "Invited",
+  deactivated: "Deactivated",
 };
 export const levels: Record<string, string> = {
   owner: "Company owner",
@@ -270,6 +275,7 @@ export function UsersPanel({
               <option value="">Any status</option>
               <option value="active">Active</option>
               <option value="invited">Invited</option>
+              <option value="deactivated">Deactivated</option>
             </select>
           </label>
           <label className="field">
@@ -373,9 +379,7 @@ export function UsersPanel({
                       <td data-label="Company level">
                         {row.companyLevel ? levels[row.companyLevel] : "None"}
                       </td>
-                      <td data-label="Status">
-                        {row.status === "invited" ? "Invited" : "Active"}
-                      </td>
+                      <td data-label="Status">{statuses[row.status]}</td>
                       <td data-label="Last sign-in">
                         {row.status === "invited"
                           ? "Not signed in yet"

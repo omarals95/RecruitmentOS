@@ -13,6 +13,7 @@ import {
 import {
   defineRequestState,
   getCurrentAdapter,
+  getCurrentDBAdapterAsyncLocalStorage,
   hasRequestState,
   runWithTransaction,
   tryGetCurrentAuthEndpointContext,
@@ -42,9 +43,14 @@ import {
   validateInvitationRole,
 } from "./auth-policy";
 import { cleanClientName } from "./client-name";
-import { clientIpHeader, keyedRateLimitHash } from "./client-ip";
+import {
+  clientIpHeader,
+  keyedRateLimitHash,
+  signInBackoffKey,
+} from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
 import { companyAuthorityHeld } from "./two-step";
+import { accountDeactivated } from "./user-account";
 
 export type AuthOptions = {
   configured: boolean;
@@ -166,8 +172,6 @@ const SIGN_IN_BACKOFF_MESSAGE =
 /** Seconds a sign-in waits after `count` counted attempts: none for 1-4, then 1, 2, 4, 8, then 15 minutes. */
 const signInDelay = (count: SQLWrapper) =>
   sql`(CASE WHEN ${count} < 5 THEN 0 WHEN ${count} < 9 THEN 60 * (1 << (${count} - 5)) ELSE 900 END) * interval '1 second'`;
-const signInBackoffKey = (email: string, secret: string) =>
-  `sign-in-email:${keyedRateLimitHash(email.trim().toLowerCase(), secret)}`;
 
 /**
  * Per-email sign-in backoff in auth.api_rate_limits under a keyed hash of the address. One atomic
@@ -215,6 +219,14 @@ const FORGET_TRUSTED_DEVICE_PATHS = new Set([
   "/two-factor/disable",
   "/two-factor/generate-backup-codes",
 ]);
+/** The user `hooks.before` found active, before Better Auth opens a password change's transaction. */
+const checkedActiveUser = defineRequestState<string | null>(() => null);
+const accountDeactivatedError = () =>
+  new APIError("FORBIDDEN", {
+    code: "account_deactivated",
+    message:
+      "This account has been deactivated. Ask a company owner or admin to reactivate it.",
+  });
 /** Only these paths may create a session for a user with two-step sign-in. */
 const TWO_STEP_SESSION_PATHS = new Set([
   "/sign-in/email",
@@ -432,26 +444,42 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         create: {
           // A two-step user's session comes only from a path that challenged or checked the code.
           before: async (row, ctx) => {
-            if (ctx && TWO_STEP_SESSION_PATHS.has(ctx.path)) return;
-            const [owner] = ctx
-              ? [
-                  await (
-                    await getCurrentAdapter(ctx.context.adapter)
-                  ).findOne<{ twoFactorEnabled: boolean }>({
-                    model: "user",
-                    where: [{ field: "id", value: row.userId }],
-                  }),
-                ]
-              : await db
-                  .select({ twoFactorEnabled: user.twoFactorEnabled })
-                  .from(user)
-                  .where(eq(user.id, row.userId));
-            if (owner?.twoFactorEnabled)
-              throw new APIError("FORBIDDEN", {
-                code: "two_step_sign_in_required",
-                message:
-                  "Sign in with your email, password and authenticator code.",
-              });
+            if (!ctx || !TWO_STEP_SESSION_PATHS.has(ctx.path)) {
+              const [owner] = ctx
+                ? [
+                    await (
+                      await getCurrentAdapter(ctx.context.adapter)
+                    ).findOne<{ twoFactorEnabled: boolean }>({
+                      model: "user",
+                      where: [{ field: "id", value: row.userId }],
+                    }),
+                  ]
+                : await db
+                    .select({ twoFactorEnabled: user.twoFactorEnabled })
+                    .from(user)
+                    .where(eq(user.id, row.userId));
+              if (owner?.twoFactorEnabled)
+                throw new APIError("FORBIDDEN", {
+                  code: "two_step_sign_in_required",
+                  message:
+                    "Sign in with your email, password and authenticator code.",
+                });
+            }
+            // A deactivated person gets no session on any path. Better Auth has already checked
+            // the password or code, so the state is never shown to someone without them.
+            const store = (
+              await getCurrentDBAdapterAsyncLocalStorage()
+            ).getStore();
+            if (store?.isTransactionActive) {
+              // No second transaction may open beside Better Auth's own (a single connection on
+              // PGlite); only a password change, checked before its transaction, gets here.
+              const checked = (await hasRequestState())
+                ? await checkedActiveUser.get()
+                : null;
+              if (checked !== row.userId)
+                throw new Error("The account state was not checked.");
+            } else if (await accountDeactivated(db, row.userId))
+              throw accountDeactivatedError();
           },
         },
       },
@@ -572,16 +600,38 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         const session = gated
           ? await getAuthoritativeSessionFromCtx(ctx)
           : undefined;
+        // A deactivated person's surviving session is refused on every gated endpoint, whatever
+        // their team role or two-step state: team management never reaches tenant_context.install.
+        if (session) {
+          if (await accountDeactivated(db, session.user.id))
+            throw accountDeactivatedError();
+          // A password change creates its new session inside Better Auth's transaction, where the
+          // deactivation check cannot open its own; the session hook relies on this check.
+          if (ctx.path === "/change-password")
+            await checkedActiveUser.set(session.user.id);
+        }
         if (session && !session.user.twoFactorEnabled) {
           const memberships = await db
             .select({ teamId: member.organizationId, role: member.role })
             .from(member)
             .where(eq(member.userId, session.user.id));
+          let held: boolean;
+          try {
+            held = await companyAuthorityHeld(db, session.user, memberships);
+          } catch (error) {
+            // A deactivation committed since the check above; answer the same refusal.
+            if (
+              error instanceof ApiError &&
+              error.code === "account_deactivated"
+            )
+              throw accountDeactivatedError();
+            throw error;
+          }
           if (
             twoStepSetupRequired(
               false,
               memberships.map((row) => row.role),
-              await companyAuthorityHeld(db, session.user, memberships),
+              held,
             )
           )
             throw new APIError("FORBIDDEN", {

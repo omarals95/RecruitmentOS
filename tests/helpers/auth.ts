@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { expect } from "vitest";
@@ -31,27 +30,12 @@ export async function applyWorkspaceSchema(pg: PGlite, role: string) {
     GRANT EXECUTE ON FUNCTION tenant_context.install(text,text,text[]) TO ${role};`;
 }
 
-// The real identity migrations, run as a restricted nonowner role like tests/auth-flows.test.ts.
-// With workspace, every migration, so the two-step gate can read company authority.
-export async function createAuthDb(options: { workspace?: boolean } = {}) {
+// Every migration, run as a restricted nonowner role like tests/auth-flows.test.ts, so the two-step
+// gate can read company authority and session creation can check deactivation (ADM-09).
+export async function createAuthDb() {
   const pg = new PGlite();
-  let sql = "";
-  if (!options.workspace)
-    for (const file of [
-      "0000_auth.sql",
-      "0003_initial_admin.sql",
-      "0004_protect_initial_admin_claim.sql",
-      "0022_two_step_sign_in.sql",
-    ])
-      sql +=
-        (await readFile(
-          new URL(`../../drizzle/${file}`, import.meta.url),
-          "utf8",
-        )) + "\n";
-  const grants = options.workspace
-    ? await applyWorkspaceSchema(pg, "identity_flow_runtime")
-    : "";
-  await pg.exec(`${sql}
+  const grants = await applyWorkspaceSchema(pg, "identity_flow_runtime");
+  await pg.exec(`
     CREATE ROLE identity_flow_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
     GRANT USAGE ON SCHEMA auth TO identity_flow_runtime;
     GRANT SELECT ON auth.initial_admin_claim TO identity_flow_runtime;

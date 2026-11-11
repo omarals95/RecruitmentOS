@@ -97,7 +97,7 @@ const errors = {
   "400": errorResponse("Invalid fields, references, query or JSON."),
   "401": errorResponse("Missing, invalid, expired or revoked credentials."),
   "403": errorResponse(
-    'Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required. Any write to the data or task boards of an archived team gets team_archived ("This team is archived. You can still read everything, but nothing can be changed until a team owner restores it.").',
+    'Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required. Any write to the data or task boards of an archived team gets team_archived ("This team is archived. You can still read everything, but nothing can be changed until a team owner restores it."). Every session, API token and connected AI app of a person deactivated in the company gets account_deactivated ("Your account has been deactivated. Ask a company owner or admin to reactivate it.").',
   ),
   "404": errorResponse("Record, resource or CV not found in this team."),
   "409": errorResponse(
@@ -1296,13 +1296,13 @@ export function GET() {
     ),
   };
   const peopleShape =
-    '{data:[{userId, name, email, teams:[{team, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, status:"active"|"invited", lastSignInAt, twoStep}], roles:[{key, name}], pagination:{pageSize, hasMore, nextCursor}}';
+    '{data:[{userId, name, email, teams:[{team, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, status:"active"|"invited"|"deactivated", lastSignInAt, twoStep}], roles:[{key, name}], pagination:{pageSize, hasMore, nextCursor}}';
   paths["/api/v1/admin/users"] = {
     get: operation(
       [],
       {
         summary: "List the people of every team for the Admin portal",
-        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active or invited), level (owner, admin or none) and role (a configured role key; invited rows never match it); an unknown slug or key returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active, or deactivated when the person is deactivated in the company) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active, invited or deactivated), level (owner, admin or none) and role (a configured role key; invited rows never match it); an unknown slug or key returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
       },
       { "200": { description: peopleShape } },
       {
@@ -1320,7 +1320,7 @@ export function GET() {
           {
             name: "status",
             in: "query",
-            schema: { enum: ["active", "invited"] },
+            schema: { enum: ["active", "invited", "deactivated"] },
           },
           {
             name: "level",
@@ -1346,13 +1346,13 @@ export function GET() {
     ),
   };
   const personShape =
-    '{data:{userId, name, email, status:"active", lastSignInAt, twoStep, signedInDevices, teams:[{team, slug, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, companyAreas, planAccess, authoritySuspended, authoritySince, events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]}}';
+    '{data:{userId, name, email, status:"active"|"deactivated", lastSignInAt, twoStep, signedInDevices, teams:[{team, slug, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, companyAreas, planAccess, authoritySuspended, authoritySince, events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]}}';
   paths["/api/v1/admin/users/{user}"] = {
     get: operation(
       [],
       {
         summary: "Read one person of the company for the Admin portal",
-        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Reads, through the owner-run helper tenant_context.workspace_person, one person with a membership in a team of the workspace; anyone else, an unknown id or a person only in another company included, gets 404 user_not_found. It gives the user id, name, email, status (always active), lastSignInAt (the start of the newest stored session, null when none is stored), whether two-step sign-in is on, signedInDevices (the person's sessions that have not expired), the person's teams in this workspace only with slug, team role and configured role name, and the person's company authority in this workspace (level, areas, plan access, whether it is suspended and since when; all null without company authority). events lists, newest first and at most 50, the configuration changes the person made and the configured role, home unit, company authority and two-step reset changes made to them, each with its time, action code, actor id and name, the configuration type and key (configuration rows only) and the configured role name (role rows only). It never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body. It takes no query parameters: any query key returns 400 invalid_input, and so does an id longer than 128 characters. Nothing is audited. Returns ${personShape}.`,
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Reads, through the owner-run helper tenant_context.workspace_person, one person with a membership in a team of the workspace; anyone else, an unknown id or a person only in another company included, gets 404 user_not_found. It gives the user id, name, email, status (deactivated when the person is deactivated in the company, else active), lastSignInAt (the start of the newest stored session, null when none is stored), whether two-step sign-in is on, signedInDevices (the person's sessions that have not expired), the person's teams in this workspace only with slug, team role and configured role name, and the person's company authority in this workspace (level, areas, plan access, whether it is suspended and since when; all null without company authority). events lists, newest first and at most 50, the configuration changes the person made and the configured role, home unit, company authority, two-step reset, deactivation, reactivation, sign out everywhere and sign-in lockout changes made to them, each with its time, action code, actor id and name, the configuration type and key (configuration rows only) and the configured role name (role rows only). It never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body. It takes no query parameters: any query key returns 400 invalid_input, and so does an id longer than 128 characters. Nothing is audited. Returns ${personShape}.`,
       },
       { "200": { description: personShape } },
       {
@@ -1366,6 +1366,57 @@ export function GET() {
           },
         ],
       },
+    ),
+  };
+  // Account actions (ADM-09): session only, recent sign-in, no MCP tool and no API token.
+  const accountActionRule = `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Only a company owner may act on a person who holds company authority (owner or admin, suspended or not); a company admin with people gets 403 company_owner_required ("Only a company owner can change a company owner or admin."). ${freshSessionRule} Your own account returns 400 cannot_change_self; a person in no team of the company, an unknown id included, returns 404 user_not_found. user is 1 to 128 characters; any query key or a longer id returns 400 invalid_input.`;
+  const userPath = {
+    name: "user",
+    in: "path",
+    required: true,
+    schema: { type: "string", minLength: 1, maxLength: 128 },
+  };
+  const userStatusShape = "{data:{active, changed}}";
+  paths["/api/v1/admin/users/{user}/status"] = {
+    put: operation(
+      [],
+      {
+        summary: "Deactivate or reactivate a person in the company",
+        description: `${accountActionRule} Send {active:false} to deactivate or {active:true} to reactivate, at most 1 KiB; anything else, including an unknown key, returns 400 invalid_input. A deactivated person cannot sign in (403 account_deactivated after a correct password), and from their next request every session, API token and connected AI app (MCP OAuth grant) of theirs gets 403 account_deactivated in every team of the company. Nothing is deleted: teams, roles, assignments, company authority, tokens and history are kept, and reactivating restores exactly the access they had. Deactivating the last active company owner returns 409 last_company_owner. Each change writes one user-account activity row (user.deactivated or user.reactivated) to your team with the person's id only; a request for the state the person is already in returns changed false and writes none. Returns ${userStatusShape}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["active"],
+            additionalProperties: false,
+            properties: { active: { type: "boolean" } },
+          },
+          { active: false },
+        ),
+      },
+      { "200": { description: userStatusShape } },
+      { sessionOnly: true, params: [userPath] },
+    ),
+  };
+  paths["/api/v1/admin/users/{user}/sign-out"] = {
+    post: operation(
+      [],
+      {
+        summary: "Sign a person out everywhere",
+        description: `${accountActionRule} No body is read. Ends every signed-in session of the person on every device; their API tokens and connected AI apps are not affected. Writes one user-account activity row (user.signed_out_everywhere) to your team with the person's id only, even when they had no session. Returns {data:{signedOut:true}}.`,
+      },
+      { "200": { description: "{data:{signedOut:true}}." } },
+      { sessionOnly: true, params: [userPath] },
+    ),
+  };
+  paths["/api/v1/admin/users/{user}/clear-lockout"] = {
+    post: operation(
+      [],
+      {
+        summary: "Clear a person's sign-in lockout",
+        description: `${accountActionRule} No body is read. Clears the per-email sign-in backoff of the person's email, so they can try to sign in again straight away. Writes one user-account activity row (user.lockout_cleared) to your team with the person's id only, even when there was no backoff. Returns {data:{cleared:true}}.`,
+      },
+      { "200": { description: "{data:{cleared:true}}." } },
+      { sessionOnly: true, params: [userPath] },
     ),
   };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.

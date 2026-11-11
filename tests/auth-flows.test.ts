@@ -24,13 +24,23 @@ import type { AppDb } from "../src/db";
 import { authTables } from "../src/db/auth-schema";
 import { createAuth } from "../src/lib/auth";
 import { getSession, getVerifiedSession } from "../src/lib/auth-session";
+import { signInBackoffKey } from "../src/lib/client-ip";
 import { changeTeamRole } from "../src/lib/member-roles";
-import { requirePrincipal } from "../src/lib/principal";
+import { roleScopes } from "../src/lib/permissions";
+import { requirePrincipal, type Principal } from "../src/lib/principal";
+import {
+  clearSignInLockout,
+  setUserActive,
+  signOutEverywhere,
+} from "../src/lib/user-account";
 import { getWorkspaceContext } from "../src/lib/workspace";
 import {
+  PASSWORD,
+  TEST_SECRET,
   addMember,
   applyWorkspaceSchema,
   authCaller,
+  cookieOf,
   createAuthDb,
   createTeam,
   createTestAuth,
@@ -507,7 +517,7 @@ describe("owner role and team creation through the handler", () => {
       )
     ).rows[0]?.role;
   beforeAll(async () => {
-    h = await createAuthDb({ workspace: true });
+    h = await createAuthDb();
     caller = authCaller(createTestAuth(h.db, mail));
     ({ cookie: ownerCookie, teamId } = await setUpAdmin(caller, mail));
     admin = await addMember(
@@ -873,7 +883,7 @@ describe("invitations to several teams through the handler", () => {
 
   beforeAll(async () => {
     // With every migration: once the invitee is a viewer, the two-step gate reads company authority.
-    h = await createAuthDb({ workspace: true });
+    h = await createAuthDb();
     caller = authCaller(createTestAuth(h.db, mail));
     const owner = await setUpAdmin(caller, mail);
     teams.a = owner.teamId;
@@ -1028,5 +1038,310 @@ describe("invitations to several teams through the handler", () => {
         { organization_id: teams.b, role: "recruiter" },
       ].sort((x, y) => x.organization_id.localeCompare(y.organization_id)),
     );
+  });
+});
+
+// ADM-09 (job 082): a deactivated person's session creation is refused after the password or code,
+// and Sign out everywhere and Clear lockout act on Better Auth's own rows, on the split runtime
+// roles with fictional people and the fake mail array only.
+describe("deactivation, sign out everywhere and clear lockout through the handler", () => {
+  const ORIGIN = "http://localhost:3000";
+  const DEACTIVATED = {
+    code: "account_deactivated",
+    message:
+      "This account has been deactivated. Ask a company owner or admin to reactivate it.",
+  };
+  const mail: Mail[] = [];
+  let harness: Awaited<ReturnType<typeof createSplitRoleDb>>;
+  let caller: ReturnType<typeof authCaller>;
+  let owner: Principal;
+  let ownerCookie = "";
+  type Person = {
+    id: string;
+    email: string;
+    cookie: string;
+    memberId: string;
+    secret?: string;
+  };
+  const people = {} as Record<
+    "plain" | "twoStep" | "other" | "teamOwner",
+    Person
+  >;
+  let teamId = "";
+  /** As the PGlite superuser, which bypasses RLS: only to arrange and inspect. */
+  const superuser = async <T>(text: string, params: unknown[] = []) => {
+    await harness.asSuperuser();
+    return (await harness.client.query<T>(text, params)).rows;
+  };
+  const sessions = async (userId: string) =>
+    (
+      await superuser<{ n: number }>(
+        "SELECT count(*)::int AS n FROM auth.session WHERE user_id = $1",
+        [userId],
+      )
+    )[0].n;
+  const backoff = async (email: string) =>
+    (
+      await superuser<{ count: number }>(
+        "SELECT count FROM auth.api_rate_limits WHERE key = $1",
+        [signInBackoffKey(email, TEST_SECRET)],
+      )
+    )[0]?.count ?? null;
+  /** Better Auth runs on the identity role; a service call may have switched to the data role. */
+  const post = async (...args: Parameters<typeof caller.post>) => {
+    await harness.identityDb();
+    return caller.post(...args);
+  };
+  const signIn = (email: string, password = PASSWORD) =>
+    post("sign-in/email", { email, password });
+  const setActive = async (person: Person, active: boolean) =>
+    expect(await setUserActive(owner, person.id, active)).toEqual({
+      active,
+      changed: true,
+    });
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.identity.mockImplementation(harness.identityDb);
+    pools.data.mockImplementation(harness.dataDb);
+    // Clear lockout derives the backoff key with the same secret as Better Auth.
+    vi.stubEnv("BETTER_AUTH_SECRET", TEST_SECRET);
+    caller = authCaller(createTestAuth(await harness.identityDb(), mail));
+    const admin = await setUpAdmin(caller, mail);
+    ownerCookie = admin.cookie;
+    for (const [key, email] of [
+      ["plain", "dx-plain@example.test"],
+      ["twoStep", "dx-two-step@example.test"],
+      ["other", "dx-other@example.test"],
+      // A second team owner without company authority; addMember turns two-step sign-in on.
+      ["teamOwner", "dx-team-owner@example.test"],
+    ] as const) {
+      await harness.identityDb();
+      const added = await addMember(
+        caller,
+        mail,
+        admin.cookie,
+        admin.teamId,
+        email,
+        key === "teamOwner" ? "owner" : "recruiter",
+      );
+      const [{ id }] = await superuser<{ id: string }>(
+        `SELECT id FROM auth."user" WHERE email = $1`,
+        [email],
+      );
+      people[key] = {
+        id,
+        email,
+        cookie: added.cookie,
+        memberId: added.memberId,
+      };
+    }
+    teamId = admin.teamId;
+    await harness.identityDb();
+    const twoStep = await caller.enableTwoStep(people.twoStep.cookie);
+    people.twoStep = { ...people.twoStep, ...twoStep };
+    const [{ id }] = await superuser<{ id: string }>(
+      `SELECT id FROM auth."user" WHERE email = 'owner@example.test'`,
+    );
+    owner = {
+      userId: id,
+      teamId: admin.teamId,
+      role: "owner",
+      scopes: roleScopes("owner"),
+      authType: "session",
+    };
+  });
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await harness?.close();
+  });
+
+  it("refuses a deactivated member only after a correct password, creates no session and keeps the backoff", async () => {
+    const { plain } = people;
+    await setActive(plain, false);
+    const before = await sessions(plain.id);
+    const wrong = await signIn(plain.email, "a-wrong-fictional-password");
+    expect(wrong.status).toBe(401);
+    expect(await wrong.json()).toMatchObject({
+      code: "INVALID_EMAIL_OR_PASSWORD",
+    });
+    const refused = await signIn(plain.email);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject(DEACTIVATED);
+    expect(refused.headers.getSetCookie().join("")).not.toContain(
+      "session_token=",
+    );
+    expect(await sessions(plain.id)).toBe(before);
+    // Both attempts were charged and the refusal cleared nothing.
+    expect(await backoff(plain.email)).toBe(2);
+    // The session they already had is refused at Better Auth as well.
+    await harness.identityDb();
+    const listed = await caller.get(
+      `${ORIGIN}/api/auth/organization/list`,
+      plain.cookie,
+    );
+    expect(listed.status).toBe(403);
+    expect(await listed.json()).toMatchObject(DEACTIVATED);
+    await setActive(plain, true);
+    expect((await signIn(plain.email)).status).toBe(200);
+    expect(await backoff(plain.email)).toBeNull();
+  });
+
+  it("refuses the two-step code of a challenge started before the deactivation, the password step and a password change", async () => {
+    const { twoStep } = people;
+    const challenged = await signIn(twoStep.email);
+    expect(await challenged.json()).toMatchObject({ twoFactorRedirect: true });
+    await setActive(twoStep, false);
+    const before = await sessions(twoStep.id);
+    const verified = await post(
+      "two-factor/verify-totp",
+      { code: await caller.code(twoStep.secret!) },
+      { cookie: cookieOf(challenged) },
+    );
+    expect(verified.status).toBe(403);
+    expect(await verified.json()).toMatchObject(DEACTIVATED);
+    const again = await signIn(twoStep.email);
+    expect(again.status).toBe(403);
+    expect(await again.json()).toMatchObject(DEACTIVATED);
+    // A password change makes its new session inside Better Auth's transaction: refused, and the
+    // password is kept.
+    const [{ password }] = await superuser<{ password: string }>(
+      "SELECT password FROM auth.account WHERE user_id = $1",
+      [twoStep.id],
+    );
+    const changed = await post(
+      "change-password",
+      {
+        currentPassword: PASSWORD,
+        newPassword: "another-long-fictional-password",
+        revokeOtherSessions: true,
+      },
+      { cookie: twoStep.cookie },
+    );
+    expect(changed.status).toBe(403);
+    expect(await changed.json()).toMatchObject(DEACTIVATED);
+    expect(
+      await superuser("SELECT password FROM auth.account WHERE user_id = $1", [
+        twoStep.id,
+      ]),
+    ).toEqual([{ password }]);
+    expect(await sessions(twoStep.id)).toBe(before);
+    await setActive(twoStep, true);
+    await harness.identityDb();
+    expect(
+      await caller.session(
+        await caller.signInWithCode(twoStep.email, twoStep.secret!),
+      ),
+    ).not.toBeNull();
+  });
+
+  it("refuses a deactivated two-step team owner's surviving session on team management", async () => {
+    const { teamOwner, plain } = people;
+    const roleOf = async (memberId: string) =>
+      (
+        await superuser<{ role: string }>(
+          "SELECT role FROM auth.member WHERE id = $1",
+          [memberId],
+        )
+      )[0]?.role;
+    const invitations = async (email: string) =>
+      (
+        await superuser<{ n: number }>(
+          "SELECT count(*)::int AS n FROM auth.invitation WHERE email = $1",
+          [email],
+        )
+      )[0].n;
+    await setActive(teamOwner, false);
+    const before = {
+      teams: await superuser("SELECT id FROM auth.organization ORDER BY id"),
+      members: await superuser("SELECT id, role FROM auth.member ORDER BY id"),
+    };
+    const attempts = [
+      await post(
+        "organization/invite-member",
+        {
+          organizationId: teamId,
+          email: "dx-second-address@example.test",
+          role: "owner",
+        },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/update-member-role",
+        { organizationId: teamId, memberId: plain.memberId, role: "viewer" },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/remove-member",
+        { organizationId: teamId, memberIdOrEmail: plain.memberId },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/create",
+        { name: "Fictional deactivated team", slug: "fictional-dx-team" },
+        { cookie: teamOwner.cookie },
+      ),
+    ];
+    for (const response of attempts) {
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject(DEACTIVATED);
+    }
+    expect(await invitations("dx-second-address@example.test")).toBe(0);
+    expect(await roleOf(plain.memberId)).toBe("recruiter");
+    expect({
+      teams: await superuser("SELECT id FROM auth.organization ORDER BY id"),
+      members: await superuser("SELECT id, role FROM auth.member ORDER BY id"),
+    }).toEqual(before);
+    // Reactivated, the same session invites again.
+    await setActive(teamOwner, true);
+    const allowed = await post(
+      "organization/invite-member",
+      {
+        organizationId: teamId,
+        email: "dx-second-address@example.test",
+        role: "viewer",
+      },
+      { cookie: teamOwner.cookie },
+    );
+    expect(allowed.status).toBe(200);
+    expect(await invitations("dx-second-address@example.test")).toBe(1);
+  });
+
+  it("signs the target out of every session in Better Auth and no one else", async () => {
+    const { plain, other } = people;
+    await harness.identityDb();
+    const cookies = [
+      await caller.signIn(plain.email),
+      await caller.signIn(plain.email),
+    ];
+    const kept = await caller.signIn(other.email);
+    for (const cookie of [...cookies, kept, ownerCookie])
+      expect(await caller.session(cookie)).not.toBeNull();
+    expect(await signOutEverywhere(owner, plain.id)).toEqual({
+      signedOut: true,
+    });
+    expect(await sessions(plain.id)).toBe(0);
+    await harness.identityDb();
+    for (const cookie of cookies)
+      expect(await caller.session(cookie)).toBeNull();
+    for (const cookie of [kept, ownerCookie])
+      expect(await caller.session(cookie)).not.toBeNull();
+  });
+
+  it("clears the target's backoff so they can sign in at once, and only theirs", async () => {
+    const { plain, other } = people;
+    for (const email of [plain.email, other.email])
+      for (let n = 0; n < 5; n++)
+        expect((await signIn(email, "a-wrong-fictional-password")).status).toBe(
+          401,
+        );
+    expect((await signIn(plain.email)).status).toBe(429);
+    expect(await clearSignInLockout(owner, plain.id)).toEqual({
+      cleared: true,
+    });
+    expect(await backoff(plain.email)).toBeNull();
+    expect(await backoff(other.email)).toBe(5);
+    expect((await signIn(plain.email)).status).toBe(200);
+    expect((await signIn(other.email)).status).toBe(429);
   });
 });

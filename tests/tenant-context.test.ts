@@ -1019,6 +1019,67 @@ describe("signed tenant context under separate nonowner data and identity roles"
     ).toBe(COMPANY);
   });
 
+  // ADM-09 (job 082): install refuses a deactivated actor, session and token alike, with its own
+  // message, on both roles; every other refusal keeps the generic one, and reactivating restores the
+  // same access.
+  it("refuses a deactivated actor with Account deactivated and accepts them again after reactivation", async () => {
+    const token = await seedApiToken(await harness.asOwner(), memberA, [
+      "candidates:read",
+    ]);
+    const deactivate = async (deactivated: boolean) =>
+      (await harness.asOwner()).execute(
+        sql`INSERT INTO app.workspace_users(workspace_id, user_id, deactivated_at, deactivated_by) VALUES (${COMPANY}::uuid, ${memberA.userId}, ${deactivated ? sql`now()` : null}, ${deactivated ? ownerA.userId : null}) ON CONFLICT (workspace_id, user_id) DO UPDATE SET deactivated_at = EXCLUDED.deactivated_at, deactivated_by = EXCLUDED.deactivated_by`,
+      );
+    const refused = { code: "42501", message: "Account deactivated" };
+    await deactivate(true);
+    try {
+      for (const p of [memberA, token]) {
+        await dataTransaction(async () => {
+          await expect(install(await claimFor(p))).rejects.toMatchObject(
+            refused,
+          );
+        });
+        await expect(
+          withTeam(p, () => Promise.resolve()),
+        ).rejects.toMatchObject({
+          status: 403,
+          code: "account_deactivated",
+          message:
+            "Your account has been deactivated. Ask a company owner or admin to reactivate it.",
+        });
+      }
+      await expect(
+        withDeadlinesAndSnapshot(await harness.identityDb(), (tx, snapshot) =>
+          installTenantContext(tx, memberA, snapshot),
+        ),
+      ).rejects.toMatchObject({ status: 403, code: "account_deactivated" });
+      // A wrong signature and an unknown token are refused before the deactivation step, generically.
+      await dataTransaction(async () => {
+        const claim = JSON.stringify(await claimFor(memberA));
+        await expect(
+          install(claim, sign(claim, Buffer.alloc(32, 7))),
+        ).rejects.toMatchObject(denied);
+      });
+      await dataTransaction(async () => {
+        await expect(
+          install(await claimFor({ ...token, tokenId: randomUUID() })),
+        ).rejects.toMatchObject(denied);
+      });
+      // Everyone else in the workspace is unaffected.
+      expect(
+        await withTeam(ownerA, (tx, access) => Promise.resolve(access)),
+      ).toEqual(ownerAccess);
+    } finally {
+      await deactivate(false);
+    }
+    expect(
+      await withTeam(memberA, (tx, access) => Promise.resolve(access)),
+    ).toEqual(memberAccess());
+    expect(
+      await withTeam(token, (tx, access) => Promise.resolve(access.scopes)),
+    ).toEqual(["candidates:read"]);
+  });
+
   it("rejects a validly signed payload that adds a workspace or company field", async () => {
     for (const extra of [
       { workspace: COMPANY },

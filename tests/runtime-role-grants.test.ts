@@ -120,8 +120,13 @@ const authTables = [
 ];
 /** Owner-only app tables: neither runtime role holds any privilege on them (0021, 0036). */
 const ownerOnlyAppTables = ["app.candidate_erasures", "app.employee_erasures"];
-/** Read-only for the data role and closed to the identity role (0028). */
-const workspaceTables = ["workspaces", "workspace_teams", "workspace_admins"];
+/** Read-only for the data role and closed to the identity role (0028, 0047). */
+const workspaceTables = [
+  "workspaces",
+  "workspace_teams",
+  "workspace_admins",
+  "workspace_users",
+];
 const workspaceWrites = [
   "INSERT INTO app.workspaces(id,name) VALUES (gen_random_uuid(),'Fictional Company')",
   "UPDATE app.workspaces SET name = 'Fictional Company'",
@@ -132,6 +137,9 @@ const workspaceWrites = [
   "INSERT INTO app.workspace_admins(workspace_id,user_id,level) VALUES ('00000000-0000-4000-a000-000000000001','fictional','owner')",
   "UPDATE app.workspace_admins SET suspended_at = NULL",
   "DELETE FROM app.workspace_admins",
+  "INSERT INTO app.workspace_users(workspace_id,user_id) VALUES ('00000000-0000-4000-a000-000000000001','fictional')",
+  "UPDATE app.workspace_users SET deactivated_at = NULL, deactivated_by = NULL",
+  "DELETE FROM app.workspace_users",
 ];
 /** Written by the data role under company authority, closed to the identity role (0030). */
 const configTables = ["config_objects", "config_versions", "config_layouts"];
@@ -164,6 +172,8 @@ const expectedData = {
     "app.workspaces": ["SELECT"],
     "app.workspace_teams": ["SELECT"],
     "app.workspace_admins": ["SELECT"],
+    // Deactivation is written only by tenant_context.set_user_active (0047).
+    "app.workspace_users": ["SELECT"],
     // The configuration store, under allows_workspace and the immutability guard (0030).
     ...Object.fromEntries(
       configTables.map((table) => [

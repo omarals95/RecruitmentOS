@@ -149,9 +149,11 @@ import {
   UserDetailPortal,
   UserDetailRefusal,
   UserDetailView,
+  accountActions,
   eventLabel,
   resetTeam,
   resetTwoStep,
+  runAccountAction,
   type WorkspacePerson,
 } from "../src/components/settings/user-detail";
 import {
@@ -3521,16 +3523,26 @@ describe("users tab", () => {
     expect(markup).toContain(
       '<p tabindex="-1" role="status" class="muted">Showing 4 people</p>',
     );
-    // No button, checkbox or other control on any row; only names link (ADM-08).
+    // No button, checkbox or other control on any row; only names link (ADM-08), and no bulk
+    // action (ADM-09).
     expect(body(markup)).not.toMatch(/<button|<input|<select|tabindex/);
     for (const text of [
       "Open",
       "Invite ",
       "Export",
-      "Deactivate",
+      ">Deactivate<",
+      ">Reactivate<",
       "Select all",
     ])
       expect(markup, text).not.toContain(text);
+    // A deactivated person reads Deactivated in the Status column (ADM-09).
+    const [deactivated] = rowsOf(
+      panel({ rows: [{ ...rows[2], status: "deactivated" }] }),
+    );
+    expect(deactivated).toContain('data-label="Status">Deactivated<');
+    expect(deactivated).toContain(
+      'data-label="Name"><a href="/app/admin/users/fictional-viewer">Fictional Viewer</a><',
+    );
   });
 
   it("offers the four filters with their choices and Apply filters", () => {
@@ -3545,6 +3557,7 @@ describe("users tab", () => {
       '<option value="" selected="">Any status</option>',
       '<option value="active">Active</option>',
       '<option value="invited">Invited</option>',
+      '<option value="deactivated">Deactivated</option>',
       '<option value="" selected="">Any level</option>',
       '<option value="owner">Company owner</option>',
       '<option value="admin">Company admin</option>',
@@ -4186,12 +4199,13 @@ describe("user detail", () => {
     expect(names).toEqual([
       "Change on Company authority",
       "Reset two-step sign-in",
+      "Deactivate",
+      "Sign out everywhere",
+      "Clear sign-in lockout",
     ]);
     for (const name of [
-      "Deactivate",
       "Suspend",
-      "Sign out everywhere",
-      "Clear lockout",
+      "Restore",
       "Anonymise",
       "Groups",
       "Effective access",
@@ -4203,8 +4217,261 @@ describe("user detail", () => {
         names.some((item) => item.includes(name)),
         name,
       ).toBe(false);
-    for (const later of ["Groups", "Effective access", "Sign out everywhere"])
+    for (const later of ["Groups", "Effective access"])
       expect(content(view()), later).not.toContain(later);
+  });
+
+  // ADM-09 (job 082): the status and the account actions.
+  const ACTIONS =
+    '<div class="row"><button type="button" class="button danger">Deactivate</button><button type="button" class="button secondary">Sign out everywhere</button><button type="button" class="button secondary">Clear sign-in lockout</button></div>';
+  const OWNER_ONLY =
+    '<p class="muted">Only a company owner can deactivate, sign out or clear the lockout of a company owner or admin.</p>';
+  const DEACTIVATED_SENTENCE =
+    "<p>Deactivated: this person cannot sign in, and their sessions, API tokens and connected apps are refused. Their teams, roles and history are kept.</p>";
+  const member = { companyLevel: null, companyAreas: null } as const;
+
+  it("shows the status first on Security and Profile, and the deactivated sentence only for a deactivated person", () => {
+    const active = panel(view({ tab: "security" }));
+    expect(active).toContain(
+      '<dl class="stack" style="gap:12px;margin:0"><div><dt class="muted">Status</dt><dd style="margin:0">Active</dd></div><div><dt class="muted">Two-step sign-in</dt>',
+    );
+    expect(active).not.toContain("Deactivated");
+    const deactivated = panel(
+      view({ tab: "security" }, { status: "deactivated" }),
+    );
+    expect(deactivated).toContain(
+      '<dt class="muted">Status</dt><dd style="margin:0">Deactivated</dd>',
+    );
+    expect(deactivated).toContain(DEACTIVATED_SENTENCE);
+    expect(
+      panel(view({ tab: "profile" }, { status: "deactivated" })),
+    ).toContain(
+      '<dt class="muted">Status</dt><dd style="margin:0">Deactivated</dd>',
+    );
+  });
+
+  it("offers the account actions to a company owner on anyone else, Reactivate for a deactivated person", () => {
+    for (const person of [{}, member, { companyLevel: "owner" as const }])
+      expect(panel(view({ tab: "security" }, person))).toContain(ACTIONS);
+    const deactivated = panel(
+      view({ tab: "security" }, { status: "deactivated" }),
+    );
+    expect(deactivated).toContain(
+      '<div class="row"><button type="button" class="button">Reactivate</button><button type="button" class="button secondary">Sign out everywhere</button>',
+    );
+    expect(deactivated).not.toContain(">Deactivate<");
+    // Busy disables every action, Reset included.
+    const busy = panel(view({ tab: "security", canReset: true, busy: true }));
+    expect(busy.match(/<button [^>]*disabled=""/g)).toHaveLength(4);
+    expect(busy.match(/<button /g)).toHaveLength(4);
+  });
+
+  it("offers a company admin the actions on a member only, and says why for a company owner or admin", () => {
+    const admin = { tab: "security" as const, companyOwner: false };
+    expect(panel(view(admin, member))).toContain(ACTIONS);
+    expect(panel(view(admin, member))).not.toContain(OWNER_ONLY);
+    for (const person of [
+      {},
+      { companyLevel: "owner" as const },
+      { authoritySuspended: true },
+    ]) {
+      const markup = panel(view(admin, person));
+      expect(markup).toContain(OWNER_ONLY);
+      expect(markup).not.toMatch(
+        /Deactivate<|Reactivate<|Sign out everywhere|Clear sign-in lockout/,
+      );
+    }
+  });
+
+  it("shows no account action and no sentence on the caller's own page", () => {
+    for (const props of [
+      { tab: "security" as const },
+      { tab: "security" as const, companyOwner: false },
+    ]) {
+      const markup = panel(view(props, { userId: workspace.user.id }));
+      expect(markup).not.toMatch(/<button/);
+      expect(markup).not.toContain(OWNER_ONLY);
+    }
+    expect(accountActions(subject, subject.userId, true)).toBe("none");
+    expect(accountActions(subject, "fictional-other", true)).toBe("allowed");
+    expect(accountActions(subject, "fictional-other", false)).toBe(
+      "owner-only",
+    );
+    expect(
+      accountActions({ ...subject, ...member }, "fictional-other", false),
+    ).toBe("allowed");
+  });
+
+  it("labels the account events in plain words", () => {
+    expect(
+      [
+        "user.deactivated",
+        "user.reactivated",
+        "user.signed_out_everywhere",
+        "user.lockout_cleared",
+      ].map((action) => eventLabel(event(action))),
+    ).toEqual([
+      "Deactivated",
+      "Reactivated",
+      "Signed out everywhere",
+      "Sign-in lockout cleared",
+    ]);
+  });
+
+  it("confirms each account action, sends it to the active team, retries once after Confirm it's you and returns its notice", async () => {
+    const sent: {
+      method: string;
+      path: string;
+      team: string | null;
+      body: unknown;
+    }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    const stale = () =>
+      json(403, {
+        error: {
+          code: "SESSION_NOT_FRESH",
+          message: "This change needs a recent sign-in.",
+        },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          team: new Headers(init.headers).get("X-Team-Id"),
+          body: init.body === undefined ? null : JSON.parse(String(init.body)),
+        });
+        return answers.shift() ?? json(200, { data: { changed: true } });
+      }),
+    );
+    try {
+      const asked: unknown[] = [];
+      const confirm = vi.fn(async (options: unknown) => {
+        asked.push(options);
+        return true;
+      });
+      const ask = vi.fn(async () => true);
+      const fresh = <T,>(work: () => Promise<T>) =>
+        retryWithFreshSession(work, ask);
+      const base = "/api/v1/admin/users/fictional-subject";
+      const run = (action: Parameters<typeof runAccountAction>[1]) =>
+        runAccountAction(subject, action, "fictional-team", confirm, fresh);
+      const expected = [
+        [
+          "deactivate",
+          {
+            title: "Deactivate Fictional Subject?",
+            message:
+              "They can no longer sign in, and their sessions, API tokens and connected AI apps stop working in every team of your company. Their teams, roles and history are kept, and you can reactivate them at any time.",
+            confirmLabel: "Deactivate",
+            destructive: true,
+          },
+          { method: "PUT", path: `${base}/status`, body: { active: false } },
+          "Fictional Subject is deactivated.",
+          "Fictional Subject was already deactivated.",
+        ],
+        [
+          "reactivate",
+          {
+            title: "Reactivate Fictional Subject?",
+            message:
+              "They can sign in again and get back exactly the access they had before.",
+            confirmLabel: "Reactivate",
+          },
+          { method: "PUT", path: `${base}/status`, body: { active: true } },
+          "Fictional Subject is active again.",
+          "Fictional Subject was already active.",
+        ],
+        [
+          "sign-out",
+          {
+            title: "Sign Fictional Subject out everywhere?",
+            message:
+              "Every device they are signed in on is signed out. Their API tokens and connected AI apps are not affected.",
+            confirmLabel: "Sign out everywhere",
+            destructive: true,
+          },
+          { method: "POST", path: `${base}/sign-out`, body: null },
+          "Fictional Subject has been signed out everywhere.",
+          "Fictional Subject has been signed out everywhere.",
+        ],
+        [
+          "clear-lockout",
+          {
+            title: "Clear Fictional Subject's sign-in lockout?",
+            message:
+              "If they had to wait after too many sign-in attempts, they can try again straight away.",
+            confirmLabel: "Clear lockout",
+          },
+          { method: "POST", path: `${base}/clear-lockout`, body: null },
+          "Fictional Subject's sign-in lockout was cleared.",
+          "Fictional Subject's sign-in lockout was cleared.",
+        ],
+      ] as const;
+      for (const [action, options, request, notice, repeat] of expected) {
+        const post = { ...request, team: "fictional-team" };
+        // Fresh: one request.
+        sent.length = 0;
+        asked.length = 0;
+        await expect(run(action), action).resolves.toBe(notice);
+        expect(asked, action).toEqual([options]);
+        expect(sent, action).toEqual([post]);
+        // A repeat that changed nothing.
+        answers.push(json(200, { data: { changed: false } }));
+        await expect(run(action), action).resolves.toBe(repeat);
+        // Stale: the dialog opens once and the same request runs once more.
+        sent.length = 0;
+        ask.mockClear();
+        answers.push(stale());
+        await expect(run(action), action).resolves.toBe(notice);
+        expect(ask, action).toHaveBeenCalledTimes(1);
+        expect(sent, action).toEqual([post, post]);
+        // Cancelled re-authentication: nothing more is sent and no notice follows.
+        sent.length = 0;
+        answers.push(stale());
+        ask.mockResolvedValueOnce(false);
+        await expect(run(action), action).resolves.toBeNull();
+        expect(sent, action).toEqual([post]);
+        // Cancelled confirmation: nothing is sent at all.
+        sent.length = 0;
+        const confirmed = vi.fn();
+        await expect(
+          runAccountAction(
+            subject,
+            action,
+            "fictional-team",
+            async () => false,
+            fresh,
+            confirmed,
+          ),
+          action,
+        ).resolves.toBeNull();
+        expect(sent, action).toEqual([]);
+        expect(confirmed, action).not.toHaveBeenCalled();
+      }
+      // Any other refusal reaches the page as an error.
+      answers.push(
+        json(403, {
+          error: {
+            code: "company_owner_required",
+            message:
+              "Only a company owner can change a company owner or admin.",
+          },
+        }),
+      );
+      await expect(run("deactivate")).rejects.toMatchObject({
+        status: 403,
+        code: "company_owner_required",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("shows the loading, no-access, not found and error states plainly", () => {

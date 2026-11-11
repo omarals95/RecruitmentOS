@@ -25,6 +25,11 @@ export function keyedRateLimitHash(value: string, secret: string): string {
   return createHmac("sha256", key).update(value).digest("base64url");
 }
 
+/** The auth.api_rate_limits key of an address's per-email sign-in backoff, under the same keyed hash. */
+export function signInBackoffKey(email: string, secret: string): string {
+  return `sign-in-email:${keyedRateLimitHash(email.trim().toLowerCase(), secret)}`;
+}
+
 /** The stored rate-limit identity of a client address, or `no-client-ip` without one. */
 export function rateLimitClientKey(ip: string | null, secret: string): string {
   return ip === null ? "no-client-ip" : keyedRateLimitHash(ip, secret);

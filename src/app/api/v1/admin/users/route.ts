@@ -28,7 +28,7 @@ const peopleQuery = z
       .max(70)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
       .optional(),
-    status: z.enum(["active", "invited"]).optional(),
+    status: z.enum(["active", "invited", "deactivated"]).optional(),
     level: z.enum(["owner", "admin", "none"]).optional(),
     role: configKey.optional(),
     cursor: cursor.optional(),
