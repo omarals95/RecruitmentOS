@@ -15,6 +15,10 @@ export type CompanyAuthorityHolder = {
   areas: string[];
   planAccess: boolean;
   suspended: boolean;
+  /** Whether the person uses two-step sign-in, which a company level needs. */
+  twoStep: boolean;
+  /** When the row was last granted, changed or restored (granted_at), as ISO time. */
+  since: string;
 };
 
 const authorityForbidden = () =>
@@ -83,13 +87,19 @@ async function inAuthority<T>(
         "not_in_company",
         "This person is not a member of any team in this company. Invite them to a team first.",
       );
+    if (code === "RQ017")
+      throw new ApiError(
+        409,
+        "authority_two_step_required",
+        "This person must set up two-step sign-in before they can hold company authority. Ask them to turn it on in My profile, then try again.",
+      );
     throw error;
   }
 }
 
 /**
  * Company owners, signed in: every company owner and admin of the workspace, suspended ones
- * included, with their display names; owners first, then by name.
+ * included, with their display names and two-step state; owners first, then by name.
  */
 export async function listCompanyAuthority(
   p: Principal,
@@ -98,17 +108,21 @@ export async function listCompanyAuthority(
     if (p.authType !== "session" || access.companyLevel !== "owner")
       throw authorityForbidden();
     return (
-      await tx.execute<Omit<CompanyAuthorityHolder, "name">>(
-        sql`select user_id as "userId", level, areas, plan_access as "planAccess", suspended_at is not null as suspended from app.workspace_admins where workspace_id = ${access.workspaceId}::uuid`,
+      await tx.execute<Omit<CompanyAuthorityHolder, "name" | "twoStep">>(
+        sql`select user_id as "userId", level, areas, plan_access as "planAccess", suspended_at is not null as suspended, granted_at as since from app.workspace_admins where workspace_id = ${access.workspaceId}::uuid`,
       )
     ).rows;
   });
   if (!rows.length) return [];
   const db = await getIdentityDb();
-  const names = new Map(
+  const people = new Map(
     (
       await db
-        .select({ id: user.id, name: user.name })
+        .select({
+          id: user.id,
+          name: user.name,
+          twoStep: user.twoFactorEnabled,
+        })
         .from(user)
         .where(
           inArray(
@@ -116,10 +130,18 @@ export async function listCompanyAuthority(
             rows.map((row) => row.userId),
           ),
         )
-    ).map((row) => [row.id, row.name]),
+    ).map((row) => [row.id, row]),
   );
   return rows
-    .map((row) => ({ ...row, name: names.get(row.userId) ?? null }))
+    .map(({ since, ...row }) => {
+      const person = people.get(row.userId);
+      return {
+        ...row,
+        name: person?.name ?? null,
+        twoStep: person?.twoStep === true,
+        since: new Date(since).toISOString(),
+      };
+    })
     .sort(
       (a, b) =>
         Number(a.level !== "owner") - Number(b.level !== "owner") ||

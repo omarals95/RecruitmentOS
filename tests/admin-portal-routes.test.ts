@@ -746,6 +746,8 @@ describe("Roles & permissions routes under the split runtime roles", () => {
           areas: [],
           planAccess: false,
           suspended: false,
+          twoStep: true,
+          since: expect.stringMatching(/^\d{4}-\d\d-\d\dT.*Z$/),
         },
         {
           userId: companyAdmin.userId,
@@ -754,6 +756,8 @@ describe("Roles & permissions routes under the split runtime roles", () => {
           areas: ["fields"],
           planAccess: false,
           suspended: false,
+          twoStep: true,
+          since: expect.stringMatching(/^\d{4}-\d\d-\d\dT.*Z$/),
         },
       ]);
       const before = (await authorityRows()).length;
