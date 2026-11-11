@@ -872,7 +872,8 @@ describe("invitations to several teams through the handler", () => {
     );
 
   beforeAll(async () => {
-    h = await createAuthDb();
+    // With every migration: once the invitee is a viewer, the two-step gate reads company authority.
+    h = await createAuthDb({ workspace: true });
     caller = authCaller(createTestAuth(h.db, mail));
     const owner = await setUpAdmin(caller, mail);
     teams.a = owner.teamId;
