@@ -194,7 +194,7 @@ export function TeamOptions({
 export function ArchivedTeamNotice({ archived }: { archived: boolean }) {
   if (!archived) return null;
   return (
-    <p className="notice" role="status">
+    <p className="notice" role="status" style={{ marginBottom: 16 }}>
       This team is archived. You can read everything, but changes are turned off
       until a team owner restores it.
     </p>

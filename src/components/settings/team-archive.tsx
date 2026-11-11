@@ -224,8 +224,8 @@ function TeamArchiveDialog({
 
 /**
  * Team detail > Archive, for the team in the URL (its TeamScope): the state from GET
- * /api/v1/me/access, and for owners the change. The page reloads after a change, as rename does,
- * so the shell, switcher and this tab show the new state.
+ * /api/v1/me/access, and for owners the change. The page reloads on this tab after a change, as
+ * rename reloads, so the shell, switcher and this tab show the new state.
  */
 export function TeamArchiveTab({
   team,
@@ -241,7 +241,10 @@ export function TeamArchiveTab({
   const [error, setError] = useState("");
   async function change(archived: boolean) {
     await requests.setArchived(archived);
-    window.location.reload();
+    // Reloads on this tab, which switching tabs does not put in the address.
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "archive");
+    window.location.assign(url);
   }
   async function restore() {
     setBusy(true);

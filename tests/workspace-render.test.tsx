@@ -159,7 +159,7 @@ describe("workspace shell", () => {
   });
   it("shows one status notice above the page while the active team is archived, none otherwise", () => {
     expect(renderToStaticMarkup(<ArchivedTeamNotice archived />)).toBe(
-      '<p class="notice" role="status">This team is archived. You can read everything, but changes are turned off until a team owner restores it.</p>',
+      '<p class="notice" role="status" style="margin-bottom:16px">This team is archived. You can read everything, but changes are turned off until a team owner restores it.</p>',
     );
     expect(renderToStaticMarkup(<ArchivedTeamNotice archived={false} />)).toBe(
       "",
