@@ -151,6 +151,55 @@ export const navigation: {
     group: "Workspace tools",
   },
 ];
+/** The ids of the caller's archived teams, read once per team (a team switch clears the cache). */
+const ARCHIVED_TEAMS_PATH = "/api/v1/me/archived-teams";
+const NO_TEAMS: string[] = [];
+/** A select cannot show a badge, so an archived team says so in its option text. */
+export function teamOptionLabel(name: string, archived: boolean) {
+  return archived ? `${name} (Archived)` : name;
+}
+/** The team switcher's options: the user's teams, and the active team when the list lacks it. */
+export function TeamOptions({
+  team,
+  teams,
+  archivedIds,
+  canCreateTeam,
+}: {
+  team: { id: string; name: string } | null;
+  teams: { id: string; name: string }[];
+  archivedIds: readonly string[];
+  canCreateTeam: boolean;
+}) {
+  return (
+    <>
+      {!team && (
+        <option value="">
+          {canCreateTeam ? "Create or join a team" : "No team yet"}
+        </option>
+      )}
+      {teams.map((item) => (
+        <option key={item.id} value={item.id}>
+          {teamOptionLabel(item.name, archivedIds.includes(item.id))}
+        </option>
+      ))}
+      {team && !teams.some((item) => item.id === team.id) && (
+        <option value={team.id}>
+          {teamOptionLabel(team.name, archivedIds.includes(team.id))}
+        </option>
+      )}
+    </>
+  );
+}
+/** Above the page content while the active team is archived, so a refused save is no surprise. */
+export function ArchivedTeamNotice({ archived }: { archived: boolean }) {
+  if (!archived) return null;
+  return (
+    <p className="notice" role="status">
+      This team is archived. You can read everything, but changes are turned off
+      until a team owner restores it.
+    </p>
+  );
+}
 export function Brand() {
   return (
     <span className="brand">
@@ -193,6 +242,10 @@ function Shell({ children }: { children: React.ReactNode }) {
     notifications?: { read: boolean }[];
     unreadCount?: number;
   }>(NOTIFICATIONS_PATH);
+  const archivedTeams = useApi<{ data: { teamIds: string[] } }>(
+    team ? ARCHIVED_TEAMS_PATH : null,
+  );
+  const archivedIds = archivedTeams.data?.data.teamIds ?? NO_TEAMS;
   const unread =
     notifications.data?.unreadCount ??
     (
@@ -264,7 +317,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         >
           <Brand />
         </Link>
-        <TeamSwitcher />
+        <TeamSwitcher archivedIds={archivedIds} />
         <nav onClick={() => setMobile(false)}>
           {navigation.map((item, index) => {
             const Icon = item.icon;
@@ -392,6 +445,9 @@ function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main id="main-content" className="workspace-main">
+          <ArchivedTeamNotice
+            archived={!!team && archivedIds.includes(team.id)}
+          />
           {team && switchNotice?.toTeamId === team.id && (
             <div
               className="notice"
@@ -436,7 +492,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-function TeamSwitcher() {
+function TeamSwitcher({ archivedIds }: { archivedIds: readonly string[] }) {
   const { team, canCreateTeam } = useWorkspace();
   const router = useRouter();
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
@@ -506,19 +562,12 @@ function TeamSwitcher() {
             }
           }}
         >
-          {!team && (
-            <option value="">
-              {canCreateTeam ? "Create or join a team" : "No team yet"}
-            </option>
-          )}
-          {teams.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
-            </option>
-          ))}
-          {team && !teams.some((item) => item.id === team.id) && (
-            <option value={team.id}>{team.name}</option>
-          )}
+          <TeamOptions
+            team={team}
+            teams={teams}
+            archivedIds={archivedIds}
+            canCreateTeam={canCreateTeam}
+          />
         </select>
         <small>{busy ? "Switching…" : "Recruitment workspace"}</small>
       </label>

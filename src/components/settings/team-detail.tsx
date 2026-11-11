@@ -14,6 +14,7 @@ import { AdminPortalView } from "./admin-portal";
 import { SpeedTab } from "./speed-settings";
 import { StorageSettings } from "./storage-settings";
 import { TaskBoardsTab } from "./task-boards-tab";
+import { TeamArchiveTab } from "./team-archive";
 import { TEAM_DETAIL_TABS, type TeamDetailTab } from "./team-detail-tabs";
 import { TeamMembers, teamRequests } from "./team-members";
 
@@ -91,8 +92,10 @@ export function TeamDetail({ team, role, companyLevel, tab }: TeamDetailProps) {
           <SpeedTab />
         ) : current === "task-boards" ? (
           <TaskBoardsTab />
-        ) : (
+        ) : current === "activity" ? (
           <ActivityList />
+        ) : (
+          <TeamArchiveTab team={team} role={role} />
         )}
       </div>
     </TeamScope>

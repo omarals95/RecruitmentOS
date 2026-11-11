@@ -9,6 +9,7 @@ export const TEAM_DETAIL_TABS = [
   { key: "speed", label: "Speed" },
   { key: "task-boards", label: "Task boards" },
   { key: "activity", label: "Activity" },
+  { key: "archive", label: "Archive" },
 ] as const;
 export type TeamDetailTab = (typeof TEAM_DETAIL_TABS)[number]["key"];
 
