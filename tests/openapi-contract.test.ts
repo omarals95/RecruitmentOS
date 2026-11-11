@@ -889,6 +889,95 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents the job architecture operations as session-only, with their codes and no pay (ADM-24)", () => {
+    const text = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method]);
+    const labels = [
+      ["/api/v1/job-architecture", "get"],
+      ["/api/v1/job-architecture", "post"],
+      ["/api/v1/job-architecture/{versionId}", "put"],
+      ["/api/v1/job-architecture/{versionId}/publish", "post"],
+    ] as const;
+    for (const [path, method] of labels) {
+      const operation = document.paths[path][method];
+      expect(operation["x-session-only"], path).toBe(true);
+      expect(operation["x-required-scopes"], path).toEqual([]);
+      expect(Object.keys(operation.responses), path).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      expect(text(path, method), path).toContain("session_required");
+      expect(text(path, method), path).not.toContain("SESSION_NOT_FRESH");
+    }
+    for (const [path, method] of labels.slice(1))
+      expect(text(path, method), path).toContain("config_forbidden");
+    for (const code of ["invalid_input", "config_draft_exists", "never pay"])
+      expect(text("/api/v1/job-architecture", "post")).toContain(code);
+    for (const path of [
+      "/api/v1/job-architecture/{versionId}",
+      "/api/v1/job-architecture/{versionId}/publish",
+    ]) {
+      const method = path.endsWith("publish") ? "post" : "put";
+      expect(text(path, method), path).toContain("not_found");
+      expect(text(path, method), path).toContain("config_state_conflict");
+    }
+    expect(text("/api/v1/job-architecture", "get")).toContain(
+      "current:{versionId, number, body}|null, draft:",
+    );
+    // Positions take a job title key on create and patch and return it.
+    for (const [path, method] of [
+      ["/api/v1/positions", "post"],
+      ["/api/v1/positions/{id}", "patch"],
+      ["/api/v1/positions", "get"],
+    ] as const)
+      expect(text(path, method), path).toContain("jobTitleKey");
+    for (const [path, method] of [
+      ["/api/v1/positions", "post"],
+      ["/api/v1/positions/{id}", "patch"],
+    ] as const) {
+      expect(text(path, method), path).toContain("invalid_reference");
+      expect(
+        JSON.stringify(document.paths[path][method].requestBody),
+        path,
+      ).toContain('"jobTitleKey"');
+    }
+    // The vacancy data schema gains only the optional jobTitleKey.
+    const vacancies = document.components.schemas.vacancies as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(Object.keys(vacancies.properties)).toEqual([
+      "title",
+      "requisitionId",
+      "department",
+      "location",
+      "employmentType",
+      "workMode",
+      "description",
+      "requirements",
+      "skills",
+      "openings",
+      "status",
+      "hiringManager",
+      "recruiter",
+      "targetDate",
+      "jobTitleKey",
+    ]);
+    expect(vacancies.properties.jobTitleKey).toEqual({
+      type: "string",
+      pattern: "^[a-z0-9][a-z0-9-]{0,62}$",
+    });
+    expect(vacancies.required ?? []).not.toContain("jobTitleKey");
+    for (const [name, schema] of Object.entries(document.components.schemas))
+      if (name !== "vacancies")
+        expect(
+          Object.keys(
+            (schema as { properties?: Record<string, unknown> }).properties ??
+              {},
+          ),
+          name,
+        ).not.toContain("jobTitleKey");
+  });
+
   it("documents the recent sign-in rule on exactly the four sensitive admin changes (ADM-06)", () => {
     const guarded = [
       "POST /api/v1/roles/{id}/publish",
@@ -975,6 +1064,10 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/teams/member-roles",
         "GET /api/v1/company-authority",
         "POST /api/v1/company-authority",
+        "GET /api/v1/job-architecture",
+        "POST /api/v1/job-architecture",
+        "PUT /api/v1/job-architecture/{versionId}",
+        "POST /api/v1/job-architecture/{versionId}/publish",
       ].sort(),
     );
     for (const { label, operation } of sessionOnly) {

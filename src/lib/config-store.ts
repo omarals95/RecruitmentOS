@@ -4,6 +4,7 @@ import type { TeamTx } from "@/db";
 import {
   CONFIG_TYPES,
   CONFIG_TYPE_AREAS,
+  JOB_ARCHITECTURE_KEY,
   configBodySchemas,
   configHelpText,
   configKey,
@@ -114,19 +115,28 @@ function assertSize(value: unknown) {
 
 /**
  * tenant_context.allows_workspace for write, read from the access state install returned: a session,
- * and company authority for the type's area, or for a task board the team owner or admin role in a
- * team that is not archived (team_archived first, for every caller).
+ * and company authority for the type's area, or for a task board the team owner or admin role.
  */
-function requireWrite(p: Principal, access: TenantAccess, type: ConfigType) {
+export function mayWriteConfig(
+  p: Principal,
+  access: TenantAccess,
+  type: ConfigType,
+): boolean {
   const area = CONFIG_TYPE_AREAS[type];
-  if (area === "task-board" && access.teamArchived) throw teamArchived();
-  const allowed =
+  return (
     p.authType === "session" &&
     (area === "task-board"
       ? access.memberRole === "owner" || access.memberRole === "admin"
       : access.companyLevel === "owner" ||
-        (area !== "roles" && access.companyAreas.includes(area)));
-  if (!allowed) throw forbidden();
+        (area !== "roles" && access.companyAreas.includes(area)))
+  );
+}
+
+/** mayWriteConfig, and for a task board a team that is not archived (team_archived first). */
+function requireWrite(p: Principal, access: TenantAccess, type: ConfigType) {
+  if (CONFIG_TYPE_AREAS[type] === "task-board" && access.teamArchived)
+    throw teamArchived();
+  if (!mayWriteConfig(p, access, type)) throw forbidden();
 }
 
 /** One withTeam transaction; the database stays authoritative and its refusals map to API errors. */
@@ -207,7 +217,8 @@ const versionJson = (column: string) =>
 
 /**
  * Creates the object when it does not exist (a task board in the caller's team) and its one draft
- * with the given body, and audits config.draft_created. An archived object takes no new draft.
+ * with the given body, and audits config.draft_created. An archived object takes no new draft, and
+ * the job architecture takes no key but JOB_ARCHITECTURE_KEY.
  */
 export async function createConfigDraft(
   p: Principal,
@@ -217,6 +228,12 @@ export async function createConfigDraft(
   const { type, key, body, note } = draftInput.parse(input);
   return inStore(p, async (tx, access) => {
     requireWrite(p, access, type);
+    if (type === "job-architecture" && key !== JOB_ARCHITECTURE_KEY)
+      throw new ApiError(
+        400,
+        "invalid_input",
+        `The job architecture key is always ${JOB_ARCHITECTURE_KEY}.`,
+      );
     const parsed = configBodySchemas[type].parse(body);
     await checkBody(tx, p, access, type, parsed);
     const teamId = type === "task-board" ? p.teamId : null;

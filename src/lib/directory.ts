@@ -24,6 +24,7 @@ import {
 } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
+import { requireJobTitle } from "@/lib/job-architecture";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
 
@@ -35,6 +36,8 @@ export type Position = {
   isManager: boolean;
   /** Only for contexts of the team that owns the job role; null otherwise. */
   jobRoleId: string | null;
+  /** A title of the published job architecture, or null (ADM-24). */
+  jobTitleKey: string | null;
   validFrom: string;
   archivedAt: string | null;
   /**
@@ -255,7 +258,7 @@ const positionJson = (p: Principal, access: TenantAccess) => {
   })
     ? sql`not exists (select 1 from app.employee_positions ep join app.employees e on e.id = ep.employee_id and e.workspace_id = ep.workspace_id where ep.position_id = p.id and ep.workspace_id = p.workspace_id and ep.valid_to is null and e.archived_at is null and e.status = 'active')`
     : sql`null::boolean`;
-  return sql`jsonb_build_object('id', p.id, 'orgUnitId', p.org_unit_id, 'title', p.title, 'code', p.code, 'isManager', p.is_manager, 'jobRoleId', case when p.job_role_team_id = ${p.teamId} then p.job_role_id end, 'validFrom', p.valid_from, 'archivedAt', p.archived_at, 'vacant', ${vacant})`;
+  return sql`jsonb_build_object('id', p.id, 'orgUnitId', p.org_unit_id, 'title', p.title, 'code', p.code, 'isManager', p.is_manager, 'jobRoleId', case when p.job_role_team_id = ${p.teamId} then p.job_role_id end, 'jobTitleKey', p.job_title_key, 'validFrom', p.valid_from, 'archivedAt', p.archived_at, 'vacant', ${vacant})`;
 };
 // The employee's current position rows, primary first, then by title and id.
 const employeeJson =
@@ -331,19 +334,23 @@ export async function listPositions(
   });
 }
 
-/** Creates a position in a current unit; a job role must be one of the caller's team. */
+/**
+ * Creates a position in a current unit; a job role must be one of the caller's team, and a job title
+ * one of the published job architecture.
+ */
 export async function createPosition(
   p: Principal,
   input: z.input<typeof positionInput>,
 ): Promise<Position> {
-  const { title, code, orgUnitId, isManager, jobRoleId } =
+  const { title, code, orgUnitId, isManager, jobRoleId, jobTitleKey } =
     positionInput.parse(input);
   // Past the write check, a 42501 is app.guard_scope_sources: a held position's code to a new unit.
   return inDirectory(p, ownerRequired, async (tx, access) => {
     requireOrgWrite(p, access);
+    if (jobTitleKey) requireJobTitle(access, jobTitleKey);
     if (jobRoleId) await requireJobRole(tx, p, jobRoleId);
     const { rows } = await tx.execute<{ position: Position }>(
-      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id) select u.workspace_id, u.id, ${title}, ${code}, ${isManager ?? false}, ${jobRoleId ? p.teamId : null}, ${jobRoleId ?? null}::uuid from app.org_units u where u.id = ${orgUnitId}::uuid and u.workspace_id = ${access.workspaceId}::uuid and u.valid_to is null and u.archived_at is null returning ${positionJson(p, access)} as position`,
+      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id, job_title_key) select u.workspace_id, u.id, ${title}, ${code}, ${isManager ?? false}, ${jobRoleId ? p.teamId : null}, ${jobRoleId ?? null}::uuid, ${jobTitleKey ?? null}::text from app.org_units u where u.id = ${orgUnitId}::uuid and u.workspace_id = ${access.workspaceId}::uuid and u.valid_to is null and u.archived_at is null returning ${positionJson(p, access)} as position`,
     );
     if (!rows[0]) throw await unitConflict(tx, access, orgUnitId);
     return rows[0].position;
@@ -367,14 +374,19 @@ const updatePositionRow = (
   });
 };
 
-/** Changes the title, manager flag or job role of the current row in place; null clears the job role. */
+/**
+ * Changes the title, manager flag, job role or job title of the current row in place; null clears
+ * the job role or job title.
+ */
 export async function updatePosition(
   p: Principal,
   positionId: string,
   input: z.input<typeof positionFacts>,
 ): Promise<Position> {
-  const { title, isManager, jobRoleId } = positionFacts.parse(input);
-  return updatePositionRow(p, positionId, orgForbidden, async (tx) => {
+  const { title, isManager, jobRoleId, jobTitleKey } =
+    positionFacts.parse(input);
+  return updatePositionRow(p, positionId, orgForbidden, async (tx, access) => {
+    if (jobTitleKey) requireJobTitle(access, jobTitleKey);
     if (jobRoleId) await requireJobRole(tx, p, jobRoleId);
     return sql.join(
       [
@@ -384,6 +396,9 @@ export async function updatePosition(
           ? [
               sql`job_role_team_id = ${jobRoleId ? p.teamId : null}, job_role_id = ${jobRoleId}::uuid`,
             ]
+          : []),
+        ...(jobTitleKey !== undefined
+          ? [sql`job_title_key = ${jobTitleKey}::text`]
           : []),
       ],
       sql`, `,

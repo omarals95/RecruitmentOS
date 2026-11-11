@@ -3015,4 +3015,64 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
       pagination: { total: 0 },
     });
   });
+
+  it("keeps a vacancy without a job title key free of it, and takes only a published title (ADM-24)", async () => {
+    const plain = unpinned(
+      await createRecord(owner, "vacancies", {
+        data: { title: "Fictional untitled-grade vacancy" },
+      }),
+    );
+    expect(plain.data).not.toHaveProperty("jobTitleKey");
+    const edited = await updateRecord(owner, "vacancies", plain.id, {
+      version: 1,
+      data: { status: "Open" },
+    });
+    expect(edited.data).not.toHaveProperty("jobTitleKey");
+    expect((await stored(plain.id)).data).not.toHaveProperty("jobTitleKey");
+    expect(
+      (await getRecord(owner, "vacancies", plain.id)).data,
+    ).not.toHaveProperty("jobTitleKey");
+    // No job architecture is published yet, so no key is a title.
+    await expect(
+      createRecord(owner, "vacancies", {
+        data: { title: "Fictional titled vacancy", jobTitleKey: "analyst" },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_reference" });
+    const draft = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: "company",
+      body: {
+        families: [{ key: "data", name: "Fictional Data" }],
+        grades: [{ code: "G6", name: "Fictional Senior", order: 6 }],
+        titles: [
+          {
+            key: "analyst",
+            name: "Fictional Analyst",
+            familyKey: "data",
+            gradeCode: "G6",
+          },
+        ],
+      },
+    });
+    await publishConfigVersion(owner, draft.versionId);
+    const titled = unpinned(
+      await createRecord(owner, "vacancies", {
+        data: { title: "Fictional titled vacancy", jobTitleKey: "analyst" },
+      }),
+    );
+    expect(titled.data).toMatchObject({ jobTitleKey: "analyst" });
+    expect((await stored(titled.id)).data.jobTitleKey).toBe("analyst");
+    await expect(
+      createRecord(owner, "vacancies", {
+        data: { title: "Fictional other vacancy", jobTitleKey: "architect" },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_reference" });
+    await expect(
+      updateRecord(owner, "vacancies", plain.id, {
+        version: 2,
+        data: { jobTitleKey: "architect" },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_reference" });
+    expect((await stored(plain.id)).data).not.toHaveProperty("jobTitleKey");
+  });
 });

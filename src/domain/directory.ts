@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { configLabel } from "./config";
+import { configKey, configLabel } from "./config";
 
 // Positions, employees and their positions (drizzle/0034_positions_employees.sql). Titles, codes,
 // names and employee numbers are text facts under the configuration label rule; work email and
@@ -22,6 +22,8 @@ export const positionInput = z
     orgUnitId: z.uuid(),
     isManager: z.boolean().optional(),
     jobRoleId: z.uuid().optional(),
+    /** A title of the published job architecture (ADM-24). */
+    jobTitleKey: configKey.optional(),
   })
   .strict();
 export const positionFacts = z
@@ -29,6 +31,8 @@ export const positionFacts = z
     title: configLabel.optional(),
     isManager: z.boolean().optional(),
     jobRoleId: z.uuid().nullable().optional(),
+    /** Null clears it. */
+    jobTitleKey: configKey.nullable().optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0);

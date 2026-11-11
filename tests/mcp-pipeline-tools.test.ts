@@ -22,6 +22,10 @@ import { NOTICE } from "../src/lib/mcp/results";
 import { SCOPES, roleScopes } from "../src/lib/permissions";
 import type { Principal } from "../src/lib/principal";
 import { createRecord, updateRecord } from "../src/lib/records";
+import {
+  createConfigDraft,
+  publishConfigVersion,
+} from "../src/lib/config-store";
 import { referenceFields } from "../src/domain/records";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { mcpHarness, type Result } from "./helpers/mcp";
@@ -1085,6 +1089,83 @@ describe("MCP pipeline tools over real migrations and RLS", () => {
         }),
       ),
     ).toBe("invalid_input");
+  });
+
+  it("takes a published job title key on create_vacancy and update_vacancy, refuses an unknown one and adds no tool (ADM-24)", async () => {
+    const writer = await token(["recruitment:write"]);
+    const reader = await token(["recruitment:read"]);
+    const names = TOOLS.map((item) => item.name);
+    const draft = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: "company",
+      body: {
+        families: [{ key: "finance", name: "Fictional Finance" }],
+        grades: [{ code: "G7", name: "Fictional Lead", order: 7 }],
+        titles: [
+          {
+            key: "payroll-lead",
+            name: "Fictional Payroll Lead",
+            familyKey: "finance",
+            gradeCode: "G7",
+          },
+          {
+            key: "payroll-manager",
+            name: "Fictional Payroll Manager",
+            familyKey: "finance",
+            gradeCode: "G7",
+          },
+        ],
+      },
+    });
+    await publishConfigVersion(owner, draft.versionId);
+    const created = data<{ id: string; version: number }>(
+      await call(writer, "create_vacancy", {
+        idempotencyKey: key(),
+        title: "Fictional Titled Vacancy",
+        jobTitleKey: "payroll-lead",
+      }),
+    );
+    expect((await row(created.id)).data.jobTitleKey).toBe("payroll-lead");
+    const before = await fingerprint();
+    expect(
+      toolError(
+        await call(writer, "create_vacancy", {
+          idempotencyKey: key(),
+          title: "Fictional Untitled Vacancy",
+          jobTitleKey: "payroll-director",
+        }),
+      ),
+    ).toBe("invalid_reference");
+    expect(
+      toolError(
+        await call(writer, "update_vacancy", {
+          id: created.id,
+          version: created.version,
+          jobTitleKey: "payroll-director",
+        }),
+      ),
+    ).toBe("invalid_reference");
+    expect(await fingerprint()).toBe(before);
+    data(
+      await call(writer, "update_vacancy", {
+        id: created.id,
+        version: created.version,
+        jobTitleKey: "payroll-manager",
+      }),
+    );
+    expect((await row(created.id)).data.jobTitleKey).toBe("payroll-manager");
+    // get_vacancy facts gain only the key, null for a vacancy without one.
+    const facts = (id: string) =>
+      call(reader, "get_vacancy", { id }).then(
+        (result) => data<{ facts: Record<string, unknown> }>(result).facts,
+      );
+    expect((await facts(created.id)).jobTitleKey).toBe("payroll-manager");
+    expect((await facts(ids.vacancy)).jobTitleKey).toBeNull();
+    // No tool reads or writes the job architecture itself (D13).
+    expect(TOOLS.map((item) => item.name)).toEqual(names);
+    expect(
+      names.filter((name) => /architecture|grade|famil|job_title/.test(name)),
+    ).toEqual([]);
   });
 
   it("completes onboarding and checklist items, declines offers and audits stage and status changes", async () => {

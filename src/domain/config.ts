@@ -7,11 +7,18 @@ import {
   configOptionValue,
   customFieldSchema,
 } from "./field-types";
-import { recordDataSchemas, uuidSchema } from "./record-schemas";
+import { configKey, recordDataSchemas, uuidSchema } from "./record-schemas";
 import type { FieldType, RecordKind, ResourceName } from "./records";
 
-// The cleaned text schemas and the kind list live in field-types.ts, which cannot import this file.
-export { CONFIGURABLE_KINDS, configHelpText, configLabel, configOptionValue };
+// The cleaned text schemas and the kind list live in field-types.ts, and the key schema in
+// record-schemas.ts, neither of which can import this file.
+export {
+  CONFIGURABLE_KINDS,
+  configHelpText,
+  configKey,
+  configLabel,
+  configOptionValue,
+};
 
 /** The object types of the versioned configuration store (drizzle/0030_config_store.sql). */
 export const CONFIG_TYPES = [
@@ -21,6 +28,7 @@ export const CONFIG_TYPES = [
   "role",
   "template",
   "task-board",
+  "job-architecture",
 ] as const;
 export type ConfigType = (typeof CONFIG_TYPES)[number];
 
@@ -35,9 +43,11 @@ export const CONFIG_TYPE_AREAS = {
   role: "roles",
   template: "templates",
   "task-board": "task-board",
+  "job-architecture": "organisation",
 } as const satisfies Record<ConfigType, string>;
 
-export const configKey = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+/** The one job architecture object of a company is always this key (ADM-24). */
+export const JOB_ARCHITECTURE_KEY = "company";
 
 // The minimal envelope for every type until its own build item replaces it. Strict objects refuse
 // unknown keys, so a body cannot carry record ids or record values.
@@ -436,7 +446,101 @@ export const taskBoardBodySchema = z
   .strict();
 export type TaskBoardBody = z.output<typeof taskBoardBodySchema>;
 
-// Role and task-board drafts carry real bodies; every other type keeps the envelope until its own item.
+/** A grade code such as G7: 1 to 20 upper-case letters, digits and hyphens. */
+const gradeCode = z.string().regex(/^[A-Z0-9][A-Z0-9-]{0,19}$/);
+const jobArchitectureShape = z
+  .object({
+    families: z
+      .array(z.object({ key: configKey, name: configLabel }).strict())
+      .max(200),
+    grades: z
+      .array(
+        z
+          .object({
+            code: gradeCode,
+            name: configLabel,
+            order: z.number().int().min(1).max(1000),
+          })
+          .strict(),
+      )
+      .max(200),
+    titles: z
+      .array(
+        z
+          .object({
+            key: configKey,
+            name: configLabel,
+            familyKey: configKey,
+            gradeCode,
+          })
+          .strict(),
+      )
+      .max(2000),
+  })
+  .strict();
+function jobArchitectureIssues(
+  body: z.output<typeof jobArchitectureShape>,
+  ctx: z.RefinementCtx,
+) {
+  const issue = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: "custom", path, message });
+  // Each list's values must be unique; the paths name the repeated entry.
+  const unique = <T>(
+    list: T[],
+    value: (entry: T) => string | number,
+    path: (index: number) => (string | number)[],
+    message: string,
+  ) => {
+    const seen = new Set<string | number>();
+    list.forEach((entry, index) => {
+      if (seen.has(value(entry))) issue(path(index), message);
+      seen.add(value(entry));
+    });
+    return seen;
+  };
+  const families = unique(
+    body.families,
+    (family) => family.key,
+    (index) => ["families", index, "key"],
+    "Family keys must be unique.",
+  );
+  const grades = unique(
+    body.grades,
+    (grade) => grade.code,
+    (index) => ["grades", index, "code"],
+    "Grade codes must be unique.",
+  );
+  unique(
+    body.grades,
+    (grade) => grade.order,
+    (index) => ["grades", index, "order"],
+    "Grade orders must be unique.",
+  );
+  unique(
+    body.titles,
+    (title) => title.key,
+    (index) => ["titles", index, "key"],
+    "Title keys must be unique.",
+  );
+  body.titles.forEach((title, index) => {
+    if (!families.has(title.familyKey))
+      issue(["titles", index, "familyKey"], "Not a family of this body.");
+    if (!grades.has(title.gradeCode))
+      issue(["titles", index, "gradeCode"], "Not a grade of this body.");
+  });
+}
+/**
+ * The company job architecture (architecture §14.5): job families, job grades and job titles, each
+ * title in one family and one grade. Names, codes and order only: strict on every level, so a body
+ * holds no pay figure, bracket, record id or record value.
+ */
+export const jobArchitectureBodySchema = jobArchitectureShape.superRefine(
+  jobArchitectureIssues,
+);
+export type JobArchitectureBody = z.output<typeof jobArchitectureBodySchema>;
+
+// Role, task-board and job architecture drafts carry real bodies; every other type keeps the envelope
+// until its own item.
 export const configBodySchemas = {
   "kind-schema": envelope,
   workflow: envelope,
@@ -444,5 +548,6 @@ export const configBodySchemas = {
   role: roleBodySchema,
   template: envelope,
   "task-board": taskBoardBodySchema,
+  "job-architecture": jobArchitectureBodySchema,
 } satisfies Record<ConfigType, z.ZodType>;
 export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;

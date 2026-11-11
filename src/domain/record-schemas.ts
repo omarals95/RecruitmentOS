@@ -39,6 +39,8 @@ export function reviewStatusValue(
     : "Needs review";
 }
 export const uuidSchema = z.uuid();
+/** A configuration object key; config.ts re-exports it, since it imports this file. */
+export const configKey = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 export const text = (max = 200) => z.string().trim().max(max).default("");
 const requiredText = (max = 200) => z.string().trim().min(1).max(max);
 const tags = z
@@ -219,6 +221,8 @@ export const recordDataSchemas = {
       hiringManager: text(),
       recruiter: text(),
       targetDate: optionalDay,
+      // A title of the published job architecture (ADM-24); a vacancy without one never gains the key.
+      jobTitleKey: configKey.optional(),
       customValues: customValuesSchema.optional(),
     })
     .strict(),
