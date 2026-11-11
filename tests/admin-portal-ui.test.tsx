@@ -3861,20 +3861,20 @@ describe("user detail", () => {
     expect(markup).not.toMatch(/<input|<select|<button|<a |fictional-alpha/);
   });
 
-  it("shows company authority read only, with the Roles & permissions link only to a company owner", () => {
+  it("shows company authority read only, with the Company authority link only to a company owner", () => {
     const owner = panel(view({ tab: "authority" }));
     expect(owner).toContain("<h3>Company authority</h3>");
     for (const [label, value] of [
       ["Level", "Company admin"],
       ["Areas", "People, Record fields"],
-      ["Plan access", "Yes"],
+      ["Plan &amp; pay access", "Yes"],
       ["Since", formatDate("2026-10-01T08:00:00.000Z")],
     ])
       expect(owner).toContain(
         `<dt class="muted">${label}</dt><dd style="margin:0">${value}</dd>`,
       );
     expect(owner).toContain(
-      '<p><a href="/app/admin/roles">Change on Roles &amp; permissions</a></p>',
+      '<p><a href="/app/admin/company-authority">Change on Company authority</a></p>',
     );
     expect(owner).not.toContain("Only a company owner");
     expect(owner).not.toContain("Suspended");
@@ -3882,7 +3882,7 @@ describe("user detail", () => {
     expect(admin).toContain(
       '<p class="muted">Only a company owner can change company authority.</p>',
     );
-    expect(admin).not.toMatch(/<a |Change on Roles/);
+    expect(admin).not.toMatch(/<a |Change on Company authority/);
     expect(
       panel(
         view(
@@ -4150,6 +4150,14 @@ describe("user detail", () => {
         }),
       ),
     ).toBe("Draft created · Task board: fictional-board");
+    expect(
+      eventLabel(
+        event("config.published", {
+          objectType: "job-architecture",
+          objectKey: "company",
+        }),
+      ),
+    ).toBe("Published · Job architecture: company");
     expect(markup).not.toContain("Showing the latest 50 changes.");
     expect(panel(view({ tab: "activity" }, { events: [] }))).toContain(
       '<p class="muted">No configuration or access changes recorded.</p>',
@@ -4176,7 +4184,7 @@ describe("user detail", () => {
       ),
     );
     expect(names).toEqual([
-      "Change on Roles & permissions",
+      "Change on Company authority",
       "Reset two-step sign-in",
     ]);
     for (const name of [
@@ -4244,10 +4252,12 @@ describe("invite to teams", () => {
     createdAt: "2026-10-01T08:00:00.000Z",
     teamRole,
     current: false,
+    archived: false,
   });
+  // Invitations keep working in an archived team (job 078), so Bravo is offered although archived.
   const rows = [
     row("Alpha", "owner"),
-    row("Bravo", "admin"),
+    { ...row("Bravo", "admin"), archived: true },
     row("Charlie", "recruiter"),
     row("Delta", "viewer"),
     row("Echo", null, null),

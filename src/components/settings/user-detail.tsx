@@ -25,12 +25,12 @@ import {
   plain,
 } from "./admin-portal";
 import { NO_ACCESS } from "./admin-tabs";
+import { areaLabels } from "./company-authority-tab";
 import {
   REAUTH_CANCELLED,
   useFreshSession,
   type ReauthCancelled,
 } from "./fresh-session-dialog";
-import { areaLabels } from "./roles-tab";
 import { teamRequests } from "./team-members";
 import { USER_DETAIL_TABS, type UserDetailTab } from "./user-detail-tabs";
 import { levels, teamRoles } from "./users-tab";
@@ -40,7 +40,7 @@ export type { UserDetailTab, WorkspacePerson };
 export interface UserDetailProps {
   /** The user id in the URL; the server allowed the Users page. */
   userId: string;
-  /** The caller's company level in the active team: only a company owner gets the Roles link. */
+  /** The caller's company level in the active team: only a company owner gets the Company authority link. */
   companyLevel: string | null;
   tab: UserDetailTab;
 }
@@ -273,7 +273,7 @@ export function UserDetailView({
   tab: UserDetailTab;
   /** The signed-in user. */
   callerId: string;
-  /** The caller is a company owner, who changes company authority on Roles & permissions. */
+  /** The caller is a company owner, who changes company authority on its page. */
   companyOwner: boolean;
   /** Reset two-step sign-in is offered (see resetTeam). */
   canReset: boolean;
@@ -452,7 +452,7 @@ function AuthorityTab({
                         .join(", ")
                     : "No areas",
               ],
-              ["Plan access", person.planAccess ? "Yes" : "No"],
+              ["Plan & pay access", person.planAccess ? "Yes" : "No"],
               [
                 "Since",
                 person.authoritySince
@@ -465,7 +465,9 @@ function AuthorityTab({
       )}
       {companyOwner ? (
         <p>
-          <Link href="/app/admin/roles">Change on Roles &amp; permissions</Link>
+          <Link href="/app/admin/company-authority">
+            Change on Company authority
+          </Link>
         </p>
       ) : (
         <p className="muted">

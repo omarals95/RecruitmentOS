@@ -1155,7 +1155,8 @@ describe("one workspace person under the split runtime roles", () => {
         { targetUserId: "person-subject" },
         "2026-10-15T08:00:00Z",
       ),
-      // Out: rows about other people, the person's own changes to others and a record row.
+      // Out: rows about other people, the person's own changes to others, a team archive row (job
+      // 078) and a record row.
       event(
         "person-team-a",
         "person-owner",
@@ -1192,6 +1193,14 @@ describe("one workspace person under the split runtime roles", () => {
         "account-security",
         { targetUserId: "person-recruiter" },
         "2026-10-19T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-subject",
+        "team.archived",
+        "team-archive",
+        {},
+        "2026-10-20T08:00:00Z",
       ),
       event(
         "person-team-a",

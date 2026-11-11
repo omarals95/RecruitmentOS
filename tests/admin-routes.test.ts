@@ -521,6 +521,7 @@ describe("admin pages check access on the server (TST-002)", () => {
         ["company owner and team owner", "allowed"],
         ["company owner as recruiter", "allowed"],
         ["company admin with people", "allowed"],
+        ["company admin with no area", "refused"],
         ["company admin", "refused"],
         ["company admin with organisation", "refused"],
         ["team owner", "refused"],

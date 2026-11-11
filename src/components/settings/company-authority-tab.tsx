@@ -41,7 +41,7 @@ const LAST_OWNER =
 /** What Plan & pay access opens: the confidential figures exist only once they are built. */
 const PLAN_PAY_HINT =
   "For confidential recruitment plan figures and salary brackets. Neither exists yet, so this opens nothing today. Only a company owner gives it, one person at a time.";
-const areaLabels: Record<GrantableArea, string> = {
+export const areaLabels: Record<GrantableArea, string> = {
   fields: "Record fields",
   workflows: "Workflows",
   boards: "Boards",
