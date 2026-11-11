@@ -56,14 +56,14 @@ export interface AccessChanges {
 const HISTORY_PAGE_SIZE = 25;
 const historyPath = (before?: string) =>
   `/api/v1/config-history?pageSize=${HISTORY_PAGE_SIZE}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
-const historyActions: Record<string, string> = {
+export const historyActions: Record<string, string> = {
   "config.draft_created": "Draft created",
   "config.published": "Published",
   "config.retired": "Retired",
   "config.archived": "Archived",
   "config.layout_changed": "Layout changed",
 };
-const objectTypes: Record<string, string> = {
+export const objectTypes: Record<string, string> = {
   "kind-schema": "Record fields",
   workflow: "Workflow",
   board: "Board",
@@ -76,7 +76,7 @@ const accessActions: Record<string, string> = {
   "role.cleared": "Role cleared",
   "scope.home_units_changed": "Home units changed",
 };
-const plain = (labels: Record<string, string>, value: string) =>
+export const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
 // The one team page left in the table; its panel text is its page description, as on its card.
 const tokensPanel = {

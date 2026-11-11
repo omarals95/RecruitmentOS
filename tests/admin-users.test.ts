@@ -25,6 +25,7 @@ import { withTeam } from "@/lib/db-team";
 import type { Principal } from "@/lib/principal";
 import { createRecord } from "@/lib/records";
 import { GET as usersRoute } from "@/app/api/v1/admin/users/route";
+import { GET as personRoute } from "@/app/api/v1/admin/users/[user]/route";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with fictional teams, people and invitations, and a
@@ -802,5 +803,702 @@ describe("paging and filters over a few hundred fictional people", () => {
       { role: "bulk-sourcer", status: "invited" },
     ] as Record<string, string>[])
       expect(await walk(owner, filters), JSON.stringify(filters)).toEqual([]);
+  });
+});
+
+// ADM-08 (job 076): one person through tenant_context.workspace_person and its route.
+describe("one workspace person under the split runtime roles", () => {
+  let harness: Harness;
+  let owner: Principal, peopleAdmin: Principal, fieldsAdmin: Principal;
+  let teamOwnerB: Principal, recruiter: Principal, viewer: Principal;
+  let ownerD: Principal;
+  let leaks: string[];
+  const PERSON_HELPER_KEYS = [
+    "user_id",
+    "name",
+    "email",
+    "last_sign_in",
+    "two_step",
+    "signed_in_devices",
+    "teams",
+    "company_level",
+    "company_areas",
+    "plan_access",
+    "authority_suspended",
+    "authority_since",
+    "events",
+  ];
+  const PERSON_KEYS = [
+    "userId",
+    "name",
+    "email",
+    "status",
+    "lastSignInAt",
+    "twoStep",
+    "signedInDevices",
+    "teams",
+    "companyLevel",
+    "companyAreas",
+    "planAccess",
+    "authoritySuspended",
+    "authoritySince",
+    "events",
+  ].sort();
+  const TEAM_KEYS = ["configuredRole", "slug", "team", "teamRole"];
+  const EVENT_KEYS = [
+    "action",
+    "actorId",
+    "actorName",
+    "objectKey",
+    "objectType",
+    "occurredAt",
+    "roleName",
+  ];
+
+  /** The helper itself, called on the data role in the principal's installed context. */
+  const helper = async (p: Principal, target: string | null) => {
+    await harness.dataDb();
+    return withTeam(
+      p,
+      async (tx) =>
+        (
+          await tx.execute<Record<string, unknown>>(
+            sql`select * from tenant_context.workspace_person(${target}::text)`,
+          )
+        ).rows,
+    );
+  };
+  /** GET /api/v1/admin/users/<id> as a signed-in member, a Bearer token or nobody. */
+  async function getPerson(
+    as: Principal | "bearer" | "anonymous",
+    id: string,
+    query = "",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ status: number; text: string; body: any }> {
+    if (as === "anonymous")
+      vi.mocked(getVerifiedSession).mockImplementation(
+        async () => requireVerifiedIdentity(null) as never,
+      );
+    else if (as !== "bearer") signIn(as);
+    const response = await personRoute(
+      new Request(
+        `${ORIGIN}/api/v1/admin/users/${encodeURIComponent(id)}${query}`,
+        {
+          headers: {
+            origin: ORIGIN,
+            ...(as === "bearer"
+              ? { authorization: "Bearer fictional-users-token" }
+              : as === "anonymous"
+                ? {}
+                : { "x-team-id": as.teamId }),
+          },
+        },
+      ),
+      { params: Promise.resolve({ user: id }) },
+    );
+    const text = await response.text();
+    return { status: response.status, text, body: JSON.parse(text) };
+  }
+  /** One app.activity row as the owner would write it, at a fixed time. */
+  const event = (
+    team: string,
+    actor: string,
+    action: string,
+    kind: string,
+    metadata: Record<string, unknown>,
+    at: string,
+  ) =>
+    `('${team}', '${actor}', 'session', '${action}', '${kind}', 'Fictional summary ${action}', '${JSON.stringify(metadata)}'::jsonb, '${at}')`;
+  const config = (workspace: string, type: string, key: string) => ({
+    workspaceId: workspace,
+    type,
+    key,
+    number: 1,
+    objectId: "00000000-0000-4000-a000-0000000000c0",
+  });
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db: AppDb = await harness.asOwner();
+    owner = await seedIdentity(db, {
+      userId: "person-owner",
+      teamId: "person-team-a",
+    });
+    peopleAdmin = await seedIdentity(db, {
+      userId: "person-people-admin",
+      teamId: "person-team-a",
+      role: "recruiter",
+    });
+    fieldsAdmin = await seedIdentity(db, {
+      userId: "person-fields-admin",
+      teamId: "person-team-a",
+      role: "recruiter",
+    });
+    recruiter = await seedIdentity(db, {
+      userId: "person-recruiter",
+      teamId: "person-team-a",
+      role: "recruiter",
+    });
+    viewer = await seedIdentity(db, {
+      userId: "person-viewer",
+      teamId: "person-team-a",
+      role: "viewer",
+    });
+    // A team-only owner of team B.
+    teamOwnerB = await seedIdentity(db, {
+      userId: "person-owner-b",
+      teamId: "person-team-b",
+    });
+    // The person the page opens: a recruiter in team A, a viewer in team B, and an admin in team
+    // D, which moves to a second workspace below.
+    await seedIdentity(db, {
+      userId: "person-subject",
+      teamId: "person-team-a",
+      role: "recruiter",
+    });
+    await seedIdentity(db, {
+      userId: "person-subject",
+      teamId: "person-team-b",
+      role: "viewer",
+    });
+    ownerD = await seedIdentity(db, {
+      userId: "person-owner-d",
+      teamId: "person-team-d",
+    });
+    await seedIdentity(db, {
+      userId: "person-subject",
+      teamId: "person-team-d",
+      role: "admin",
+    });
+    // Someone only in the second workspace, and someone with two-step off and no authority.
+    await seedIdentity(db, {
+      userId: "person-only-d",
+      teamId: "person-team-d",
+      role: "recruiter",
+    });
+    await seedIdentity(db, {
+      userId: "person-plain",
+      teamId: "person-team-b",
+      role: "recruiter",
+      twoFactorEnabled: false,
+    });
+    await harness.client.exec(`
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','person-people-admin','admin','{people}');
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','person-fields-admin','admin','{fields}');
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,plan_access,granted_at,suspended_at) VALUES
+        ('${COMPANY}','person-subject','admin','{fields,organisation}',true,'2026-10-01T08:00:00Z','2026-10-20T08:00:00Z');
+      INSERT INTO app.workspaces(id,name) VALUES ('${SECOND}','Fictional Second Company');
+      UPDATE app.workspace_teams SET workspace_id = '${SECOND}' WHERE team_id = 'person-team-d';
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${SECOND}','person-owner-d','owner','{}');
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,plan_access) VALUES ('${SECOND}','person-subject','admin','{people}',false);`);
+    const sourcer = await publishRole(
+      harness,
+      owner,
+      "person-sourcer",
+      "Fictional Person Sourcer",
+    );
+    await harness.asSuperuser();
+    const [{ version }] = (
+      await harness.client.query<{ version: string }>(
+        "SELECT current_version_id::text AS version FROM app.config_objects WHERE id = $1",
+        [sourcer],
+      )
+    ).rows;
+    await harness.client.query(
+      "INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('person-team-a', 'person-subject', $1)",
+      [sourcer],
+    );
+    await harness.dataDb();
+    const candidate = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Person Leak Candidate" },
+    });
+    const token = await seedApiToken(await harness.asOwner(), owner);
+    await harness.asSuperuser();
+    const rows = [
+      // In: configuration the person made in this workspace; a task board of the caller's team A.
+      event(
+        "person-team-a",
+        "person-subject",
+        "config.draft_created",
+        "config",
+        config(COMPANY, "workflow", "fictional-flow"),
+        "2026-10-02T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-subject",
+        "config.published",
+        "config",
+        config(COMPANY, "task-board", "fictional-board-a"),
+        "2026-10-03T08:00:00Z",
+      ),
+      // In: access changes made to the person.
+      event(
+        "person-team-a",
+        "person-owner",
+        "role.assigned",
+        "role-assignment",
+        {
+          workspaceId: COMPANY,
+          affectedUserId: "person-subject",
+          roleObjectId: sourcer,
+          roleVersionId: version,
+        },
+        "2026-10-04T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "role.cleared",
+        "role-assignment",
+        {
+          workspaceId: COMPANY,
+          affectedUserId: "person-subject",
+          roleObjectId: sourcer,
+          roleVersionId: null,
+        },
+        "2026-10-05T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "scope.home_units_changed",
+        "scope",
+        {
+          workspaceId: COMPANY,
+          affectedUserIds: ["person-recruiter", "person-subject"],
+          unitIds: ["00000000-0000-4000-a000-0000000000a1"],
+        },
+        "2026-10-06T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "workspace_authority.changed",
+        "workspace-authority",
+        {
+          targetUserId: "person-subject",
+          before: null,
+          after: { level: "admin" },
+        },
+        "2026-10-07T08:00:00Z",
+      ),
+      event(
+        "person-team-b",
+        "person-owner-b",
+        "two_step.reset",
+        "account-security",
+        { targetUserId: "person-subject" },
+        "2026-10-08T08:00:00Z",
+      ),
+      // Out: another team's task board, someone else's configuration, another workspace's rows.
+      event(
+        "person-team-b",
+        "person-subject",
+        "config.published",
+        "config",
+        config(COMPANY, "task-board", "fictional-board-b"),
+        "2026-10-09T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "config.published",
+        "config",
+        config(COMPANY, "workflow", "fictional-owner-flow"),
+        "2026-10-10T08:00:00Z",
+      ),
+      event(
+        "person-team-d",
+        "person-subject",
+        "config.published",
+        "config",
+        config(SECOND, "workflow", "fictional-second-flow"),
+        "2026-10-11T08:00:00Z",
+      ),
+      event(
+        "person-team-d",
+        "person-owner-d",
+        "role.assigned",
+        "role-assignment",
+        {
+          workspaceId: SECOND,
+          affectedUserId: "person-subject",
+          roleObjectId: sourcer,
+          roleVersionId: version,
+        },
+        "2026-10-12T08:00:00Z",
+      ),
+      event(
+        "person-team-d",
+        "person-owner-d",
+        "scope.home_units_changed",
+        "scope",
+        { workspaceId: SECOND, affectedUserIds: ["person-subject"] },
+        "2026-10-13T08:00:00Z",
+      ),
+      event(
+        "person-team-d",
+        "person-owner-d",
+        "workspace_authority.changed",
+        "workspace-authority",
+        { targetUserId: "person-subject" },
+        "2026-10-14T08:00:00Z",
+      ),
+      event(
+        "person-team-d",
+        "person-owner-d",
+        "two_step.reset",
+        "account-security",
+        { targetUserId: "person-subject" },
+        "2026-10-15T08:00:00Z",
+      ),
+      // Out: rows about other people, the person's own changes to others and a record row.
+      event(
+        "person-team-a",
+        "person-owner",
+        "role.assigned",
+        "role-assignment",
+        {
+          workspaceId: COMPANY,
+          affectedUserId: "person-recruiter",
+          roleObjectId: sourcer,
+          roleVersionId: version,
+        },
+        "2026-10-16T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "scope.home_units_changed",
+        "scope",
+        { workspaceId: COMPANY, affectedUserIds: ["person-recruiter"] },
+        "2026-10-17T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-owner",
+        "workspace_authority.changed",
+        "workspace-authority",
+        { targetUserId: "person-people-admin" },
+        "2026-10-18T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-subject",
+        "two_step.reset",
+        "account-security",
+        { targetUserId: "person-recruiter" },
+        "2026-10-19T08:00:00Z",
+      ),
+      event(
+        "person-team-a",
+        "person-subject",
+        "record.created",
+        "candidate",
+        { workspaceId: COMPANY },
+        "2026-10-21T08:00:00Z",
+      ),
+    ];
+    await harness.client.exec(`
+      UPDATE auth.organization SET name = 'Fictional ' || upper(split_part(id, '-', 3)) || ' Team',
+        slug = 'fictional-' || split_part(id, '-', 3) WHERE id LIKE 'person-team-%';
+      UPDATE auth."user" SET name = 'Fictional ' || initcap(replace(id, '-', ' ')) WHERE id LIKE 'person-%';
+      INSERT INTO auth.session(id, expires_at, token, created_at, updated_at, user_id, ip_address, user_agent) VALUES
+        ('person-session-1', now() + interval '1 day', 'fictional-person-token-1', '2026-11-01T09:00:00Z', now(), 'person-subject', '192.0.2.20', 'Fictional Person Agent'),
+        ('person-session-2', now() + interval '2 days', 'fictional-person-token-2', '2026-11-03T09:00:00Z', now(), 'person-subject', '192.0.2.21', 'Fictional Person Agent'),
+        ('person-session-3', now() - interval '1 minute', 'fictional-person-token-3', '2026-11-06T09:00:00Z', now(), 'person-subject', '192.0.2.22', 'Fictional Person Agent'),
+        ('person-session-4', now() + interval '1 day', 'fictional-person-token-4', '2026-11-07T09:00:00Z', now(), 'person-owner', '192.0.2.23', 'Fictional Person Agent');
+      INSERT INTO app.activity(team_id, actor_id, actor_type, action, kind, summary, metadata, created_at) VALUES
+        ${rows.join(",\n        ")};`);
+    leaks = [
+      candidate.id,
+      "Fictional Person Leak Candidate",
+      token.tokenId!,
+      "ros_live_fiction",
+      "person-session-",
+      "fictional-person-token",
+      "192.0.2.",
+      "Fictional Person Agent",
+      "person-team-",
+      "Fictional summary",
+      "00000000-0000-4000-a000-0000000000a1",
+      "00000000-0000-4000-a000-0000000000c0",
+      sourcer,
+      version,
+      COMPANY,
+      ...(
+        await harness.client.query<{ id: string }>(
+          "SELECT id::text FROM app.activity UNION SELECT token_hash FROM auth.api_tokens",
+        )
+      ).rows.map((row) => row.id),
+    ];
+  });
+  afterAll(async () => harness?.close());
+
+  it("returns one row with exactly the documented columns to a company owner and a people admin", async () => {
+    for (const p of [owner, peopleAdmin]) {
+      const rows = await helper(p, "person-subject");
+      expect(rows, p.userId).toHaveLength(1);
+      const [row] = rows;
+      expect(Object.keys(row), p.userId).toEqual(PERSON_HELPER_KEYS);
+      expect(row, p.userId).toMatchObject({
+        user_id: "person-subject",
+        name: "Fictional Person Subject",
+        email: "person-subject@example.test",
+        two_step: true,
+        // Two sessions have not expired; the expired one still counts for the last sign-in.
+        signed_in_devices: 2,
+        teams: [
+          {
+            team: "Fictional A Team",
+            slug: "fictional-a",
+            teamRole: "recruiter",
+            configuredRole: "Fictional Person Sourcer",
+          },
+          {
+            team: "Fictional B Team",
+            slug: "fictional-b",
+            teamRole: "viewer",
+            configuredRole: null,
+          },
+        ],
+        company_level: "admin",
+        company_areas: ["fields", "organisation"],
+        plan_access: true,
+        authority_suspended: true,
+      });
+      expect(new Date(row.last_sign_in as string).toISOString()).toBe(
+        "2026-11-06T09:00:00.000Z",
+      );
+      expect(new Date(row.authority_since as string).toISOString()).toBe(
+        "2026-10-01T08:00:00.000Z",
+      );
+      for (const team of row.teams as Record<string, unknown>[])
+        expect(Object.keys(team).sort()).toEqual(TEAM_KEYS);
+    }
+    // Without company authority the five authority columns are null; two-step off, no session.
+    const [plain] = await helper(owner, "person-plain");
+    expect(plain).toMatchObject({
+      two_step: false,
+      signed_in_devices: 0,
+      last_sign_in: null,
+      company_level: null,
+      company_areas: null,
+      plan_access: null,
+      authority_suspended: null,
+      authority_since: null,
+      events: [],
+    });
+  });
+
+  it("lists only the person's configuration changes and the access changes made to them, newest first", async () => {
+    const actor = (id: string, name: string) => ({
+      actorId: id,
+      actorName: name,
+    });
+    const access = { objectType: null, objectKey: null, roleName: null };
+    for (const p of [owner, peopleAdmin]) {
+      const [row] = await helper(p, "person-subject");
+      const events = row.events as Record<string, unknown>[];
+      for (const item of events)
+        expect(Object.keys(item).sort(), p.userId).toEqual(EVENT_KEYS);
+      expect(
+        events.map((item) => ({
+          ...item,
+          occurredAt: new Date(item.occurredAt as string).toISOString(),
+        })),
+        p.userId,
+      ).toEqual([
+        {
+          occurredAt: "2026-10-08T08:00:00.000Z",
+          action: "two_step.reset",
+          ...actor("person-owner-b", "Fictional Person Owner B"),
+          ...access,
+        },
+        {
+          occurredAt: "2026-10-07T08:00:00.000Z",
+          action: "workspace_authority.changed",
+          ...actor("person-owner", "Fictional Person Owner"),
+          ...access,
+        },
+        {
+          occurredAt: "2026-10-06T08:00:00.000Z",
+          action: "scope.home_units_changed",
+          ...actor("person-owner", "Fictional Person Owner"),
+          ...access,
+        },
+        {
+          occurredAt: "2026-10-05T08:00:00.000Z",
+          action: "role.cleared",
+          ...actor("person-owner", "Fictional Person Owner"),
+          ...access,
+        },
+        {
+          occurredAt: "2026-10-04T08:00:00.000Z",
+          action: "role.assigned",
+          ...actor("person-owner", "Fictional Person Owner"),
+          ...access,
+          roleName: "Fictional Person Sourcer",
+        },
+        {
+          occurredAt: "2026-10-03T08:00:00.000Z",
+          action: "config.published",
+          ...actor("person-subject", "Fictional Person Subject"),
+          objectType: "task-board",
+          objectKey: "fictional-board-a",
+          roleName: null,
+        },
+        {
+          occurredAt: "2026-10-02T08:00:00.000Z",
+          action: "config.draft_created",
+          ...actor("person-subject", "Fictional Person Subject"),
+          objectType: "workflow",
+          objectKey: "fictional-flow",
+          roleName: null,
+        },
+      ]);
+    }
+  });
+
+  it("returns at most 50 events, the newest", async () => {
+    await harness.asSuperuser();
+    await harness.client.exec(`
+      INSERT INTO app.activity(team_id, actor_id, actor_type, action, kind, summary, metadata, created_at)
+        SELECT 'person-team-b', 'person-plain', 'session', 'config.draft_created', 'config', 'Fictional summary',
+          jsonb_build_object('workspaceId', '${COMPANY}', 'type', 'workflow', 'key', 'fictional-many-' || lpad(i::text, 2, '0'), 'number', 1),
+          '2026-09-01T00:00:00Z'::timestamptz + i * interval '1 hour'
+        FROM generate_series(1, 55) i;`);
+    const [row] = await helper(owner, "person-plain");
+    const events = row.events as { objectKey: string }[];
+    expect(events).toHaveLength(50);
+    expect(events.map((item) => item.objectKey)).toEqual(
+      Array.from(
+        { length: 50 },
+        (_, i) => `fictional-many-${String(55 - i).padStart(2, "0")}`,
+      ),
+    );
+    const { body } = await getPerson(owner, "person-plain");
+    expect(body.data.events).toHaveLength(50);
+    expect(body.data.events[0].objectKey).toBe("fictional-many-55");
+  });
+
+  it("refuses a company admin without people, a team-only owner, a recruiter, a viewer and a token context", async () => {
+    for (const p of [fieldsAdmin, teamOwnerB, recruiter, viewer]) {
+      await expect(helper(p, "person-subject"), p.userId).rejects.toMatchObject(
+        { cause: { code: "42501" } },
+      );
+      const { status, body } = await getPerson(p, "person-subject");
+      expect(status, p.userId).toBe(403);
+      expect(body.error.code, p.userId).toBe("people_forbidden");
+    }
+    await expect(
+      helper(
+        await seedApiToken(await harness.asOwner(), owner),
+        "person-subject",
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    const calls = pools.data.mock.calls.length;
+    const bearer = await getPerson("bearer", "person-subject");
+    expect(bearer.status).toBe(403);
+    expect(bearer.body.error.code).toBe("session_required");
+    expect(pools.data.mock.calls.length).toBe(calls);
+    expect((await getPerson("anonymous", "person-subject")).status).toBe(401);
+  });
+
+  it("refuses a null, empty or 129-character id with 22023", async () => {
+    for (const target of [null, "", "a".repeat(129)])
+      await expect(
+        helper(owner, target),
+        String(target?.length),
+      ).rejects.toMatchObject({ cause: { code: "22023" } });
+    expect(await helper(owner, "a".repeat(128))).toEqual([]);
+  });
+
+  it("answers a person only in another workspace and an unknown id with no row and 404", async () => {
+    for (const target of ["person-only-d", "person-unknown"]) {
+      expect(await helper(owner, target), target).toEqual([]);
+      const { status, body, text } = await getPerson(peopleAdmin, target);
+      expect(status, target).toBe(404);
+      expect(body.error.code, target).toBe("user_not_found");
+      expect(body.error.message).toBe(
+        "This person is not in any team of your company.",
+      );
+      expect(text).not.toContain("Fictional Person Only D");
+    }
+    // The second workspace's owner sees the shared person with that workspace's team, authority
+    // and events only.
+    const [row] = await helper(ownerD, "person-subject");
+    expect(row).toMatchObject({
+      teams: [
+        {
+          team: "Fictional D Team",
+          slug: "fictional-d",
+          teamRole: "admin",
+          configuredRole: null,
+        },
+      ],
+      company_level: "admin",
+      company_areas: ["people"],
+      plan_access: false,
+      authority_suspended: false,
+    });
+    expect(
+      (row.events as { action: string; objectKey: string | null }[]).map(
+        (item) => [item.action, item.objectKey],
+      ),
+    ).toEqual([
+      ["two_step.reset", null],
+      ["workspace_authority.changed", null],
+      ["scope.home_units_changed", null],
+      ["role.assigned", null],
+      ["config.published", "fictional-second-flow"],
+    ]);
+    expect(await helper(ownerD, "person-owner")).toEqual([]);
+  });
+
+  it("answers the route with exactly the documented keys and nothing of records, tokens, sessions or team ids", async () => {
+    for (const p of [owner, peopleAdmin]) {
+      const { status, body, text } = await getPerson(p, "person-subject");
+      expect(status, p.userId).toBe(200);
+      expect(Object.keys(body)).toEqual(["data"]);
+      expect(Object.keys(body.data).sort()).toEqual(PERSON_KEYS);
+      expect(body.data).toMatchObject({
+        userId: "person-subject",
+        status: "active",
+        lastSignInAt: "2026-11-06T09:00:00.000Z",
+        twoStep: true,
+        signedInDevices: 2,
+        companyLevel: "admin",
+        companyAreas: ["fields", "organisation"],
+        planAccess: true,
+        authoritySuspended: true,
+        authoritySince: "2026-10-01T08:00:00.000Z",
+      });
+      for (const team of body.data.teams)
+        expect(Object.keys(team).sort()).toEqual(TEAM_KEYS);
+      expect(body.data.events).toHaveLength(7);
+      for (const item of body.data.events)
+        expect(Object.keys(item).sort()).toEqual(EVENT_KEYS);
+      expect(body.data.events[0].occurredAt).toBe("2026-10-08T08:00:00.000Z");
+      for (const leak of [...leaks, SECOND, "Fictional D Team", "fictional-d"])
+        expect(text, `${p.userId}: ${leak}`).not.toContain(leak);
+    }
+  });
+
+  it("refuses an unknown query parameter and an over-long id with 400 and no helper call", async () => {
+    for (const [id, query] of [
+      ["person-subject", "?tab=security"],
+      ["person-subject", "?userId=person-owner"],
+      ["a".repeat(129), ""],
+    ]) {
+      const calls = pools.data.mock.calls.length;
+      const { status, body } = await getPerson(owner, id, query);
+      expect(status, query || String(id.length)).toBe(400);
+      expect(body.error.code).toBe("invalid_input");
+      expect(pools.data.mock.calls.length).toBe(calls);
+    }
   });
 });
