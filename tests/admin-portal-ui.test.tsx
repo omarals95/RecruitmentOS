@@ -217,6 +217,7 @@ const access = (
   teamRole,
   companyLevel,
   teamArchived: false,
+  planAccess: { read: false, write: false },
   role: { name: "Fictional role", membership: "recruiter" },
   scopes: [],
   pages: [],

@@ -4,6 +4,7 @@ import type { TeamTx } from "@/db";
 import { gradeCode } from "@/domain/config";
 import { mayWriteConfig } from "@/lib/config-store";
 import { withTeam } from "@/lib/db-team";
+import type { PlanAccess } from "@/lib/authz";
 import { ApiError } from "@/lib/errors";
 import { jobArchitectureFor } from "@/lib/job-architecture";
 import { teamArchived } from "@/lib/permissions";
@@ -170,6 +171,24 @@ async function readVersion(
     sql`select ${versionJson} as version from app.salary_bracket_versions v where v.id = ${versionId}::uuid and v.workspace_id = ${access.workspaceId}::uuid`,
   );
   return rows[0]?.version ?? null;
+}
+
+/**
+ * The Plan & pay access answer of GET /api/v1/me/access: tenant_context.allows_plan for read and
+ * write in one statement, run only for a context with a company level, since a grant needs one.
+ * Everyone else gets false with no statement. It carries no figure, version, pay period or coverage.
+ */
+export async function planAccessFor(
+  tx: TeamTx,
+  access: TenantAccess,
+): Promise<PlanAccess> {
+  if (!access.companyLevel) return { read: false, write: false };
+  const [row] = (
+    await tx.execute<PlanAccess>(
+      sql`select tenant_context.allows_plan(${access.workspaceId}::uuid, 'read') as "read", tenant_context.allows_plan(${access.workspaceId}::uuid, 'write') as "write"`,
+    )
+  ).rows;
+  return { read: row.read === true, write: row.write === true };
 }
 
 /** The grade codes of the published job architecture; none without one. */

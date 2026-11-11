@@ -385,23 +385,28 @@ export function accessMap(ctx: AccessContext): AccessMap {
   };
 }
 
+/** The database's tenant_context.allows_plan answers for the caller's context: Plan & pay access. */
+export type PlanAccess = { read: boolean; write: boolean };
 /**
- * GET /api/v1/me/access and the admin pages: the team role, company level, the team's archived state
- * and accessMap().
+ * GET /api/v1/me/access and the admin pages: the team role, company level, the team's archived state,
+ * the Plan & pay access answer read by the caller and accessMap().
  */
 export type MeAccess = AccessMap & {
   teamRole: string | null;
   companyLevel: "owner" | "admin" | null;
   teamArchived: boolean;
+  planAccess: PlanAccess;
 };
 export function meAccess(
   principal: Principal,
   access: AccessContext["access"],
+  planAccess: PlanAccess,
 ): MeAccess {
   return {
     teamRole: principal.role,
     companyLevel: access.companyLevel,
     teamArchived: access.teamArchived ?? false,
+    planAccess,
     ...accessMap(accessContext(principal, access)),
   };
 }

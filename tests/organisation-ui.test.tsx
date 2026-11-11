@@ -68,6 +68,30 @@ import {
   buildPeopleTree,
 } from "../src/components/settings/org-tree";
 import type { ReportingPerson } from "../src/lib/directory";
+import { readFileSync } from "node:fs";
+import {
+  AMOUNT_ERROR,
+  BRACKET_ORDER_ERROR,
+  CONFIDENTIAL_NOTICE,
+  JobArchitectureView,
+  SalaryBracketsForm,
+  aedToFils,
+  bracketPrefill,
+  checkBracketRows,
+  filsToAed,
+  gradeError,
+  gradesInOrder,
+  loadJobArchitecture,
+  loadSalaryBrackets,
+  saveJobArchitecture,
+  saveSalaryBrackets,
+  type BracketState,
+  type JobArchitectureState,
+  type JobView,
+} from "../src/components/settings/job-architecture-panel";
+import { tabKeys } from "../src/components/ui/tab-keys";
+import type { JobArchitectureBody } from "../src/domain/config";
+import type { SalaryBracketVersion } from "../src/lib/pay-brackets";
 
 // Fictional people, units and ids only (R2a-16, job 058).
 const workspace = {
@@ -90,11 +114,16 @@ const id = (n: number) =>
 const access = (
   teamRole: string | null,
   companyLevel: MeAccess["companyLevel"],
-  options: { organisation?: boolean; directory?: Action[] } = {},
+  options: {
+    organisation?: boolean;
+    directory?: Action[];
+    planAccess?: MeAccess["planAccess"];
+  } = {},
 ): MeAccess => ({
   teamRole,
   companyLevel,
   teamArchived: false,
+  planAccess: options.planAccess ?? { read: false, write: false },
   role: { name: "Fictional role", membership: "recruiter" },
   scopes: [],
   pages: [],
@@ -1500,5 +1529,563 @@ describe("org tree by people (ADM-23)", () => {
         />,
       ),
     ).not.toContain("Export image");
+  });
+});
+
+describe("job architecture (ADM-26)", () => {
+  // Fictional families, grades, titles and AED figures only (job 086).
+  const body: JobArchitectureBody = {
+    families: [{ key: "fictional-finance", name: "Fictional Finance" }],
+    grades: [
+      { code: "FG2", name: "Fictional Senior", order: 20 },
+      { code: "FG1", name: "Fictional Junior", order: 10 },
+    ],
+    titles: [
+      {
+        key: "fictional-payroll-lead",
+        name: "Fictional Payroll Lead",
+        familyKey: "fictional-finance",
+        gradeCode: "FG2",
+      },
+    ],
+  };
+  const draftBody: JobArchitectureBody = {
+    ...body,
+    grades: [
+      ...body.grades,
+      { code: "FG3", name: "Fictional Draft Grade", order: 30 },
+    ],
+  };
+  const published: JobArchitectureState = {
+    current: { versionId: id(70), number: 3, body },
+    draft: null,
+  };
+  const withDraft: JobArchitectureState = {
+    ...published,
+    draft: {
+      id: id(71),
+      body: draftBody,
+      note: null,
+      createdAt: "2026-11-10T09:00:00.000Z",
+    },
+  };
+  const version = (
+    n: number,
+    state: SalaryBracketVersion["state"],
+    codes: string[],
+  ): SalaryBracketVersion => ({
+    versionId: id(n),
+    number: state === "published" ? 2 : null,
+    state,
+    payPeriod: "monthly",
+    covers: "basic",
+    effectiveFrom: "2027-01-01",
+    createdAt: "2026-11-10T09:00:00.000Z",
+    publishedAt: state === "published" ? "2026-11-10T10:00:00.000Z" : null,
+    brackets: codes.map((gradeCode) =>
+      gradeCode === "FG1"
+        ? {
+            gradeCode,
+            minimumFils: 1_234_500,
+            midpointFils: 1_500_050,
+            maximumFils: 1_800_000,
+          }
+        : {
+            gradeCode,
+            minimumFils: 2_100_000,
+            midpointFils: 2_600_000,
+            maximumFils: 3_200_000,
+          },
+    ),
+  });
+  const brackets: BracketState = {
+    current: version(80, "published", ["FG1", "FG2"]),
+    draft: version(81, "draft", ["FG1", "FG2"]),
+  };
+  const FIGURES = [
+    "12,345",
+    "15,000.50",
+    "18,000",
+    "21,000",
+    "26,000",
+    "32,000",
+  ];
+  const owner = access("owner", "owner", { organisation: true });
+  const orgAdmin = access("recruiter", "admin", { organisation: true });
+  const holder = access("owner", "owner", {
+    organisation: true,
+    planAccess: { read: true, write: true },
+  });
+  const reader = access("owner", "owner", {
+    organisation: true,
+    planAccess: { read: true, write: false },
+  });
+  const member = access("recruiter", null);
+  const view = (
+    value: MeAccess,
+    state: JobArchitectureState | null = published,
+    extra: {
+      view?: JobView;
+      showBrackets?: boolean;
+      brackets?: BracketState | null;
+    } = {},
+  ) =>
+    renderToStaticMarkup(
+      <JobArchitectureView access={value} state={state} {...extra} />,
+    );
+  /** Records each request's method and path; reads answer an empty state. */
+  function requests() {
+    const sent: string[] = [];
+    const request = (async (path: string, init?: RequestInit) => {
+      sent.push(`${init?.method ?? "GET"} ${path}`);
+      return { data: { current: null, draft: null } };
+    }) as Requester;
+    return { sent, request };
+  }
+  const notice = `<p class="notice"><strong>Confidential.</strong> ${CONFIDENTIAL_NOTICE.replace(/&/g, "&amp;")}</p>`;
+
+  it("shows grades without pay, no switch and requests no brackets without Plan & pay access", async () => {
+    expect(CONFIDENTIAL_NOTICE).toBe(
+      "Salary brackets are visible only to people a company owner has given Plan & pay access in Company authority; company owners need it too. Everyone else sees grades without pay. Brackets are never sent to AI tools, exports, notifications, search or activity.",
+    );
+    for (const value of [owner, orgAdmin]) {
+      // Even with brackets handed in, nothing of them renders.
+      const markup = view(value, published, { showBrackets: true, brackets });
+      expect(markup).toContain(notice);
+      expect(markup).toContain("Add grade");
+      expect(markup).toContain(
+        '<div class="row" style="flex-wrap:nowrap;overflow-wrap:normal;gap:8px"><button type="button" class="button secondary small" aria-label="Edit: FG1">Edit</button></div>',
+      );
+      for (const text of [
+        "Show salary brackets",
+        'role="switch"',
+        "Minimum",
+        "Edit salary brackets",
+        "AED",
+        ...FIGURES,
+      ])
+        expect(markup, text).not.toContain(text);
+      const { sent, request } = requests();
+      await loadJobArchitecture(request);
+      expect(sent).toEqual(["GET /api/v1/job-architecture"]);
+      expect(await loadSalaryBrackets(request, value)).toBeNull();
+      expect(sent).toEqual(["GET /api/v1/job-architecture"]);
+    }
+  });
+
+  it("lists grades by order with their title counts, and shows loading and load errors", () => {
+    const markup = view(owner);
+    expect(markup.indexOf(">FG1<")).toBeLessThan(markup.indexOf(">FG2<"));
+    expect(markup).toContain(
+      '<td data-label="Grade">FG2</td><td data-label="Name">Fictional Senior</td><td data-label="Order">20</td><td data-label="Job titles">1</td>',
+    );
+    expect(markup).toContain("Published version 3");
+    expect(view(owner, null)).toContain(
+      '<p role="status">Loading job architecture…</p>',
+    );
+    expect(
+      renderToStaticMarkup(
+        <JobArchitectureView
+          access={owner}
+          state={null}
+          loadError="Fictional failure."
+        />,
+      ),
+    ).toMatch(
+      /role="alert">Could not load the job architecture\. Fictional failure\./,
+    );
+    expect(gradesInOrder(body).map((grade) => grade.code)).toEqual([
+      "FG1",
+      "FG2",
+    ]);
+  });
+
+  it("shows the switch, figures, band and summary to a holder, and Edit salary brackets only with write", async () => {
+    const off = view(holder);
+    expect(off).toContain(
+      '<input type="checkbox" role="switch"/>Show salary brackets',
+    );
+    expect(off).not.toContain("Minimum");
+    const markup = view(holder, published, { showBrackets: true, brackets });
+    expect(markup).toContain(
+      '<input type="checkbox" role="switch" checked=""/>Show salary brackets',
+    );
+    for (const header of [
+      "<th>Minimum (AED a month)</th>",
+      "<th>Midpoint (AED a month)</th>",
+      "<th>Maximum (AED a month)</th>",
+      "<th>Range</th>",
+    ])
+      expect(markup).toContain(header);
+    for (const figure of FIGURES) expect(markup).toContain(figure);
+    expect(markup).toContain(
+      'role="img" aria-label="AED 12,345 to AED 18,000, midpoint AED 15,000.50"',
+    );
+    expect(markup).toContain(
+      "Brackets in AED, monthly, basic salary only · effective 1 Jan 2027 · version 2",
+    );
+    expect(markup).toContain("Edit salary brackets");
+    expect(markup).toContain("Publish salary brackets");
+    expect(markup).toContain(
+      "A salary bracket draft is saved and not published yet.",
+    );
+    // The band is scaled to the highest maximum, with the midpoint marked.
+    expect(markup).toContain('style="left:65.625%;right:0%"');
+    expect(markup).toContain('style="left:81.25%"');
+    const readOnly = view(reader, published, { showBrackets: true, brackets });
+    expect(readOnly).toContain('role="switch"');
+    for (const figure of FIGURES) expect(readOnly).toContain(figure);
+    expect(readOnly).not.toContain("Edit salary brackets");
+    expect(readOnly).not.toContain("Publish salary brackets");
+    // The bracket columns are on the grades table only.
+    expect(
+      view(holder, published, { view: "titles", showBrackets: true, brackets }),
+    ).not.toContain("AED");
+    const { sent, request } = requests();
+    await loadSalaryBrackets(request, holder);
+    expect(sent).toEqual(["GET /api/v1/salary-brackets"]);
+  });
+
+  it("shows No bracket, the empty summary and the stale-draft note", () => {
+    const partial: BracketState = {
+      current: version(82, "published", ["FG1"]),
+      draft: version(83, "draft", ["FG1"]),
+    };
+    const markup = view(holder, published, {
+      showBrackets: true,
+      brackets: partial,
+    });
+    expect(markup).toContain(">No bracket</td>");
+    expect(markup).toContain(
+      "This draft was made for other job grades. Saving brackets makes a new draft.",
+    );
+    expect(markup).not.toContain("Publish salary brackets");
+    const none = view(holder, published, {
+      showBrackets: true,
+      brackets: { current: null, draft: null },
+    });
+    expect(none).toContain("No salary brackets are published yet.");
+    expect(none).not.toContain("Minimum");
+    const ungraded = view(
+      holder,
+      { current: null, draft: null },
+      { showBrackets: true, brackets: { current: null, draft: null } },
+    );
+    expect(ungraded).toContain(
+      "Publish a job architecture with at least one grade first.",
+    );
+    expect(ungraded).not.toContain("Edit salary brackets");
+  });
+
+  it("renders the bracket dialog with AED fixed, Monthly and Basic salary only by default", () => {
+    const values = bracketPrefill(gradesInOrder(body), {
+      current: null,
+      draft: null,
+    });
+    expect(values).toEqual({
+      payPeriod: "monthly",
+      covers: "basic",
+      effectiveFrom: "",
+      rows: [
+        { gradeCode: "FG1", minimum: "", midpoint: "", maximum: "" },
+        { gradeCode: "FG2", minimum: "", midpoint: "", maximum: "" },
+      ],
+    });
+    const markup = renderToStaticMarkup(
+      <SalaryBracketsForm values={values} grades={gradesInOrder(body)} />,
+    );
+    expect(markup).toContain(">Salary brackets</h2>");
+    expect(markup).toContain("<legend>Bracket settings</legend>");
+    expect(markup).toContain("<legend>Brackets</legend>");
+    expect(markup).toContain("<p>Currency: AED</p>");
+    expect(markup.match(/<select/g)).toHaveLength(2);
+    expect(markup).not.toMatch(/Currency<\/span><select/);
+    expect(markup).toMatch(
+      /<span>Pay period<\/span><select><option value="monthly" selected="">Monthly<\/option><option value="annual">Annual<\/option>/,
+    );
+    expect(markup).toMatch(
+      /<span>What the bracket covers<\/span><select><option value="basic" selected="">Basic salary only<\/option>/,
+    );
+    expect(markup).toContain(
+      '<span>Effective from</span><input type="date" aria-required="true"',
+    );
+    expect(markup).toContain(
+      '<span><span class="sr-only">FG1 </span>Minimum (AED)</span><input aria-required="true" inputMode="decimal"',
+    );
+    // A published version prefills, matched by code; a draft for the published grades wins.
+    expect(bracketPrefill(gradesInOrder(body), brackets).rows[0]).toEqual({
+      gradeCode: "FG1",
+      minimum: "12345",
+      midpoint: "15000.50",
+      maximum: "18000",
+    });
+  });
+
+  it("converts AED to fils by string arithmetic and refuses anything else", () => {
+    expect(aedToFils("15000")).toBe(1_500_000);
+    expect(aedToFils("15000.5")).toBe(1_500_050);
+    expect(aedToFils("15000.50")).toBe(1_500_050);
+    expect(aedToFils("0.01")).toBe(1);
+    expect(aedToFils("1000000000")).toBe(100_000_000_000);
+    for (const text of [
+      "1.234",
+      "-5",
+      "abc",
+      "0",
+      "1000000000.01",
+      "",
+      "1,000",
+    ])
+      expect(() => aedToFils(text), text).toThrow(AMOUNT_ERROR);
+    expect(AMOUNT_ERROR).toBe(
+      "Enter each amount in AED, such as 15000 or 15000.50, from 0.01 to 1,000,000,000.",
+    );
+    expect(filsToAed(1_500_000)).toBe("15,000");
+    expect(filsToAed(1_500_050)).toBe("15,000.50");
+    expect(filsToAed(1)).toBe("0.01");
+  });
+
+  it("refuses brackets out of order in plain words before any request", () => {
+    expect(BRACKET_ORDER_ERROR).toBe(
+      "The minimum must be at most the midpoint, and the midpoint at most the maximum.",
+    );
+    const row = (
+      gradeCode: string,
+      minimum: string,
+      midpoint: string,
+      maximum: string,
+    ) => ({ gradeCode, minimum, midpoint, maximum });
+    const minAbove = checkBracketRows([row("FG1", "16000", "15000", "18000")]);
+    expect(minAbove.error).toBe(`Grade FG1: ${BRACKET_ORDER_ERROR}`);
+    expect(minAbove.brackets).toEqual([]);
+    const midAbove = checkBracketRows([
+      row("FG1", "12000", "15000", "18000"),
+      row("FG2", "21000", "33000", "32000"),
+    ]);
+    expect(midAbove.error).toBe(`Grade FG2: ${BRACKET_ORDER_ERROR}`);
+    expect(checkBracketRows([row("FG1", "12000", "", "18000")]).error).toBe(
+      `Grade FG1: ${AMOUNT_ERROR}`,
+    );
+    expect(checkBracketRows([row("FG1", "12000", "15000.5", "18000")])).toEqual(
+      {
+        error: "",
+        brackets: [
+          {
+            gradeCode: "FG1",
+            minimumFils: 1_200_000,
+            midpointFils: 1_500_050,
+            maximumFils: 1_800_000,
+          },
+        ],
+      },
+    );
+    const markup = renderToStaticMarkup(
+      <SalaryBracketsForm
+        values={bracketPrefill(gradesInOrder(body), brackets)}
+        grades={gradesInOrder(body)}
+        error={midAbove.error}
+        newGrades
+      />,
+    );
+    expect(markup).toContain(
+      'role="alert">Grade FG2: The minimum must be at most the midpoint, and the midpoint at most the maximum.</p>',
+    );
+    expect(markup).toContain(
+      "Brackets follow the published job grades. Publish the job architecture first to add brackets for new grades.",
+    );
+  });
+
+  it("shows a plain member the published names only, read-only", () => {
+    for (const tab of ["grades", "titles", "families"] as const) {
+      const markup = view(member, withDraft, {
+        view: tab,
+        showBrackets: true,
+        brackets,
+      });
+      expect(markup).toContain("Published version 3");
+      for (const text of [
+        "Fictional Draft Grade",
+        "FG3",
+        "A draft is saved",
+        "Add ",
+        ">Edit<",
+        "Publish job architecture",
+        "Publish salary brackets",
+        'role="switch"',
+        "AED",
+      ])
+        expect(markup, `${tab}: ${text}`).not.toContain(text);
+    }
+    expect(view(member)).toContain("Fictional Senior");
+    expect(view(member, withDraft, { view: "titles" })).toContain(
+      '<td data-label="Job title">Fictional Payroll Lead</td><td data-label="Key">fictional-payroll-lead</td><td data-label="Family">Fictional Finance</td><td data-label="Grade">FG2 · Fictional Senior</td>',
+    );
+    expect(view(member, withDraft, { view: "families" })).toContain(
+      '<td data-label="Family">Fictional Finance</td><td data-label="Key">fictional-finance</td><td data-label="Job titles">1</td>',
+    );
+    const nothing = view(member, { current: null, draft: null });
+    expect(nothing).toContain("No job architecture is published yet.");
+    expect(nothing).not.toContain('role="tablist"');
+  });
+
+  it("shows an editor the draft with Publish, and Add job title only with a family and a grade", () => {
+    const markup = view(owner, withDraft);
+    expect(markup).toContain("Fictional Draft Grade");
+    expect(markup).toContain("A draft is saved and not published yet");
+    expect(markup).toContain("Publish job architecture");
+    const empty = view(
+      owner,
+      { current: null, draft: null },
+      { view: "titles" },
+    );
+    expect(empty).toContain("No job architecture is published yet.");
+    expect(empty).toContain(
+      '<button type="button" class="button secondary" disabled="" aria-describedby="job-add-hint">Add job title</button><p id="job-add-hint" class="muted">Add a job family and a job grade first.</p>',
+    );
+    expect(view(owner, published, { view: "titles" })).toContain(
+      '<button type="button" class="button secondary">Add job title</button>',
+    );
+    expect(view(owner, published, { view: "families" })).toContain(
+      "Add job family",
+    );
+  });
+
+  it("saves into the draft with PUT, or makes one with POST, and routes bracket saves the same way", async () => {
+    const put = requests();
+    await saveJobArchitecture(put.request, withDraft, body);
+    expect(put.sent).toEqual([`PUT /api/v1/job-architecture/${id(71)}`]);
+    const post = requests();
+    await saveJobArchitecture(post.request, published, body);
+    expect(post.sent).toEqual(["POST /api/v1/job-architecture"]);
+    const input = {
+      payPeriod: "monthly" as const,
+      covers: "basic" as const,
+      effectiveFrom: "2027-01-01",
+      brackets: brackets.current!.brackets,
+    };
+    const codes = ["FG1", "FG2"];
+    const cases: [BracketState, string][] = [
+      [brackets, `PUT /api/v1/salary-brackets/${id(81)}`],
+      [
+        { ...brackets, draft: version(84, "draft", ["FG1"]) },
+        "POST /api/v1/salary-brackets",
+      ],
+      [{ ...brackets, draft: null }, "POST /api/v1/salary-brackets"],
+    ];
+    for (const [state, expected] of cases) {
+      const { sent, request } = requests();
+      await saveSalaryBrackets(request, state, codes, input);
+      expect(sent).toEqual([expected]);
+    }
+  });
+
+  it("refuses a repeated grade code and a 201st grade before sending", () => {
+    const values = { name: "Fictional Lead", code: "FG1", order: "30" };
+    expect(gradeError(body, values, null)).toBe(
+      "Another grade already uses this code.",
+    );
+    const full: JobArchitectureBody = {
+      ...body,
+      grades: Array.from({ length: 200 }, (_, index) => ({
+        code: `FG${index + 1}`,
+        name: `Fictional Grade ${index + 1}`,
+        order: index + 1,
+      })),
+    };
+    expect(gradeError(full, { ...values, code: "FG999" }, null)).toBe(
+      "A job architecture holds at most 200 grades.",
+    );
+    expect(gradeError(body, { ...values, code: "FG3" }, null)).toBe("");
+    expect(
+      gradeError(body, { ...values, code: "FG3", order: "10" }, null),
+    ).toBe("Another grade already uses this order.");
+    expect(gradeError(body, { ...values, code: "fg3" }, null)).toContain(
+      "capital letters",
+    );
+    expect(gradeError(body, { ...values, code: "FG3", name: " " }, null)).toBe(
+      "Enter a name.",
+    );
+    expect(
+      gradeError(body, { ...values, code: "FG3", order: "1.5" }, null),
+    ).toBe("Enter the order as a whole number from 1 to 1000.");
+    // Editing keeps the code and may keep the grade's own order.
+    expect(gradeError(body, { ...values, order: "10" }, body.grades[1])).toBe(
+      "",
+    );
+  });
+
+  it("moves between the three sub-views with the arrow keys, Home and End", () => {
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/job-architecture-panel.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /role="tablist"\s+aria-label="Job architecture"\s+onKeyDown=\{tabKeys\}/,
+    );
+    const markup = view(owner);
+    const tablist = markup.slice(
+      markup.indexOf('role="tablist"'),
+      markup.indexOf('role="tabpanel"'),
+    );
+    expect(tablist.match(/role="tab"/g)).toHaveLength(3);
+    for (const label of [
+      "Job grades &amp; salary brackets",
+      "Job titles",
+      "Job families",
+    ])
+      expect(tablist).toContain(`>${label}</button>`);
+    expect(tablist.match(/aria-selected="true"/g)).toHaveLength(1);
+    expect(tablist.match(/tabindex="0"/g)).toHaveLength(1);
+    expect(tablist).toContain(
+      'id="job-tab-grades" aria-controls="job-panel-grades" tabindex="0" aria-selected="true"',
+    );
+    expect(markup).toContain(
+      'role="tabpanel" id="job-panel-grades" aria-labelledby="job-tab-grades"',
+    );
+    const clicked: string[] = [];
+    const doc = { activeElement: null as unknown };
+    const buttons = ["grades", "titles", "families"].map((key) => ({
+      key,
+      focus() {
+        doc.activeElement = this;
+      },
+      click() {
+        clicked.push(key);
+      },
+    }));
+    vi.stubGlobal("document", doc);
+    try {
+      const press = (key: string, from: number) => {
+        doc.activeElement = buttons[from];
+        const prevented = vi.fn();
+        tabKeys({
+          key,
+          currentTarget: { querySelectorAll: () => buttons },
+          preventDefault: prevented,
+        } as unknown as Parameters<typeof tabKeys>[0]);
+        return prevented.mock.calls.length;
+      };
+      expect(press("ArrowRight", 0)).toBe(1);
+      expect(press("ArrowRight", 2)).toBe(1);
+      expect(press("ArrowLeft", 0)).toBe(1);
+      expect(press("ArrowLeft", 2)).toBe(1);
+      expect(press("Home", 2)).toBe(1);
+      expect(press("Enter", 1)).toBe(0);
+      expect(press("End", 0)).toBe(1);
+      expect(clicked).toEqual([
+        "titles",
+        "grades",
+        "families",
+        "titles",
+        "grades",
+        "families",
+      ]);
+      expect(doc.activeElement).toBe(buttons[2]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

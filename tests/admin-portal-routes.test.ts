@@ -336,6 +336,7 @@ describe("Admin portal routes under the split runtime roles", () => {
             teamRole,
             companyLevel,
             teamArchived: false,
+            planAccess: { read: false, write: false },
             role: { name: role.name, membership: role.membership },
             scopes: ctx.scopes,
             pages: PAGE_KEYS.filter((page) => ctx.role!.pages.includes(page)),
@@ -350,6 +351,7 @@ describe("Admin portal routes under the split runtime roles", () => {
             "companyLevel",
             "fields",
             "pages",
+            "planAccess",
             "role",
             "scopes",
             "teamArchived",
@@ -371,6 +373,7 @@ describe("Admin portal routes under the split runtime roles", () => {
       expect(body.data).toMatchObject({
         teamRole: "recruiter",
         companyLevel: null,
+        planAccess: { read: false, write: false },
         role: { name: "Fictional narrowed recruiter", membership: "recruiter" },
         scopes: ctx.scopes,
         ...expectedAnswers(ctx),
@@ -389,6 +392,49 @@ describe("Admin portal routes under the split runtime roles", () => {
       );
       expect(plain.data.scopes).toContain("cvs:write");
       expect(plain.data.actions.candidates).toContain("edit");
+    });
+
+    // ADM-26: the database's allows_plan answers; the plan scopes come from the team role.
+    it("answers Plan & pay access for a company owner holding the grant only where their team role gives the plan scopes", async () => {
+      await superuser(
+        "UPDATE app.workspace_admins SET plan_access = true WHERE user_id = $1",
+        [owner.userId],
+      );
+      const inTeamB = await seedIdentity(await harness.asOwner(), {
+        userId: owner.userId,
+        teamId: teamOwnerB.teamId,
+        role: "recruiter",
+      });
+      try {
+        const asOwner = await get(meAccessRoute, owner, "/api/v1/me/access");
+        expect(asOwner.status).toBe(200);
+        expect(asOwner.body.data).toMatchObject({
+          teamRole: "owner",
+          companyLevel: "owner",
+          planAccess: { read: true, write: true },
+        });
+        const asRecruiter = await get(
+          meAccessRoute,
+          inTeamB,
+          "/api/v1/me/access",
+        );
+        expect(asRecruiter.status).toBe(200);
+        expect(asRecruiter.body.data).toMatchObject({
+          teamRole: "recruiter",
+          companyLevel: "owner",
+          planAccess: { read: false, write: false },
+        });
+        expect(asRecruiter.body.data.scopes).not.toContain("plans:read");
+      } finally {
+        await superuser(
+          "UPDATE app.workspace_admins SET plan_access = false WHERE user_id = $1",
+          [owner.userId],
+        );
+        await superuser(
+          "DELETE FROM auth.member WHERE user_id = $1 AND organization_id = $2",
+          [owner.userId, teamOwnerB.teamId],
+        );
+      }
     });
 
     it("holds no user, team, workspace, role, version or object id", async () => {

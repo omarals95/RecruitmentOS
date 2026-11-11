@@ -4099,3 +4099,44 @@ progress::-moz-progress-bar {
     width: auto;
   }
 }
+
+/* Job architecture (ADM-26): the salary bracket band, scaled to the version's highest maximum, with
+   the midpoint marked; theme variables only, so dark follows. */
+.bracket-band {
+  position: relative;
+  min-width: 120px;
+  height: 10px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+}
+.bracket-band-range {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  border-radius: 999px;
+}
+.bracket-band-midpoint {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 16px;
+  margin-left: -1px;
+  background: var(--primary);
+}
+.bracket-grade {
+  margin: 0;
+  font-size: 13px;
+}
+.bracket-amounts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 720px) {
+  .bracket-amounts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

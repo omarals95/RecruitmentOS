@@ -1197,13 +1197,13 @@ export function GET() {
   };
   // The Admin portal's reads (R2a-11): session only, no MCP tool and no API token access.
   const meAccessShape =
-    "{data:{teamRole, companyLevel, teamArchived, role:{name, membership}|null, scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit}}, adminAreas}}";
+    "{data:{teamRole, companyLevel, teamArchived, planAccess:{read, write}, role:{name, membership}|null, scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit}}, adminAreas}}";
   paths["/api/v1/me/access"] = {
     get: operation(
       [],
       {
         summary: "Read your own access",
-        description: `Session only: any signed-in member of the team; Bearer tokens get 403 session_required. Returns only your own access in the active team, as the server decides it: teamRole (your team role), companyLevel (owner, admin or null), teamArchived (true when the active team is archived: your scopes then hold only read scopes, and every write gets 403 team_archived), role (the name and membership of your role: the built-in template of your team role or the configured role assigned to you; null when no role applies, and then pages, actions and fields are empty), scopes (your effective scopes), pages, actions (the allowed actions per resource; a resource with none is left out), fields (the field rules of each record kind you may view) and adminAreas (the company areas you hold). It holds no user, team, workspace, role, version or configuration object id and no configuration body. Nothing is audited. Returns ${meAccessShape}.`,
+        description: `Session only: any signed-in member of the team; Bearer tokens get 403 session_required. Returns only your own access in the active team, as the server decides it: teamRole (your team role), companyLevel (owner, admin or null), teamArchived (true when the active team is archived: your scopes then hold only read scopes, and every write gets 403 team_archived), planAccess (the Plan & pay access answer for the active team, from the database's tenant_context.allows_plan: read is true only with the per-person grant and plans:read, write only with the grant and plans:write; both are false without a company level, with no statement run; it carries no figure, version, pay period or coverage), role (the name and membership of your role: the built-in template of your team role or the configured role assigned to you; null when no role applies, and then pages, actions and fields are empty), scopes (your effective scopes), pages, actions (the allowed actions per resource; a resource with none is left out), fields (the field rules of each record kind you may view) and adminAreas (the company areas you hold). It holds no user, team, workspace, role, version or configuration object id and no configuration body. Nothing is audited. Returns ${meAccessShape}.`,
       },
       { "200": { description: meAccessShape } },
       { sessionOnly: true },
