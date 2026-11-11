@@ -2,11 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { HardDrive } from "lucide-react";
-import {
-  requestJson,
-  useApi,
-  useWorkspace,
-} from "@/components/workspace/client";
+import { requestJson, useApi, useTeamId } from "@/components/workspace/client";
 
 export type StorageSettingsData = {
   maxBytes: number | null;
@@ -31,6 +27,20 @@ const MIN_BYTES = 1_000_000;
 const MAX_BYTES = 10_000_000_000_000;
 const MAX_FILES = 1_000_000;
 const MAX_RATE = 600;
+const STORAGE_SETTINGS_PATH = "/api/v1/teams/storage-settings";
+type StorageSettingsInput = Omit<StorageSettingsData, "usage">;
+
+/** Saves one team's CV storage settings, naming that team. */
+export function saveStorageSettings(
+  teamId: string,
+  input: StorageSettingsInput,
+) {
+  return requestJson<{ data: StorageSettingsData }>(
+    teamId,
+    STORAGE_SETTINGS_PATH,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+}
 
 /**
  * Decimal bytes for an amount in MB or GB (1 MB = 1,000,000 bytes) with at most 3 decimal places,
@@ -87,12 +97,7 @@ export function StorageSettingsForm({
   /** Any page action is running; saving is this form's own save. */
   busy: boolean;
   saving?: boolean;
-  onSave: (input: {
-    maxBytes: number | null;
-    maxFiles: number | null;
-    uploadRequestsPerMinute: number | null;
-    mcpCvTextEnabled: boolean;
-  }) => void;
+  onSave: (input: StorageSettingsInput) => void;
 }) {
   const saved =
     settings.maxBytes === null ? undefined : savedAmount(settings.maxBytes);
@@ -272,7 +277,7 @@ export function StorageSettingsForm({
 
 /**
  * Owner and admin only: the team's CV storage limit, upload rate limit, whether connected AI apps can
- * read CV contents, and current usage.
+ * read CV contents, and current usage, for the team of useTeamId (the team detail page's team).
  */
 export function StorageSettings({
   busy,
@@ -285,9 +290,10 @@ export function StorageSettings({
     message: string,
   ) => Promise<void>;
 }) {
-  const { team } = useWorkspace();
-  const path = "/api/v1/teams/storage-settings";
-  const current = useApi<{ data: StorageSettingsData }>(team ? path : null);
+  const teamId = useTeamId();
+  const current = useApi<{ data: StorageSettingsData }>(
+    teamId ? STORAGE_SETTINGS_PATH : null,
+  );
   const settings = current.data?.data;
   return (
     <section className="panel" id="cv-storage">
@@ -307,7 +313,7 @@ export function StorageSettings({
         <p className="notice error" role="alert">
           Could not load CV storage settings. {current.error}
         </p>
-      ) : !settings || !team ? (
+      ) : !settings || !teamId ? (
         <p role="status">Loading CV storage settings…</p>
       ) : (
         <StorageSettingsForm
@@ -319,13 +325,7 @@ export function StorageSettings({
             void onAction(
               "storage",
               async () => {
-                current.setData(
-                  await requestJson<{ data: StorageSettingsData }>(
-                    team.id,
-                    path,
-                    { method: "PUT", body: JSON.stringify(input) },
-                  ),
-                );
+                current.setData(await saveStorageSettings(teamId, input));
               },
               "CV storage settings saved.",
             )

@@ -710,16 +710,22 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
     </div>
   );
 }
-export function ActivityScreen() {
-  const { team } = useWorkspace();
+type ActivityPage = {
+  data: ActivityItem[];
+  pagination: { total: number; totalPages: number };
+};
+/** The activity feed's search, record type and page, and its read of the active or TeamScope team. */
+function useActivity() {
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState("");
   const [page, setPage] = useState(1);
-  const result = useApi<{
-    data: ActivityItem[];
-    pagination: { total: number; totalPages: number };
-  }>(activityPath(page, search, kind));
-  useReadyTiming("tab.activity", !!result.data);
+  const result = useApi<ActivityPage>(activityPath(page, search, kind));
+  return { search, setSearch, kind, setKind, page, setPage, result };
+}
+export function ActivityScreen() {
+  const { team } = useWorkspace();
+  const activity = useActivity();
+  useReadyTiming("tab.activity", !!activity.result.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -731,117 +737,136 @@ export function ActivityScreen() {
             A traceable record of changes across your recruitment workspace.
           </p>
         </div>
-        <button className="button secondary" onClick={result.refresh}>
+        <button className="button secondary" onClick={activity.result.refresh}>
           <RefreshCw size={16} aria-hidden="true" />
           Refresh
         </button>
       </div>
-      <section className="panel">
-        <div className="records-toolbar">
-          <div className="search-field">
-            <Search size={18} aria-hidden="true" />
-            <input
-              aria-label="Search activity"
-              placeholder="Search activity…"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
-              }}
-            />
-          </div>
-          <select
-            aria-label="Filter activity by record type"
-            value={kind}
+      <ActivityPanel {...activity} />
+    </div>
+  );
+}
+/** The team detail Activity tab: the same feed as /app/activity, for the TeamScope's team. */
+export function ActivityList() {
+  const activity = useActivity();
+  return <ActivityPanel heading="Activity" {...activity} />;
+}
+/** The activity feed with its search, record-type filter and paging, 50 events a page. */
+function ActivityPanel({
+  heading,
+  search,
+  setSearch,
+  kind,
+  setKind,
+  page,
+  setPage,
+  result,
+}: ReturnType<typeof useActivity> & { heading?: string }) {
+  return (
+    <section className="panel">
+      {heading && <h2>{heading}</h2>}
+      <div className="records-toolbar">
+        <div className="search-field">
+          <Search size={18} aria-hidden="true" />
+          <input
+            aria-label="Search activity"
+            placeholder="Search activity…"
+            value={search}
             onChange={(e) => {
-              setKind(e.target.value);
+              setSearch(e.target.value);
               setPage(1);
             }}
-          >
-            <option value="">All record types</option>
-            {[
-              "candidate",
-              "vacancy",
-              "application",
-              "task",
-              "interview",
-              "offer",
-              "onboarding",
-              "checklist",
-              "comment",
-              "export",
-            ].map((item) => (
-              <option key={item}>{item}</option>
-            ))}
-          </select>
-        </div>
-        {result.error ? (
-          <LoadError message={result.error} retry={result.refresh} />
-        ) : result.loading ? (
-          <Loading />
-        ) : result.data?.data.length ? (
-          <div className="activity-feed">
-            {result.data.data.map((item) => (
-              <article key={item.id}>
-                <span className="activity-icon">
-                  <Activity size={18} aria-hidden="true" />
-                </span>
-                <div>
-                  <p>
-                    <strong>{item.actorName || item.actorType}</strong>
-                    <span className="badge">{item.kind}</span>
-                  </p>
-                  <h3>{item.summary}</h3>
-                  <p className="muted">
-                    {formatDate(item.createdAt, true)} · {item.actorType}
-                    {item.action === "import"
-                      ? " · Imported source record"
-                      : ""}
-                  </p>
-                  {item.metadata.fromStage && item.metadata.toStage ? (
-                    <p>
-                      <Badge value={item.metadata.fromStage} /> →{" "}
-                      <Badge value={item.metadata.toStage} />
-                    </p>
-                  ) : null}
-                  {item.metadata.fromStatus && item.metadata.toStatus ? (
-                    <p>
-                      <Badge value={item.metadata.fromStatus} /> →{" "}
-                      <Badge value={item.metadata.toStatus} />
-                    </p>
-                  ) : null}
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="Your team’s story starts here"
-            description="Saved changes and workflow updates appear in this audit trail."
           />
-        )}
-        <div className="pagination">
-          <span>{result.data?.pagination.total || 0} events</span>
-          <div className="row">
-            <button
-              className="button secondary small"
-              disabled={page === 1}
-              onClick={() => setPage((n) => n - 1)}
-            >
-              Previous
-            </button>
-            <span>Page {page}</span>
-            <button
-              className="button secondary small"
-              disabled={page >= (result.data?.pagination.totalPages || 1)}
-              onClick={() => setPage((n) => n + 1)}
-            >
-              Next
-            </button>
-          </div>
         </div>
-      </section>
-    </div>
+        <select
+          aria-label="Filter activity by record type"
+          value={kind}
+          onChange={(e) => {
+            setKind(e.target.value);
+            setPage(1);
+          }}
+        >
+          <option value="">All record types</option>
+          {[
+            "candidate",
+            "vacancy",
+            "application",
+            "task",
+            "interview",
+            "offer",
+            "onboarding",
+            "checklist",
+            "comment",
+            "export",
+          ].map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </div>
+      {result.error ? (
+        <LoadError message={result.error} retry={result.refresh} />
+      ) : result.loading ? (
+        <Loading />
+      ) : result.data?.data.length ? (
+        <div className="activity-feed">
+          {result.data.data.map((item) => (
+            <article key={item.id}>
+              <span className="activity-icon">
+                <Activity size={18} aria-hidden="true" />
+              </span>
+              <div>
+                <p>
+                  <strong>{item.actorName || item.actorType}</strong>
+                  <span className="badge">{item.kind}</span>
+                </p>
+                <h3>{item.summary}</h3>
+                <p className="muted">
+                  {formatDate(item.createdAt, true)} · {item.actorType}
+                  {item.action === "import" ? " · Imported source record" : ""}
+                </p>
+                {item.metadata.fromStage && item.metadata.toStage ? (
+                  <p>
+                    <Badge value={item.metadata.fromStage} /> →{" "}
+                    <Badge value={item.metadata.toStage} />
+                  </p>
+                ) : null}
+                {item.metadata.fromStatus && item.metadata.toStatus ? (
+                  <p>
+                    <Badge value={item.metadata.fromStatus} /> →{" "}
+                    <Badge value={item.metadata.toStatus} />
+                  </p>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          title="Your team’s story starts here"
+          description="Saved changes and workflow updates appear in this audit trail."
+        />
+      )}
+      <div className="pagination">
+        <span>{result.data?.pagination.total || 0} events</span>
+        <div className="row">
+          <button
+            className="button secondary small"
+            disabled={page === 1}
+            onClick={() => setPage((n) => n - 1)}
+          >
+            Previous
+          </button>
+          <span>Page {page}</span>
+          <button
+            className="button secondary small"
+            disabled={page >= (result.data?.pagination.totalPages || 1)}
+            onClick={() => setPage((n) => n + 1)}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 interface NotificationItem {

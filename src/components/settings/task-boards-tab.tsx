@@ -19,7 +19,7 @@ import {
   humanError,
   requestJson,
   useApi,
-  useWorkspace,
+  useTeamId,
 } from "@/components/workspace/client";
 import { ReferencePicker } from "@/components/workspace/editor";
 import { dataOf, recordLabel } from "@/components/workspace/helpers";
@@ -90,6 +90,33 @@ function bucketName(id: string, buckets: RecordDto[]) {
   return bucket ? recordLabel(bucket) : "A bucket that is no longer active";
 }
 
+/** The task-board writes, each naming one team. */
+export function taskBoardRequests(teamId: string | null) {
+  return {
+    create: (key: string, body: TaskBoardBody) =>
+      requestJson<{ data: { versionId: string } }>(
+        teamId,
+        "/api/v1/task-boards",
+        { method: "POST", body: JSON.stringify({ key, body }) },
+      ),
+    update: (versionId: string, body: TaskBoardBody) =>
+      requestJson(teamId, `/api/v1/task-boards/${versionId}`, {
+        method: "PUT",
+        body: JSON.stringify({ body }),
+      }),
+    publish: (versionId: string) =>
+      requestJson<{ data: { number: number } }>(
+        teamId,
+        `/api/v1/task-boards/${versionId}/publish`,
+        { method: "POST" },
+      ),
+    retire: (boardId: string) =>
+      requestJson(teamId, `/api/v1/task-boards/${boardId}`, {
+        method: "DELETE",
+      }),
+  };
+}
+
 type Open = {
   /** Null for a new board, whose key comes from its name. */
   versionId: string | null;
@@ -97,10 +124,13 @@ type Open = {
   body: TaskBoardBody | null;
 };
 
-/** The Task boards tab: the built-in All buckets board and this team's own boards. */
+/**
+ * The team detail Task boards tab: the built-in All buckets board and the own boards of the team of
+ * useTeamId.
+ */
 export function TaskBoardsTab() {
-  const { team } = useWorkspace();
-  const teamId = team?.id ?? null;
+  const teamId = useTeamId();
+  const requests = taskBoardRequests(teamId);
   const boards = useApi<{ data: ConfigObject[] }>(teamId ? BOARDS_PATH : null);
   const buckets = useApi<{ data: RecordDto[] }>(teamId ? BUCKETS_PATH : null);
   const fields = useApi<{ data: RecordDto[] }>(
@@ -156,14 +186,8 @@ export function TaskBoardsTab() {
     const saved = await run(
       () =>
         open?.versionId
-          ? requestJson(teamId, `/api/v1/task-boards/${open.versionId}`, {
-              method: "PUT",
-              body: JSON.stringify({ body }),
-            })
-          : requestJson(teamId, "/api/v1/task-boards", {
-              method: "POST",
-              body: JSON.stringify({ key, body }),
-            }),
+          ? requests.update(open.versionId, body)
+          : requests.create(key, body),
       setFormError,
     );
     if (saved) {
@@ -177,15 +201,7 @@ export function TaskBoardsTab() {
     const body = board.current?.body as TaskBoardBody | undefined;
     if (!body) return;
     const created = await run(
-      () =>
-        requestJson<{ data: { versionId: string } }>(
-          teamId,
-          "/api/v1/task-boards",
-          {
-            method: "POST",
-            body: JSON.stringify({ key: board.key, body }),
-          },
-        ),
+      () => requests.create(board.key, body),
       (message) => setRowError({ id: board.id, message }),
     );
     if (created)
@@ -195,12 +211,7 @@ export function TaskBoardsTab() {
     if (!board.draft) return;
     const versionId = board.draft.id;
     const published = await run(
-      () =>
-        requestJson<{ data: { number: number } }>(
-          teamId,
-          `/api/v1/task-boards/${versionId}/publish`,
-          { method: "POST" },
-        ),
+      () => requests.publish(versionId),
       (message) => setRowError({ id: board.id, message }),
     );
     if (published) {
@@ -221,10 +232,7 @@ export function TaskBoardsTab() {
     )
       return;
     const retired = await run(
-      () =>
-        requestJson(teamId, `/api/v1/task-boards/${board.id}`, {
-          method: "DELETE",
-        }),
+      () => requests.retire(board.id),
       (message) => setRowError({ id: board.id, message }),
     );
     if (retired) {

@@ -22,7 +22,6 @@ import {
 import { DirectoryTab } from "./directory-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
-import { TaskBoardsTab } from "./task-boards-tab";
 import { TeamsTab } from "./teams-tab";
 import { UsersTab } from "./users-tab";
 
@@ -79,41 +78,11 @@ const accessActions: Record<string, string> = {
 };
 const plain = (labels: Record<string, string>, value: string) =>
   Object.hasOwn(labels, value) ? labels[value] : value;
-type TeamTabKey = Exclude<
-  AdminTabKey,
-  | "users"
-  | "teams"
-  | "roles"
-  | "organisation"
-  | "directory"
-  | "history"
-  | "task-boards"
->;
-// The panel texts are the page descriptions of ADMIN_TABS, which the Admin home cards also show.
-const teamPanels: Record<
-  TeamTabKey,
-  { title: string; href: string; link: string }
-> = {
-  members: {
-    title: "Members",
-    href: "/app/settings/team",
-    link: "Open Team & access",
-  },
-  "cv-storage": {
-    title: "CV storage",
-    href: "/app/settings/team#cv-storage",
-    link: "Open CV storage settings",
-  },
-  speed: {
-    title: "Speed",
-    href: "/app/settings/speed",
-    link: "Open Speed",
-  },
-  tokens: {
-    title: "API tokens",
-    href: "/app/settings/api-tokens",
-    link: "Open API tokens",
-  },
+// The one team page left in the table; its panel text is its page description, as on its card.
+const tokensPanel = {
+  title: "API tokens",
+  href: "/app/settings/api-tokens",
+  link: "Open API tokens",
 };
 
 /**
@@ -216,10 +185,8 @@ export function AdminPortalView({
               <OrganisationTab access={access} />
             ) : current.key === "directory" ? (
               <DirectoryTab access={access} />
-            ) : current.key === "task-boards" ? (
-              <TaskBoardsTab />
             ) : (
-              <TeamPanel tab={current.key} text={current.description} />
+              <TokensPanel text={current.description} />
             )}
           </div>
         </div>
@@ -309,15 +276,14 @@ function NoAccess({ text }: { text: string }) {
   );
 }
 
-/** Team tabs link to the existing settings pages, which keep their own guards. */
-function TeamPanel({ tab, text }: { tab: TeamTabKey; text: string }) {
-  const panel = teamPanels[tab];
+/** API tokens links to the existing settings page, which keeps its own guards. */
+function TokensPanel({ text }: { text: string }) {
   return (
     <section className="panel">
-      <h2>{panel.title}</h2>
+      <h2>{tokensPanel.title}</h2>
       <p>{text}</p>
-      <Link href={panel.href} className="button">
-        {panel.link}
+      <Link href={tokensPanel.href} className="button">
+        {tokensPanel.link}
       </Link>
     </section>
   );

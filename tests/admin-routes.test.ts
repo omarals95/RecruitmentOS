@@ -86,13 +86,8 @@ const COMPANY = "00000000-0000-4000-a000-000000000001";
 const DETAIL = "teams/[team]/page.tsx";
 const ADMIN_DIR = join(process.cwd(), "src/app/app/admin");
 const KEYS = ADMIN_TABS.map((tab) => tab.key);
-const TEAM_PAGES: AdminTabKey[] = [
-  "members",
-  "cv-storage",
-  "speed",
-  "task-boards",
-  "tokens",
-];
+// The four old team pages redirect to team detail tabs (tests/admin-redirects.test.ts).
+const TEAM_PAGES: AdminTabKey[] = ["tokens"];
 const workspace = {
   user: {
     id: "fictional-route-user",
@@ -137,13 +132,14 @@ type Page = (props: {
 
 /**
  * Calls the page file's default export as Next would, for one caller and one key; the team detail
- * page gets `team` (team A unless named) as its params.
+ * page gets `team` (team A unless named) as its params and `tab`, when named, as `?tab=`.
  */
 async function open(
   caller: Caller,
   page: string,
   key: AdminTabKey | "fictional" | null,
   team = "route-team-a",
+  tab?: string,
 ): Promise<Outcome> {
   request.headers = new Headers(
     caller.kind === "bearer"
@@ -165,9 +161,10 @@ async function open(
         : page === DETAIL
           ? { team }
           : {};
+    const search: Record<string, string> = tab === undefined ? {} : { tab };
     element = await render({
       params: Promise.resolve(params),
-      searchParams: Promise.resolve({}),
+      searchParams: Promise.resolve(search),
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -189,7 +186,7 @@ async function open(
     // The team in the URL, as the server read it; the page sends nothing about any other team.
     expect(result.props).toMatchObject({
       team: { id: team, name: "Fictional Test Team" },
-      tab: "members",
+      tab: tab ?? "members",
     });
     expect(["owner", "admin"]).toContain(result.props.role);
     expect(markup).toContain("<h2>Fictional Test Team</h2>");
@@ -470,45 +467,56 @@ describe("admin pages check access on the server (TST-002)", () => {
 
   // ADM-03: the team detail page opens only through the team role in that team (architecture
   // §14.2); company authority outside the team gets the plain not-a-member state (TST-005).
-  it("opens team detail for the team's owners and admins only, and tells company authority outside the team it is not a member", async () => {
+  // ADM-04 (job 075): every tab, the new ones included, opens through the same one check.
+  it("opens team detail for the team's owners and admins only, and tells company authority outside the team it is not a member, on every tab", async () => {
     // Caller, team in the URL, outcome, and the team its one access check ran in.
     const A = "route-team-a";
     const B = "route-team-b";
-    for (const [name, team, outcome, checked] of [
-      ["anonymous", A, "sign-in", null],
-      ["bearer", A, "sign-in", null],
-      ["team A owner", A, "allowed", A],
-      ["team admin", A, "allowed", A],
-      ["company owner and team owner", A, "allowed", A],
-      ["team owner", A, "refused", B],
-      ["recruiter", A, "refused", A],
-      ["viewer", A, "refused", A],
-      ["company owner as recruiter", B, "refused", B],
-      ["company admin", A, "not-a-member", B],
-      ["company admin with organisation", A, "not-a-member", B],
-      ["company owner and team owner", "route-team-c", "not-a-member", A],
-      ["no team", A, "refused", null],
-      [
-        "company owner and team owner",
-        "fictional-made-up-team",
-        "not-a-member",
-        A,
-      ],
-      ["team owner", "fictional-made-up-team", "refused", B],
-    ] as const) {
-      vi.mocked(withTeam).mockClear();
-      const label = `${name} on ${team}`;
-      expect(await open(callers[name], DETAIL, "teams", team), label).toBe(
-        outcome,
-      );
-      // A member is checked in the team of the URL, anyone else in their active team.
-      expect(withTeam, label).toHaveBeenCalledTimes(checked ? 1 : 0);
-      if (checked)
-        expect(vi.mocked(withTeam).mock.calls[0][0], label).toMatchObject({
-          teamId: checked,
-          authType: "session",
-        });
-    }
+    for (const tab of [
+      undefined,
+      "members",
+      "settings",
+      "cv-storage",
+      "speed",
+      "task-boards",
+      "activity",
+    ])
+      for (const [name, team, outcome, checked] of [
+        ["anonymous", A, "sign-in", null],
+        ["bearer", A, "sign-in", null],
+        ["team A owner", A, "allowed", A],
+        ["team admin", A, "allowed", A],
+        ["company owner and team owner", A, "allowed", A],
+        ["team owner", A, "refused", B],
+        ["recruiter", A, "refused", A],
+        ["viewer", A, "refused", A],
+        ["company owner as recruiter", B, "refused", B],
+        ["company admin", A, "not-a-member", B],
+        ["company admin with organisation", A, "not-a-member", B],
+        ["company owner and team owner", "route-team-c", "not-a-member", A],
+        ["no team", A, "refused", null],
+        [
+          "company owner and team owner",
+          "fictional-made-up-team",
+          "not-a-member",
+          A,
+        ],
+        ["team owner", "fictional-made-up-team", "refused", B],
+      ] as const) {
+        vi.mocked(withTeam).mockClear();
+        const label = `${name} on ${team} ?tab=${tab ?? ""}`;
+        expect(
+          await open(callers[name], DETAIL, "teams", team, tab),
+          label,
+        ).toBe(outcome);
+        // A member is checked in the team of the URL, anyone else in their active team.
+        expect(withTeam, label).toHaveBeenCalledTimes(checked ? 1 : 0);
+        if (checked)
+          expect(vi.mocked(withTeam).mock.calls[0][0], label).toMatchObject({
+            teamId: checked,
+            authType: "session",
+          });
+      }
     expect(authenticateApiToken).not.toHaveBeenCalled();
     expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });

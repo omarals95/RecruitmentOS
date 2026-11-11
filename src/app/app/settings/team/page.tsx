@@ -1,4 +1,6 @@
 import { TeamSettings } from "@/components/settings/team-settings";
-export default function TeamSettingsPage() {
+import { redirectToTeamTab } from "@/lib/admin-access";
+export default async function TeamSettingsPage() {
+  await redirectToTeamTab("members");
   return <TeamSettings />;
 }

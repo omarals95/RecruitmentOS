@@ -21,7 +21,7 @@ function slugFor(value: string) {
     .slice(0, 70);
 }
 const BOOTSTRAP_FAILED =
-  "Your team was created, but default task buckets could not be prepared. Select the team and use “Prepare task board” to retry.";
+  "Your team was created, but default task buckets could not be prepared. Open Admin portal > Teams > the team > Settings and use “Prepare task board” to retry.";
 
 /**
  * Create a team, on Admin > Teams and in Team & access: only when canCreateTeam allows it, through

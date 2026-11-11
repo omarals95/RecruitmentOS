@@ -1,19 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Building2, RefreshCw, Users } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import {
   clearWorkspaceCache,
   humanError,
-  requestJson,
   useApi,
   useWorkspace,
 } from "@/components/workspace/client";
 import type { MeAccess } from "./admin-portal";
 import { CreateTeam, ensure } from "./create-team";
-import { SettingsNavigation } from "./settings-navigation";
-import { StorageSettings } from "./storage-settings";
+import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
 import { roleDescriptions, TeamMembers, type TeamRole } from "./team-members";
 
 interface TeamSummary {
@@ -22,6 +20,11 @@ interface TeamSummary {
   slug: string;
 }
 
+/**
+ * Team & access for people who are not an owner or admin of the current team, and for creating a
+ * first team: the server sends owners and admins to the team detail page, which holds the rename,
+ * Prepare task board and CV storage.
+ */
 export function TeamSettings() {
   const { team } = useWorkspace();
   return <TeamSettingsContent key={team?.id ?? "no-team"} />;
@@ -34,8 +37,7 @@ function TeamSettingsContent() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [teamName, setTeamName] = useState(team?.name || "");
-  const canAdmin = role === "owner" || role === "admin";
+  const adminPortal = useAdminPortalLink();
   // The company level decides whether the members list shows the Configured role column.
   const me = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
   const load = useCallback(async () => {
@@ -100,22 +102,6 @@ function TeamSettingsContent() {
       "Team selected.",
     );
   }
-  async function renameTeam(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!team) return;
-    await action(
-      "rename",
-      async () => {
-        const result = await authClient.organization.update({
-          organizationId: team.id,
-          data: { name: teamName.trim() },
-        });
-        ensure(result);
-        window.location.reload();
-      },
-      "Team name updated.",
-    );
-  }
   return (
     <div className="stack settings-page">
       <header className="page-heading">
@@ -129,7 +115,7 @@ function TeamSettingsContent() {
         </div>
         <Users size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation active="team" role={role} />
+      <SettingsNavigation adminPortal={adminPortal} />
       {error && (
         <div className="notice error" role="alert">
           {error} Your unsaved fields are retained.
@@ -210,60 +196,16 @@ function TeamSettingsContent() {
                 ? roleDescriptions[role as TeamRole]
                 : ""}
             </p>
-            {canAdmin ? (
-              <form className="stack" onSubmit={renameTeam}>
-                <label className="field">
-                  <span>Team name</span>
-                  <input
-                    required
-                    maxLength={100}
-                    value={teamName}
-                    onChange={(e) => setTeamName(e.target.value)}
-                  />
-                </label>
-                <div className="row">
-                  <button
-                    type="submit"
-                    className="button"
-                    disabled={!!busy || teamName.trim() === team.name}
-                  >
-                    {busy === "rename" ? "Saving…" : "Save team name"}
-                  </button>
-                  <button
-                    type="button"
-                    className="button secondary"
-                    disabled={!!busy}
-                    onClick={() =>
-                      void action(
-                        "bootstrap",
-                        async () => {
-                          await requestJson(
-                            team.id,
-                            "/api/v1/teams/bootstrap",
-                            { method: "POST" },
-                          );
-                        },
-                        "Task board prepared. Existing tasks and buckets were kept.",
-                      )
-                    }
-                  >
-                    Prepare task board
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <p>
-                You can view team membership. An owner or admin can change
-                access and invitations.
-              </p>
-            )}
+            <p>
+              You can view team membership. An owner or admin can change access
+              and invitations.
+            </p>
           </section>
           <TeamMembers
             team={team}
             role={role}
             companyLevel={me.data?.data.companyLevel ?? null}
           />
-          {canAdmin && <StorageSettings busy={busy} onAction={action} />}
         </>
       )}
       <CreateTeam

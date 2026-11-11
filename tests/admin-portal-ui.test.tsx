@@ -5,8 +5,36 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: () => {}, push: () => {}, refresh: () => {} }),
 }));
+// ADM-04 (job 075): every read a rendered component starts, with the cache and team it reads
+// from, since a static render never subscribes.
+const reads = vi.hoisted(
+  () =>
+    [] as {
+      path: string;
+      scope: ReturnType<
+        typeof import("../src/components/workspace/client").useQueryScope
+      >;
+    }[],
+);
+vi.mock("../src/components/workspace/client", async (original) => {
+  const actual =
+    await original<typeof import("../src/components/workspace/client")>();
+  return {
+    ...actual,
+    useApi: (path: string | null) => {
+      const scope = actual.useQueryScope();
+      if (path) reads.push({ path, scope });
+      return actual.useApi(path);
+    },
+  };
+});
 
-import { WorkspaceProvider } from "../src/components/workspace/client";
+import {
+  clearWorkspaceCache,
+  dataCache,
+  TeamScope,
+  WorkspaceProvider,
+} from "../src/components/workspace/client";
 import {
   ADMIN_GROUPS,
   ADMIN_TABS,
@@ -39,6 +67,7 @@ import {
   TaskBoardForm,
   TaskBoardsList,
   taskBoardRefusal,
+  taskBoardRequests,
 } from "../src/components/settings/task-boards-tab";
 import {
   ADMIN_ROLE,
@@ -71,6 +100,19 @@ import {
   TeamDetailPortal,
   type TeamDetailProps,
 } from "../src/components/settings/team-detail";
+import {
+  TEAM_DETAIL_TABS,
+  teamDetailTab,
+} from "../src/components/settings/team-detail-tabs";
+import { saveStorageSettings } from "../src/components/settings/storage-settings";
+import {
+  canOpenAdminPortal,
+  SettingsNavigation,
+} from "../src/components/settings/settings-navigation";
+import {
+  ActivityList,
+  ActivityScreen,
+} from "../src/components/workspace/overview";
 import {
   MembersTable,
   TeamMembers,
@@ -106,7 +148,9 @@ const workspace = {
 };
 const TEAM_ROLES = ["owner", "admin", "recruiter", "viewer"] as const;
 const COMPANY_LEVELS = ["owner", "admin", null] as const;
-const TEAM_TABS = ["members", "cv-storage", "speed", "task-boards", "tokens"];
+const TEAM_TABS = ["tokens"];
+// ADM-04 (job 075): the old team pages live only as team detail tabs now.
+const OLD_TEAM_KEYS = ["members", "cv-storage", "speed", "task-boards"];
 const NOT_YET = [
   "Fields",
   "Screens",
@@ -204,7 +248,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the eleven pages that exist, by group, in order", () => {
+  it("defines exactly the seven pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -218,10 +262,6 @@ describe("admin portal tabs", () => {
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label, tab.group])).toEqual([
       ["users", "Users", "People"],
       ["teams", "Teams", "People"],
-      ["members", "Members", "People"],
-      ["cv-storage", "CV storage", "People"],
-      ["speed", "Speed", "People"],
-      ["task-boards", "Task boards", "People"],
       ["organisation", "Organisation", "People"],
       ["directory", "Directory", "People"],
       ["roles", "Roles & permissions", "Access"],
@@ -301,10 +341,6 @@ describe("admin portal tabs", () => {
                 companyLevel === "owner" ||
                 (companyLevel === "admin" && adminAreas.includes("people")),
               teams: team || companyLevel !== null,
-              members: team,
-              "cv-storage": team,
-              speed: team,
-              "task-boards": team,
               tokens: team,
               organisation:
                 companyLevel === "owner" ||
@@ -325,6 +361,11 @@ describe("admin portal tabs", () => {
                 ADMIN_TABS.filter((row) => row.key === tab.key),
                 label,
               ).toEqual([tab]);
+            for (const key of OLD_TEAM_KEYS)
+              expect(
+                tabs.map((tab) => tab.key as string),
+                label,
+              ).not.toContain(key);
           }
   });
 });
@@ -412,14 +453,21 @@ describe("admin home", () => {
     }
   });
 
-  it("gives the team panels the same description as their home card", () => {
+  it("gives the API tokens panel the same description as its home card", () => {
     const markup = render(null, access("owner", null));
-    for (const key of ["members", "cv-storage", "speed", "tokens"] as const) {
-      const text = ADMIN_TABS.find((tab) => tab.key === key)!.description;
-      const panel = render(key, access("owner", null));
-      const escaped = text.replaceAll("'", "&#x27;");
-      expect(markup, key).toContain(escaped);
-      expect(panel, key).toContain(`<p>${escaped}</p>`);
+    const text = ADMIN_TABS.find((tab) => tab.key === "tokens")!.description;
+    const panel = render("tokens", access("owner", null));
+    expect(markup).toContain(text);
+    expect(panel).toContain(`<p>${text}</p>`);
+  });
+
+  it("shows no Members, CV storage, Speed or Task boards card or link", () => {
+    for (const [name, value] of callers) {
+      const markup = render(null, value);
+      for (const key of OLD_TEAM_KEYS)
+        expect(markup, `${name}: ${key}`).not.toContain(`/app/admin/${key}"`);
+      for (const label of ["Members", "CV storage", "Speed", "Task boards"])
+        expect(markup, `${name}: ${label}`).not.toContain(`>${label}</a>`);
     }
   });
 
@@ -505,15 +553,11 @@ describe("admin sidebar", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all ten tab links and nothing that does not exist yet", () => {
-    const markup = render("members", access("owner", "owner"));
+  it("shows a company owner who is a team owner all six tab links and nothing that does not exist yet", () => {
+    const markup = render("tokens", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
       "users",
       "teams",
-      "members",
-      "cv-storage",
-      "speed",
-      "task-boards",
       "organisation",
       "roles",
       "tokens",
@@ -523,7 +567,7 @@ describe("admin portal", () => {
       .map((match) => match[0])
       .filter((tag) => tag.includes('aria-current="page"'));
     expect(current).toHaveLength(1);
-    expect(current[0]).toContain('href="/app/admin/members"');
+    expect(current[0]).toContain('href="/app/admin/tokens"');
     expect(current[0]).not.toMatch(/class="[^"]*secondary/);
     expect(markup).toContain('aria-label="Admin portal sections"');
     expect(markup.match(/<h1>/g)).toHaveLength(1);
@@ -535,7 +579,7 @@ describe("admin portal", () => {
       for (const companyLevel of COMPANY_LEVELS) {
         const tabs = adminTabs({ teamRole, companyLevel });
         const markup = render(
-          tabs[0]?.key ?? "members",
+          tabs[0]?.key ?? "tokens",
           access(teamRole, companyLevel),
         );
         if (!tabs.length) onlyHeadingAndNoAccess(markup);
@@ -547,36 +591,36 @@ describe("admin portal", () => {
       }
   });
 
-  it("links each team tab to its existing settings page", () => {
-    for (const [tab, href, title] of [
-      ["members", "/app/settings/team", "Members"],
-      ["cv-storage", "/app/settings/team#cv-storage", "CV storage"],
-      ["speed", "/app/settings/speed", "Speed"],
-      ["tokens", "/app/settings/api-tokens", "API tokens"],
-    ] as const) {
-      const markup = render(tab, access("admin", null));
-      expect(markup).toContain(`<h2>${title}</h2>`);
-      expect(markup).toContain(`class="button" href="${href}"`);
-      expect(markup).not.toContain("<table");
-    }
+  it("links API tokens to its existing settings page, and no other page to a settings page", () => {
+    const markup = render("tokens", access("admin", null));
+    expect(markup).toContain("<h2>API tokens</h2>");
+    expect(markup).toContain('class="button" href="/app/settings/api-tokens"');
+    expect(markup).not.toContain("<table");
+    for (const value of [access("owner", "owner", directory)])
+      for (const tab of adminTabs(value).filter(
+        (item) => item.key !== "tokens",
+      ))
+        expect(render(tab.key, value), tab.key).not.toMatch(
+          /href="\/app\/settings\/(team|speed)/,
+        );
   });
 
   it("shows only the heading and the no-access text for a 403, no tabs and a tab outside the caller's", () => {
-    onlyHeadingAndNoAccess(render("members", null, { denied: true }));
+    onlyHeadingAndNoAccess(render("tokens", null, { denied: true }));
     onlyHeadingAndNoAccess(render(null, null, { denied: true }));
     onlyHeadingAndNoAccess(render(null, access("recruiter", null)));
     onlyHeadingAndNoAccess(render("history", access("viewer", null)));
-    onlyHeadingAndNoAccess(render("members", access("recruiter", "owner")));
-    onlyHeadingAndNoAccess(render("speed", access("viewer", "admin")));
+    onlyHeadingAndNoAccess(render("tokens", access("recruiter", "owner")));
+    onlyHeadingAndNoAccess(render("tokens", access("viewer", "admin")));
     // A team owner without company authority asks for History.
     onlyHeadingAndNoAccess(render("history", access("owner", null)));
   });
 
   it("shows loading and other errors plainly, never a blank page", () => {
-    const loading = render("members", null);
+    const loading = render("tokens", null);
     expect(loading).toContain('<p role="status">Loading…</p>');
     expect(loading).not.toContain(NO_ACCESS);
-    const failed = render("members", null, {
+    const failed = render("tokens", null, {
       error: "The request could not be completed.",
     });
     expect(failed).toContain('role="alert"');
@@ -591,7 +635,7 @@ describe("admin portal", () => {
     expect(portal).toContain('<p role="status">Loading…</p>');
     const noTeam = renderToStaticMarkup(
       <WorkspaceProvider value={{ ...workspace, team: null, role: null }}>
-        <AdminPortal tab="members" />
+        <AdminPortal tab="tokens" />
       </WorkspaceProvider>,
     );
     onlyHeadingAndNoAccess(noTeam);
@@ -611,6 +655,43 @@ describe("admin portal", () => {
     const admin = render("history", access("owner", "admin"));
     expect(admin).toContain("<h2>Configuration history</h2>");
     expect(admin).not.toContain("Recent access changes");
+  });
+});
+
+// ADM-04 (job 075): the link in personal settings follows the rule /app/admin applies.
+describe("admin portal link in personal settings", () => {
+  const link = (adminPortal: boolean) =>
+    /<a [^>]*href="\/app\/admin"[^>]*>Admin portal<\/a>/.test(
+      renderToStaticMarkup(
+        <SettingsNavigation active="profile" adminPortal={adminPortal} />,
+      ),
+    );
+
+  it("shows for anyone with an admin page, over every team role, company level and directory action", () => {
+    for (const teamRole of [...TEAM_ROLES, null])
+      for (const companyLevel of COMPANY_LEVELS)
+        for (const actions of [{}, directory.actions!]) {
+          const value = access(teamRole as string, companyLevel, { actions });
+          const label = `${teamRole} / ${companyLevel} / ${actions.directory?.join(",") ?? "-"}`;
+          const shown = canOpenAdminPortal(value);
+          expect(shown, label).toBe(adminTabs(value).length > 0);
+          expect(shown, label).toBe(
+            teamRole === "owner" ||
+              teamRole === "admin" ||
+              companyLevel !== null ||
+              !!actions.directory,
+          );
+          expect(link(shown), label).toBe(shown);
+        }
+  });
+
+  it("shows for a company admin whose team role is recruiter, and not for a recruiter or viewer without company authority", () => {
+    expect(canOpenAdminPortal(access("recruiter", "admin"))).toBe(true);
+    expect(canOpenAdminPortal(access("viewer", "owner"))).toBe(true);
+    expect(canOpenAdminPortal(access("recruiter", null))).toBe(false);
+    expect(canOpenAdminPortal(access("viewer", null))).toBe(false);
+    // Loading, failed or no team: no access state, no link.
+    expect(canOpenAdminPortal(null)).toBe(false);
   });
 });
 
@@ -1669,25 +1750,35 @@ describe("task boards tab", () => {
       .map((match) => match[1])
       .slice(1);
 
-  it("shows the tab only to team owners and admins, never through company authority", () => {
+  // ADM-04 (job 075): a team detail tab, which the server opens for the team's owners and admins
+  // only (tests/admin-routes.test.ts); company authority never lists it as a page.
+  it("shows the tab on team detail only, never as a page of company authority", () => {
     for (const teamRole of TEAM_ROLES)
-      for (const companyLevel of COMPANY_LEVELS) {
-        const markup = render("task-boards", access(teamRole, companyLevel));
-        if (teamRole === "owner" || teamRole === "admin") {
-          expect(tabLinks(markup)).toContain("task-boards");
-          expect(markup).toContain('<h2 tabindex="-1">Task boards</h2>');
-          expect(markup).toContain(
-            'aria-current="page" href="/app/admin/task-boards"',
-          );
-          // Its own panel, not a link to a settings page.
-          expect(markup).not.toContain('class="button" href="/app/settings');
-        } else onlyHeadingAndNoAccess(markup);
-      }
-    expect(
-      adminTabs({ teamRole: "recruiter", companyLevel: "owner" }).map(
-        (tab) => tab.key,
-      ),
-    ).not.toContain("task-boards");
+      for (const companyLevel of COMPANY_LEVELS)
+        expect(
+          adminTabs({ teamRole, companyLevel }).map((tab) => tab.key as string),
+        ).not.toContain("task-boards");
+    for (const role of ["owner", "admin"]) {
+      const markup = renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <TeamDetail
+            team={{ id: "fictional-other-team", name: "Fictional Other Team" }}
+            role={role}
+            companyLevel={null}
+            tab="task-boards"
+          />
+        </WorkspaceProvider>,
+      );
+      expect(markup, role).toContain(
+        '<div role="tabpanel" id="team-panel-task-boards" aria-labelledby="team-tab-task-boards" tabindex="0" class="stack"><section class="panel stack"><h2 tabindex="-1">Task boards</h2>',
+      );
+      expect(markup, role).toContain("<strong>All buckets</strong>");
+      expect(markup, role).toContain(
+        '<p role="status">Loading task boards…</p>',
+      );
+      // Its own panel, not a link to a settings page.
+      expect(markup, role).not.toContain('class="button" href="/app/settings');
+    }
   });
 
   it("shows the built-in All buckets board as text and each board's state, columns, filter and actions", () => {
@@ -2010,7 +2101,19 @@ describe("team detail", () => {
       (match) => [match[0], match[1]],
     );
 
-  it("shows the shell, the team's name and a tablist with exactly Members and Settings", () => {
+  const SIX = [
+    ["members", "Members"],
+    ["settings", "Settings"],
+    ["cv-storage", "CV storage"],
+    ["speed", "Speed"],
+    ["task-boards", "Task boards"],
+    ["activity", "Activity"],
+  ] as const;
+  /** The tab panel and what follows it. */
+  const panel = (markup: string) =>
+    markup.slice(markup.indexOf('<div role="tabpanel"'));
+
+  it("shows the shell, the team's name and a tablist with exactly the six tabs in order", () => {
     const markup = detail();
     expect(markup).toContain("<h1>Admin portal</h1>");
     expect(sidebar(markup)).toContain(
@@ -2021,22 +2124,57 @@ describe("team detail", () => {
       '<div class="tabs" role="tablist" aria-label="Team details">',
     );
     const found = tabs(markup);
-    expect(found.map(([, label]) => label)).toEqual(["Members", "Settings"]);
-    expect(found[0][0]).toBe(
-      '<button type="button" role="tab" id="team-tab-members" aria-controls="team-panel-members" tabindex="0" aria-selected="true">Members</button>',
+    expect(found.map(([, label]) => label)).toEqual(
+      SIX.map(([, label]) => label),
     );
-    expect(found[1][0]).toBe(
-      '<button type="button" role="tab" id="team-tab-settings" aria-controls="team-panel-settings" tabindex="-1" aria-selected="false">Settings</button>',
+    SIX.forEach(([key, label], index) =>
+      expect(found[index][0]).toBe(
+        `<button type="button" role="tab" id="team-tab-${key}" aria-controls="team-panel-${key}" tabindex="${index ? -1 : 0}" aria-selected="${!index}">${label}</button>`,
+      ),
     );
     expect(markup).toContain(
       '<div role="tabpanel" id="team-panel-members" aria-labelledby="team-tab-members" tabindex="0" class="stack">',
     );
-    // No page of a later item: no CV storage, Speed, Task boards or Activity tab.
-    for (const later of ["CV storage", "Speed", "Task boards", "Activity"])
-      expect(content(markup)).not.toContain(later);
+    expect(TEAM_DETAIL_TABS.map((tab) => [tab.key, tab.label])).toEqual(
+      SIX.map((tab) => [...tab]),
+    );
+    // No tab of a later item.
+    for (const later of [
+      "Overview",
+      "Roles in this team",
+      "Mail log",
+      "Archive",
+      "Danger zone",
+    ])
+      expect(content(markup), later).not.toContain(later);
   });
 
-  it("opens Settings with the rename form when asked, and Members otherwise", () => {
+  it("opens the tab of ?tab=, and Members for a missing or unknown key", () => {
+    for (const [key] of SIX) {
+      expect(teamDetailTab(key)).toBe(key);
+      const markup = detail({ tab: key });
+      const selected = tabs(markup).filter(([tag]) =>
+        tag.includes('aria-selected="true"'),
+      );
+      expect(selected, key).toHaveLength(1);
+      expect(selected[0][0], key).toContain(`id="team-tab-${key}"`);
+      expect(selected[0][0], key).toContain('tabindex="0"');
+      expect(markup, key).toContain(
+        `<div role="tabpanel" id="team-panel-${key}" aria-labelledby="team-tab-${key}" tabindex="0" class="stack">`,
+      );
+    }
+    for (const value of [
+      undefined,
+      "",
+      "overview",
+      "tokens",
+      ["speed"],
+      "SPEED",
+    ])
+      expect(teamDetailTab(value), String(value)).toBe("members");
+  });
+
+  it("opens Settings with the rename form and Prepare task board, and Members otherwise", () => {
     const settings = detail({ tab: "settings" });
     expect(tabs(settings)[1][0]).toContain('aria-selected="true"');
     expect(settings).toContain('id="team-panel-settings"');
@@ -2046,11 +2184,221 @@ describe("team detail", () => {
     expect(settings).toContain(
       '<button type="submit" class="button" disabled="">Save team name</button>',
     );
-    expect(settings).not.toContain("Prepare task board");
+    // Prepare task board is the second control, under the rename form.
+    expect(panel(settings)).toMatch(
+      /<h2>Rename team<\/h2>[\s\S]*Save team name<\/button>[\s\S]*<h2>Task board<\/h2><p class="muted">Prepares the team&#x27;s default task buckets when it has none. Existing tasks and buckets are kept.<\/p><div class="row"><button type="button" class="button secondary">Prepare task board<\/button><\/div>/,
+    );
     expect(settings).not.toContain("<h2>Members</h2>");
     const members = detail();
     expect(members).toContain("<h2>Members</h2>");
     expect(members).not.toContain("Save team name");
+    expect(members).not.toContain("Prepare task board");
+  });
+
+  it("shows the CV storage panel with its provider-cap sentence while its settings load", () => {
+    const markup = panel(detail({ tab: "cv-storage" }));
+    expect(markup).toContain('<section class="panel" id="cv-storage"><h2><svg');
+    expect(markup).toContain(" CV storage</h2>");
+    expect(markup).toContain(
+      "These are application limits, not hard provider caps. The store-wide budget set by the RecruitmentOS owner still applies.",
+    );
+    expect(markup).toContain(
+      '<p role="status">Loading CV storage settings…</p>',
+    );
+    expect(markup).not.toContain('role="alert"');
+    expect(markup).not.toContain("<h2>Members</h2>");
+  });
+
+  it("shows the Speed panel with what it keeps while its timings load", () => {
+    const markup = panel(detail({ tab: "speed" }));
+    expect(markup).toContain('<section class="panel stack"><h2>Speed</h2>');
+    expect(markup).toContain(
+      "This panel holds the last 30 days of timings and route names only, with no names, ids or content.",
+    );
+    expect(markup).toContain('<p role="status">Loading speed timings…</p>');
+    expect(markup).not.toMatch(/<input|<select|<button/);
+  });
+
+  it("shows the team's activity list with search, the record-type filter and paging", () => {
+    const markup = panel(detail({ tab: "activity" }));
+    expect(markup).toContain('<section class="panel"><h2>Activity</h2>');
+    expect(markup).toContain(
+      '<input aria-label="Search activity" placeholder="Search activity…" value=""/>',
+    );
+    expect(markup).toContain(
+      '<select aria-label="Filter activity by record type">',
+    );
+    expect(markup).toContain(
+      '<option value="" selected="">All record types</option>',
+    );
+    expect(markup).toContain("<option>candidate</option>");
+    expect(markup).toContain("<span>0 events</span>");
+    expect(markup).toMatch(
+      /<button class="button secondary small" disabled="">Previous<\/button><span>Page 1<\/span><button class="button secondary small" disabled="">Next<\/button>/,
+    );
+    // The page's own heading and Refresh stay on /app/activity.
+    expect(markup).not.toContain("<h1>");
+    expect(markup).not.toContain("Refresh");
+  });
+
+  it("keeps /app/activity's markup and adds the heading only on the tab", () => {
+    const screen = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <ActivityScreen />
+      </WorkspaceProvider>,
+    );
+    expect(screen).toContain("<h1>Activity</h1>");
+    expect(screen).toContain(">Refresh</button>");
+    expect(screen).toContain(
+      '<section class="panel"><div class="records-toolbar">',
+    );
+    const tab = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <TeamScope teamId={other.id}>
+          <ActivityList />
+        </TeamScope>
+      </WorkspaceProvider>,
+    );
+    const list = (markup: string) =>
+      markup
+        .slice(markup.indexOf('<div class="records-toolbar">'))
+        .split("</section>")[0];
+    expect(list(tab)).toBe(list(screen));
+  });
+
+  it("sends X-Team-Id of the page's team on every read and write of the new tabs and Prepare task board", async () => {
+    const sent: { method: string; path: string; team: string | null }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          team: new Headers(init.headers).get("X-Team-Id"),
+        });
+        return new Response(
+          JSON.stringify({ data: { versionId: "fictional", number: 1 } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    try {
+      reads.length = 0;
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <TeamDetailPortal
+            team={other}
+            role="owner"
+            companyLevel="owner"
+            tab="cv-storage"
+          />
+        </WorkspaceProvider>,
+      );
+      for (const tab of ["speed", "task-boards", "activity"] as const)
+        detail({ tab });
+      // A board's vacancy filter searches the page's team too.
+      const vacancyId = "00000000-0000-4000-8000-000000000201";
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <TeamScope teamId={other.id}>
+            <TaskBoardForm
+              boardKey="fictional-board"
+              initial={{
+                name: "Fictional board",
+                columns: [],
+                filter: { by: "vacancy", vacancyId },
+              }}
+              buckets={[]}
+              fields={[]}
+              busy={false}
+              error=""
+              onSave={() => {}}
+              onCancel={() => {}}
+            />
+          </TeamScope>
+        </WorkspaceProvider>,
+      );
+      // Only the sidebar's access reads the active team.
+      const sidebarRead = reads.filter(
+        (read) => read.path === "/api/v1/me/access",
+      );
+      expect(sidebarRead.map((read) => read.scope.identity)).toEqual([
+        { userId: workspace.user.id, teamId: workspace.team.id },
+      ]);
+      expect(sidebarRead[0].scope.cache).toBe(dataCache);
+      const tabReads = reads.filter((read) => !sidebarRead.includes(read));
+      expect(tabReads.map((read) => read.path)).toEqual([
+        "/api/v1/teams/storage-settings",
+        "/api/v1/teams/speed",
+        "/api/v1/task-boards?drafts=true",
+        "/api/v1/buckets?pageSize=100&sort=position&direction=asc",
+        "/api/v1/task-fields?pageSize=100&sort=position&direction=asc",
+        "/api/v1/activity?page=1&pageSize=50&search=&kind=",
+        "/api/v1/vacancies?pageSize=100&search=",
+        `/api/v1/vacancies/${vacancyId}`,
+      ]);
+      for (const read of tabReads) {
+        expect(read.scope.identity, read.path).toEqual({
+          userId: workspace.user.id,
+          teamId: other.id,
+        });
+        // Not the active team's cache, whose identity change would drop the entry.
+        expect(read.scope.cache, read.path).not.toBe(dataCache);
+      }
+      // Each read as its cache loads it when the tab is shown.
+      for (const read of reads)
+        await read.scope.cache.prefetch(read.scope.identity!, read.path);
+      const body: TaskBoardBody = { name: "Fictional board", columns: [] };
+      await saveStorageSettings(other.id, {
+        maxBytes: null,
+        maxFiles: null,
+        uploadRequestsPerMinute: null,
+        mcpCvTextEnabled: false,
+      });
+      const boards = taskBoardRequests(other.id);
+      await boards.create("fictional-board", body);
+      await boards.update("fictional-version", body);
+      await boards.publish("fictional-version");
+      await boards.retire("fictional-board-id");
+      await teamRequests(other.id).prepareTaskBoard();
+      expect(sent).toEqual([
+        {
+          method: "GET",
+          path: "/api/v1/me/access",
+          team: workspace.team.id,
+        },
+        ...tabReads.map((read) => ({
+          method: "GET",
+          path: read.path,
+          team: other.id,
+        })),
+        {
+          method: "PUT",
+          path: "/api/v1/teams/storage-settings",
+          team: other.id,
+        },
+        { method: "POST", path: "/api/v1/task-boards", team: other.id },
+        {
+          method: "PUT",
+          path: "/api/v1/task-boards/fictional-version",
+          team: other.id,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/task-boards/fictional-version/publish",
+          team: other.id,
+        },
+        {
+          method: "DELETE",
+          path: "/api/v1/task-boards/fictional-board-id",
+          team: other.id,
+        },
+        { method: "POST", path: "/api/v1/teams/bootstrap", team: other.id },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+      clearWorkspaceCache();
+    }
   });
 
   it("holds the members list and the invite form for an owner or admin of the team", () => {

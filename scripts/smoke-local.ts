@@ -259,7 +259,7 @@ async function main() {
       "notifications",
       "insights",
       "source-review",
-      "settings/team",
+      "settings/about",
       "settings/api-tokens",
       "settings/profile",
     ])

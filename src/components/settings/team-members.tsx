@@ -122,6 +122,8 @@ export function teamRequests(
         method: "POST",
         body: JSON.stringify({ userId }),
       }),
+    prepareTaskBoard: () =>
+      requestJson(teamId, "/api/v1/teams/bootstrap", { method: "POST" }),
   };
 }
 
