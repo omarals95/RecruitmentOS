@@ -41,6 +41,7 @@ const access = (
 ): MeAccess => ({
   teamRole: "admin",
   companyLevel,
+  teamArchived: false,
   role: { name: "Fictional role", membership: "admin" },
   scopes: [],
   pages: [],

@@ -17,7 +17,11 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { WorkspaceProvider } from "../src/components/workspace/client";
-import { WorkspaceShell } from "../src/components/workspace/shell";
+import {
+  ArchivedTeamNotice,
+  TeamOptions,
+  WorkspaceShell,
+} from "../src/components/workspace/shell";
 import { DisplayModeToggle } from "../src/components/workspace/display-mode-toggle";
 import {
   ApplicationReference,
@@ -123,6 +127,67 @@ describe("workspace shell", () => {
     const member = switcher(false);
     expect(member).toMatch(/<option value=""[^>]*>No team yet<\/option>/);
     expect(member).not.toContain("Create or join a team");
+  });
+  // ADM-05 (job 078): a select cannot show a badge, so an archived team says so in its option.
+  it("labels each archived team's switcher option (Archived)", () => {
+    const options = (team: { id: string; name: string } | null) =>
+      renderToStaticMarkup(
+        <select>
+          <TeamOptions
+            team={team}
+            teams={[
+              { id: "fictional-team", name: "Fictional Team" },
+              { id: "fictional-archived", name: "Fictional Archived Team" },
+            ]}
+            archivedIds={["fictional-archived", "fictional-missing"]}
+            canCreateTeam
+          />
+        </select>,
+      );
+    expect(options(workspace.team)).toBe(
+      '<select><option value="fictional-team">Fictional Team</option><option value="fictional-archived">Fictional Archived Team (Archived)</option></select>',
+    );
+    // The active team outside the list keeps its own label too.
+    expect(
+      options({ id: "fictional-missing", name: "Fictional Missing Team" }),
+    ).toContain(
+      '<option value="fictional-missing">Fictional Missing Team (Archived)</option>',
+    );
+    expect(options(null)).toContain(
+      '<option value="">Create or join a team</option>',
+    );
+  });
+  it("shows one status notice above the page while the active team is archived, none otherwise", () => {
+    expect(renderToStaticMarkup(<ArchivedTeamNotice archived />)).toBe(
+      '<p class="notice" role="status" style="margin-bottom:16px">This team is archived. You can read everything, but changes are turned off until a team owner restores it.</p>',
+    );
+    expect(renderToStaticMarkup(<ArchivedTeamNotice archived={false} />)).toBe(
+      "",
+    );
+    // An active team, before the read answers: no notice in the shell.
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <WorkspaceShell identity={workspace}>
+          <p>Fictional page</p>
+        </WorkspaceShell>
+      </WorkspaceProvider>,
+    );
+    expect(markup).not.toContain("This team is archived");
+    expect(markup).toContain(
+      '<main id="main-content" class="workspace-main"><p>Fictional page</p>',
+    );
+    // The shell reads the archived teams once per team and places the notice first in main.
+    const source = readFileSync(
+      new URL("../src/components/workspace/shell.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain(
+      'const ARCHIVED_TEAMS_PATH = "/api/v1/me/archived-teams";',
+    );
+    expect(source).toMatch(
+      /<main id="main-content" className="workspace-main">\s*<ArchivedTeamNotice\s*archived=\{!!team && archivedIds\.includes\(team\.id\)\}\s*\/>/,
+    );
+    expect(source).toContain("<TeamSwitcher archivedIds={archivedIds} />");
   });
   it("shows the version label in the footer, which the phone rule leaves visible", () => {
     vi.stubEnv("NEXT_PUBLIC_APP_VERSION", "1.0.0");

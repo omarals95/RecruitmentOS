@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -108,6 +109,10 @@ import {
 } from "../src/components/settings/team-detail-tabs";
 import { saveStorageSettings } from "../src/components/settings/storage-settings";
 import {
+  TeamArchiveDialogView,
+  TeamArchiveView,
+} from "../src/components/settings/team-archive";
+import {
   canOpenAdminPortal,
   SettingsNavigation,
 } from "../src/components/settings/settings-navigation";
@@ -189,6 +194,7 @@ const access = (
 ): MeAccess => ({
   teamRole,
   companyLevel,
+  teamArchived: false,
   role: { name: "Fictional role", membership: "recruiter" },
   scopes: [],
   pages: [],
@@ -2071,6 +2077,7 @@ describe("teams tab", () => {
     createdAt: "2026-11-02T09:00:00.000Z",
     teamRole,
     current,
+    archived: false,
   });
   const rows = [
     row("Alpha", "owner", true),
@@ -2128,6 +2135,32 @@ describe("teams tab", () => {
     expect(echo).toContain('data-label="Your access">Viewer<');
     for (const text of [charlie, delta, echo])
       expect(text).not.toMatch(/<a |<button|<input|<select/);
+  });
+
+  // ADM-05 (job 078): the archived state is visible text in the Team cell.
+  it("labels an archived team Archived in its Team cell, for members and non-members alike", () => {
+    const markup = renderToStaticMarkup(
+      <TeamsPanel
+        rows={[
+          { ...row("Alpha", "owner", true), archived: true },
+          { ...row("Charlie", null), archived: true },
+          row("Delta", "recruiter"),
+        ]}
+        error=""
+      />,
+    );
+    const [alpha, charlie, delta] = rowsOf(markup);
+    for (const [text, name] of [
+      [alpha, "Alpha"],
+      [charlie, "Charlie"],
+    ])
+      expect(text).toContain(
+        `data-label="Team">Fictional ${name} <span class="badge warning">Archived</span></td>`,
+      );
+    expect(delta).toContain('data-label="Team">Fictional Delta</td>');
+    expect(delta).not.toContain("Archived");
+    // The label adds no control.
+    expect(charlie).not.toMatch(/<a |<button/);
   });
 
   it("opens another team's detail page by link, never switching the active team", () => {
@@ -2208,19 +2241,20 @@ describe("team detail", () => {
       (match) => [match[0], match[1]],
     );
 
-  const SIX = [
+  const SEVEN = [
     ["members", "Members"],
     ["settings", "Settings"],
     ["cv-storage", "CV storage"],
     ["speed", "Speed"],
     ["task-boards", "Task boards"],
     ["activity", "Activity"],
+    ["archive", "Archive"],
   ] as const;
   /** The tab panel and what follows it. */
   const panel = (markup: string) =>
     markup.slice(markup.indexOf('<div role="tabpanel"'));
 
-  it("shows the shell, the team's name and a tablist with exactly the six tabs in order", () => {
+  it("shows the shell, the team's name and a tablist with exactly the seven tabs in order, Archive last", () => {
     const markup = detail();
     expect(markup).toContain("<h1>Admin portal</h1>");
     expect(sidebar(markup)).toContain(
@@ -2232,9 +2266,9 @@ describe("team detail", () => {
     );
     const found = tabs(markup);
     expect(found.map(([, label]) => label)).toEqual(
-      SIX.map(([, label]) => label),
+      SEVEN.map(([, label]) => label),
     );
-    SIX.forEach(([key, label], index) =>
+    SEVEN.forEach(([key, label], index) =>
       expect(found[index][0]).toBe(
         `<button type="button" role="tab" id="team-tab-${key}" aria-controls="team-panel-${key}" tabindex="${index ? -1 : 0}" aria-selected="${!index}">${label}</button>`,
       ),
@@ -2243,21 +2277,20 @@ describe("team detail", () => {
       '<div role="tabpanel" id="team-panel-members" aria-labelledby="team-tab-members" tabindex="0" class="stack">',
     );
     expect(TEAM_DETAIL_TABS.map((tab) => [tab.key, tab.label])).toEqual(
-      SIX.map((tab) => [...tab]),
+      SEVEN.map((tab) => [...tab]),
     );
     // No tab of a later item.
     for (const later of [
       "Overview",
       "Roles in this team",
       "Mail log",
-      "Archive",
       "Danger zone",
     ])
       expect(content(markup), later).not.toContain(later);
   });
 
   it("opens the tab of ?tab=, and Members for a missing or unknown key", () => {
-    for (const [key] of SIX) {
+    for (const [key] of SEVEN) {
       expect(teamDetailTab(key)).toBe(key);
       const markup = detail({ tab: key });
       const selected = tabs(markup).filter(([tag]) =>
@@ -2371,6 +2404,239 @@ describe("team detail", () => {
         .slice(markup.indexOf('<div class="records-toolbar">'))
         .split("</section>")[0];
     expect(list(tab)).toBe(list(screen));
+  });
+
+  // ADM-05 (job 078): Archive, last of the team's tabs.
+  const archiveView = (
+    props: Partial<Parameters<typeof TeamArchiveView>[0]> = {},
+  ) =>
+    renderToStaticMarkup(
+      <TeamArchiveView
+        role="owner"
+        archived={false}
+        loadError=""
+        busy={false}
+        error=""
+        onArchive={() => {}}
+        onRestore={() => {}}
+        {...props}
+      />,
+    );
+  type ArchiveDialogProps = Parameters<typeof TeamArchiveDialogView>[0];
+  const archiveDialogProps = (
+    overrides: Partial<ArchiveDialogProps> = {},
+  ): ArchiveDialogProps => ({
+    name: other.name,
+    typed: "",
+    busy: false,
+    error: "",
+    ids: {
+      description: "archive-what",
+      input: "archive-input",
+      name: "archive-name",
+    },
+    onTyped: () => {},
+    onCancel: () => {},
+    onConfirm: () => {},
+    ...overrides,
+  });
+  const archiveDialog = (overrides: Partial<ArchiveDialogProps> = {}) =>
+    renderToStaticMarkup(
+      <TeamArchiveDialogView {...archiveDialogProps(overrides)} />,
+    );
+  /** Text buttons in document order; the icon-only close button has no text label. */
+  const textButtons = (markup: string) =>
+    [...markup.matchAll(/<button([^>]*)>([^<]+)<\/button>/g)].map(
+      ([, attributes, label]) => ({ attributes, label }),
+    );
+  const ARCHIVE_SENTENCE =
+    "Archiving makes the team read-only: members keep read access to everything, nothing is deleted, and a team owner can restore it at any time.";
+
+  it("opens Archive by ?tab=archive and reads the state of the page's team", () => {
+    reads.length = 0;
+    const markup = panel(detail({ tab: "archive" }));
+    expect(markup).toContain(
+      '<section class="panel stack" aria-labelledby="team-archive-title"><h2 id="team-archive-title">Archive</h2>',
+    );
+    expect(markup).toContain(
+      '<p role="status">Loading the team&#x27;s state…</p>',
+    );
+    expect(markup).toContain(ARCHIVE_SENTENCE);
+    // No control until the state is known.
+    expect(markup).not.toMatch(/<button|<input/);
+    const tabRead = reads.filter(
+      (read) =>
+        read.path === "/api/v1/me/access" &&
+        read.scope.identity?.teamId === other.id,
+    );
+    expect(tabRead).toHaveLength(1);
+    expect(tabRead[0].scope.cache).not.toBe(dataCache);
+  });
+
+  it("shows an owner of an active team its state, the sentence and Archive team", () => {
+    const markup = archiveView();
+    expect(markup).toContain("<p>State: <strong>Active</strong></p>");
+    expect(markup).toContain(ARCHIVE_SENTENCE);
+    expect(textButtons(markup)).toEqual([
+      {
+        attributes: ' type="button" class="button danger"',
+        label: "Archive team",
+      },
+    ]);
+    expect(markup).not.toContain("Only a team owner");
+  });
+
+  it("shows an owner of an archived team Restore team, with no typed confirmation", () => {
+    const markup = archiveView({ archived: true });
+    expect(markup).toContain("<p>State: <strong>Archived</strong></p>");
+    expect(textButtons(markup)).toEqual([
+      { attributes: ' type="button" class="button"', label: "Restore team" },
+    ]);
+    expect(markup).not.toMatch(/<input|Archive team/);
+    expect(textButtons(archiveView({ archived: true, busy: true }))).toEqual([
+      {
+        attributes: ' type="button" class="button" disabled=""',
+        label: "Restoring…",
+      },
+    ]);
+  });
+
+  it("shows an admin the state and the owner sentence, with no button", () => {
+    for (const archived of [false, true]) {
+      const markup = archiveView({ role: "admin", archived });
+      expect(markup).toContain(
+        `<p>State: <strong>${archived ? "Archived" : "Active"}</strong></p>`,
+      );
+      expect(markup).toContain(
+        "<p>Only a team owner can archive or restore this team.</p>",
+      );
+      expect(markup).not.toMatch(/<button|<input/);
+    }
+  });
+
+  it("shows a refused change and a failed read as alerts", () => {
+    expect(
+      archiveView({ archived: true, error: "Fictional refusal." }),
+    ).toContain('<p class="notice error" role="alert">Fictional refusal.</p>');
+    const failed = archiveView({ archived: null, loadError: "Offline." });
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load the team&#x27;s state. Offline.</p>',
+    );
+    expect(failed).not.toMatch(/<button/);
+  });
+
+  it("confirms Archive in a labelled alertdialog, enabled only for the exact trimmed team name", () => {
+    const markup = archiveDialog();
+    const opening = /<dialog[^>]*>/.exec(markup)![0];
+    expect(opening).toContain('role="alertdialog"');
+    expect(opening).toContain('aria-describedby="archive-what"');
+    const heading = /aria-labelledby="([^"]+)"/.exec(opening)![1];
+    expect(markup).toContain(`<h2 id="${heading}">Archive ${other.name}?</h2>`);
+    expect(markup).toContain(
+      '<label for="archive-input">Type the team name to confirm</label>',
+    );
+    expect(markup).toMatch(
+      /<input id="archive-input"[^>]*aria-describedby="archive-name"/,
+    );
+    expect(markup).toContain(
+      `<small id="archive-name" class="muted">Name: <strong>${other.name}</strong></small>`,
+    );
+    const [cancel, confirm] = textButtons(markup);
+    expect(cancel.label).toBe("Cancel");
+    expect(cancel.attributes).toContain("autofocus");
+    expect(confirm.label).toBe("Archive team");
+    expect(confirm.attributes).toContain('class="button danger"');
+    for (const typed of [
+      "",
+      "   ",
+      "Fictional Other",
+      "fictional other team",
+      `${other.name}.`,
+    ])
+      expect(
+        textButtons(archiveDialog({ typed }))[1].attributes,
+        typed,
+      ).toContain("disabled");
+    for (const typed of [other.name, `  ${other.name}  `])
+      expect(
+        textButtons(archiveDialog({ typed }))[1].attributes,
+        typed,
+      ).not.toContain("disabled");
+    const busy = archiveDialog({ typed: other.name, busy: true });
+    expect(/<dialog[^>]*>/.exec(busy)![0]).toContain('aria-busy="true"');
+    expect(textButtons(busy)[1]).toEqual({
+      attributes: ' type="button" class="button danger" disabled=""',
+      label: "Archiving…",
+    });
+    expect(
+      archiveDialog({ typed: other.name, error: "Fictional refusal." }),
+    ).toContain('<p class="notice error" role="alert">Fictional refusal.</p>');
+  });
+
+  it("cancels by Cancel, Escape and the close button without sending a request", () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const onCancel = vi.fn();
+      const onConfirm = vi.fn();
+      const tree = TeamArchiveDialogView(
+        archiveDialogProps({ typed: other.name, onCancel, onConfirm }),
+      );
+      // Dialog calls onClose for Escape (its cancel event) and for its close button.
+      (tree.props as { onClose: () => void }).onClose();
+      const buttons: { label: ReactNode; onClick: () => void }[] = [];
+      const walk = (node: ReactNode) => {
+        if (Array.isArray(node)) return node.forEach(walk);
+        if (!isValidElement(node)) return;
+        const props = node.props as {
+          children?: ReactNode;
+          onClick?: () => void;
+        };
+        if (node.type === "button" && props.onClick)
+          buttons.push({ label: props.children, onClick: props.onClick });
+        walk(props.children);
+      };
+      walk((tree.props as { children: ReactNode }).children);
+      buttons.find((button) => button.label === "Cancel")!.onClick();
+      expect(onCancel).toHaveBeenCalledTimes(2);
+      expect(onConfirm).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("archives and restores the page's team with PUT /api/v1/teams/archive and its X-Team-Id", async () => {
+    const sent: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          team: new Headers(init.headers).get("X-Team-Id"),
+          body: JSON.parse(String(init.body)),
+        });
+        return new Response(
+          JSON.stringify({ data: { archived: true, changed: true } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    try {
+      await teamRequests(other.id).setArchived(true);
+      await teamRequests(other.id).setArchived(false);
+      expect(sent).toEqual(
+        [true, false].map((archived) => ({
+          method: "PUT",
+          path: "/api/v1/teams/archive",
+          team: other.id,
+          body: { archived },
+        })),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("sends X-Team-Id of the page's team on every read and write of the new tabs and Prepare task board", async () => {

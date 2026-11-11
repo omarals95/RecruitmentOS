@@ -124,6 +124,12 @@ export function teamRequests(
       }),
     prepareTaskBoard: () =>
       requestJson(teamId, "/api/v1/teams/bootstrap", { method: "POST" }),
+    setArchived: (archived: boolean) =>
+      requestJson<{ data: { archived: boolean; changed: boolean } }>(
+        teamId,
+        "/api/v1/teams/archive",
+        { method: "PUT", body: JSON.stringify({ archived }) },
+      ),
   };
 }
 

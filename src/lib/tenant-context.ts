@@ -66,7 +66,8 @@ export async function installTenantContextKey(client: {
  * a built-in template's fixed id without an assigned role, null for an assigned role install could
  * not use (no scopes are then stored). recordScope is that role's record scope per group (all in
  * every group without an assigned role, null when it failed closed); homeUnits are the actor's home
- * org units, sorted, from the employee linked to their user.
+ * org units, sorted, from the employee linked to their user. teamArchived is the team's archived
+ * state; scopes then hold only read scopes.
  */
 export type TenantAccess = {
   scopes: Scope[];
@@ -79,6 +80,7 @@ export type TenantAccess = {
   roleVersionId: string | null;
   recordScope: RoleBody["recordScope"] | null;
   homeUnits: string[];
+  teamArchived: boolean;
 };
 type InstallResult = Omit<TenantAccess, "documents"> & {
   documents: ConfigDocumentRow[];

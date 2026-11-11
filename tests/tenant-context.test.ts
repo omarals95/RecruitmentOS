@@ -195,6 +195,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
     roleVersionId: "00000000-0000-4000-8000-000000000101",
     recordScope: { pipeline: "all", candidates: "all", tasks: "all" },
     homeUnits: [],
+    teamArchived: false,
   };
 
   beforeAll(async () => {
@@ -924,6 +925,7 @@ describe("signed tenant context under separate nonowner data and identity roles"
     roleVersionId: "00000000-0000-4000-8000-000000000103",
     recordScope: { pipeline: "all", candidates: "all", tasks: "all" },
     homeUnits: [],
+    teamArchived: false,
   });
 
   it("passes the access state install derived to withTeam's work", async () => {
@@ -933,6 +935,59 @@ describe("signed tenant context under separate nonowner data and identity roles"
     expect(
       await withTeam(memberA, (tx, access) => Promise.resolve(access)),
     ).toEqual(memberAccess());
+  });
+
+  // ADM-05 (job 078): an active team stores every asserted scope and returns teamArchived false; an
+  // archived team stores only the read scopes, in order, for every context of that team.
+  it("stores every asserted scope for an active team and only the read scopes for an archived one", async () => {
+    const archive = (archived: boolean) =>
+      harness
+        .asOwner()
+        .then((db) =>
+          db.execute(
+            sql`UPDATE app.workspace_teams SET archived_at = ${archived ? sql`now()` : null}, archived_by = ${archived ? ownerA.userId : null} WHERE team_id = ${ownerA.teamId}`,
+          ),
+        );
+    const stored = async (p: Principal) => {
+      const access = await withTeam(
+        { ...p, scopes: [...p.scopes] },
+        (_tx, state) => Promise.resolve(state),
+      );
+      return { scopes: access.scopes, teamArchived: access.teamArchived };
+    };
+    expect(await stored(ownerA)).toEqual({
+      scopes: [...SCOPES],
+      teamArchived: false,
+    });
+    expect(await stored(memberA)).toEqual({
+      scopes: [...memberA.scopes],
+      teamArchived: false,
+    });
+    await archive(true);
+    try {
+      expect(await stored(ownerA)).toEqual({
+        scopes: [
+          "candidates:read",
+          "recruitment:read",
+          "cvs:read",
+          "directory:read",
+          "plans:read",
+        ],
+        teamArchived: true,
+      });
+      expect(await stored(memberA)).toEqual({
+        scopes: ["candidates:read", "recruitment:read", "cvs:read"],
+        teamArchived: true,
+      });
+      // Another team of the same workspace is unaffected.
+      expect(await stored(ownerB)).toMatchObject({ teamArchived: false });
+    } finally {
+      await archive(false);
+    }
+    expect(await stored(memberA)).toEqual({
+      scopes: [...memberA.scopes],
+      teamArchived: false,
+    });
   });
 
   it("rejects a context for a team with no workspace mapping", async () => {

@@ -516,6 +516,8 @@ describe("admin pages check access on the server (TST-002)", () => {
       "speed",
       "task-boards",
       "activity",
+      // ADM-05 (job 078): Archive, shown to owners and admins alike.
+      "archive",
     ])
       for (const [name, team, outcome, checked] of [
         ["anonymous", A, "sign-in", null],

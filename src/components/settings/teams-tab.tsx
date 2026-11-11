@@ -128,7 +128,15 @@ export function TeamsPanel({
             <tbody>
               {rows.map((row) => (
                 <tr key={row.slug}>
-                  <td data-label="Team">{row.name}</td>
+                  <td data-label="Team">
+                    {row.name}
+                    {row.archived && (
+                      <>
+                        {" "}
+                        <span className="badge warning">Archived</span>
+                      </>
+                    )}
+                  </td>
                   <td data-label="Identifier">{row.slug}</td>
                   <td data-label="Created">{formatDate(row.createdAt)}</td>
                   <td data-label="Your access">
