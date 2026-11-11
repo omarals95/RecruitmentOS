@@ -2088,6 +2088,29 @@ export function GET() {
       { sessionOnly: true, params: [versionIdParameter] },
     ),
   };
+  // Job title usage (ADM-27): counts only, shown before a title's grade changes.
+  const jobTitleUsageShape = "{data:{positions, openVacancies, openOffers}}";
+  paths["/api/v1/job-architecture/usage"] = {
+    get: operation(
+      [],
+      {
+        summary: "Count what uses a job title",
+        description: `${jobArchitectureWriteRule} titleKey is the job title's key; a missing titleKey, one that is not a key (1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit) or any other query key returns 400 invalid_input, with nothing run. Counts only, across every team of the company, through the owner-run helper tenant_context.job_title_usage: positions counts the current positions (not ended and not archived) with the title; openVacancies counts the unarchived vacancies with status Open and the title; openOffers counts the unarchived offers with status Draft or Sent whose application's vacancy has the title, whatever that vacancy's status. A key no position or vacancy uses, including one that is not a published title, returns three zeros. It never returns an id, name, team, date, status breakdown or per-team breakdown, and never reads salary brackets. Nothing is audited. Returns ${jobTitleUsageShape}.`,
+      },
+      { "200": { description: jobTitleUsageShape } },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "titleKey",
+            in: "query",
+            required: true,
+            schema: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" },
+          },
+        ],
+      },
+    ),
+  };
   // Salary brackets (ADM-25): confidential, session only, never offered to tokens or MCP (D13).
   const bracketAccessRule =
     'Session only: Bearer tokens, including MCP OAuth tokens, get 403 session_required. Salary brackets are confidential: the database itself lets only a session holding Plan & pay access (a per-person grant only a company owner gives, themselves included) and the plans:read scope of their team role read them; anyone else, team owners, company admins and company owners without the grant included, gets 403 plan_access_required ("Salary brackets need Plan & pay access, which only a company owner gives."). Brackets are AED fils (whole numbers, 100 fils to the dirham), never offered to API tokens or MCP and never in exports, search, notifications, analytics or activity, which holds the version number only.';
