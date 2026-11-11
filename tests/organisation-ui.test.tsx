@@ -54,6 +54,20 @@ import {
 import type { Action } from "../src/domain/config";
 import type { Employee, Position } from "../src/lib/directory";
 import type { OrgLevel, OrgUnit } from "../src/lib/org";
+import {
+  EMPTY_PEOPLE,
+  PeopleTreeView,
+  loadReports,
+  peopleViewAllowed,
+  reportingPath,
+  type PeopleState,
+} from "../src/components/settings/organisation-tab";
+import {
+  ZOOM_MAX,
+  ZOOM_MIN,
+  buildPeopleTree,
+} from "../src/components/settings/org-tree";
+import type { ReportingPerson } from "../src/lib/directory";
 
 // Fictional people, units and ids only (R2a-16, job 058).
 const workspace = {
@@ -1076,5 +1090,413 @@ describe("org tree by units (ADM-22)", () => {
     const normal = at(100);
     for (const label of ["Zoom out", "Zoom in", "Reset zoom", "Export image"])
       expect(normal).toContain(toolButton(label, false));
+  });
+});
+
+describe("org tree by people (ADM-23)", () => {
+  const person = (
+    n: number,
+    displayName: string,
+    reports = 0,
+    changes: Partial<ReportingPerson> = {},
+  ): ReportingPerson => ({
+    id: id(n),
+    displayName,
+    title: `Fictional Title ${n}`,
+    unitName: "Fictional Holdings",
+    otherPositions: 0,
+    reports,
+    ...changes,
+  });
+  const chief = person(50, "Fictional Chief", 2, { otherPositions: 1 });
+  const deputy = person(51, "Fictional Deputy", 1);
+  const helper = person(52, "Fictional Helper");
+  const loner = person(53, "Fictional Loner");
+  /** The chief expanded with two reports; the deputy collapsed; the top level has more. */
+  const people = (changes: Partial<PeopleState> = {}): PeopleState => ({
+    ...EMPTY_PEOPLE,
+    lists: {
+      "": { people: [chief, loner], page: 1, hasMore: true },
+      [chief.id]: { people: [deputy, helper], page: 1, hasMore: false },
+    },
+    expanded: [chief.id],
+    ...changes,
+  });
+  const panel = (
+    options: {
+      allowed?: boolean;
+      mode?: "units" | "people";
+      view?: "list" | "tree";
+      state?: PeopleState;
+      tree?: Partial<TreeState>;
+    } = {},
+  ) =>
+    renderToStaticMarkup(
+      <OrgChartPanel
+        levels={levels}
+        chart={chart()}
+        owner
+        directoryView
+        view={options.view ?? "tree"}
+        tree={{ ...TREE_START, ...options.tree }}
+        peopleAllowed={options.allowed ?? true}
+        treeMode={options.mode ?? "people"}
+        people={options.state ?? people()}
+      />,
+    );
+  const treeItems = (markup: string) =>
+    [...markup.matchAll(/<li ([^>]*)>/g)].map((match) => match[1]);
+  const attribute = (tag: string, name: string) =>
+    new RegExp(`${name}="([^"]*)"`).exec(tag)?.[1];
+  const toolButton = (label: string, disabled: boolean) =>
+    `<button type="button" class="button secondary small"${disabled ? ' disabled=""' : ""}>${label}</button>`;
+  const switchMarkup = (people: boolean) =>
+    `<div class="view-toggle" role="group" aria-label="Org tree shows"><button type="button" aria-pressed="${!people}">By units</button><button type="button" aria-pressed="${people}">By people</button></div>`;
+  const RULE =
+    "Each person reports to whoever holds a manager position in their unit, or in the nearest unit above it that has one.";
+
+  it("offers By units, pressed by default, and By people in the Org tree view only to callers allowed people", () => {
+    const units = panel({ mode: "units" });
+    expect(units).toContain(switchMarkup(false));
+    expect(units).toContain('aria-label="Org tree by units"');
+    expect(units).not.toContain("Org tree by people");
+    expect(units).not.toContain(RULE);
+    const byPeople = panel();
+    expect(byPeople).toContain(switchMarkup(true));
+    expect(byPeople).toContain(
+      '<ul role="tree" aria-label="Org tree by people" class="org-tree" data-org-tree="" style="zoom:1">',
+    );
+    expect(byPeople).toContain(`<p class="muted small-text">${RULE}</p>`);
+    expect(byPeople).not.toContain("Org tree by units");
+    // The chart view switch and Add top-level unit stay as they are.
+    expect(byPeople).toContain(
+      '<button type="button" aria-pressed="false">List</button><button type="button" aria-pressed="true">Org tree</button>',
+    );
+    expect(byPeople.indexOf(">Add top-level unit</button>")).toBeLessThan(
+      byPeople.search(/<ul /),
+    );
+    // Not allowed: no switch, no people text, whatever the mode says.
+    for (const markup of [
+      panel({ allowed: false }),
+      panel({ allowed: false, mode: "units" }),
+      panel({ view: "list" }),
+    ]) {
+      expect(markup).not.toContain("Org tree shows");
+      expect(markup).not.toContain("By people");
+      expect(markup).not.toContain("By units");
+      expect(markup).not.toContain("Org tree by people");
+      expect(markup).not.toContain("Fictional Chief");
+      expect(markup).not.toContain(RULE);
+    }
+    expect(panel({ allowed: false })).toContain(
+      'aria-label="Org tree by units"',
+    );
+    // A default render, as before ADM-23, has no people markup either.
+    expect(orgChart(true)).not.toContain("By people");
+  });
+
+  it("allows people only with both the directory page and directory view", () => {
+    const allowed = (pages: MeAccess["pages"], directory?: Action[]) =>
+      peopleViewAllowed({
+        pages,
+        actions: directory ? { directory } : {},
+      });
+    expect(allowed(["directory"], ["view"])).toBe(true);
+    expect(allowed(["admin", "directory"], ALL_DIRECTORY)).toBe(true);
+    expect(allowed(["directory"])).toBe(false);
+    expect(allowed(["directory"], ["create", "edit"])).toBe(false);
+    expect(allowed(["admin"], ["view"])).toBe(false);
+    expect(allowed([], ALL_DIRECTORY)).toBe(false);
+  });
+
+  it("loads the top level, and one person's reports, from the reporting lines route only", async () => {
+    const { paths, request } = recorder();
+    await loadReports(request, null);
+    await loadReports(request, chief.id);
+    await loadReports(request, chief.id, 2);
+    expect(paths).toEqual([
+      "/api/v1/employees/reporting-lines?page=1&pageSize=100",
+      `/api/v1/employees/reporting-lines?managerId=${chief.id}&page=1&pageSize=100`,
+      `/api/v1/employees/reporting-lines?managerId=${chief.id}&page=2&pageSize=100`,
+    ]);
+    expect(reportingPath(null)).toBe(paths[0]);
+  });
+
+  it("renders a nested tree of person treeitems with level, set size, position, and expanded state only with reports", () => {
+    const markup = panel();
+    const items = treeItems(markup);
+    expect(items.every((tag) => tag.startsWith('role="treeitem"'))).toBe(true);
+    expect(
+      items.map((tag) => [
+        attribute(tag, "aria-label"),
+        attribute(tag, "aria-level"),
+        attribute(tag, "aria-setsize"),
+        attribute(tag, "aria-posinset"),
+        attribute(tag, "aria-expanded"),
+      ]),
+    ).toEqual([
+      [
+        "Fictional Chief, Fictional Title 50, Fictional Holdings, and 1 more position, 2 direct reports",
+        "1",
+        "3",
+        "1",
+        "true",
+      ],
+      [
+        "Fictional Deputy, Fictional Title 51, Fictional Holdings, 1 direct report",
+        "2",
+        "2",
+        "1",
+        "false",
+      ],
+      [
+        "Fictional Helper, Fictional Title 52, Fictional Holdings",
+        "2",
+        "2",
+        "2",
+        undefined,
+      ],
+      [
+        "Fictional Loner, Fictional Title 53, Fictional Holdings",
+        "1",
+        "3",
+        "2",
+        undefined,
+      ],
+      ["Show more top-level people", "1", "3", "3", undefined],
+    ]);
+    expect(items.map((tag) => attribute(tag, "tabindex"))).toEqual([
+      "0",
+      "-1",
+      "-1",
+      "-1",
+      "-1",
+    ]);
+    // People mode keeps its own tab stop.
+    expect(
+      treeItems(
+        panel({
+          state: people({
+            focused: {
+              key: `person:${deputy.id}`,
+              path: [`person:${chief.id}`],
+            },
+          }),
+          tree: {
+            focused: { key: `unit:${holdings.id}`, path: [] },
+          },
+        }),
+      ).map((tag) => attribute(tag, "tabindex")),
+    ).toEqual(["-1", "0", "-1", "-1", "-1"]);
+    expect(
+      markup.match(/<ul role="group" class="org-tree-group"/g),
+    ).toHaveLength(1);
+    const tree = markup.slice(markup.indexOf('<ul role="tree"'));
+    expect(tree).not.toMatch(/<button|<a |<input|<select/);
+    expect(markup).toMatch(
+      /class="org-tree-node org-tree-person org-tree-first"><div class="org-tree-box"><span class="org-tree-title"><svg[^>]*>.*?<\/svg>Fictional Chief<\/span><span class="org-tree-meta">Fictional Title 50 · Fictional Holdings<\/span><span class="org-tree-meta">\+1 more position<\/span><span class="org-tree-meta">2 direct reports<\/span><\/div>/,
+    );
+    expect(markup).toMatch(
+      /class="org-tree-node org-tree-person org-tree-last"><div class="org-tree-box"><span class="org-tree-title">Fictional Helper<\/span><span class="org-tree-meta">Fictional Title 52 · Fictional Holdings<\/span><\/div><\/li>/,
+    );
+    expect(markup).toContain(
+      '<p role="status" class="small-text">Loaded: 4 people</p>',
+    );
+  });
+
+  it("shows no work email, phone, employee number or user, even when the rows carry them", () => {
+    const leaky = {
+      ...chief,
+      workEmail: "chief@example.test",
+      workPhone: "+00 0000 0050",
+      employeeNumber: "EMP-50",
+      userId: "fictional-chief-user",
+      status: "active",
+    } as ReportingPerson;
+    const markup = panel({
+      state: people({
+        lists: {
+          "": { people: [leaky], page: 1, hasMore: false },
+          [chief.id]: {
+            people: [
+              {
+                ...helper,
+                workEmail: "helper@example.test",
+              } as ReportingPerson,
+            ],
+            page: 1,
+            hasMore: false,
+          },
+        },
+      }),
+    });
+    for (const fact of [
+      "chief@example.test",
+      "helper@example.test",
+      "+00 0000 0050",
+      "EMP-50",
+      "fictional-chief-user",
+      "active",
+    ])
+      expect(markup).not.toContain(fact);
+    expect(markup).toContain("Fictional Chief");
+    expect(markup).toContain("Fictional Helper");
+  });
+
+  it("says while the top level loads, when it fails or is empty, and while a person's reports load or fail", () => {
+    expect(panel({ state: EMPTY_PEOPLE })).toContain(
+      '<p role="status">Loading the org tree by people…</p>',
+    );
+    expect(
+      panel({
+        state: { ...EMPTY_PEOPLE, errors: { "load:": "Fictional refusal." } },
+      }),
+    ).toMatch(
+      /<p class="notice error" role="alert">Could not load the org tree by people\. (<!-- -->)?Fictional refusal\.<\/p>/,
+    );
+    const empty = panel({
+      state: {
+        ...EMPTY_PEOPLE,
+        lists: { "": { people: [], page: 1, hasMore: false } },
+      },
+    });
+    expect(empty).toContain(
+      '<p class="muted">No one holds a current position yet.</p>',
+    );
+    expect(empty).not.toContain('role="tree"');
+    const loading = panel({
+      state: people({ expanded: [chief.id, deputy.id] }),
+    });
+    expect(loading).toMatch(
+      /<span class="org-tree-meta">Loading the people reporting to (<!-- -->)?Fictional Deputy(<!-- -->)?…<\/span>/,
+    );
+    expect(loading).toContain(
+      'aria-label="Fictional Deputy, Fictional Title 51, Fictional Holdings, 1 direct report, loading"',
+    );
+    const failed = panel({
+      state: people({
+        expanded: [chief.id, deputy.id],
+        errors: { [`load:${deputy.id}`]: "Fictional refusal." },
+      }),
+    });
+    expect(failed.replace(/<!-- -->/g, "")).toContain(
+      '<p class="notice error" role="alert">Could not load the people reporting to Fictional Deputy. Fictional refusal. Collapse and expand Fictional Deputy to try again.</p>',
+    );
+    expect(failed).toContain(
+      'aria-label="Fictional Deputy, Fictional Title 51, Fictional Holdings, 1 direct report, could not load"',
+    );
+    expect(panel({ state: people({ busy: ["list:"] }) })).toContain(
+      '<div class="org-tree-box">Loading more people…</div>',
+    );
+    expect(panel({ tree: { exportFailed: true } })).toContain(
+      '<p class="notice error" role="alert">Could not make the image. Collapse some people and try again.</p>',
+    );
+  });
+
+  it("says in the status line when Expand all runs, stops at the limit, fails or finishes", () => {
+    const status = (expandAll: PeopleState["expandAll"]) =>
+      panel({ state: people({ expandAll }) });
+    const limit = status({ state: "limit", people: 480 });
+    expect(limit).toContain(
+      '<p role="status" class="small-text">Loaded: 4 people. Expand all stopped at the limit of 500 people. Expand a person to see who reports to them.</p>',
+    );
+    expect(limit).toContain(toolButton("Expand all", false));
+    const running = status({ state: "running", people: 120 });
+    expect(running).toContain(toolButton("Expand all", true));
+    expect(running).toContain(
+      "Expand all is loading people: 120 people loaded so far.",
+    );
+    expect(status({ state: "finished", people: 4 })).toContain(
+      "Expand all finished: 4 people loaded.",
+    );
+    expect(
+      status({ state: "failed", person: "Fictional Deputy", people: 4 }),
+    ).toContain(
+      "Expand all stopped because the people reporting to Fictional Deputy could not load.",
+    );
+    // The units status stays out of people mode.
+    expect(
+      panel({ tree: { expandAll: { state: "finished", units: 3 } } }),
+    ).not.toContain("units loaded");
+  });
+
+  it("moves focus and expands or collapses people for every tree key", () => {
+    const items = flattenTree(buildPeopleTree(people()));
+    const [chiefKey, deputyKey, helperKey, lonerKey, moreKey] = items.map(
+      (item) => item.key,
+    );
+    expect(moreKey).toBe("more:");
+    const key = (current: string, pressed: string) =>
+      treeKey(items, current, pressed);
+    expect(key(chiefKey, "ArrowDown")).toEqual({ focus: deputyKey });
+    expect(key(moreKey, "ArrowDown")).toEqual({ focus: moreKey });
+    expect(key(helperKey, "ArrowUp")).toEqual({ focus: deputyKey });
+    expect(key(chiefKey, "ArrowUp")).toEqual({ focus: chiefKey });
+    expect(key(lonerKey, "Home")).toEqual({ focus: chiefKey });
+    expect(key(deputyKey, "End")).toEqual({ focus: moreKey });
+    // Right expands a collapsed person with reports, enters an expanded one, and does nothing on a
+    // person without reports.
+    expect(key(deputyKey, "ArrowRight")).toEqual({ togglePerson: deputy });
+    expect(key(chiefKey, "ArrowRight")).toEqual({ focus: deputyKey });
+    expect(key(helperKey, "ArrowRight")).toEqual({});
+    expect(key(lonerKey, "ArrowRight")).toEqual({});
+    // Left collapses an expanded person, otherwise moves to the person above.
+    expect(key(chiefKey, "ArrowLeft")).toEqual({ togglePerson: chief });
+    expect(key(helperKey, "ArrowLeft")).toEqual({ focus: chiefKey });
+    expect(key(deputyKey, "ArrowLeft")).toEqual({ focus: chiefKey });
+    expect(key(lonerKey, "ArrowLeft")).toEqual({});
+    for (const pressed of ["Enter", " "]) {
+      expect(key(chiefKey, pressed)).toEqual({ togglePerson: chief });
+      expect(key(deputyKey, pressed)).toEqual({ togglePerson: deputy });
+      expect(key(helperKey, pressed)).toEqual({});
+      expect(key(moreKey, pressed)).toEqual({ more: "" });
+    }
+    expect(key(helperKey, "a")).toBeNull();
+    // A hidden focused person gives the tab stop to the nearest visible person above.
+    const collapsed = flattenTree(buildPeopleTree(people({ expanded: [] })));
+    expect(resolveFocus(collapsed, { key: helperKey, path: [chiefKey] })).toBe(
+      chiefKey,
+    );
+    expect(resolveFocus(items, { key: helperKey, path: [chiefKey] })).toBe(
+      helperKey,
+    );
+    expect(resolveFocus(items, null)).toBe(chiefKey);
+  });
+
+  it("zooms between 50% and 150% in people mode, disabling each button at its bound", () => {
+    const at = (zoom: number) =>
+      renderToStaticMarkup(
+        <PeopleTreeView
+          people={people()}
+          zoom={zoom}
+          focused={null}
+          expandAll={{ state: "idle" }}
+        />,
+      );
+    const low = at(ZOOM_MIN);
+    expect(low).toContain(toolButton("Zoom out", true));
+    expect(low).toContain(toolButton("Zoom in", false));
+    expect(low).toMatch(/<span class="small-text">50(<!-- -->)?%<\/span>/);
+    expect(low).toContain('style="zoom:0.5"');
+    const high = at(ZOOM_MAX);
+    expect(high).toContain(toolButton("Zoom out", false));
+    expect(high).toContain(toolButton("Zoom in", true));
+    expect(high).toContain('style="zoom:1.5"');
+    for (const label of ["Zoom out", "Zoom in", "Reset zoom", "Export image"])
+      expect(at(100)).toContain(toolButton(label, false));
+    // Export image waits for a loaded person.
+    expect(
+      renderToStaticMarkup(
+        <PeopleTreeView
+          people={{
+            ...EMPTY_PEOPLE,
+            lists: { "": { people: [], page: 1, hasMore: false } },
+          }}
+          zoom={100}
+          focused={null}
+          expandAll={{ state: "idle" }}
+        />,
+      ),
+    ).not.toContain("Export image");
   });
 });

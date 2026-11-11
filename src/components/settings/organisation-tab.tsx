@@ -23,7 +23,7 @@ import {
 } from "@/components/workspace/client";
 import { saveBlob } from "@/components/workspace/helpers";
 import type { Requester } from "@/components/workspace/optimistic";
-import type { Employee, Position } from "@/lib/directory";
+import type { Employee, Position, ReportingPerson } from "@/lib/directory";
 import type { OrgLevel, OrgUnit } from "@/lib/org";
 import type { MeAccess } from "./admin-portal";
 import { OrgImportPanel } from "./org-import-panel";
@@ -31,14 +31,20 @@ import {
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEP,
+  buildPeopleTree,
   buildTree,
   countsText,
   drawLayout,
   expandAll,
+  expandAllPeople,
   expandMessage,
   exportScale,
   flattenTree,
   imageFilename,
+  peopleCount,
+  peopleCountsText,
+  peopleExpandMessage,
+  personDetails,
   resolveFocus,
   treeCounts,
   treeKey,
@@ -47,7 +53,10 @@ import {
   zoomTo,
   type ExpandStatus,
   type MoreNode,
+  type PeopleExpandStatus,
+  type PersonNode,
   type TreeFocus,
+  type TreeLayout,
   type TreeNode,
   type UnitNode,
 } from "./org-tree";
@@ -133,6 +142,50 @@ export const TREE_START: TreeState = {
   expandAll: { state: "idle" },
   exportFailed: false,
 };
+/** What the org tree shows (ADM-23): units, the default, or people with their reporting lines. */
+export type TreeMode = "units" | "people";
+export interface PeopleList {
+  people: ReportingPerson[];
+  page: number;
+  hasMore: boolean;
+}
+/** The org tree by people, loaded apart from the chart; nothing loads until By people is chosen. */
+export interface PeopleState {
+  /** One level per manager id; "" is the top level. */
+  lists: Record<string, PeopleList>;
+  expanded: string[];
+  /** Load errors by `load:` (a person's first page) or `list:` (Show more) and a manager id. */
+  errors: Record<string, string>;
+  /** Keys of the requests in flight, in the same form. */
+  busy: string[];
+  /** People mode's own tab stop; null is the first item. */
+  focused: TreeFocus | null;
+  expandAll: PeopleExpandStatus;
+}
+export interface PeopleHandlers {
+  treeMode: (mode: TreeMode) => void;
+  togglePerson: (person: ReportingPerson) => void;
+  morePeople: (listKey: string) => void;
+  /** Makes the item people mode's tab stop; with move, focus goes to it too. */
+  focusPerson: (node: TreeNode, move?: boolean) => void;
+  expandAllPeople: () => void;
+  collapseAllPeople: () => void;
+  exportPeopleImage: () => void;
+}
+export const EMPTY_PEOPLE: PeopleState = {
+  lists: {},
+  expanded: [],
+  errors: {},
+  busy: [],
+  focused: null,
+  expandAll: { state: "idle" },
+};
+/** The org tree by people needs the directory page and directory view (directory:read). */
+export const peopleViewAllowed = (
+  access: Pick<MeAccess, "pages" | "actions">,
+) =>
+  access.pages.includes("directory") &&
+  !!access.actions.directory?.includes("view");
 
 export const LEVELS_PATH = "/api/v1/org-units/levels";
 export const CHART_PAGE_SIZE = 100;
@@ -157,6 +210,15 @@ export const loadUnit = (request: Requester, unitId: string) =>
     request<Page<OrgUnit>>(unitsPath(unitId)),
     request<Page<Position>>(positionsPath(unitId)),
   ]);
+export const PEOPLE_PAGE_SIZE = 100;
+export const reportingPath = (managerId: string | null, page = 1) =>
+  `/api/v1/employees/reporting-lines?${managerId ? `managerId=${managerId}&` : ""}page=${page}&pageSize=${PEOPLE_PAGE_SIZE}`;
+/** Expanding a person: one page of the people reporting to them; null is the top level. */
+export const loadReports = (
+  request: Requester,
+  managerId: string | null,
+  page = 1,
+) => request<Page<ReportingPerson>>(reportingPath(managerId, page));
 /** Show employees on a position: one page of the people who hold it. */
 export const loadHolders = (request: Requester, positionId: string, page = 1) =>
   request<Page<Employee>>(holdersPath(positionId, page));
@@ -171,6 +233,11 @@ export const EMPTY_CHART: ChartState = {
 };
 const unitList = (page: Page<OrgUnit>): UnitList => ({
   units: page.data,
+  page: page.pagination.page,
+  hasMore: page.pagination.hasMore,
+});
+const peopleList = (page: Page<ReportingPerson>): PeopleList => ({
+  people: page.data,
   page: page.pagination.page,
   hasMore: page.pagination.hasMore,
 });
@@ -225,12 +292,16 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
   );
   const owner = access.companyLevel === "owner";
   const directoryView = !!access.actions.directory?.includes("view");
+  const peopleAllowed = peopleViewAllowed(access);
   const [levels, setLevels] = useState<OrgLevel[] | null>(null);
   const [loadError, setLoadError] = useState("");
   const [chart, setChart] = useState<ChartState>(EMPTY_CHART);
   const [form, setForm] = useState<OrgForm | null>(null);
   const [view, setView] = useState<ChartView>("list");
   const [tree, setTree] = useState<TreeState>(TREE_START);
+  const [treeMode, setTreeMode] = useState<TreeMode>("units");
+  const [people, setPeople] = useState<PeopleState>(EMPTY_PEOPLE);
+  const peopleMode = peopleAllowed && treeMode === "people";
   const moveTreeFocus = useRef(false);
   const levelNames = useMemo(
     () => new Map((levels ?? []).map((level) => [level.id, level.name])),
@@ -247,6 +318,15 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
     }));
   const setBusy = (key: string, on: boolean) =>
     patch((current) => ({
+      busy: on
+        ? [...current.busy, key]
+        : current.busy.filter((item) => item !== key),
+    }));
+  const patchPeople = (
+    change: (current: PeopleState) => Partial<PeopleState>,
+  ) => setPeople((current) => ({ ...current, ...change(current) }));
+  const setPeopleBusy = (key: string, on: boolean) =>
+    patchPeople((current) => ({
       busy: on
         ? [...current.busy, key]
         : current.busy.filter((item) => item !== key),
@@ -292,23 +372,25 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
     });
 
   // Focus follows a key or a click to the tree's tab stop. When a collapse hides the focused item,
-  // the view moves the tab stop to its nearest visible unit, and focus follows if it was lost.
+  // the view moves the tab stop to its nearest visible unit or person, and focus follows if it was
+  // lost. Each tree mode keeps its own tab stop.
+  const treeFocused = peopleMode ? people.focused : tree.focused;
   useEffect(() => {
     if (view !== "tree") return;
     const element = document.querySelector<HTMLElement>(
       '[data-org-tree] [tabindex="0"]',
     );
     const lost =
-      !!tree.focused &&
+      !!treeFocused &&
       document.activeElement === document.body &&
-      element?.dataset.orgTreeKey !== tree.focused.key;
+      element?.dataset.orgTreeKey !== treeFocused.key;
     if (!element || !(moveTreeFocus.current || lost)) return;
     moveTreeFocus.current = false;
     element.focus({ preventScroll: true });
     element
       .querySelector(".org-tree-box")
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [view, chart, tree.focused]);
+  }, [view, chart, people, treeFocused]);
 
   /** After an import: the levels and the top level again, with every unit collapsed. */
   async function reloadChart() {
@@ -500,23 +582,26 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
       setTree((current) => ({ ...current, zoom: zoomTo(zoom) }));
     },
     exportImage() {
-      const failed = () =>
-        setTree((current) => ({ ...current, exportFailed: true }));
-      const layout = treeLayout(buildTree(chart, levelNames));
-      const scale = exportScale(layout);
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.floor(layout.width * scale));
-      canvas.height = Math.max(1, Math.floor(layout.height * scale));
-      const context = canvas.getContext("2d");
-      if (!context) return failed();
-      drawLayout(context, layout, scale);
-      canvas.toBlob((blob) => {
-        if (!blob) return failed();
-        setTree((current) => ({ ...current, exportFailed: false }));
-        saveBlob(imageFilename(new Date()), blob);
-      }, "image/png");
+      saveImage(treeLayout(buildTree(chart, levelNames)), "units");
     },
   };
+  /** Draws the layout on a canvas in the browser and saves it as a PNG; no request is made. */
+  function saveImage(layout: TreeLayout, mode: TreeMode) {
+    const failed = () =>
+      setTree((current) => ({ ...current, exportFailed: true }));
+    const scale = exportScale(layout);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.floor(layout.width * scale));
+    canvas.height = Math.max(1, Math.floor(layout.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return failed();
+    drawLayout(context, layout, scale);
+    canvas.toBlob((blob) => {
+      if (!blob) return failed();
+      setTree((current) => ({ ...current, exportFailed: false }));
+      saveBlob(imageFilename(new Date(), mode), blob);
+    }, "image/png");
+  }
   /** Expand all through loadUnit; each result goes into the chart as an expand would put it. */
   async function runExpandAll() {
     if (!request || tree.expandAll.state === "running") return;
@@ -553,6 +638,136 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
       progress,
     });
     setTree((current) => ({ ...current, expandAll: result }));
+  }
+
+  /** Loads the first page of a person's reports, or of the top level for "". */
+  async function loadPeople(managerId: string) {
+    if (!request) return;
+    const key = `load:${managerId}`;
+    patchPeople((current) => ({
+      busy: [...current.busy, key],
+      errors: without(current.errors, key),
+    }));
+    try {
+      const page = await loadReports(request, managerId || null);
+      patchPeople((current) => ({
+        lists: { ...current.lists, [managerId]: peopleList(page) },
+      }));
+    } catch (e) {
+      patchPeople((current) => ({
+        errors: { ...current.errors, [key]: humanError(e) },
+      }));
+    } finally {
+      setPeopleBusy(key, false);
+    }
+  }
+  const peopleHandlers: PeopleHandlers = {
+    treeMode(mode) {
+      setTreeMode(mode);
+      setTree((current) => ({ ...current, exportFailed: false }));
+      // The first switch to By people loads the top level; after a failure, switching retries.
+      if (
+        mode === "people" &&
+        !people.lists[""] &&
+        !people.busy.includes("load:")
+      )
+        void loadPeople("");
+    },
+    togglePerson(person) {
+      if (!person.reports) return;
+      const open = people.expanded.includes(person.id);
+      patchPeople((current) => ({
+        expanded: open
+          ? current.expanded.filter((id) => id !== person.id)
+          : [...current.expanded, person.id],
+      }));
+      // Once per person: collapsing and expanding again uses what was loaded.
+      if (
+        !open &&
+        !people.lists[person.id] &&
+        !people.busy.includes(`load:${person.id}`)
+      )
+        void loadPeople(person.id);
+    },
+    morePeople(key) {
+      const list = people.lists[key];
+      const busyKey = `list:${key}`;
+      if (!request || !list || people.busy.includes(busyKey)) return;
+      setPeopleBusy(busyKey, true);
+      loadReports(request, key || null, list.page + 1)
+        .then((page) =>
+          patchPeople((current) => ({
+            lists: {
+              ...current.lists,
+              [key]: {
+                people: [...current.lists[key].people, ...page.data],
+                page: page.pagination.page,
+                hasMore: page.pagination.hasMore,
+              },
+            },
+            errors: without(current.errors, busyKey),
+          })),
+        )
+        .catch((e) =>
+          patchPeople((current) => ({
+            errors: { ...current.errors, [busyKey]: humanError(e) },
+          })),
+        )
+        .finally(() => setPeopleBusy(busyKey, false));
+    },
+    focusPerson(node, move = false) {
+      if (move) moveTreeFocus.current = true;
+      setPeople((current) =>
+        current.focused?.key === node.key && !move
+          ? current
+          : { ...current, focused: { key: node.key, path: node.path } },
+      );
+    },
+    expandAllPeople() {
+      void runExpandAllPeople();
+    },
+    collapseAllPeople() {
+      patchPeople(() => ({ expanded: [] }));
+    },
+    exportPeopleImage() {
+      saveImage(treeLayout(buildPeopleTree(people)), "people");
+    },
+  };
+  /** Expand all by people through loadReports; each result goes in as an expand would put it. */
+  async function runExpandAllPeople() {
+    if (!request || people.expandAll.state === "running") return;
+    const progress = (count: number) =>
+      patchPeople(() => ({ expandAll: { state: "running", people: count } }));
+    progress(peopleCount(people));
+    const result = await expandAllPeople(
+      people,
+      (id) => loadReports(request, id),
+      {
+        loaded(person, page) {
+          patchPeople((current) => ({
+            lists: { ...current.lists, [person.id]: peopleList(page) },
+            expanded: opened(current.expanded, person.id),
+            errors: without(current.errors, `load:${person.id}`),
+          }));
+        },
+        expanded(person) {
+          patchPeople((current) => ({
+            expanded: opened(current.expanded, person.id),
+          }));
+        },
+        failed(person, error) {
+          patchPeople((current) => ({
+            expanded: opened(current.expanded, person.id),
+            errors: {
+              ...current.errors,
+              [`load:${person.id}`]: humanError(error),
+            },
+          }));
+        },
+        progress,
+      },
+    );
+    patchPeople(() => ({ expandAll: result }));
   }
 
   async function archive(
@@ -707,7 +922,10 @@ export function OrganisationTab({ access }: { access: MeAccess }) {
         directoryView={directoryView}
         view={view}
         tree={tree}
-        on={{ ...handlers, ...treeHandlers }}
+        peopleAllowed={peopleAllowed}
+        treeMode={treeMode}
+        people={people}
+        on={{ ...handlers, ...treeHandlers, ...peopleHandlers }}
       />
       <OrgImportPanel
         request={request}
@@ -943,7 +1161,8 @@ interface ChartContext {
 
 /**
  * The org chart, as a nested list where each unit's button expands it in place, or as the org tree
- * by units (ADM-22). Both read the same chart state.
+ * by units (ADM-22). Both read the same chart state. With the directory page and directory view the
+ * org tree can show people instead (ADM-23), from its own state.
  */
 export function OrgChartPanel({
   levels,
@@ -952,6 +1171,9 @@ export function OrgChartPanel({
   directoryView,
   view = "list",
   tree = TREE_START,
+  peopleAllowed = false,
+  treeMode = "units",
+  people = EMPTY_PEOPLE,
   on = {},
 }: {
   levels: OrgLevel[];
@@ -960,7 +1182,10 @@ export function OrgChartPanel({
   directoryView: boolean;
   view?: ChartView;
   tree?: TreeState;
-  on?: Partial<ChartHandlers & TreeHandlers>;
+  peopleAllowed?: boolean;
+  treeMode?: TreeMode;
+  people?: PeopleState;
+  on?: Partial<ChartHandlers & TreeHandlers & PeopleHandlers>;
 }) {
   const ctx: ChartContext = {
     levelNames: new Map(levels.map((level) => [level.id, level.name])),
@@ -970,6 +1195,7 @@ export function OrgChartPanel({
     on,
   };
   const top = chart.lists[""];
+  const peopleMode = view === "tree" && peopleAllowed && treeMode === "people";
   return (
     <section className="panel stack">
       <h2>Org chart</h2>
@@ -994,6 +1220,24 @@ export function OrgChartPanel({
             Org tree
           </button>
         </div>
+        {view === "tree" && peopleAllowed && (
+          <div className="view-toggle" role="group" aria-label="Org tree shows">
+            <button
+              type="button"
+              aria-pressed={!peopleMode}
+              onClick={() => on.treeMode?.("units")}
+            >
+              By units
+            </button>
+            <button
+              type="button"
+              aria-pressed={peopleMode}
+              onClick={() => on.treeMode?.("people")}
+            >
+              By people
+            </button>
+          </div>
+        )}
         <button
           type="button"
           className="button"
@@ -1003,7 +1247,22 @@ export function OrgChartPanel({
           Add top-level unit
         </button>
       </div>
-      {chart.errors["list:"] && !top ? (
+      {peopleMode && (
+        <p className="muted small-text">
+          Each person reports to whoever holds a manager position in their unit,
+          or in the nearest unit above it that has one.
+        </p>
+      )}
+      {peopleMode ? (
+        <PeopleTreeView
+          people={people}
+          zoom={tree.zoom}
+          focused={people.focused}
+          expandAll={people.expandAll}
+          exportFailed={tree.exportFailed}
+          on={on}
+        />
+      ) : chart.errors["list:"] && !top ? (
         <p className="notice error" role="alert">
           {chart.errors["list:"]}
         </p>
@@ -1078,55 +1337,15 @@ export function OrgTreeView({
   }
   return (
     <div className="stack" style={{ gap: 12 }}>
-      <div className="row" style={{ gap: 8 }}>
-        <button
-          type="button"
-          className="button secondary small"
-          disabled={expandAll.state === "running"}
-          onClick={() => on.expandAll?.()}
-        >
-          Expand all
-        </button>
-        <button
-          type="button"
-          className="button secondary small"
-          onClick={() => on.collapseAll?.()}
-        >
-          Collapse all
-        </button>
-        <button
-          type="button"
-          className="button secondary small"
-          disabled={zoom <= ZOOM_MIN}
-          onClick={() => on.zoom?.(zoom - ZOOM_STEP)}
-        >
-          Zoom out
-        </button>
-        <span className="small-text">{zoom}%</span>
-        <button
-          type="button"
-          className="button secondary small"
-          disabled={zoom >= ZOOM_MAX}
-          onClick={() => on.zoom?.(zoom + ZOOM_STEP)}
-        >
-          Zoom in
-        </button>
-        <button
-          type="button"
-          className="button secondary small"
-          onClick={() => on.zoom?.(100)}
-        >
-          Reset zoom
-        </button>
-        <button
-          type="button"
-          className="button secondary small"
-          disabled={!counts.units}
-          onClick={() => on.exportImage?.()}
-        >
-          Export image
-        </button>
-      </div>
+      <TreeToolbar
+        zoom={zoom}
+        running={expandAll.state === "running"}
+        exportable={!!counts.units}
+        onExpandAll={() => on.expandAll?.()}
+        onCollapseAll={() => on.collapseAll?.()}
+        onZoom={(next) => on.zoom?.(next)}
+        onExport={() => on.exportImage?.()}
+      />
       <p role="status" className="small-text">
         {message ? `${countsText(counts)}. ${message}` : countsText(counts)}
       </p>
@@ -1173,6 +1392,280 @@ export function OrgTreeView({
         </ul>
       </div>
     </div>
+  );
+}
+
+/** Expand all, Collapse all, zoom and Export image, the same in both tree modes. */
+function TreeToolbar({
+  zoom,
+  running,
+  exportable,
+  onExpandAll,
+  onCollapseAll,
+  onZoom,
+  onExport,
+}: {
+  zoom: number;
+  running: boolean;
+  exportable: boolean;
+  onExpandAll: () => void;
+  onCollapseAll: () => void;
+  onZoom: (zoom: number) => void;
+  onExport: () => void;
+}) {
+  return (
+    <div className="row" style={{ gap: 8 }}>
+      <button
+        type="button"
+        className="button secondary small"
+        disabled={running}
+        onClick={onExpandAll}
+      >
+        Expand all
+      </button>
+      <button
+        type="button"
+        className="button secondary small"
+        onClick={onCollapseAll}
+      >
+        Collapse all
+      </button>
+      <button
+        type="button"
+        className="button secondary small"
+        disabled={zoom <= ZOOM_MIN}
+        onClick={() => onZoom(zoom - ZOOM_STEP)}
+      >
+        Zoom out
+      </button>
+      <span className="small-text">{zoom}%</span>
+      <button
+        type="button"
+        className="button secondary small"
+        disabled={zoom >= ZOOM_MAX}
+        onClick={() => onZoom(zoom + ZOOM_STEP)}
+      >
+        Zoom in
+      </button>
+      <button
+        type="button"
+        className="button secondary small"
+        onClick={() => onZoom(100)}
+      >
+        Reset zoom
+      </button>
+      <button
+        type="button"
+        className="button secondary small"
+        disabled={!exportable}
+        onClick={onExport}
+      >
+        Export image
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The org tree by people (ADM-23): a read-only nested list of who reports to whom, with the same
+ * keys, zoom and export as the tree by units. Each person shows only their name, the title and unit
+ * of the position they report from, and two counts; never a contact fact or employee number.
+ */
+export function PeopleTreeView({
+  people,
+  zoom,
+  focused,
+  expandAll,
+  exportFailed = false,
+  on = {},
+}: {
+  people: Pick<PeopleState, "lists" | "expanded" | "errors" | "busy">;
+  zoom: number;
+  focused: TreeFocus | null;
+  expandAll: PeopleExpandStatus;
+  exportFailed?: boolean;
+  on?: Partial<TreeHandlers & PeopleHandlers>;
+}) {
+  const top = people.lists[""];
+  const nodes = buildPeopleTree(people);
+  const items = flattenTree(nodes);
+  const stop = resolveFocus(items, focused);
+  if (!top)
+    return people.errors["load:"] ? (
+      <p className="notice error" role="alert">
+        Could not load the org tree by people. {people.errors["load:"]}
+      </p>
+    ) : (
+      <p role="status">Loading the org tree by people…</p>
+    );
+  if (!top.people.length)
+    return <p className="muted">No one holds a current position yet.</p>;
+  const count = peopleCount(people);
+  const message = peopleExpandMessage(expandAll);
+  const failures = items.filter(
+    (item): item is PersonNode => item.kind === "person" && item.failed,
+  );
+  const listErrors = items.filter(
+    (item): item is MoreNode =>
+      item.kind === "more" && !!people.errors[`list:${item.listKey}`],
+  );
+  function onKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = (event.target as HTMLElement).dataset.orgTreeKey;
+    const move = key && treeKey(items, key, event.key);
+    if (!move) return;
+    event.preventDefault();
+    if (move.togglePerson) on.togglePerson?.(move.togglePerson);
+    if (move.more !== undefined) on.morePeople?.(move.more);
+    const target = items.find((item) => item.key === move.focus);
+    if (target) on.focusPerson?.(target, true);
+  }
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      <TreeToolbar
+        zoom={zoom}
+        running={expandAll.state === "running"}
+        exportable={count > 0}
+        onExpandAll={() => on.expandAllPeople?.()}
+        onCollapseAll={() => on.collapseAllPeople?.()}
+        onZoom={(next) => on.zoom?.(next)}
+        onExport={() => on.exportPeopleImage?.()}
+      />
+      <p role="status" className="small-text">
+        {message
+          ? `${peopleCountsText(count)}. ${message}`
+          : peopleCountsText(count)}
+      </p>
+      {exportFailed && (
+        <p className="notice error" role="alert">
+          Could not make the image. Collapse some people and try again.
+        </p>
+      )}
+      {failures.map((item) => (
+        <p key={item.key} className="notice error" role="alert">
+          Could not load the people reporting to {item.person.displayName}.{" "}
+          {people.errors[`load:${item.person.id}`]} Collapse and expand{" "}
+          {item.person.displayName} to try again.
+        </p>
+      ))}
+      {listErrors.map((item) => (
+        <p key={item.key} className="notice error" role="alert">
+          {people.errors[`list:${item.listKey}`]}
+        </p>
+      ))}
+      <div className="org-tree-scroll">
+        <ul
+          role="tree"
+          aria-label="Org tree by people"
+          className="org-tree"
+          data-org-tree=""
+          style={{ zoom: zoom / 100 }}
+          onKeyDown={onKeyDown}
+        >
+          {nodes.map((node, index) => (
+            <PersonTreeItem
+              key={node.key}
+              node={node}
+              edge={edgeOf(index, nodes.length)}
+              stop={stop}
+              on={on}
+            />
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function PersonTreeItem({
+  node,
+  edge,
+  stop,
+  on,
+}: {
+  node: TreeNode;
+  edge: string;
+  stop: string | null;
+  on: Partial<PeopleHandlers>;
+}) {
+  const item = {
+    role: "treeitem",
+    "aria-level": node.level,
+    "aria-setsize": node.setSize,
+    "aria-posinset": node.posInSet,
+    "aria-label": node.label,
+    tabIndex: node.key === stop ? 0 : -1,
+    "data-org-tree-key": node.key,
+    onFocus: (event: FocusEvent) => {
+      if (event.target === event.currentTarget) on.focusPerson?.(node);
+    },
+  };
+  if (node.kind !== "person")
+    return (
+      <li {...item} className={`org-tree-node org-tree-more${edge}`}>
+        <div
+          className="org-tree-box"
+          onClick={() => {
+            on.focusPerson?.(node, true);
+            if (node.kind === "more") on.morePeople?.(node.listKey);
+          }}
+        >
+          {node.kind === "more" && node.busy
+            ? "Loading more people…"
+            : node.label}
+        </div>
+      </li>
+    );
+  const { person } = node;
+  const Chevron = node.expanded ? ChevronDown : ChevronRight;
+  return (
+    <li
+      {...item}
+      aria-expanded={person.reports > 0 ? node.expanded : undefined}
+      className={`org-tree-node org-tree-person${edge}`}
+    >
+      <div
+        className="org-tree-box"
+        onClick={() => {
+          on.focusPerson?.(node, true);
+          if (person.reports > 0) on.togglePerson?.(person);
+        }}
+      >
+        <span className="org-tree-title">
+          {person.reports > 0 && <Chevron size={14} aria-hidden="true" />}
+          {person.displayName}
+        </span>
+        {personDetails(person).map((line) => (
+          <span key={line} className="org-tree-meta">
+            {line}
+          </span>
+        ))}
+        {node.loading && (
+          <span className="org-tree-meta">
+            Loading the people reporting to {person.displayName}…
+          </span>
+        )}
+      </div>
+      {node.children.length > 0 && (
+        <ul
+          role="group"
+          className="org-tree-group"
+          style={{
+            gridTemplateColumns: `repeat(${node.children.length}, auto)`,
+          }}
+        >
+          {node.children.map((child, index) => (
+            <PersonTreeItem
+              key={child.key}
+              node={child}
+              edge={edgeOf(index, node.children.length)}
+              stop={stop}
+              on={on}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
   );
 }
 
@@ -1241,6 +1734,8 @@ function OrgTreeItem({
         </div>
       </li>
     );
+  // The tree by units holds no person nodes.
+  if (node.kind === "person") return null;
   const { unit } = node;
   const Chevron = node.expanded ? ChevronDown : ChevronRight;
   const row = node.children.filter((child) => child.kind !== "position");
