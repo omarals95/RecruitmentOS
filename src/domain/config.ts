@@ -213,13 +213,14 @@ export type RecordScope = (typeof RECORD_SCOPES)[number];
 export const DIRECTORY_RULES = ["basic", "full"] as const;
 export type DirectoryRule = (typeof DIRECTORY_RULES)[number];
 
-/** Company areas a company owner may grant to a company admin (drizzle/0028). */
+/** Company areas a company owner may grant to a company admin (drizzle/0028, people drizzle/0042). */
 export const GRANTABLE_ADMIN_AREAS = [
   "fields",
   "workflows",
   "boards",
   "organisation",
   "templates",
+  "people",
 ] as const;
 /** Company areas only a company owner holds, whatever companyAreas says. */
 export const OWNER_ADMIN_AREAS = ["roles", "ai", "plan", "home-units"] as const;
