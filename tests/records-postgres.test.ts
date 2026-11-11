@@ -25,7 +25,14 @@ import {
   RECRUITER_ROLE,
   VIEWER_ROLE,
 } from "@/domain/config-defaults";
-import type { ConfigurableKind, RoleBody } from "@/domain/config";
+import {
+  CONFIGURABLE_KINDS,
+  kindSchemaBodySchema,
+  type ConfigurableKind,
+  type KindSchemaBody,
+  type RoleBody,
+} from "@/domain/config";
+import type { CustomField, CustomFieldType } from "@/domain/field-types";
 import {
   TASK_LINK_KINDS,
   type RecordDto,
@@ -2618,6 +2625,81 @@ describe("recruitment records with real PostgreSQL migrations and RLS", () => {
   });
 });
 
+// Kind schemas as an admin writer would publish them until R2b-09 adds a route.
+type ScreenAction = KindSchemaBody["screens"][number]["action"];
+const WORKSPACE = "00000000-0000-4000-a000-000000000001";
+/** A fictional custom field definition; a fresh key unless one is given. */
+const customField = (
+  label: string,
+  type: CustomFieldType,
+  extra: Record<string, unknown> = {},
+  key: string = randomUUID(),
+) =>
+  ({
+    key,
+    system: false,
+    label,
+    type,
+    required: false,
+    ...extra,
+  }) as CustomField;
+/**
+ * The kind's default body plus the given custom fields, each listed on every screen unless
+ * `screens` names the custom keys of a screen.
+ */
+const kindBody = (
+  kind: ConfigurableKind,
+  custom: CustomField[],
+  screens: Partial<Record<ScreenAction, string[]>> = {},
+) => {
+  const body = structuredClone(
+    DEFAULT_KIND_SCHEMAS[kind].body,
+  ) as KindSchemaBody;
+  body.fields.push(...custom);
+  for (const screen of body.screens)
+    screen.fields.push(
+      ...(screens[screen.action] ?? custom.map((field) => field.key)),
+    );
+  return body;
+};
+/** Publishes the body as the kind's next current version, as the database owner; its version id. */
+async function publishKindSchema(
+  fixture: Awaited<ReturnType<typeof createTestDb>>,
+  createdBy: string,
+  body: KindSchemaBody,
+): Promise<string> {
+  const text = JSON.stringify(kindSchemaBodySchema.parse(body));
+  await fixture.client.exec("RESET ROLE");
+  try {
+    const objectId =
+      (
+        await fixture.client.query<{ id: string }>(
+          "SELECT id FROM app.config_objects WHERE workspace_id = $1 AND team_id IS NULL AND type = 'kind-schema' AND key = $2",
+          [WORKSPACE, body.kind],
+        )
+      ).rows[0]?.id ??
+      (
+        await fixture.client.query<{ id: string }>(
+          "INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ($1, 'kind-schema', $2, $3) RETURNING id",
+          [WORKSPACE, body.kind, createdBy],
+        )
+      ).rows[0].id;
+    const versionId = (
+      await fixture.client.query<{ id: string }>(
+        "INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) SELECT $1, $2, 'published', coalesce(max(number), 0) + 1, $3::jsonb, now() FROM app.config_versions WHERE object_id = $1 RETURNING id",
+        [objectId, WORKSPACE, text],
+      )
+    ).rows[0].id;
+    await fixture.client.query(
+      "UPDATE app.config_objects SET current_version_id = $1 WHERE id = $2",
+      [versionId, objectId],
+    );
+    return versionId;
+  } finally {
+    await fixture.client.exec("SET ROLE recruitment_test_runtime");
+  }
+}
+
 // Record pins and custom values (R2b-02, job 067), on a database of their own so the kind schema
 // published here reaches no other case.
 describe("record pins and custom values with real PostgreSQL migrations and RLS", () => {
@@ -2872,9 +2954,26 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
     ]);
   });
 
-  it("round-trips non-task custom values unchecked against fields and refuses anything outside the bounded shape", async () => {
-    // Field ids that name no task field or any other record: nothing checks them until R2b-04.
+  it("round-trips non-task custom values of published fields and refuses anything outside the bounded shape first", async () => {
     const [text, number, flag, empty] = [1, 2, 3, 4].map(() => randomUUID());
+    await publishKindSchema(
+      fixture,
+      owner.userId,
+      kindBody("candidate", [
+        customField("Fictional note", "short-text", {}, text),
+        customField("Fictional score", "number", {}, number),
+        customField("Fictional flag", "checkbox", {}, flag),
+        customField("Fictional empty", "short-text", {}, empty),
+      ]),
+    );
+    await publishKindSchema(
+      fixture,
+      owner.userId,
+      kindBody("job-role", [
+        customField("Fictional role flag", "checkbox", {}, flag),
+        customField("Fictional role note", "short-text", {}, text),
+      ]),
+    );
     const values = {
       [text]: "Fictional custom value",
       [number]: 12.5,
@@ -2917,6 +3016,14 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
       }),
     );
     expect(role.data).toMatchObject({ customValues: { [flag]: false } });
+    // The strict schema runs first: a value outside the bounded shape is invalid_input, never
+    // unknown_custom_field or invalid_custom_value, and so is a system field error beside custom
+    // values that would fail later.
+    await expect(
+      createRecord(owner, "candidates", {
+        data: { customValues: { [randomUUID()]: "x", [number]: "x" } },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "invalid_input" });
     const refused = [
       { "not-a-uuid": "Fictional value" },
       { [text]: { nested: "Fictional value" } },
@@ -2954,12 +3061,21 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
 
   it("hides custom values from a role published before they existed, in a get, a list and a search", async () => {
     const secret = "Fictional confidential custom value";
+    const confidential = customField(
+      "Fictional confidential note",
+      "long-text",
+    );
+    await publishKindSchema(
+      fixture,
+      owner.userId,
+      kindBody("candidate", [confidential]),
+    );
     const person = unpinned(
       await createRecord(owner, "candidates", {
         data: {
           name: "Fictional Restricted Candidate",
           jobTitle: "Fictional analyst",
-          customValues: { [randomUUID()]: secret },
+          customValues: { [confidential.key]: secret },
         },
       }),
     );
@@ -3074,5 +3190,550 @@ describe("record pins and custom values with real PostgreSQL migrations and RLS"
       }),
     ).rejects.toMatchObject({ status: 400, code: "invalid_reference" });
     expect((await stored(plain.id)).data).not.toHaveProperty("jobTitleKey");
+  });
+});
+
+// Dynamic validation on create and update (R2b-04, job 081), on a database of its own so the kind
+// schemas published here reach no other case. Each case publishes the versions it needs first.
+describe("dynamic validation of custom values with real PostgreSQL migrations and RLS", () => {
+  const UNKNOWN = "A custom field is not available in this team.";
+  const PRESERVED = "Archived custom field values must be preserved unchanged.";
+  const KEPT = "Archived field values cannot be removed.";
+  const options = [
+    { id: "opt-1", label: "Fictional first" },
+    { id: "opt-2", label: "Fictional second" },
+  ];
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  const publish = (body: KindSchemaBody) =>
+    publishKindSchema(fixture, owner.userId, body);
+  /** The stored row, read as the database owner outside RLS. */
+  const stored = async (id: string) => {
+    await fixture.client.exec("RESET ROLE");
+    try {
+      return (
+        await fixture.client.query<{
+          data: Record<string, unknown>;
+          version: number;
+          schema_version_id: string | null;
+        }>(
+          "SELECT data, version, schema_version_id::text FROM app.records WHERE id = $1",
+          [id],
+        )
+      ).rows[0];
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+  };
+  const refusal = (code: string, message: string) => ({
+    status: 400,
+    code,
+    message,
+  });
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db, {
+      userId: "dynamic-owner",
+      teamId: "dynamic-team",
+    });
+    await enforceTestRls(fixture.db);
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+
+  it("refuses every custom value on the built-in default schemas as an unknown field", async () => {
+    const customValues = { [randomUUID()]: "x" };
+    const unknown = refusal("unknown_custom_field", UNKNOWN);
+    await expect(
+      createRecord(owner, "candidates", {
+        data: { name: "Fictional Default Candidate", customValues },
+      }),
+    ).rejects.toMatchObject(unknown);
+    await expect(
+      createRecord(owner, "job-roles", {
+        data: { title: "Fictional default role", customValues },
+      }),
+    ).rejects.toMatchObject(unknown);
+    const person = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Default Candidate" },
+    });
+    await expect(
+      updateRecord(owner, "candidates", person.id, {
+        version: 1,
+        data: { customValues },
+      }),
+    ).rejects.toMatchObject(unknown);
+    expect((await stored(person.id)).data).not.toHaveProperty("customValues");
+  });
+
+  it("checks added and changed custom values on each configurable kind and pins the version", async () => {
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional dynamic bucket" },
+    });
+    const vacancy = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional dynamic vacancy" },
+    });
+    const applicant = async () =>
+      (
+        await createRecord(owner, "candidates", {
+          data: { name: "Fictional Dynamic Applicant" },
+        })
+      ).id;
+    const application = async () =>
+      (
+        await createRecord(owner, "applications", {
+          candidateId: await applicant(),
+          vacancyId: vacancy.id,
+          data: {},
+        })
+      ).id;
+    const parent = await application();
+    const onboarding = await createRecord(owner, "onboarding", {
+      applicationId: parent,
+      data: {},
+    });
+    // Each kind's create input without custom values; parents are created as needed.
+    const inputs: [
+      ConfigurableKind,
+      ResourceName,
+      () => Promise<{ data: Record<string, unknown> }>,
+    ][] = [
+      [
+        "candidate",
+        "candidates",
+        async () => ({ data: { name: "Fictional Dynamic Candidate" } }),
+      ],
+      [
+        "job-role",
+        "job-roles",
+        async () => ({ data: { title: "Fictional dynamic role" } }),
+      ],
+      [
+        "vacancy",
+        "vacancies",
+        async () => ({ data: { title: "Fictional dynamic vacancy" } }),
+      ],
+      [
+        "application",
+        "applications",
+        async () => ({
+          candidateId: await applicant(),
+          vacancyId: vacancy.id,
+          data: {},
+        }),
+      ],
+      [
+        "task",
+        "tasks",
+        async () => ({
+          bucketId: bucket.id,
+          data: { title: "Fictional dynamic task" },
+        }),
+      ],
+      [
+        "interview",
+        "interviews",
+        async () => ({
+          applicationId: parent,
+          data: {
+            title: "Fictional dynamic interview",
+            startAt: "2026-11-20T06:00:00.000Z",
+          },
+        }),
+      ],
+      [
+        "offer",
+        "offers",
+        async () => ({
+          applicationId: parent,
+          data: { title: "Fictional dynamic offer" },
+        }),
+      ],
+      [
+        "onboarding",
+        "onboarding",
+        async () => ({ applicationId: await application(), data: {} }),
+      ],
+      [
+        "checklist",
+        "checklist",
+        async () => ({
+          onboardingId: onboarding.id,
+          data: { title: "Fictional dynamic checklist item" },
+        }),
+      ],
+    ];
+    expect(inputs.map(([kind]) => kind)).toEqual([...CONFIGURABLE_KINDS]);
+    for (const [kind, resource, input] of inputs) {
+      const score = customField(`Fictional ${kind} score`, "number", {
+        min: 0,
+        max: 10,
+      });
+      const status = customField(`Fictional ${kind} status`, "dropdown", {
+        options,
+      });
+      const versionId = await publish(kindBody(kind, [score, status]));
+      const values = { [score.key]: 7, [status.key]: "opt-1" };
+      const { data, ...refs } = await input();
+      const created = await createRecord(owner, resource, {
+        ...refs,
+        data: { ...data, customValues: values },
+      });
+      expect(created.data, kind).toMatchObject({ customValues: values });
+      const before = await stored(created.id);
+      expect(before.data.customValues, kind).toEqual(values);
+      expect(before.schema_version_id, kind).toBe(versionId);
+      for (const [field, value] of [
+        [score, "7"],
+        [score, 11],
+        [score, -1],
+        [status, "opt-9"],
+        [status, true],
+      ] as const)
+        await expect(
+          updateRecord(owner, resource, created.id, {
+            version: 1,
+            data: { customValues: { ...values, [field.key]: value } },
+          }),
+          `${kind} ${String(value)}`,
+        ).rejects.toMatchObject(
+          refusal("invalid_custom_value", `Invalid value for ${field.label}.`),
+        );
+      const stranger = { [randomUUID()]: 3 };
+      await expect(
+        updateRecord(owner, resource, created.id, {
+          version: 1,
+          data: { customValues: { ...values, ...stranger } },
+        }),
+        kind,
+      ).rejects.toMatchObject(refusal("unknown_custom_field", UNKNOWN));
+      const other = await input();
+      await expect(
+        createRecord(owner, resource, {
+          ...other,
+          data: { ...other.data, customValues: stranger },
+        }),
+        kind,
+      ).rejects.toMatchObject(refusal("unknown_custom_field", UNKNOWN));
+      expect(await stored(created.id), kind).toEqual(before);
+    }
+  });
+
+  it("keeps an archived field's value and refuses changing, removing or adding one unless imported", async () => {
+    const legacy = customField("Fictional legacy code", "short-text");
+    const grade = customField("Fictional grade", "number");
+    await publish(kindBody("vacancy", [legacy, grade]));
+    const held = await createRecord(owner, "vacancies", {
+      data: {
+        title: "Fictional archived-field vacancy",
+        customValues: { [legacy.key]: "Fictional code 7" },
+      },
+    });
+    const plain = await createRecord(owner, "vacancies", {
+      data: { title: "Fictional plain vacancy" },
+    });
+    const archived = await publish(
+      kindBody("vacancy", [{ ...legacy, archived: true }, grade]),
+    );
+    const edited = await updateRecord(owner, "vacancies", held.id, {
+      version: 1,
+      data: { title: "Fictional renamed vacancy" },
+    });
+    expect(edited.data).toMatchObject({
+      customValues: { [legacy.key]: "Fictional code 7" },
+    });
+    expect((await stored(held.id)).schema_version_id).toBe(archived);
+    // The kept value may be sent again unchanged beside a new one.
+    const both = { [legacy.key]: "Fictional code 7", [grade.key]: 4 };
+    const added = await updateRecord(owner, "vacancies", held.id, {
+      version: 2,
+      data: { customValues: both },
+    });
+    expect(added.data).toMatchObject({ customValues: both });
+    for (const value of ["Fictional code 8", null, ""])
+      await expect(
+        updateRecord(owner, "vacancies", held.id, {
+          version: 3,
+          data: { customValues: { ...both, [legacy.key]: value } },
+        }),
+      ).rejects.toMatchObject(refusal("archived_custom_field", PRESERVED));
+    await expect(
+      updateRecord(owner, "vacancies", held.id, {
+        version: 3,
+        data: { customValues: { [grade.key]: 4 } },
+      }),
+    ).rejects.toMatchObject(refusal("archived_custom_field", KEPT));
+    await expect(
+      updateRecord(owner, "vacancies", plain.id, {
+        version: 1,
+        data: { customValues: { [legacy.key]: "Fictional code 9" } },
+      }),
+    ).rejects.toMatchObject(refusal("archived_custom_field", PRESERVED));
+    await expect(
+      createRecord(owner, "vacancies", {
+        data: {
+          title: "Fictional new vacancy",
+          customValues: { [legacy.key]: "Fictional code 9" },
+        },
+      }),
+    ).rejects.toMatchObject(refusal("archived_custom_field", PRESERVED));
+    expect((await stored(held.id)).data.customValues).toEqual(both);
+    // An imported write skips only the archived rules, as task imports do.
+    const imported = await updateRecord(owner, "vacancies", held.id, {
+      version: 3,
+      importMeta: { workbook: "Fictional.xlsx" },
+      data: {
+        customValues: {
+          [legacy.key]: "Fictional imported code",
+          [grade.key]: 4,
+        },
+      },
+    });
+    expect(imported.data).toMatchObject({
+      customValues: { [legacy.key]: "Fictional imported code" },
+    });
+    await expect(
+      updateRecord(owner, "vacancies", held.id, {
+        version: 4,
+        importMeta: { workbook: "Fictional.xlsx" },
+        data: { customValues: { [grade.key]: "four" } },
+      }),
+    ).rejects.toMatchObject(
+      refusal("invalid_custom_value", "Invalid value for Fictional grade."),
+    );
+  });
+
+  it("lets a field made mandatory after the pin stay empty on an unrelated edit, but not be emptied once set", async () => {
+    const note = customField("Fictional role note", "short-text");
+    await publish(kindBody("job-role", [note]));
+    const role = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional pinned role" },
+    });
+    const level = customField("Fictional role level", "dropdown", {
+      options,
+      required: true,
+    });
+    const second = await publish(
+      kindBody("job-role", [note, level], {
+        create: [note.key, level.key],
+        edit: [level.key, note.key],
+        view: [note.key],
+      }),
+    );
+    const edited = await updateRecord(owner, "job-roles", role.id, {
+      version: 1,
+      data: { title: "Fictional retitled role" },
+    });
+    expect(edited.data).toMatchObject({ title: "Fictional retitled role" });
+    expect(edited.data).not.toHaveProperty("customValues");
+    expect((await stored(role.id)).schema_version_id).toBe(second);
+    const required = refusal(
+      "required_custom_field",
+      "A valid value for Fictional role level is required.",
+    );
+    for (const customValues of [
+      undefined,
+      {},
+      { [level.key]: null },
+      { [level.key]: "" },
+      { [note.key]: "Fictional note" },
+    ])
+      await expect(
+        createRecord(owner, "job-roles", {
+          data: { title: "Fictional new role", customValues },
+        }),
+      ).rejects.toMatchObject(required);
+    const created = await createRecord(owner, "job-roles", {
+      data: {
+        title: "Fictional new role",
+        customValues: { [level.key]: "opt-1" },
+      },
+    });
+    expect(created.data).toMatchObject({
+      customValues: { [level.key]: "opt-1" },
+    });
+    await updateRecord(owner, "job-roles", role.id, {
+      version: 2,
+      data: { customValues: { [level.key]: "opt-2" } },
+    });
+    for (const customValues of [
+      { [level.key]: null },
+      { [level.key]: "" },
+      {},
+      { [note.key]: "Fictional note" },
+    ])
+      await expect(
+        updateRecord(owner, "job-roles", role.id, {
+          version: 3,
+          data: { customValues },
+        }),
+      ).rejects.toMatchObject(required);
+    const noted = await updateRecord(owner, "job-roles", role.id, {
+      version: 3,
+      data: {
+        customValues: { [level.key]: "opt-2", [note.key]: "Fictional note" },
+      },
+    });
+    expect(noted.version).toBe(4);
+  });
+
+  it("never checks again a value carried over unchanged from an earlier version", async () => {
+    const code = customField("Fictional role code", "short-text", { max: 40 });
+    const band = customField("Fictional role band", "number", { max: 100 });
+    await publish(kindBody("job-role", [code, band]));
+    const values = { [code.key]: "Fictional code value", [band.key]: 90 };
+    const role = await createRecord(owner, "job-roles", {
+      data: { title: "Fictional carried role", customValues: values },
+    });
+    // Version 2 drops the code field and tightens the band below the stored value.
+    await publish(
+      kindBody("job-role", [
+        customField(band.label, "number", { max: 10 }, band.key),
+      ]),
+    );
+    const edited = await updateRecord(owner, "job-roles", role.id, {
+      version: 1,
+      data: { department: "Fictional Carried" },
+    });
+    expect(edited.data).toMatchObject({ customValues: values });
+    const resent = await updateRecord(owner, "job-roles", role.id, {
+      version: 2,
+      data: { title: "Fictional resent role", customValues: values },
+    });
+    expect(resent.data).toMatchObject({ customValues: values });
+    await expect(
+      updateRecord(owner, "job-roles", role.id, {
+        version: 3,
+        data: { customValues: { ...values, [band.key]: 95 } },
+      }),
+    ).rejects.toMatchObject(
+      refusal("invalid_custom_value", "Invalid value for Fictional role band."),
+    );
+    await expect(
+      updateRecord(owner, "job-roles", role.id, {
+        version: 3,
+        data: { customValues: { ...values, [code.key]: "Fictional new code" } },
+      }),
+    ).rejects.toMatchObject(refusal("unknown_custom_field", UNKNOWN));
+    // A value of a dropped field may be removed.
+    const removed = await updateRecord(owner, "job-roles", role.id, {
+      version: 3,
+      data: { customValues: { [band.key]: 90 } },
+    });
+    expect((removed.data as { customValues?: unknown }).customValues).toEqual({
+      [band.key]: 90,
+    });
+  });
+
+  it("checks a task's team task-field values and its central custom values each by their own rules", async () => {
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional mixed bucket" },
+    });
+    const team = await createRecord(owner, "task-fields", {
+      data: { name: "Fictional team estimate", type: "Number" },
+    });
+    const central = customField("Fictional central priority", "dropdown", {
+      options,
+    });
+    await publish(kindBody("task", [central]));
+    const values = { [team.id]: 3, [central.key]: "opt-1" };
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: { title: "Fictional mixed task", customValues: values },
+    });
+    expect(task.data).toMatchObject({ customValues: values });
+    const refused: [Record<string, unknown>, object][] = [
+      [
+        { ...values, [team.id]: "three" },
+        refusal(
+          "invalid_custom_value",
+          "Invalid value for Fictional team estimate.",
+        ),
+      ],
+      [
+        { ...values, [central.key]: "opt-9" },
+        refusal(
+          "invalid_custom_value",
+          "Invalid value for Fictional central priority.",
+        ),
+      ],
+      [
+        { ...values, [randomUUID()]: 1 },
+        refusal("unknown_custom_field", UNKNOWN),
+      ],
+    ];
+    for (const [customValues, error] of refused)
+      await expect(
+        updateRecord(owner, "tasks", task.id, {
+          version: 1,
+          data: { customValues },
+        }),
+      ).rejects.toMatchObject(error);
+    // Once the team field is archived its value must stay, while the central value may go.
+    await updateRecord(owner, "task-fields", team.id, {
+      version: 1,
+      archived: true,
+    });
+    const kept = await updateRecord(owner, "tasks", task.id, {
+      version: 1,
+      data: { customValues: { [team.id]: 3 } },
+    });
+    expect((kept.data as { customValues?: unknown }).customValues).toEqual({
+      [team.id]: 3,
+    });
+    await expect(
+      updateRecord(owner, "tasks", task.id, {
+        version: 2,
+        data: { customValues: { [central.key]: "opt-2" } },
+      }),
+    ).rejects.toMatchObject(refusal("archived_custom_field", KEPT));
+  });
+
+  // Last: it leaves the candidate email mandatory for any later case.
+  it("refuses a create without a system field made mandatory, and lets an empty one stay empty on edit", async () => {
+    const emailless = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Emailless Candidate" },
+    });
+    const emailed = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Emailed Candidate",
+        email: "emailed@example.test",
+      },
+    });
+    const body = kindBody("candidate", []);
+    const email = body.fields.find((field) => field.key === "email")!;
+    email.required = true;
+    await publish(body);
+    const required = refusal(
+      "invalid_input",
+      `email: ${email.label} is required.`,
+    );
+    for (const data of [
+      { name: "Fictional New Candidate" },
+      { name: "Fictional New Candidate", email: "" },
+    ])
+      await expect(
+        createRecord(owner, "candidates", { data }),
+      ).rejects.toMatchObject(required);
+    const created = await createRecord(owner, "candidates", {
+      data: { name: "Fictional New Candidate", email: "new@example.test" },
+    });
+    expect(created.data).toMatchObject({ email: "new@example.test" });
+    const edited = await updateRecord(owner, "candidates", emailless.id, {
+      version: 1,
+      data: { phone: "+971 50 222 2222" },
+    });
+    expect(edited.data).toMatchObject({
+      email: "",
+      phone: "+971 50 222 2222",
+    });
+    await expect(
+      updateRecord(owner, "candidates", emailed.id, {
+        version: 1,
+        data: { email: "" },
+      }),
+    ).rejects.toMatchObject(required);
   });
 });

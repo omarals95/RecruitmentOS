@@ -758,6 +758,43 @@ describe("field type engine (R2b-03)", () => {
     expect(recompiled.mandatory).toEqual(first.mandatory);
   });
 
+  it("takes an optional archived flag and leaves archived fields out of every mandatory list (R2b-04)", () => {
+    for (const archived of [true, false])
+      expect(parsed("number", { archived })).toMatchObject({ archived });
+    expect(parsed("number")).not.toHaveProperty("archived");
+    for (const archived of ["true", 1, null])
+      expect(refused("number", { archived }), String(archived)).toBe(true);
+    expect(compileKindSchema(DEFAULT_KIND_SCHEMAS.candidate).archived).toEqual(
+      [],
+    );
+    const active = uuid(701);
+    const retired = uuid(702);
+    const retiredOptional = uuid(703);
+    const body = kindSchemaBodySchema.parse(
+      withCustom([
+        definition("short-text", { required: true }, active),
+        definition("short-text", { required: true, archived: true }, retired),
+        definition("checkbox", { archived: true }, retiredOptional),
+      ]),
+    );
+    const compiled = compileKindSchema({ versionId: uuid(700), body });
+    expect(compiled.mandatory).toEqual({
+      create: ["name", active],
+      edit: ["name", active],
+      view: ["name", active],
+    });
+    expect(compiled.archived).toEqual([retired, retiredOptional]);
+    expect(Object.isFrozen(compiled.archived)).toBe(true);
+    // An archived field is still a field of the version, so its kept value parses.
+    expect(
+      compiled.customValues.safeParse({
+        [retired]: "Fictional kept value",
+        [retiredOptional]: false,
+      }).success,
+    ).toBe(true);
+    expect(compileKindSchema({ versionId: uuid(700), body })).toBe(compiled);
+  });
+
   it("compiles the largest configuration within 20 ms", () => {
     // 40 screens and 30 types per kind cannot be expressed until R2b-07 and R2b-11: the body has
     // one screen per action, so this is the largest body it can hold today.

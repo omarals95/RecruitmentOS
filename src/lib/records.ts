@@ -44,7 +44,6 @@ import {
   bulkApplicationsSchema,
   candidateStateSchema,
   createRecordSchemas,
-  daySchema,
   dubaiToday,
   kindToResource,
   recordDataSchemas,
@@ -63,9 +62,16 @@ import {
 import {
   CONFIGURABLE_KINDS,
   type ConfigurableKind,
+  type KindSchemaBody,
   type TaskBoardBody,
 } from "@/domain/config";
 import { EXPORT_RESOURCES, type ExportResource } from "@/domain/export";
+import {
+  TASK_FIELD_TYPE_MAP,
+  compileKindSchema,
+  fieldValueSchema,
+  type CustomField,
+} from "@/domain/field-types";
 import { kindSchemaFor } from "@/lib/config-store";
 import { requireJobTitle } from "@/lib/job-architecture";
 import { publishedTaskBoards } from "@/lib/task-boards";
@@ -206,15 +212,16 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
 function id(value: unknown) {
   return parse(uuidSchema, value);
 }
+type KindSchema = { versionId: string; body: KindSchemaBody };
 /**
- * The kind schema version a create or update of this kind is validated against (architecture 1.3):
- * the current published kind schema from the install result, else the fixed default version id;
- * null for a kind without a kind schema. It runs no statement, and an access state without
- * documents or an invalid published body throws rather than pinning the default.
+ * The kind schema version a create or update of this kind is validated against and pins
+ * (architecture 1.3): the current published kind schema from the install result, else the fixed
+ * default version; null for a kind without a kind schema. It runs no statement, and an access state
+ * without documents or an invalid published body throws rather than pinning the default.
  */
-function kindSchemaPin(ctx: AccessContext, kind: RecordKind): string | null {
+function kindSchemaOf(ctx: AccessContext, kind: RecordKind): KindSchema | null {
   return (CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)
-    ? kindSchemaFor(ctx.access, kind as ConfigurableKind).versionId
+    ? kindSchemaFor(ctx.access, kind as ConfigurableKind)
     : null;
 }
 /**
@@ -654,30 +661,133 @@ function validateRelations(kind: RecordKind, data: Data) {
       );
   }
 }
-function validCustomValue(field: DbRecord, value: unknown): boolean {
-  if (value === "" || value === null || value === undefined)
-    return !field.data.required;
-  switch (field.data.type) {
-    case "Text":
-      return typeof value === "string" && value.length <= 4000;
-    case "Number":
-      return typeof value === "number" && Number.isFinite(value);
-    case "Date":
-      return typeof value === "string" && daySchema.safeParse(value).success;
-    case "Dropdown":
-      return (
-        typeof value === "string" &&
-        (field.data.options as string[]).includes(value)
+// Empty for a mandatory rule (architecture 1.5 item 5); false is a value.
+const isEmpty = (value: unknown) =>
+  value === undefined ||
+  value === null ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
+/**
+ * Checks the custom values of a configurable kind against the kind schema version the write pins
+ * (architecture 1.5), after the strict parse. Only an added or changed value is checked, so a value
+ * carried over unchanged never blocks an unrelated edit; an archived field's value can be neither
+ * changed nor removed unless the write is imported. Then the mandatory rules: a create needs every
+ * mandatory field of the create screen, and an edit may not empty a filled one of the edit screen.
+ * A task's team task-field keys are left to checkCustomValues. It runs no statement.
+ */
+function checkKindValues(
+  schema: KindSchema,
+  data: Data,
+  existing: Data | undefined,
+  importing: boolean,
+  teamFields: ReadonlySet<string> = new Set(),
+) {
+  const compiled = compileKindSchema(schema);
+  const fields = new Map(schema.body.fields.map((field) => [field.key, field]));
+  const own = (map: Data | undefined) =>
+    Object.fromEntries(
+      Object.entries((map?.customValues ?? {}) as Data).filter(
+        ([key]) => !teamFields.has(key),
+      ),
+    );
+  const values = own(data);
+  const oldValues = own(existing);
+  const archived = new Set(compiled.archived);
+  const changed = Object.fromEntries(
+    Object.entries(values).filter(
+      ([key, value]) =>
+        JSON.stringify(oldValues[key]) !== JSON.stringify(value),
+    ),
+  );
+  for (const key of Object.keys(changed)) {
+    if (fields.get(key)?.system !== false)
+      throw new ApiError(
+        400,
+        "unknown_custom_field",
+        "A custom field is not available in this team.",
       );
-    case "Checkbox":
-      return typeof value === "boolean";
-    default:
-      return false;
+    if (!importing && archived.has(key))
+      throw new ApiError(
+        400,
+        "archived_custom_field",
+        "Archived custom field values must be preserved unchanged.",
+      );
+  }
+  const parsed = compiled.customValues.safeParse(changed);
+  if (!parsed.success)
+    throw new ApiError(
+      400,
+      "invalid_custom_value",
+      `Invalid value for ${fields.get(String(parsed.error.issues[0].path[0]))!.label}.`,
+    );
+  for (const key of Object.keys(oldValues))
+    if (!importing && archived.has(key) && !Object.hasOwn(values, key))
+      throw new ApiError(
+        400,
+        "archived_custom_field",
+        "Archived field values cannot be removed.",
+      );
+  // A custom key is looked up in customValues and a system key in data.
+  const valueOf = (map: Data, custom: Data, key: string) =>
+    fields.get(key)?.system ? map[key] : custom[key];
+  const mandatory = existing
+    ? (compiled.mandatory.edit ?? []).filter(
+        (key) =>
+          !isEmpty(valueOf(existing, oldValues, key)) &&
+          isEmpty(valueOf(data, values, key)),
+      )
+    : (compiled.mandatory.create ?? []).filter((key) =>
+        isEmpty(valueOf(data, values, key)),
+      );
+  if (mandatory.length) {
+    const field = fields.get(mandatory[0])!;
+    throw field.system
+      ? new ApiError(
+          400,
+          "invalid_input",
+          `${field.key}: ${field.label} is required.`,
+        )
+      : new ApiError(
+          400,
+          "required_custom_field",
+          `A valid value for ${field.label} is required.`,
+        );
   }
 }
+/**
+ * The check of one team task field's values on the field type engine (TASK_FIELD_TYPE_MAP, options
+ * as their own ids): "", null and a missing value are valid only when the field is optional.
+ */
+function validCustomValue(field: DbRecord): (value: unknown) => boolean {
+  const type = field.data.type as keyof typeof TASK_FIELD_TYPE_MAP;
+  const schema = fieldValueSchema({
+    key: field.id,
+    system: false,
+    label: String(field.data.name),
+    type: TASK_FIELD_TYPE_MAP[type],
+    required: !!field.data.required,
+    ...(type === "Dropdown"
+      ? {
+          options: (field.data.options as string[]).map((option) => ({
+            id: option,
+            label: option,
+          })),
+        }
+      : {}),
+  } as CustomField);
+  return (value) =>
+    value === "" || value === null || value === undefined
+      ? !field.data.required
+      : schema.safeParse(value).success;
+}
+/**
+ * A task's custom values: the team's task-field keys as today, every other key through
+ * checkKindValues against the task kind schema.
+ */
 async function checkCustomValues(
   tx: TeamTx,
   ctx: AccessContext,
+  schema: KindSchema,
   data: Data,
   existing?: DbRecord,
   importing = false,
@@ -686,17 +796,22 @@ async function checkCustomValues(
     .select()
     .from(records)
     .where(and(...scopeFilter(ctx, "task-field")));
+  checkKindValues(
+    schema,
+    data,
+    existing?.data,
+    importing,
+    new Set(fields.map((field) => field.id)),
+  );
   const values = data.customValues as Data;
   const oldValues = (existing?.data.customValues ?? {}) as Data;
   const byId = new Map(fields.map((field) => [field.id, field]));
+  const valid = new Map(
+    fields.map((field) => [field.id, validCustomValue(field)]),
+  );
   for (const [key, value] of Object.entries(values)) {
     const field = byId.get(key);
-    if (!field)
-      throw new ApiError(
-        400,
-        "unknown_custom_field",
-        "A custom field is not available in this team.",
-      );
+    if (!field) continue;
     if (field.archivedAt) {
       if (
         !importing &&
@@ -707,7 +822,7 @@ async function checkCustomValues(
           "archived_custom_field",
           "Archived custom field values must be preserved unchanged.",
         );
-    } else if (!validCustomValue(field, value))
+    } else if (!valid.get(key)!(value))
       throw new ApiError(
         400,
         "invalid_custom_value",
@@ -715,7 +830,7 @@ async function checkCustomValues(
       );
   }
   for (const field of fields.filter((item) => !item.archivedAt)) {
-    if (!validCustomValue(field, values[field.id]))
+    if (!valid.get(field.id)!(values[field.id]))
       throw new ApiError(
         400,
         "required_custom_field",
@@ -750,13 +865,13 @@ async function checkFieldCompatibility(
     .where(
       and(eq(records.teamId, ctx.principal.teamId), eq(records.kind, "task")),
     );
-  const proposed = { ...existing, data } as DbRecord;
+  const valid = validCustomValue({ ...existing, data } as DbRecord);
   for (const task of tasks) {
     const values = (task.data.customValues ?? {}) as Data;
     const value = existing ? values[existing.id] : undefined;
     if (
-      (value !== undefined && !validCustomValue(proposed, value)) ||
-      (!task.archivedAt && !validCustomValue(proposed, value))
+      (value !== undefined && !valid(value)) ||
+      (!task.archivedAt && !valid(value))
     )
       throw new ApiError(
         409,
@@ -1739,8 +1854,10 @@ export async function createInside(
     undefined,
     !!input.archived,
   );
+  const schema = kindSchemaOf(ctx, kind);
   if (kind === "task")
-    await checkCustomValues(tx, ctx, input.data, undefined, imported);
+    await checkCustomValues(tx, ctx, schema!, input.data, undefined, imported);
+  else if (schema) checkKindValues(schema, input.data, undefined, imported);
   if (kind === "task-field")
     await checkFieldCompatibility(
       tx,
@@ -1793,7 +1910,7 @@ export async function createInside(
         updatedAt: now,
         archivedAt: input.archived ? now : null,
         orgUnitId: input.orgUnitId ?? null,
-        schemaVersionId: kindSchemaPin(ctx, kind),
+        schemaVersionId: schema?.versionId ?? null,
       })
       .returning(readColumns(ctx)),
   );
@@ -1969,8 +2086,10 @@ export async function updateRecord(
     );
     const refs = refsFor(patch, existing);
     await uniqueChecks(tx, ctx, kind, data, refs, existing, archived);
+    const schema = kindSchemaOf(ctx, kind);
     if (kind === "task")
-      await checkCustomValues(tx, ctx, data, existing, imported);
+      await checkCustomValues(tx, ctx, schema!, data, existing, imported);
+    else if (schema) checkKindValues(schema, data, existing.data, imported);
     if (kind === "task-field")
       await checkFieldCompatibility(tx, ctx, existing, data, archived);
     const now = new Date();
@@ -2066,7 +2185,7 @@ export async function updateRecord(
             : {}),
           version: existing.version + 1,
           updatedAt: now,
-          schemaVersionId: kindSchemaPin(ctx, kind),
+          schemaVersionId: schema?.versionId ?? null,
         })
         .where(
           and(

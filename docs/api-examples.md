@@ -169,7 +169,19 @@ Refusals roll back the whole write:
 
 ## Custom values on records
 
-Candidates, job roles, vacancies, applications, interviews, offers, onboarding records and checklist items take an optional `data.customValues` on `POST /api/v1/{resource}` and `PATCH /api/v1/{resource}/{id}`: a map from a field definition ID (a UUID) to a string of at most 4000 characters, a finite number, `true`, `false` or `null`. A key that is not a UUID, an object or array value, a longer string or a non-finite number answers 400 `invalid_input`. On `PATCH`, a sent `customValues` replaces the whole stored map, and a `PATCH` without it leaves the map as it is.
+Candidates, job roles, vacancies, applications, interviews, offers, onboarding records and checklist items take an optional `data.customValues` on `POST /api/v1/{resource}` and `PATCH /api/v1/{resource}/{id}`: a map from a field definition ID (a UUID) to a string of at most 4000 characters, a finite number, `true`, `false` or `null`. A key that is not a UUID, an object or array value, a longer string or a non-finite number answers 400 `invalid_input`, before any check below. On `PATCH`, a sent `customValues` replaces the whole stored map, and a `PATCH` without it leaves the map as it is.
+
+Each write is checked against the kind's current published kind schema, which the record then pins:
+
+| Response                    | When                                                                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 400 `unknown_custom_field`  | an added or changed key that is not a custom field of the kind schema ("A custom field is not available in this team."); on the built-in default schemas, which hold no custom fields, every key |
+| 400 `invalid_custom_value`  | an added or changed value that does not fit its field's type, bounds or options ("Invalid value for {field label}.")                                                                             |
+| 400 `archived_custom_field` | a value of an archived field is added or changed, or removed from a record that holds it; an import (`legacyId` or `importMeta`) may change or remove it                                         |
+| 400 `required_custom_field` | a create without a value for a custom field required on the create screen, or an edit that empties a filled one required on the edit screen ("A valid value for {field label} is required.")     |
+| 400 `invalid_input`         | the same mandatory rules for a system field the kind schema makes required ("{key}: {field label} is required.")                                                                                 |
+
+A value carried over unchanged from the stored record is not checked again, so a field removed or tightened later, or made mandatory later and left empty, never blocks an unrelated edit. `null` and `""` are empty values of any field.
 
 ```bash
 curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
@@ -179,7 +191,7 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
   --data '{"data":{"title":"Fictional Data Analyst","customValues":{"9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f":"Fictional cost centre 42"}}}'
 ```
 
-The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. Until custom field definitions arrive, the values are not checked against any field and are not shown in the app, exports or MCP, and OpenAPI does not list them. A role that hides any field of a kind also hides that kind's `customValues` from its members, in responses and search, unless it names its own rule for `customValues`. Tasks are unchanged: their `customValues` are still checked against the team's task fields. No response includes the kind schema version a record was last saved against.
+The example names `9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f`, a fictional short-text field "Cost centre" of a published vacancy kind schema; on the built-in default schemas it answers 400 `unknown_custom_field`. No route publishes kind schemas yet. The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. The values are not shown in the app, exports or MCP, and OpenAPI does not list them. A role that hides any field of a kind also hides that kind's `customValues` from its members, in responses and search, unless it names its own rule for `customValues`. Tasks keep their team task fields: a key that is one of the team's task fields is checked as before, every value on each write, and any other key by the rules above against the task kind schema. No response includes the kind schema version a record was last saved against.
 
 ## Upload a CV
 
