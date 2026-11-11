@@ -2073,6 +2073,8 @@ describe("upgrade from 0037 to record scope in row-level security", () => {
       { table: "activity", name: "record_scope", command: "*" },
       { table: "idempotency", name: "actor_only", command: "*" },
       { table: "record_assignments", name: "record_scope", command: "*" },
+      // 0049 adds the same policy on the record files it creates.
+      { table: "record_files", name: "record_scope", command: "*" },
       { table: "records", name: "record_scope", command: "*" },
       { table: "uploads", name: "record_scope", command: "*" },
     ]);
@@ -2173,7 +2175,7 @@ describe("upgrade from 0038 to the candidate scope index", () => {
       policies: (
         await pg.query(
           `SELECT tablename, policyname, permissive, roles, cmd, qual, with_check FROM pg_policies
-           WHERE policyname IN ('record_scope', 'actor_only') ORDER BY 1, 2`,
+           WHERE policyname IN ('record_scope', 'actor_only') AND tablename <> 'record_files' ORDER BY 1, 2`,
         )
       ).rows,
       helpers: (
