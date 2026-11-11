@@ -57,6 +57,10 @@
  *   Neither the team B owner nor a company admin without the people area (the team C owner, given
  *   the organisation area by the owner for that check and then removed) can call
  *   tenant_context.workspace_people (0042).
+ *   A team owner's session archives their team through tenant_context.set_team_archived; every
+ *   context of that team then stores only read scopes, so a member's record insert and the
+ *   owner's task-board insert are refused, a team admin cannot call the helper, and after the
+ *   owner restores the team the same inserts succeed (0044).
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -101,7 +105,10 @@
  *   of the two record-scope checks it writes one more such role, gives it to the team A recruiter
  *   and assigns them to the team A fixture vacancy and the team A owner to the fixture candidate,
  *   removing all four in that check; the data role's writes there are rolled back. As the
- *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role.
+ *   identity role it briefly makes the team A fixture recruiter a viewer and restores the role,
+ *   and once an admin and restores the role. The team A owner's session archives and restores
+ *   team A once, writing two team-archive activity rows there; if the restore did not run, the
+ *   owner clears the two archive columns.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -448,7 +455,7 @@ const installSql =
 
 /**
  * The access state install derived and returned (0029), with the current configuration versions
- * and the bodies the hint did not name (0032).
+ * and the bodies the hint did not name (0032) and the team's archived state (0044).
  */
 type Access = {
   scopes: string[];
@@ -460,6 +467,7 @@ type Access = {
   roleVersionId: string | null;
   recordScope: Record<string, string> | null;
   homeUnits: string[];
+  teamArchived: boolean;
   documents: {
     versionId: string;
     objectId: string;
@@ -4983,6 +4991,131 @@ async function runChecks(run: Run) {
     );
     probe.at("end-state");
     return pass && probe.all(["end-state", (await workspaceRows()) === before]);
+  });
+
+  // An archived team is read-only for every context (0044): the team A owner's session archives it
+  // through the helper; the recruiter's context then inserts no record and the owner's no task
+  // board; the recruiter, made admin for this check, cannot call the helper; and after the owner
+  // restores it the same inserts succeed (rolled back). The team is restored even on failure.
+  await check("archived-team-write-denied", async (probe) => {
+    const setArchived = (principal: Principal, archived: boolean) =>
+      transaction(
+        data,
+        async () => {
+          await installAs(data, signer, principal);
+          return attempt(
+            data,
+            "SELECT tenant_context.set_team_archived($1, $2) AS changed",
+            [f.teams.a, archived],
+          );
+        },
+        true,
+      );
+    const recordInsert = () =>
+      attempt(
+        data,
+        "INSERT INTO app.records(team_id,kind,data,created_by) VALUES($1,'candidate',$2::jsonb,$3)",
+        [
+          f.teams.a,
+          JSON.stringify({ name: `Fictional archived ${f.prefix}` }),
+          f.users.a2,
+        ],
+      );
+    const boardInsert = () =>
+      attempt(
+        data,
+        "INSERT INTO app.config_objects(workspace_id,team_id,type,key) VALUES($1::uuid,$2,'task-board',$3)",
+        [COMPANY_WORKSPACE, f.teams.a, `${f.prefix}-archived-board`],
+      );
+    /** The recruiter's record insert and the owner's task-board insert, each rolled back. */
+    const writes = async () => {
+      const record = await transaction(data, async () => {
+        const { access } = await installAs(data, signer, p.memberA);
+        return { access, outcome: await recordInsert() };
+      });
+      const board = await transaction(data, async () => {
+        const { access } = await installAs(data, signer, p.ownerA);
+        return { access, outcome: await boardInsert() };
+      });
+      return { record, board };
+    };
+    const setRole = (role: string) =>
+      identity.query("UPDATE auth.member SET role = $2 WHERE id = $1", [
+        f.members.a2,
+        role,
+      ]);
+    const archivedRows = () =>
+      count(
+        owner,
+        "SELECT count(*)::int AS n FROM app.workspace_teams WHERE team_id = $1 AND archived_at IS NOT NULL",
+        [f.teams.a],
+      );
+    let pass: boolean;
+    let restored = false;
+    try {
+      probe.at("setup");
+      const archived = await setArchived(p.ownerA, true);
+      probe.at("outcome");
+      const refused = await writes();
+      const readOnly = [refused.record.access, refused.board.access].every(
+        (access) =>
+          access.teamArchived === true &&
+          access.scopes.every((scope) => scope.endsWith(":read")),
+      );
+      const changed = await setRole("admin");
+      let adminCall: Outcome | undefined;
+      try {
+        adminCall = await transaction(data, async () => {
+          await installAs(data, signer, {
+            ...p.memberA,
+            scopes: ALL_SCOPES,
+          });
+          return attempt(
+            data,
+            "SELECT tenant_context.set_team_archived($1, false)",
+            [f.teams.a],
+          );
+        });
+      } finally {
+        await setRole("recruiter");
+      }
+      const stillArchived = (await archivedRows()) === 1;
+      probe.at("positive-control");
+      const restore = await setArchived(p.ownerA, false);
+      restored = restore.ok && restore.rows[0]?.changed === true;
+      const allowed = await writes();
+      pass = probe.all(
+        ["setup", archived.ok && archived.rows[0]?.changed === true],
+        ["outcome", readOnly],
+        denial(refused.record.outcome),
+        denial(refused.board.outcome),
+        ["setup", changed.rowCount === 1],
+        failsWith(adminCall, "42501"),
+        ["outcome", stillArchived],
+        ["positive-control", restored],
+        outcomeIs(
+          allowed.record.outcome.ok && allowed.record.outcome.count === 1,
+          allowed.record.outcome,
+          "positive-control",
+        ),
+        outcomeIs(
+          allowed.board.outcome.ok && allowed.board.outcome.count === 1,
+          allowed.board.outcome,
+          "positive-control",
+        ),
+      );
+    } finally {
+      // Even on failure: the owner clears the archive, so no later check or run sees it.
+      if (!restored)
+        await owner
+          .query(
+            "UPDATE app.workspace_teams SET archived_at = NULL, archived_by = NULL WHERE team_id = $1",
+            [f.teams.a],
+          )
+          .catch(() => {});
+    }
+    probe.at("end-state");
+    return pass && probe.all(["end-state", (await archivedRows()) === 0]);
   });
 }
 
