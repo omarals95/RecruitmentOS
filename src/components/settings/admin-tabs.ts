@@ -2,6 +2,8 @@ import type { AccessMap } from "@/lib/authz";
 
 /** The plain refusal on every admin page; server pages import it, so it lives outside "use client". */
 export const NO_ACCESS = "You do not have access to this page";
+/** The team detail page for a company owner or admin outside that team: no team data at all (TST-005). */
+export const NOT_A_MEMBER = "You are not a member of this team";
 
 /** The Admin portal sidebar groups, in order (architecture §14.1). */
 export const ADMIN_GROUPS = [

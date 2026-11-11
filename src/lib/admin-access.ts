@@ -1,8 +1,25 @@
 import { meAccess, type MeAccess } from "./authz";
 import { withTeam } from "./db-team";
-import { roleScopes } from "./permissions";
+import { roleScopes, type Role } from "./permissions";
 import type { Principal } from "./principal";
-import { getWorkspaceContext } from "./workspace";
+import { getTeamWorkspaceContext, getWorkspaceContext } from "./workspace";
+
+/** One withTeam for the session user in one of their teams, answering as GET /api/v1/me/access. */
+async function sessionAccess(
+  userId: string,
+  teamId: string,
+  role: Role,
+): Promise<MeAccess> {
+  const p: Principal = {
+    userId,
+    teamId,
+    role,
+    scopes: roleScopes(role),
+    authType: "session",
+  };
+  const access = await withTeam(p, async (_tx, state) => state);
+  return meAccess(p, access);
+}
 
 /**
  * The server check every admin page awaits before rendering: the signed-in session from cookies
@@ -13,13 +30,32 @@ import { getWorkspaceContext } from "./workspace";
 export async function adminPageAccess(): Promise<MeAccess | null> {
   const { user, team, role } = await getWorkspaceContext();
   if (!team || !role) return null;
-  const p: Principal = {
-    userId: user.id,
-    teamId: team.id,
-    role,
-    scopes: roleScopes(role),
-    authType: "session",
-  };
-  const access = await withTeam(p, async (_tx, state) => state);
-  return meAccess(p, access);
+  return sessionAccess(user.id, team.id, role);
+}
+
+export type TeamPageAccess =
+  | { state: "allowed"; team: { id: string; name: string }; access: MeAccess }
+  | { state: "not-a-member" }
+  | { state: "refused" };
+
+/**
+ * The team detail page's server check (architecture §14.2): it opens only through the team role,
+ * for an owner or admin of that team, checked as the session user in that team. A company owner or
+ * admin who is not a member gets only the not-a-member state, since company authority never opens
+ * team data (TST-005); that is read from the active team, as adminPageAccess does. Everyone else
+ * is refused, and an unknown id is treated as a team the caller is not in.
+ */
+export async function teamPageAccess(teamId: string): Promise<TeamPageAccess> {
+  const { user, team, role, member } = await getTeamWorkspaceContext(teamId);
+  if (member) {
+    const access = await sessionAccess(user.id, member.team.id, member.role);
+    return access.teamRole === "owner" || access.teamRole === "admin"
+      ? { state: "allowed", team: member.team, access }
+      : { state: "refused" };
+  }
+  const access =
+    team && role ? await sessionAccess(user.id, team.id, role) : null;
+  return access?.companyLevel === "owner" || access?.companyLevel === "admin"
+    ? { state: "not-a-member" }
+    : { state: "refused" };
 }

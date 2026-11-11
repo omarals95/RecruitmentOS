@@ -48,6 +48,7 @@ import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
 import { DisplayModeToggle, type DisplayMode } from "./display-mode-toggle";
 import { Dialog } from "@/components/ui/dialog";
+import { tabKeys } from "@/components/ui/tab-keys";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
 import {
@@ -108,24 +109,6 @@ import {
 export type { ListResponse } from "./helpers";
 export { screenDefinitions } from "./tab-requests";
 export { Loading } from "./skeleton";
-function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  const buttons = [
-    ...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-  ];
-  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-  if (index < 0) return;
-  event.preventDefault();
-  const next =
-    event.key === "Home"
-      ? 0
-      : event.key === "End"
-        ? buttons.length - 1
-        : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) %
-          buttons.length;
-  buttons[next].focus();
-  buttons[next].click();
-}
 const tableColumns: Partial<Record<ResourceName, string[]>> = {
   candidates: [
     "name",

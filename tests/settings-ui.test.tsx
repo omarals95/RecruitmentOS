@@ -8,14 +8,14 @@ import {
   ProfileSettings,
   TwoStepPanel,
 } from "../src/components/settings/profile-settings";
+import { TeamSettings } from "../src/components/settings/team-settings";
 import {
   canAssignRoles,
   canResetTwoStep,
   ConfiguredRolesNotice,
   MemberActions,
   MemberRoleControl,
-  TeamSettings,
-} from "../src/components/settings/team-settings";
+} from "../src/components/settings/team-members";
 import { TokenSettings } from "../src/components/settings/token-settings";
 import {
   formatStorageBytes,

@@ -67,9 +67,11 @@ import {
 import {
   ADMIN_TABS,
   NO_ACCESS,
+  NOT_A_MEMBER,
   isAdminTab,
   type AdminTabKey,
 } from "@/components/settings/admin-tabs";
+import { TeamDetailPortal } from "@/components/settings/team-detail";
 import { WorkspaceProvider } from "@/components/workspace/client";
 import {
   authenticateApiToken,
@@ -81,6 +83,7 @@ import { createSplitRoleDb, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with two fictional teams.
 const COMPANY = "00000000-0000-4000-a000-000000000001";
+const DETAIL = "teams/[team]/page.tsx";
 const ADMIN_DIR = join(process.cwd(), "src/app/app/admin");
 const KEYS = ADMIN_TABS.map((tab) => tab.key);
 const TEAM_PAGES: AdminTabKey[] = [
@@ -125,17 +128,22 @@ type Caller =
   | { kind: "anonymous" }
   | { kind: "bearer" }
   | { kind: "session"; cookie: string };
-type Outcome = "allowed" | "refused" | "sign-in" | "not-found";
+type Outcome = "allowed" | "refused" | "not-a-member" | "sign-in" | "not-found";
 
 type Page = (props: {
   params: Promise<Record<string, string>>;
+  searchParams: Promise<Record<string, string>>;
 }) => Promise<unknown>;
 
-/** Calls the page file's default export as Next would, for one caller and one key. */
+/**
+ * Calls the page file's default export as Next would, for one caller and one key; the team detail
+ * page gets `team` (team A unless named) as its params.
+ */
 async function open(
   caller: Caller,
   page: string,
   key: AdminTabKey | "fictional" | null,
+  team = "route-team-a",
 ): Promise<Outcome> {
   request.headers = new Headers(
     caller.kind === "bearer"
@@ -152,8 +160,15 @@ async function open(
   let element: unknown;
   try {
     const params: Record<string, string> =
-      page.startsWith("[tab]/") && key !== null ? { tab: key } : {};
-    element = await render({ params: Promise.resolve(params) });
+      page.startsWith("[tab]/") && key !== null
+        ? { tab: key }
+        : page === DETAIL
+          ? { team }
+          : {};
+    element = await render({
+      params: Promise.resolve(params),
+      searchParams: Promise.resolve({}),
+    });
   } catch (error) {
     const message = (error as Error).message;
     if (message === "redirect:/sign-in") return "sign-in";
@@ -170,13 +185,32 @@ async function open(
     expect(markup).not.toContain(NO_ACCESS);
     return "allowed";
   }
-  // Refused: the plain no-access state, with no sidebar and no tab content mounted.
+  if (result.type === TeamDetailPortal) {
+    // The team in the URL, as the server read it; the page sends nothing about any other team.
+    expect(result.props).toMatchObject({
+      team: { id: team, name: "Fictional Test Team" },
+      tab: "members",
+    });
+    expect(["owner", "admin"]).toContain(result.props.role);
+    expect(markup).toContain("<h2>Fictional Test Team</h2>");
+    expect(markup).not.toContain(NO_ACCESS);
+    expect(markup).not.toContain(NOT_A_MEMBER);
+    return "allowed";
+  }
+  // Refused or not a member: one plain sentence, with no sidebar and no tab or team content.
   expect(result.type).toBe(AdminPortalView);
   expect(result.props).toMatchObject({ access: null, denied: true });
   expect(markup).toContain("<h1>Admin portal</h1>");
-  expect(markup).toContain(`<p>${NO_ACCESS}</p>`);
   expect(markup).not.toContain("Admin portal sections");
   expect(markup).not.toMatch(/<nav|<h2|role="status"/);
+  expect(markup).not.toContain("Fictional Test");
+  expect(markup).not.toContain("@example.test");
+  if (markup.includes(`<p>${NOT_A_MEMBER}</p>`)) {
+    expect(page).toBe(DETAIL);
+    expect(markup).not.toContain(NO_ACCESS);
+    return "not-a-member";
+  }
+  expect(markup).toContain(`<p>${NO_ACCESS}</p>`);
   return "refused";
 }
 
@@ -247,6 +281,13 @@ describe("admin pages check access on the server (TST-002)", () => {
       teamId: "route-team-b",
       role: "recruiter",
     });
+    // A second owner of team A, without company authority.
+    const teamAOwner = await seedIdentity(db, {
+      userId: "route-owner-a2",
+      teamId: "route-team-a",
+    });
+    // Team C: its owner is the only member, so the company owner is not in it.
+    await seedIdentity(db, { userId: "route-owner-c", teamId: "route-team-c" });
     const companyAdmin = await seedIdentity(db, {
       userId: "route-company-admin",
       teamId: "route-team-b",
@@ -272,6 +313,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     callers.anonymous = { kind: "anonymous" };
     callers.bearer = { kind: "bearer" };
     signIn("team owner", teamOwner);
+    signIn("team A owner", teamAOwner);
     signIn("team admin", teamAdmin);
     signIn("recruiter", recruiter);
     signIn("viewer", viewer);
@@ -325,6 +367,19 @@ describe("admin pages check access on the server (TST-002)", () => {
     expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });
 
+  /** The team detail page on team A for each caller of the page table; see the matrix below. */
+  const onTeamA: Record<string, Outcome> = {
+    "team owner": "refused",
+    "team admin": "allowed",
+    recruiter: "refused",
+    viewer: "refused",
+    "company admin": "not-a-member",
+    "company admin with organisation": "not-a-member",
+    "company owner and team owner": "allowed",
+    "company owner as recruiter": "allowed",
+    "no team": "refused",
+  };
+
   it("opens exactly the pages each signed-in caller holds, and the no-access state everywhere else", async () => {
     for (const [name, keys] of Object.entries(allowed))
       for (const page of adminPages())
@@ -333,7 +388,11 @@ describe("admin pages check access on the server (TST-002)", () => {
           const outcome = await open(callers[name], page, key);
           const label = `${name} on ${page} ${key ?? "home"}`;
           expect(outcome, label).toBe(
-            keys.includes(key) ? "allowed" : "refused",
+            page === DETAIL
+              ? onTeamA[name]
+              : keys.includes(key)
+                ? "allowed"
+                : "refused",
           );
           // One access check through authorize() for the active team, none without a team.
           expect(withTeam, label).toHaveBeenCalledTimes(
@@ -376,6 +435,51 @@ describe("admin pages check access on the server (TST-002)", () => {
         ),
         key,
       ).toBe("refused");
+  });
+
+  // ADM-03: the team detail page opens only through the team role in that team (architecture
+  // §14.2); company authority outside the team gets the plain not-a-member state (TST-005).
+  it("opens team detail for the team's owners and admins only, and tells company authority outside the team it is not a member", async () => {
+    // Caller, team in the URL, outcome, and the team its one access check ran in.
+    const A = "route-team-a";
+    const B = "route-team-b";
+    for (const [name, team, outcome, checked] of [
+      ["anonymous", A, "sign-in", null],
+      ["bearer", A, "sign-in", null],
+      ["team A owner", A, "allowed", A],
+      ["team admin", A, "allowed", A],
+      ["company owner and team owner", A, "allowed", A],
+      ["team owner", A, "refused", B],
+      ["recruiter", A, "refused", A],
+      ["viewer", A, "refused", A],
+      ["company owner as recruiter", B, "refused", B],
+      ["company admin", A, "not-a-member", B],
+      ["company admin with organisation", A, "not-a-member", B],
+      ["company owner and team owner", "route-team-c", "not-a-member", A],
+      ["no team", A, "refused", null],
+      [
+        "company owner and team owner",
+        "fictional-made-up-team",
+        "not-a-member",
+        A,
+      ],
+      ["team owner", "fictional-made-up-team", "refused", B],
+    ] as const) {
+      vi.mocked(withTeam).mockClear();
+      const label = `${name} on ${team}`;
+      expect(await open(callers[name], DETAIL, "teams", team), label).toBe(
+        outcome,
+      );
+      // A member is checked in the team of the URL, anyone else in their active team.
+      expect(withTeam, label).toHaveBeenCalledTimes(checked ? 1 : 0);
+      if (checked)
+        expect(vi.mocked(withTeam).mock.calls[0][0], label).toMatchObject({
+          teamId: checked,
+          authType: "session",
+        });
+    }
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });
 
   it("answers an unknown key with not found", async () => {

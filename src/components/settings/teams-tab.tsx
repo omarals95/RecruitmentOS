@@ -2,16 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { authClient } from "@/lib/auth-client";
 import type { AdminTeamRow } from "@/lib/admin-teams";
 import {
-  clearWorkspaceCache,
   humanError,
   useApi,
   useWorkspace,
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
-import { CreateTeam, ensure } from "./create-team";
+import { CreateTeam } from "./create-team";
 
 export type { AdminTeamRow };
 const access: Record<NonNullable<AdminTeamRow["teamRole"]>, string> = {
@@ -20,8 +18,6 @@ const access: Record<NonNullable<AdminTeamRow["teamRole"]>, string> = {
   recruiter: "Recruiter",
   viewer: "Viewer",
 };
-/** Until a team detail page exists (ADM-03), a managed team opens on the active team's Members. */
-const MEMBERS = "/app/admin/members";
 // The column is as narrow as its control, which stays on one line.
 const actionCell = {
   width: "1%",
@@ -60,28 +56,6 @@ export function TeamsTab() {
       setOutcomeFocus((count) => count + 1);
     }
   }
-  /** Selects the team as Team & access does, then opens its Members page. */
-  async function switchTo(row: AdminTeamRow) {
-    const teamId = row.teamId;
-    if (!teamId) return;
-    await action(
-      `switch-${teamId}`,
-      async () => {
-        try {
-          ensure(
-            await authClient.organization.setActive({ organizationId: teamId }),
-          );
-        } catch (e) {
-          throw new Error(`Could not switch to ${row.name}. ${humanError(e)}`, {
-            cause: e,
-          });
-        }
-        clearWorkspaceCache();
-        window.location.assign(MEMBERS);
-      },
-      "Team selected.",
-    );
-  }
   return (
     <>
       {error && (
@@ -99,12 +73,7 @@ export function TeamsTab() {
           {notice}
         </div>
       )}
-      <TeamsPanel
-        rows={teams.data?.data ?? null}
-        error={teams.error}
-        busy={busy}
-        onSwitch={(row) => void switchTo(row)}
-      />
+      <TeamsPanel rows={teams.data?.data ?? null} error={teams.error} />
       <CreateTeam
         busy={busy}
         onAction={action}
@@ -118,20 +87,16 @@ export function TeamsTab() {
 }
 
 /**
- * The teams list. Only a team where the caller is owner or admin has a control: Open for the active
- * team, Switch for another. Any other row is text only, so it opens nothing of that team.
+ * The teams list. Only a team where the caller is owner or admin has a control: Open, to that
+ * team's detail page, without switching teams. Any other row is text only, so it opens nothing of
+ * that team.
  */
 export function TeamsPanel({
   rows,
   error,
-  busy = "",
-  onSwitch = () => {},
 }: {
   rows: AdminTeamRow[] | null;
   error: string;
-  /** The running action's key; every Switch button waits while one runs. */
-  busy?: string;
-  onSwitch?: (row: AdminTeamRow) => void;
 }) {
   return (
     <section className="panel stack">
@@ -170,24 +135,15 @@ export function TeamsPanel({
                     {row.teamRole ? access[row.teamRole] : "Not a member"}
                   </td>
                   <td data-label="Actions" style={actionCell}>
-                    {row.teamRole !== "owner" &&
-                    row.teamRole !== "admin" ? null : row.current ? (
-                      <Link href={MEMBERS} className="button secondary">
-                        Open<span className="sr-only"> {row.name}</span>
-                      </Link>
-                    ) : (
-                      <button
-                        type="button"
-                        className="button secondary"
-                        disabled={!!busy}
-                        onClick={() => onSwitch(row)}
-                      >
-                        {busy === `switch-${row.teamId}`
-                          ? "Switching…"
-                          : "Switch and open"}
-                        <span className="sr-only"> {row.name}</span>
-                      </button>
-                    )}
+                    {(row.teamRole === "owner" || row.teamRole === "admin") &&
+                      row.teamId && (
+                        <Link
+                          href={`/app/admin/teams/${encodeURIComponent(row.teamId)}`}
+                          className="button secondary"
+                        >
+                          Open<span className="sr-only"> {row.name}</span>
+                        </Link>
+                      )}
                   </td>
                 </tr>
               ))}

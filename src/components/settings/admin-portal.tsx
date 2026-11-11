@@ -134,12 +134,21 @@ export function AdminPortalView({
   access,
   denied,
   error,
+  refusal = NO_ACCESS,
+  detail,
   onAccessChanged = () => {},
 }: {
   tab: AdminTabKey | null;
   access: MeAccess | null;
   denied: boolean;
   error: string;
+  /** The plain text a denied page shows. */
+  refusal?: string;
+  /**
+   * A sub-page of `tab` the server already allowed, such as the team detail page: it shows beside
+   * the sidebar even when the active team's access lists no page.
+   */
+  detail?: ReactNode;
   /** Reloads the caller's access after a change to their own company authority. */
   onAccessChanged?: () => void;
 }) {
@@ -158,7 +167,19 @@ export function AdminPortalView({
         <ShieldCheck size={28} aria-hidden="true" />
       </header>
       {denied ? (
-        <NoAccess />
+        <NoAccess text={refusal} />
+      ) : detail ? (
+        <>
+          {error && (
+            <p className="notice error" role="alert">
+              Could not load your access. {error}
+            </p>
+          )}
+          <div className="admin-shell">
+            <AdminSidebar tabs={tabs} current={tab} />
+            <div className="stack admin-content">{detail}</div>
+          </div>
+        </>
       ) : error ? (
         <p className="notice error" role="alert">
           Could not load your access. {error}
@@ -166,7 +187,7 @@ export function AdminPortalView({
       ) : !access ? (
         <p role="status">Loading…</p>
       ) : !tabs.length || (tab !== null && !current) ? (
-        <NoAccess />
+        <NoAccess text={NO_ACCESS} />
       ) : (
         <div className="admin-shell">
           <AdminSidebar tabs={tabs} current={current?.key ?? null} />
@@ -271,10 +292,10 @@ function AdminHome({ tabs }: { tabs: AdminTab[] }) {
   ));
 }
 
-function NoAccess() {
+function NoAccess({ text }: { text: string }) {
   return (
     <section className="panel">
-      <p>{NO_ACCESS}</p>
+      <p>{text}</p>
     </section>
   );
 }
