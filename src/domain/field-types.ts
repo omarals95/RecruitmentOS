@@ -199,6 +199,8 @@ const definition = <T extends CustomFieldType, S extends z.ZodRawShape>(
       help: configHelpText.optional(),
       type: z.literal(type),
       required: z.boolean(),
+      // Absent means active. An archived field keeps its values and is never mandatory (§1.5).
+      archived: z.boolean().optional(),
       ...shape,
     })
     .strict();
@@ -351,8 +353,10 @@ export type CompiledKindSchema = Readonly<{
   versionId: string;
   /** One optional key per custom field of the body; any other key is refused. */
   customValues: z.ZodType<Record<string, unknown>>;
-  /** Per screen action, the required fields listed on that screen, in screen order. */
+  /** Per screen action, the required active fields listed on that screen, in screen order. */
   mandatory: Readonly<Partial<Record<ScreenAction, readonly string[]>>>;
+  /** The keys of the archived custom fields, in body order. */
+  archived: readonly string[];
 }>;
 
 /** The most compiled versions one instance keeps. */
@@ -376,8 +380,13 @@ export function compileKindSchema(version: {
     return cached;
   }
   const { fields, screens } = version.body;
+  const archived = fields.flatMap((field) =>
+    !field.system && field.archived ? [field.key] : [],
+  );
   const required = new Set(
-    fields.filter((field) => field.required).map((field) => field.key),
+    fields
+      .filter((field) => field.required && !archived.includes(field.key))
+      .map((field) => field.key),
   );
   const result: CompiledKindSchema = Object.freeze({
     versionId: version.versionId,
@@ -400,6 +409,7 @@ export function compileKindSchema(version: {
         ]),
       ),
     ),
+    archived: Object.freeze(archived),
   });
   compiled.set(version.versionId, result);
   for (const id of compiled.keys()) {
