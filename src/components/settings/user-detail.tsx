@@ -33,7 +33,7 @@ import {
 } from "./fresh-session-dialog";
 import { teamRequests } from "./team-members";
 import { USER_DETAIL_TABS, type UserDetailTab } from "./user-detail-tabs";
-import { levels, teamRoles } from "./users-tab";
+import { levels, statuses, teamRoles } from "./users-tab";
 
 export type { UserDetailTab, WorkspacePerson };
 
@@ -47,6 +47,9 @@ export interface UserDetailProps {
 
 export const USER_NOT_FOUND = "This person is not in any team of your company.";
 export const EVENT_LIMIT = 50;
+/** The Security tab's account actions (ADM-09). */
+export type AccountAction =
+  "deactivate" | "reactivate" | "sign-out" | "clear-lockout";
 
 /**
  * Admin > Users > one person: the shell and sidebar of the active team, as on every admin page,
@@ -147,6 +150,33 @@ export function UserDetail({ userId, companyLevel, tab }: UserDetailProps) {
     }
     if (done) setOutcomeFocus((count) => count + 1);
   }
+  async function account(action: AccountAction) {
+    if (!person || !teamId || busy) return;
+    setError("");
+    setNotice("");
+    let done: boolean;
+    try {
+      const outcome = await runAccountAction(
+        person,
+        action,
+        teamId,
+        confirm,
+        freshSession.withFreshSession,
+        () => setBusy(true),
+      );
+      done = outcome !== null;
+      if (outcome !== null) {
+        setNotice(outcome);
+        setRun((value) => value + 1);
+      }
+    } catch (e) {
+      setError(humanError(e));
+      done = true;
+    } finally {
+      setBusy(false);
+    }
+    if (done) setOutcomeFocus((count) => count + 1);
+  }
 
   if (!loaded) return <p role="status">Loading this person…</p>;
   if (!person)
@@ -164,6 +194,7 @@ export function UserDetail({ userId, companyLevel, tab }: UserDetailProps) {
         notice={notice}
         outcomeRef={outcome}
         onReset={() => void reset()}
+        onAccountAction={(action) => void account(action)}
       />
       {freshSession.dialog}
       {dialog}
@@ -240,6 +271,110 @@ export async function resetTwoStep(
   return outcome !== REAUTH_CANCELLED;
 }
 
+/**
+ * Whether the caller may use the account actions on this person: never on their own page; a company
+ * owner on anyone else; a company admin (who holds people, or could not open the page) only on
+ * someone without company authority. "owner-only" is that admin on a company owner or admin.
+ */
+export function accountActions(
+  person: Pick<WorkspacePerson, "userId" | "companyLevel">,
+  callerId: string,
+  companyOwner: boolean,
+): "allowed" | "owner-only" | "none" {
+  if (person.userId === callerId) return "none";
+  return companyOwner || person.companyLevel === null
+    ? "allowed"
+    : "owner-only";
+}
+
+/**
+ * One account action: its confirmation, then the request, which on 403 SESSION_NOT_FRESH opens
+ * "Confirm it's you" and retries once. The notice once done; null when the confirmation or the
+ * re-authentication was cancelled, which sends nothing more.
+ */
+export async function runAccountAction(
+  person: Pick<WorkspacePerson, "userId" | "name">,
+  action: AccountAction,
+  teamId: string,
+  confirm: (options: ConfirmOptions) => Promise<boolean>,
+  withFreshSession: <T>(work: () => Promise<T>) => Promise<T | ReauthCancelled>,
+  onConfirmed: () => void = () => {},
+): Promise<string | null> {
+  const { name } = person;
+  const path = `/api/v1/admin/users/${encodeURIComponent(person.userId)}`;
+  const status = (active: boolean) => () =>
+    requestJson<{ data: { active: boolean; changed: boolean } }>(
+      teamId,
+      `${path}/status`,
+      { method: "PUT", body: JSON.stringify({ active }) },
+    );
+  const post = (suffix: string) => () =>
+    requestJson(teamId, `${path}/${suffix}`, { method: "POST" });
+  const steps: Record<
+    AccountAction,
+    {
+      options: ConfirmOptions;
+      request: () => Promise<unknown>;
+      notice: (changed: boolean) => string;
+    }
+  > = {
+    deactivate: {
+      options: {
+        title: `Deactivate ${name}?`,
+        message:
+          "They can no longer sign in, and their sessions, API tokens and connected AI apps stop working in every team of your company. Their teams, roles and history are kept, and you can reactivate them at any time.",
+        confirmLabel: "Deactivate",
+        destructive: true,
+      },
+      request: status(false),
+      notice: (changed) =>
+        changed
+          ? `${name} is deactivated.`
+          : `${name} was already deactivated.`,
+    },
+    reactivate: {
+      options: {
+        title: `Reactivate ${name}?`,
+        message:
+          "They can sign in again and get back exactly the access they had before.",
+        confirmLabel: "Reactivate",
+      },
+      request: status(true),
+      notice: (changed) =>
+        changed ? `${name} is active again.` : `${name} was already active.`,
+    },
+    "sign-out": {
+      options: {
+        title: `Sign ${name} out everywhere?`,
+        message:
+          "Every device they are signed in on is signed out. Their API tokens and connected AI apps are not affected.",
+        confirmLabel: "Sign out everywhere",
+        destructive: true,
+      },
+      request: post("sign-out"),
+      notice: () => `${name} has been signed out everywhere.`,
+    },
+    "clear-lockout": {
+      options: {
+        title: `Clear ${name}'s sign-in lockout?`,
+        message:
+          "If they had to wait after too many sign-in attempts, they can try again straight away.",
+        confirmLabel: "Clear lockout",
+      },
+      request: post("clear-lockout"),
+      notice: () => `${name}'s sign-in lockout was cleared.`,
+    },
+  };
+  const step = steps[action];
+  if (!(await confirm(step.options))) return null;
+  onConfirmed();
+  const outcome = await withFreshSession(step.request);
+  if (outcome === REAUTH_CANCELLED) return null;
+  return step.notice(
+    (outcome as { data?: { changed?: boolean } }).data?.changed !== false,
+  );
+}
+
 /** The plain words for one event's change. */
 export function eventLabel(event: WorkspacePersonEvent) {
   if (event.action.startsWith("config."))
@@ -253,10 +388,18 @@ export function eventLabel(event: WorkspacePersonEvent) {
   if (event.action === "workspace_authority.changed")
     return "Company authority changed";
   if (event.action === "two_step.reset") return "Two-step sign-in reset";
+  if (event.action === "user.deactivated") return "Deactivated";
+  if (event.action === "user.reactivated") return "Reactivated";
+  if (event.action === "user.signed_out_everywhere")
+    return "Signed out everywhere";
+  if (event.action === "user.lockout_cleared") return "Sign-in lockout cleared";
   return event.action;
 }
 
-/** The loaded person: name, the five tabs and the open tab's panel. Read only but for Reset. */
+/**
+ * The loaded person: name, the five tabs and the open tab's panel. Read only but for Reset and the
+ * Security tab's account actions.
+ */
 export function UserDetailView({
   person,
   tab,
@@ -268,6 +411,7 @@ export function UserDetailView({
   notice = "",
   outcomeRef,
   onReset = () => {},
+  onAccountAction = () => {},
 }: {
   person: WorkspacePerson;
   tab: UserDetailTab;
@@ -282,6 +426,7 @@ export function UserDetailView({
   notice?: string;
   outcomeRef?: Ref<HTMLDivElement>;
   onReset?: () => void;
+  onAccountAction?: (action: AccountAction) => void;
 }) {
   const [current, setCurrent] = useState(tab);
   return (
@@ -325,11 +470,13 @@ export function UserDetailView({
           <SecurityTab
             person={person}
             canReset={canReset && person.userId !== callerId}
+            actions={accountActions(person, callerId, companyOwner)}
             busy={busy}
             error={error}
             notice={notice}
             outcomeRef={outcomeRef}
             onReset={onReset}
+            onAccountAction={onAccountAction}
           />
         ) : (
           <ActivityTab person={person} />
@@ -361,7 +508,7 @@ function ProfileTab({ person }: { person: WorkspacePerson }) {
         items={[
           ["Name", person.name],
           ["Email", person.email],
-          ["Status", "Active"],
+          ["Status", statuses[person.status]],
           [
             "Last sign-in",
             person.lastSignInAt
@@ -481,20 +628,25 @@ function AuthorityTab({
 function SecurityTab({
   person,
   canReset,
+  actions,
   busy,
   error,
   notice,
   outcomeRef,
   onReset,
+  onAccountAction,
 }: {
   person: WorkspacePerson;
   canReset: boolean;
+  actions: ReturnType<typeof accountActions>;
   busy: boolean;
   error: string;
   notice: string;
   outcomeRef?: Ref<HTMLDivElement>;
   onReset: () => void;
+  onAccountAction: (action: AccountAction) => void;
 }) {
+  const deactivated = person.status === "deactivated";
   return (
     <>
       {error && (
@@ -521,10 +673,18 @@ function SecurityTab({
         <h3>Security</h3>
         <Facts
           items={[
+            ["Status", statuses[person.status]],
             ["Two-step sign-in", person.twoStep ? "On" : "Off"],
             ["Signed-in devices", String(person.signedInDevices)],
           ]}
         />
+        {deactivated && (
+          <p>
+            Deactivated: this person cannot sign in, and their sessions, API
+            tokens and connected apps are refused. Their teams, roles and
+            history are kept.
+          </p>
+        )}
         {canReset && (
           <div className="row">
             <button
@@ -536,6 +696,52 @@ function SecurityTab({
               Reset two-step sign-in
             </button>
           </div>
+        )}
+        {actions === "allowed" ? (
+          <div className="row">
+            {deactivated ? (
+              <button
+                type="button"
+                className="button"
+                disabled={busy}
+                onClick={() => onAccountAction("reactivate")}
+              >
+                Reactivate
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="button danger"
+                disabled={busy}
+                onClick={() => onAccountAction("deactivate")}
+              >
+                Deactivate
+              </button>
+            )}
+            <button
+              type="button"
+              className="button secondary"
+              disabled={busy}
+              onClick={() => onAccountAction("sign-out")}
+            >
+              Sign out everywhere
+            </button>
+            <button
+              type="button"
+              className="button secondary"
+              disabled={busy}
+              onClick={() => onAccountAction("clear-lockout")}
+            >
+              Clear sign-in lockout
+            </button>
+          </div>
+        ) : (
+          actions === "owner-only" && (
+            <p className="muted">
+              Only a company owner can deactivate, sign out or clear the lockout
+              of a company owner or admin.
+            </p>
+          )
         )}
       </section>
     </>
