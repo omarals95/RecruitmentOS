@@ -1056,8 +1056,18 @@ describe("deactivation, sign out everywhere and clear lockout through the handle
   let caller: ReturnType<typeof authCaller>;
   let owner: Principal;
   let ownerCookie = "";
-  type Person = { id: string; email: string; cookie: string; secret?: string };
-  const people = {} as Record<"plain" | "twoStep" | "other", Person>;
+  type Person = {
+    id: string;
+    email: string;
+    cookie: string;
+    memberId: string;
+    secret?: string;
+  };
+  const people = {} as Record<
+    "plain" | "twoStep" | "other" | "teamOwner",
+    Person
+  >;
+  let teamId = "";
   /** As the PGlite superuser, which bypasses RLS: only to arrange and inspect. */
   const superuser = async <T>(text: string, params: unknown[] = []) => {
     await harness.asSuperuser();
@@ -1103,6 +1113,8 @@ describe("deactivation, sign out everywhere and clear lockout through the handle
       ["plain", "dx-plain@example.test"],
       ["twoStep", "dx-two-step@example.test"],
       ["other", "dx-other@example.test"],
+      // A second team owner without company authority; addMember turns two-step sign-in on.
+      ["teamOwner", "dx-team-owner@example.test"],
     ] as const) {
       await harness.identityDb();
       const added = await addMember(
@@ -1111,14 +1123,20 @@ describe("deactivation, sign out everywhere and clear lockout through the handle
         admin.cookie,
         admin.teamId,
         email,
-        "recruiter",
+        key === "teamOwner" ? "owner" : "recruiter",
       );
       const [{ id }] = await superuser<{ id: string }>(
         `SELECT id FROM auth."user" WHERE email = $1`,
         [email],
       );
-      people[key] = { id, email, cookie: added.cookie };
+      people[key] = {
+        id,
+        email,
+        cookie: added.cookie,
+        memberId: added.memberId,
+      };
     }
+    teamId = admin.teamId;
     await harness.identityDb();
     const twoStep = await caller.enableTwoStep(people.twoStep.cookie);
     people.twoStep = { ...people.twoStep, ...twoStep };
@@ -1215,6 +1233,78 @@ describe("deactivation, sign out everywhere and clear lockout through the handle
         await caller.signInWithCode(twoStep.email, twoStep.secret!),
       ),
     ).not.toBeNull();
+  });
+
+  it("refuses a deactivated two-step team owner's surviving session on team management", async () => {
+    const { teamOwner, plain } = people;
+    const roleOf = async (memberId: string) =>
+      (
+        await superuser<{ role: string }>(
+          "SELECT role FROM auth.member WHERE id = $1",
+          [memberId],
+        )
+      )[0]?.role;
+    const invitations = async (email: string) =>
+      (
+        await superuser<{ n: number }>(
+          "SELECT count(*)::int AS n FROM auth.invitation WHERE email = $1",
+          [email],
+        )
+      )[0].n;
+    await setActive(teamOwner, false);
+    const before = {
+      teams: await superuser("SELECT id FROM auth.organization ORDER BY id"),
+      members: await superuser("SELECT id, role FROM auth.member ORDER BY id"),
+    };
+    const attempts = [
+      await post(
+        "organization/invite-member",
+        {
+          organizationId: teamId,
+          email: "dx-second-address@example.test",
+          role: "owner",
+        },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/update-member-role",
+        { organizationId: teamId, memberId: plain.memberId, role: "viewer" },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/remove-member",
+        { organizationId: teamId, memberIdOrEmail: plain.memberId },
+        { cookie: teamOwner.cookie },
+      ),
+      await post(
+        "organization/create",
+        { name: "Fictional deactivated team", slug: "fictional-dx-team" },
+        { cookie: teamOwner.cookie },
+      ),
+    ];
+    for (const response of attempts) {
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject(DEACTIVATED);
+    }
+    expect(await invitations("dx-second-address@example.test")).toBe(0);
+    expect(await roleOf(plain.memberId)).toBe("recruiter");
+    expect({
+      teams: await superuser("SELECT id FROM auth.organization ORDER BY id"),
+      members: await superuser("SELECT id, role FROM auth.member ORDER BY id"),
+    }).toEqual(before);
+    // Reactivated, the same session invites again.
+    await setActive(teamOwner, true);
+    const allowed = await post(
+      "organization/invite-member",
+      {
+        organizationId: teamId,
+        email: "dx-second-address@example.test",
+        role: "viewer",
+      },
+      { cookie: teamOwner.cookie },
+    );
+    expect(allowed.status).toBe(200);
+    expect(await invitations("dx-second-address@example.test")).toBe(1);
   });
 
   it("signs the target out of every session in Better Auth and no one else", async () => {

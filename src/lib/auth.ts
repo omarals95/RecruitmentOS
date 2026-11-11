@@ -219,11 +219,8 @@ const FORGET_TRUSTED_DEVICE_PATHS = new Set([
   "/two-factor/disable",
   "/two-factor/generate-backup-codes",
 ]);
-/** A password change's deactivation check, made before Better Auth opens the change's transaction. */
-const checkedAccount = defineRequestState<{
-  userId: string;
-  deactivated: boolean;
-} | null>(() => null);
+/** The user `hooks.before` found active, before Better Auth opens a password change's transaction. */
+const checkedActiveUser = defineRequestState<string | null>(() => null);
 const accountDeactivatedError = () =>
   new APIError("FORBIDDEN", {
     code: "account_deactivated",
@@ -477,11 +474,10 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               // No second transaction may open beside Better Auth's own (a single connection on
               // PGlite); only a password change, checked before its transaction, gets here.
               const checked = (await hasRequestState())
-                ? await checkedAccount.get()
+                ? await checkedActiveUser.get()
                 : null;
-              if (checked?.userId !== row.userId)
+              if (checked !== row.userId)
                 throw new Error("The account state was not checked.");
-              if (checked.deactivated) throw accountDeactivatedError();
             } else if (await accountDeactivated(db, row.userId))
               throw accountDeactivatedError();
           },
@@ -604,6 +600,16 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         const session = gated
           ? await getAuthoritativeSessionFromCtx(ctx)
           : undefined;
+        // A deactivated person's surviving session is refused on every gated endpoint, whatever
+        // their team role or two-step state: team management never reaches tenant_context.install.
+        if (session) {
+          if (await accountDeactivated(db, session.user.id))
+            throw accountDeactivatedError();
+          // A password change creates its new session inside Better Auth's transaction, where the
+          // deactivation check cannot open its own; the session hook relies on this check.
+          if (ctx.path === "/change-password")
+            await checkedActiveUser.set(session.user.id);
+        }
         if (session && !session.user.twoFactorEnabled) {
           const memberships = await db
             .select({ teamId: member.organizationId, role: member.role })
@@ -613,7 +619,7 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
           try {
             held = await companyAuthorityHeld(db, session.user, memberships);
           } catch (error) {
-            // The context install refuses a deactivated person; answer as session creation does.
+            // A deactivation committed since the check above; answer the same refusal.
             if (
               error instanceof ApiError &&
               error.code === "account_deactivated"
@@ -633,13 +639,6 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               message: TWO_STEP_SETUP_MESSAGE,
             });
         }
-        // A password change creates its new session inside Better Auth's transaction, where the
-        // deactivation check cannot open its own; the session's user is checked before it opens.
-        if (session && ctx.path === "/change-password")
-          await checkedAccount.set({
-            userId: session.user.id,
-            deactivated: await accountDeactivated(db, session.user.id),
-          });
         if (session && FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path))
           await forgetTrustedDevicesOf.set(session.user.id);
         if (ctx.path === "/sign-in/email") {
