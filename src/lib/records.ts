@@ -21,7 +21,8 @@ import {
   recordAssignments,
   records,
 } from "@/db/schema";
-import type { TeamTx } from "@/db";
+import { getIdentityDb, type TeamTx } from "@/db";
+import { member } from "@/db/auth-schema";
 import {
   accessContext,
   anyRecordScopeRule,
@@ -673,7 +674,8 @@ const isEmpty = (value: unknown) =>
  * carried over unchanged never blocks an unrelated edit; an archived field's value can be neither
  * changed nor removed unless the write is imported. Then the mandatory rules: a create needs every
  * mandatory field of the create screen, and an edit may not empty a filled one of the edit screen.
- * A task's team task-field keys are left to checkCustomValues. It runs no statement.
+ * A task's team task-field keys are left to checkCustomValues. It runs no statement and returns the
+ * added or changed values for checkFieldReferences.
  */
 function checkKindValues(
   schema: KindSchema,
@@ -681,7 +683,7 @@ function checkKindValues(
   existing: Data | undefined,
   importing: boolean,
   teamFields: ReadonlySet<string> = new Set(),
-) {
+): Data {
   const compiled = compileKindSchema(schema);
   const fields = new Map(schema.body.fields.map((field) => [field.key, field]));
   const own = (map: Data | undefined) =>
@@ -753,6 +755,147 @@ function checkKindValues(
           `A valid value for ${field.label} is required.`,
         );
   }
+  return changed;
+}
+/**
+ * The person values a write may store: the ids confirmed as members of the team through the
+ * identity pool, or "ask" on the first attempt of createRecord and updateRecord.
+ */
+type Members = ReadonlySet<string> | "ask";
+/**
+ * Thrown by a first attempt that meets a changed person value. It rolls back the transaction, and
+ * withMembers reads those ids through the identity pool and runs the work again; never a response.
+ */
+class MembersNeeded extends Error {
+  userIds: string[];
+  constructor(userIds: string[]) {
+    super("Team membership is read before this write.");
+    this.userIds = userIds;
+  }
+}
+/**
+ * Runs `work` once with "ask". When it needs membership, reads in one identity query, outside any
+ * data transaction, which of the person ids are members of the team, and runs `work` exactly once
+ * more with them; the data role never reads auth.member.
+ */
+async function withMembers<T>(
+  p: Principal,
+  work: (members: Members) => Promise<T>,
+): Promise<T> {
+  try {
+    return await work("ask");
+  } catch (error) {
+    if (!(error instanceof MembersNeeded)) throw error;
+    const db = await getIdentityDb();
+    const rows = await db
+      .select({ userId: member.userId })
+      .from(member)
+      .where(
+        and(
+          eq(member.organizationId, p.teamId),
+          inArray(member.userId, error.userIds),
+        ),
+      );
+    return work(new Set(rows.map((row) => row.userId)));
+  }
+}
+/**
+ * Checks the references of the added or changed values checkKindValues returned (architecture 1.5
+ * item 7): each non-empty value of an active person, org unit or lookup field. A person must be in
+ * `members`; with "ask" it throws MembersNeeded before any statement. Org units and lookups are
+ * read together in at most one statement: a current unit of the caller's company, and a record of
+ * the field's target kind in the caller's team and record scope. A lookup to anything else, or to
+ * a kind the caller may not view, is refused exactly as a missing parent.
+ */
+async function checkFieldReferences(
+  tx: TeamTx,
+  ctx: AccessContext,
+  schema: KindSchema,
+  changed: Data,
+  members: Members,
+  allowArchived: boolean,
+) {
+  const values = schema.body.fields.flatMap((field) =>
+    !field.system &&
+    !field.archived &&
+    (field.type === "person" ||
+      field.type === "org-unit" ||
+      field.type === "lookup") &&
+    !isEmpty(changed[field.key])
+      ? [{ field, value: changed[field.key] as string }]
+      : [],
+  );
+  const people = values.filter(({ field }) => field.type === "person");
+  if (people.length && members === "ask")
+    throw new MembersNeeded([...new Set(people.map(({ value }) => value))]);
+  for (const { field, value } of people)
+    if (!(members as ReadonlySet<string>).has(value))
+      throw new ApiError(
+        400,
+        "invalid_reference",
+        `${field.label} must be a member of this team.`,
+      );
+  const units = values.flatMap(({ field, value }) =>
+    field.type === "org-unit" ? [value] : [],
+  );
+  const lookups = values.flatMap(({ field, value }) =>
+    field.type === "lookup" ? [{ target: field.target, value }] : [],
+  );
+  // As in referencedRecord: a kind the caller may not view, and candidates without candidates:read,
+  // are never read, so their records answer as missing.
+  const targets = [...new Set(lookups.map(({ target }) => target))].filter(
+    (target) =>
+      (target !== "candidate" || ctx.scopes.includes("candidates:read")) &&
+      decide(ctx, { resource: kindToResource[target], action: "view" }),
+  );
+  const parts = [
+    ...(units.length
+      ? [
+          sql`select u.id::text as id, 'org-unit'::text as kind, false as archived from app.org_units u where u.workspace_id = ${ctx.access.workspaceId}::uuid and u.valid_to is null and u.archived_at is null and u.id = any(${sql.param(units)}::uuid[])`,
+        ]
+      : []),
+    ...targets.map(
+      (target) =>
+        sql`select ${records.id}::text as id, ${records.kind} as kind, ${records.archivedAt} is not null as archived from ${records} where ${and(
+          ...scopeFilter(ctx, target),
+          inArray(
+            records.id,
+            lookups.flatMap((lookup) =>
+              lookup.target === target ? [lookup.value] : [],
+            ),
+          ),
+        )}`,
+    ),
+  ];
+  const found = new Map(
+    parts.length
+      ? (
+          await tx.execute<{ id: string; kind: string; archived: boolean }>(
+            sql.join(parts, sql` union all `),
+          )
+        ).rows.map((row): [string, boolean] => [
+          `${row.kind}:${row.id}`,
+          row.archived,
+        ])
+      : [],
+  );
+  for (const { field, value } of values) {
+    if (field.type === "org-unit" && !found.has(`org-unit:${value}`))
+      throw new ApiError(
+        400,
+        "invalid_reference",
+        `${field.label} does not reference a current unit of this company.`,
+      );
+    if (field.type !== "lookup") continue;
+    const archived = found.get(`${field.target}:${value}`);
+    if (archived === undefined) throw missingReference(field.label);
+    if (archived && !allowArchived)
+      throw new ApiError(
+        400,
+        "archived_reference",
+        `${field.label} references an archived record.`,
+      );
+  }
 }
 /**
  * The check of one team task field's values on the field type engine (TASK_FIELD_TYPE_MAP, options
@@ -782,7 +925,7 @@ function validCustomValue(field: DbRecord): (value: unknown) => boolean {
 }
 /**
  * A task's custom values: the team's task-field keys as today, every other key through
- * checkKindValues against the task kind schema.
+ * checkKindValues against the task kind schema, whose changed values it returns.
  */
 async function checkCustomValues(
   tx: TeamTx,
@@ -791,12 +934,12 @@ async function checkCustomValues(
   data: Data,
   existing?: DbRecord,
   importing = false,
-) {
+): Promise<Data> {
   const fields = await tx
     .select()
     .from(records)
     .where(and(...scopeFilter(ctx, "task-field")));
-  checkKindValues(
+  const changed = checkKindValues(
     schema,
     data,
     existing?.data,
@@ -849,6 +992,7 @@ async function checkCustomValues(
         "Archived field values cannot be removed.",
       );
   }
+  return changed;
 }
 async function checkFieldCompatibility(
   tx: TeamTx,
@@ -1823,7 +1967,11 @@ async function changeAssignees(
   }
 }
 
-/** `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review. */
+/**
+ * `auditMetadata` joins the created event's metadata, for evidence such as bulk intake review.
+ * `members` are the person values confirmed as team members (withMembers); without them, any added
+ * person value is refused, so a caller inside another transaction never reads the identity pool.
+ */
 export async function createInside(
   tx: TeamTx,
   ctx: AccessContext,
@@ -1831,19 +1979,15 @@ export async function createInside(
   input: WriteInput,
   imported: boolean,
   auditMetadata: Data = {},
+  members: Members = new Set(),
 ): Promise<RecordDto> {
   const { principal: p } = ctx;
   validateRelations(kind, input.data);
   if (kind === "vacancy" && input.data.jobTitleKey !== undefined)
     requireJobTitle(ctx.access, String(input.data.jobTitleKey));
-  await checkReferences(
-    tx,
-    ctx,
-    kind,
-    input,
-    undefined,
-    imported && (input.archived === true || kind === "comment"),
-  );
+  const allowArchived =
+    imported && (input.archived === true || kind === "comment");
+  await checkReferences(tx, ctx, kind, input, undefined, allowArchived);
   const refs = refsFor(input);
   await uniqueChecks(
     tx,
@@ -1855,9 +1999,26 @@ export async function createInside(
     !!input.archived,
   );
   const schema = kindSchemaOf(ctx, kind);
-  if (kind === "task")
-    await checkCustomValues(tx, ctx, schema!, input.data, undefined, imported);
-  else if (schema) checkKindValues(schema, input.data, undefined, imported);
+  const changed =
+    kind === "task"
+      ? await checkCustomValues(
+          tx,
+          ctx,
+          schema!,
+          input.data,
+          undefined,
+          imported,
+        )
+      : schema && checkKindValues(schema, input.data, undefined, imported);
+  if (changed)
+    await checkFieldReferences(
+      tx,
+      ctx,
+      schema!,
+      changed,
+      members,
+      allowArchived,
+    );
   if (kind === "task-field")
     await checkFieldCompatibility(
       tx,
@@ -1940,11 +2101,23 @@ export async function createInside(
   return dto({ ...row, assigneeIds: [...assigneeIds].sort() });
 }
 
-export async function createRecord(
+export function createRecord(
   p: Principal,
   resource: ResourceName,
   raw: unknown,
   idempotencyKey?: string,
+): Promise<RecordDto> {
+  return withMembers(p, (members) =>
+    createOnce(p, resource, raw, idempotencyKey, members),
+  );
+}
+/** One attempt of createRecord, with the members withMembers confirmed or "ask". */
+async function createOnce(
+  p: Principal,
+  resource: ResourceName,
+  raw: unknown,
+  idempotencyKey: string | undefined,
+  members: Members,
 ): Promise<RecordDto> {
   const kind = kindOf(resource);
   return withTeam(p, async (tx, access) => {
@@ -2000,7 +2173,7 @@ export async function createRecord(
           ctx,
           (
             await decorate(tx, ctx, [
-              await createInside(tx, ctx, kind, input, imported),
+              await createInside(tx, ctx, kind, input, imported, {}, members),
             ])
           )[0],
         ),
@@ -2021,12 +2194,25 @@ export async function createRecord(
  * `options.comment` appends a comment on the record in the same transaction, after the update and
  * its audit row; if the comment cannot be written, nothing changes. REST and the UI never pass it.
  */
-export async function updateRecord(
+export function updateRecord(
   p: Principal,
   resource: ResourceName,
   recordId: string,
   raw: unknown,
   options: { comment?: string } = {},
+): Promise<RecordDto & { commentId?: string }> {
+  return withMembers(p, (members) =>
+    updateOnce(p, resource, recordId, raw, options, members),
+  );
+}
+/** One attempt of updateRecord, with the members withMembers confirmed or "ask". */
+async function updateOnce(
+  p: Principal,
+  resource: ResourceName,
+  recordId: string,
+  raw: unknown,
+  options: { comment?: string },
+  members: Members,
 ): Promise<RecordDto & { commentId?: string }> {
   const kind = kindOf(resource);
   return withTeam(p, async (tx, access) => {
@@ -2093,9 +2279,19 @@ export async function updateRecord(
     const refs = refsFor(patch, existing);
     await uniqueChecks(tx, ctx, kind, data, refs, existing, archived);
     const schema = kindSchemaOf(ctx, kind);
-    if (kind === "task")
-      await checkCustomValues(tx, ctx, schema!, data, existing, imported);
-    else if (schema) checkKindValues(schema, data, existing.data, imported);
+    const changed =
+      kind === "task"
+        ? await checkCustomValues(tx, ctx, schema!, data, existing, imported)
+        : schema && checkKindValues(schema, data, existing.data, imported);
+    if (changed)
+      await checkFieldReferences(
+        tx,
+        ctx,
+        schema!,
+        changed,
+        members,
+        imported && archived,
+      );
     if (kind === "task-field")
       await checkFieldCompatibility(tx, ctx, existing, data, archived);
     const now = new Date();

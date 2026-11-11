@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { kindSchemaBodySchema, type KindSchemaBody } from "@/domain/config";
+import {
+  configBodySchemas,
+  kindSchemaBodySchema,
+  type KindSchemaBody,
+} from "@/domain/config";
 import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import {
   FIELD_TYPES,
@@ -665,6 +669,25 @@ describe("field type engine (R2b-03)", () => {
     };
     system.fields[0].key = uuid(5);
     expect(kindSchemaBodySchema.safeParse(system).success).toBe(false);
+  });
+
+  // R2b-05: configuration never holds a record id or value, so no draft can reach publish with one.
+  // The draft envelope refuses any body with fields until R2b-09, with or without a default.
+  it("refuses a kind schema body whose lookup field holds a default, in the body schema and the draft envelope", () => {
+    const lookup = (extra: Record<string, unknown> = {}) =>
+      withCustom([definition("lookup", extra, uuid(501))]);
+    for (const value of [uuid(502), null, ""]) {
+      const body = lookup({ default: value });
+      expect(kindSchemaBodySchema.safeParse(body).success, String(value)).toBe(
+        false,
+      );
+      expect(
+        configBodySchemas["kind-schema"].safeParse(body).success,
+        String(value),
+      ).toBe(false);
+    }
+    const result = kindSchemaBodySchema.safeParse(lookup());
+    expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
   });
 
   it("compiles a default body and a custom body into customValues and the mandatory rules", () => {

@@ -173,15 +173,30 @@ Candidates, job roles, vacancies, applications, interviews, offers, onboarding r
 
 Each write is checked against the kind's current published kind schema, which the record then pins:
 
-| Response                    | When                                                                                                                                                                                             |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 400 `unknown_custom_field`  | an added or changed key that is not a custom field of the kind schema ("A custom field is not available in this team."); on the built-in default schemas, which hold no custom fields, every key |
-| 400 `invalid_custom_value`  | an added or changed value that does not fit its field's type, bounds or options ("Invalid value for {field label}.")                                                                             |
-| 400 `archived_custom_field` | a value of an archived field is added or changed, or removed from a record that holds it; an import (`legacyId` or `importMeta`) may change or remove it                                         |
-| 400 `required_custom_field` | a create without a value for a custom field required on the create screen, or an edit that empties a filled one required on the edit screen ("A valid value for {field label} is required.")     |
-| 400 `invalid_input`         | the same mandatory rules for a system field the kind schema makes required ("{key}: {field label} is required.")                                                                                 |
+| Response                    | When                                                                                                                                                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 400 `unknown_custom_field`  | an added or changed key that is not a custom field of the kind schema ("A custom field is not available in this team."); on the built-in default schemas, which hold no custom fields, every key                                                                         |
+| 400 `invalid_custom_value`  | an added or changed value that does not fit its field's type, bounds or options ("Invalid value for {field label}.")                                                                                                                                                     |
+| 400 `archived_custom_field` | a value of an archived field is added or changed, or removed from a record that holds it; an import (`legacyId` or `importMeta`) may change or remove it                                                                                                                 |
+| 400 `required_custom_field` | a create without a value for a custom field required on the create screen, or an edit that empties a filled one required on the edit screen ("A valid value for {field label} is required.")                                                                             |
+| 400 `invalid_input`         | the same mandatory rules for a system field the kind schema makes required ("{key}: {field label} is required.")                                                                                                                                                         |
+| 400 `invalid_reference`     | a person value that is not the user ID of a member of the record's team ("{field label} must be a member of this team.")                                                                                                                                                 |
+| 400 `invalid_reference`     | an org unit value that is not a current unit of your company, open and not archived ("{field label} does not reference a current unit of this company.")                                                                                                                 |
+| 400 `invalid_reference`     | a lookup value that is not a record of the field's target kind in your team and record scope ("{field label} does not reference the expected record in this team."), the same answer for a missing record, another kind, another team's record or one outside your scope |
+| 400 `archived_reference`    | a lookup value naming an archived record ("{field label} references an archived record."); an import of an archived record may name one                                                                                                                                  |
 
 A value carried over unchanged from the stored record is not checked again, so a field removed or tightened later, or made mandatory later and left empty, never blocks an unrelated edit. `null` and `""` are empty values of any field.
+
+Person, org unit and lookup values are bare IDs: a person value is a user ID, an org unit value the unit's ID and a lookup value the record's ID. They are checked only when added or changed, so a person who later leaves the team, or a unit or record archived later, never blocks an unrelated edit. Responses return the stored ID only, never a name or label.
+
+```bash
+curl --fail-with-body -X PATCH "$RECRUITMENTOS_URL/api/v1/candidates/$CANDIDATE_ID" \
+  -H "Authorization: Bearer $RECRUITMENTOS_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"version":3,"data":{"customValues":{"2b7c8d9e-0f1a-4b2c-9d3e-4f5a6b7c8d9e":"fictional-user-id","3c8d9e0f-1a2b-4c3d-8e4f-5a6b7c8d9e0f":"6d9e0f1a-2b3c-4d4e-9f5a-6b7c8d9e0f1a","4d9e0f1a-2b3c-4d4e-8f5a-6b7c8d9e0f1a":"7e0f1a2b-3c4d-4e5f-8a6b-7c8d9e0f1a2b"}}}'
+```
+
+The example names three fictional fields of a published candidate kind schema: `2b7c8d9e-…` a person field "Sponsor" holding a member's user ID, `3c8d9e0f-…` an org unit field "Home unit" holding a current unit's ID and `4d9e0f1a-…` a lookup field "Linked vacancy" whose target kind is `vacancy`, holding a vacancy's ID.
 
 ```bash
 curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \

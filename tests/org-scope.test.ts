@@ -54,6 +54,11 @@ import { dubaiToday, type ResourceName } from "@/domain/records";
 import { POST as createRoute } from "@/app/api/v1/[resource]/route";
 import { PATCH as updateRoute } from "@/app/api/v1/[resource]/[id]/route";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 
 // Fictional data only: one company with a 500-unit, six-level tree, a second fictional company for
 // the cross-workspace refusal, and members whose roles limit records to their unit or to assigned
@@ -1454,6 +1459,244 @@ describe("record scope in the service under the split runtime roles", () => {
       ).toEqual(
         [inside.id, outside.id].sort().map((record_id) => ({ record_id })),
       );
+    });
+  });
+
+  // Person, org unit and lookup fields (R2b-05, job 084). Membership is read through the identity
+  // role, so the person cases passing here prove the data role never reads auth.member.
+  describe("person and lookup fields", () => {
+    const sponsor = customField("Fictional candidate sponsor", "person");
+    const reviewer = customField("Fictional task reviewer", "person");
+    const linked = customField("Fictional task vacancy", "lookup", {
+      target: "vacancy",
+    });
+    const memberRefusal = (label: string) => ({
+      status: 400,
+      code: "invalid_reference",
+      message: `${label} must be a member of this team.`,
+    });
+    /** The refusal a write answers, as its status, code and message only. */
+    const refusalOf = async (write: Promise<unknown>) => {
+      const error = await write.then(
+        () => expect.fail("The write was accepted."),
+        (error: { status: number; code: string; message: string }) => error,
+      );
+      return { status: error.status, code: error.code, message: error.message };
+    };
+    const stored = (recordId: string) =>
+      look<{ data: Row; version: number }>(
+        "SELECT data, version FROM app.records WHERE id = $1",
+        [recordId],
+      ).then((rows) => rows[0]);
+
+    beforeAll(async () => {
+      await harness.asSuperuser();
+      // A fictional user who belongs to no team.
+      await harness.client.query(
+        `INSERT INTO auth."user"(id, name, email) VALUES ('os-loner', 'Fictional Loner', 'os-loner@example.test')`,
+      );
+      // Drafts inserted outside row security, published by the company owner through the store.
+      for (const body of [
+        kindBody("candidate", [sponsor]),
+        kindBody("task", [reviewer, linked]),
+      ]) {
+        await harness.asSuperuser();
+        await publishConfigVersion(
+          owner,
+          await insertKindSchema(harness.client, owner.userId, body, {
+            draft: true,
+          }),
+        );
+      }
+    });
+
+    it("stores a team member as the bare id on a candidate and a task, and refuses a non-member, another team's member and an unknown id alike", async () => {
+      const writes = [
+        {
+          resource: "candidates",
+          field: sponsor,
+          input: (userId: string) => ({
+            data: {
+              name: "Fictional Sponsored Candidate",
+              customValues: { [sponsor.key]: userId },
+            },
+          }),
+        },
+        {
+          resource: "tasks",
+          field: reviewer,
+          input: (userId: string) => ({
+            bucketId: bucket,
+            data: {
+              title: "Fictional reviewed task",
+              customValues: { [reviewer.key]: userId },
+            },
+          }),
+        },
+      ] as const;
+      for (const { resource, field, input } of writes) {
+        const created = await createRecord(
+          owner,
+          resource,
+          input(colleague.userId),
+        );
+        expect(created.data, resource).toMatchObject({
+          customValues: { [field.key]: colleague.userId },
+        });
+        const changed = await updateRecord(owner, resource, created.id, {
+          version: 1,
+          data: { customValues: { [field.key]: hm.userId } },
+        });
+        expect(changed.data, resource).toMatchObject({
+          customValues: { [field.key]: hm.userId },
+        });
+        const before = await stored(created.id);
+        expect(before.data.customValues, resource).toEqual({
+          [field.key]: hm.userId,
+        });
+        // No team at all, only another team of the company, only another company's team, unknown.
+        for (const userId of [
+          "os-loner",
+          "os-outsider",
+          "os-owner-x",
+          "os-nobody",
+        ]) {
+          expect(
+            await refusalOf(
+              updateRecord(owner, resource, created.id, {
+                version: 2,
+                data: { customValues: { [field.key]: userId } },
+              }),
+            ),
+            `${resource} ${userId}`,
+          ).toEqual(memberRefusal(field.label));
+          expect(
+            await refusalOf(createRecord(owner, resource, input(userId))),
+            `${resource} ${userId}`,
+          ).toEqual(memberRefusal(field.label));
+        }
+        expect(await stored(created.id), resource).toEqual(before);
+      }
+      expect(
+        await look(
+          "SELECT kind FROM app.records WHERE data->>'name' = 'Fictional Sponsored Candidate' OR data->>'title' = 'Fictional reviewed task' ORDER BY kind",
+        ),
+      ).toEqual([{ kind: "candidate" }, { kind: "task" }]);
+    });
+
+    it("writes a person value once, with one audit and one idempotency row, and refuses one over REST in the error shape", async () => {
+      const name = "Fictional Idempotent Sponsored Candidate";
+      const input = {
+        data: { name, customValues: { [sponsor.key]: colleague.userId } },
+      };
+      const first = await createRecord(
+        owner,
+        "candidates",
+        input,
+        "os-sponsor",
+      );
+      const replay = await createRecord(
+        owner,
+        "candidates",
+        input,
+        "os-sponsor",
+      );
+      expect(replay.id).toBe(first.id);
+      expect(
+        await look("SELECT id FROM app.records WHERE data->>'name' = $1", [
+          name,
+        ]),
+      ).toEqual([{ id: first.id }]);
+      expect(
+        await look("SELECT action FROM app.activity WHERE record_id = $1", [
+          first.id,
+        ]),
+      ).toEqual([{ action: "created" }]);
+      expect(
+        await look(
+          "SELECT operation FROM app.idempotency WHERE key = 'os-sponsor'",
+        ),
+      ).toEqual([{ operation: "create:candidates" }]);
+
+      const post = (userId: string) =>
+        call(
+          "POST",
+          owner,
+          "/api/v1/candidates",
+          { resource: "candidates" },
+          {
+            data: {
+              name: "Fictional REST Sponsored Candidate",
+              customValues: { [sponsor.key]: userId },
+            },
+          },
+        );
+      const refused = await post("os-outsider");
+      expect(refused).toEqual({
+        status: 400,
+        body: {
+          error: {
+            code: "invalid_reference",
+            message: memberRefusal(sponsor.label).message,
+            correlationId: expect.any(String),
+          },
+        },
+      });
+      const created = await post(colleague.userId);
+      expect(created.status).toBe(201);
+      expect(created.body.data.data.customValues).toEqual({
+        [sponsor.key]: colleague.userId,
+      });
+    });
+
+    it("answers a scoped member's lookup outside their record scope exactly as an unknown id, and stores one in scope", async () => {
+      const missing = {
+        status: 400,
+        code: "invalid_reference",
+        message: `${linked.label} does not reference the expected record in this team.`,
+      };
+      for (const member of [unitMember, assignedMember]) {
+        const input = (vacancyId: string) => ({
+          bucketId: bucket,
+          data: {
+            title: `Fictional ${member.userId} lookup task`,
+            customValues: { [linked.key]: vacancyId },
+          },
+        });
+        const outside = await refusalOf(
+          createRecord(member, "tasks", input(id.vOut)),
+        );
+        expect(outside, member.userId).toEqual(missing);
+        expect(
+          await refusalOf(createRecord(member, "tasks", input(randomUUID()))),
+        ).toEqual(outside);
+        // Over REST the two bodies differ only by their correlation id.
+        const rest = async (vacancyId: string) => {
+          const { status, body } = await call(
+            "POST",
+            member,
+            "/api/v1/tasks",
+            { resource: "tasks" },
+            input(vacancyId),
+          );
+          const { correlationId, ...error } = body.error;
+          expect(correlationId).toEqual(expect.any(String));
+          return { status, error };
+        };
+        expect(await rest(id.vOut)).toEqual(await rest(randomUUID()));
+        const inside = await createRecord(member, "tasks", input(id.vIn));
+        expect(inside.data, member.userId).toMatchObject({
+          customValues: { [linked.key]: id.vIn },
+        });
+        expect(
+          await refusalOf(
+            updateRecord(member, "tasks", inside.id, {
+              version: inside.version,
+              data: { customValues: { [linked.key]: id.vOut } },
+            }),
+          ),
+        ).toEqual(missing);
+      }
     });
   });
 });

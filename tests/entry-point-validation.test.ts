@@ -35,6 +35,11 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 
 const origin = "http://localhost:3000";
 
@@ -353,5 +358,44 @@ describe("UI, API and importer reject the same invalid writes", () => {
     expect(stored.data).toMatchObject({
       jobTitle: "Concurrent importer-era title",
     });
+  });
+
+  // Last: it leaves a candidate kind schema published for any later case.
+  it("answers a lookup to no record in the error shape with a correlation id (R2b-05)", async () => {
+    const field = customField("Fictional linked vacancy", "lookup", {
+      target: "vacancy",
+    });
+    await fixture.client.exec("RESET ROLE");
+    try {
+      await insertKindSchema(
+        fixture.client,
+        owner.userId,
+        kindBody("candidate", [field]),
+      );
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+    const name = "Fictional Missing Lookup";
+    const response = await send("token", "POST", "/api/v1/candidates", {
+      data: { name, customValues: { [field.key]: randomUUID() } },
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        code: "invalid_reference",
+        message:
+          "Fictional linked vacancy does not reference the expected record in this team.",
+        correlationId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        ),
+      },
+    });
+    expect(response.headers.get("x-correlation-id")).toBe(
+      body.error.correlationId,
+    );
+    expect(
+      await total("candidate", sql`${records.data}->>'name' = ${name}`),
+    ).toBe(0);
   });
 });
