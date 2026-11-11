@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import type { TeamDetailTab } from "@/components/settings/team-detail-tabs";
 import { meAccess, type MeAccess } from "./authz";
 import { withTeam } from "./db-team";
+import { planAccessFor } from "./pay-brackets";
 import { roleScopes, type Role } from "./permissions";
 import type { Principal } from "./principal";
 import { getTeamWorkspaceContext, getWorkspaceContext } from "./workspace";
@@ -19,8 +20,11 @@ async function sessionAccess(
     scopes: roleScopes(role),
     authType: "session",
   };
-  const access = await withTeam(p, async (_tx, state) => state);
-  return meAccess(p, access);
+  const [access, planAccess] = await withTeam(
+    p,
+    async (tx, state) => [state, await planAccessFor(tx, state)] as const,
+  );
+  return meAccess(p, access, planAccess);
 }
 
 /**

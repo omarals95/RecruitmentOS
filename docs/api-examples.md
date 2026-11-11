@@ -803,6 +803,7 @@ These three routes serve the Admin portal and need a signed-in browser session. 
   "data": {
     "teamRole": "recruiter",
     "companyLevel": "admin",
+    "planAccess": { "read": false, "write": false },
     "role": { "name": "Recruiter", "membership": "recruiter" },
     "scopes": ["candidates:read", "candidates:write", "recruitment:read"],
     "pages": ["home", "candidates", "vacancies", "settings", "admin"],
@@ -819,6 +820,7 @@ These three routes serve the Admin portal and need a signed-in browser session. 
 ```
 
 - `teamRole` is your team role and `companyLevel` your company authority (`owner`, `admin` or `null`).
+- `planAccess` is your Plan & pay access answer for the active team, as the database's `tenant_context.allows_plan` gives it: `read` means you hold the grant and your role gives `plans:read`, `write` the grant and `plans:write`. A company owner without the grant, or a holder whose role in this team is recruiter, gets both `false`; without a company level both are `false` and no statement runs. It never holds a figure, version, pay period or coverage. The Job architecture panel decides from it whether to offer **Show salary brackets**.
 - `role` is the name and level of the role that applies to you: the built-in template of your team role, or the configured role a company owner gave you. It is `null` when no role applies; `pages`, `actions` and `fields` are then empty.
 - `actions` lists the allowed actions per resource and leaves out a resource with none. `fields` gives the rule of each field (`hidden`, `read` or `edit`) for each record kind you may view.
 - `adminAreas` lists the company areas you hold.
