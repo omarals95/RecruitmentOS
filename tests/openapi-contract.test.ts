@@ -697,7 +697,8 @@ describe("OpenAPI contract", () => {
     const history = document.paths["/api/v1/config-history"].get;
     const changes = document.paths["/api/v1/access-changes"].get;
     const teams = document.paths["/api/v1/teams"].get;
-    for (const operation of [access, history, changes, teams]) {
+    const users = document.paths["/api/v1/admin/users"].get;
+    for (const operation of [access, history, changes, teams, users]) {
       expect(operation["x-session-only"]).toBe(true);
       expect(operation["x-required-scopes"]).toEqual([]);
       expect(Object.keys(operation.responses)).toEqual(
@@ -745,6 +746,21 @@ describe("OpenAPI contract", () => {
       "no id, members, member count, record count, storage figure or activity",
     ])
       expect(JSON.stringify(teams)).toContain(text);
+    // ADM-07 (job 073): people and invitations of every team, never team data.
+    for (const text of [
+      "people_forbidden",
+      "invalid_input",
+      "userId, name, email, teams:[{team, teamRole, configuredRole}]",
+      "lastSignInAt, twoStep",
+      "nextCursor",
+      "never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret",
+      '"name":"team"',
+      '"name":"status"',
+      '"name":"level"',
+      '"name":"role"',
+      '"name":"cursor"',
+    ])
+      expect(JSON.stringify(users)).toContain(text);
   });
 
   it("documents customValues only on tasks and never names the record pins (R2b-02)", () => {
@@ -896,6 +912,7 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",
         "GET /api/v1/teams",
+        "GET /api/v1/admin/users",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",

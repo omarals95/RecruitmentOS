@@ -25,9 +25,19 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
  * the role's directory view action, so a team role never yields any of them and company authority
  * never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
- * other team by name only, never its data. A page is added here only when its feature exists.
+ * other team by name only, never its data. Users follows a company owner or a company admin with
+ * the people area (D20): everyone in every team by name, email, teams and roles, never team data. A
+ * page is added here only when its feature exists.
  */
 export const ADMIN_TABS = [
+  {
+    key: "users",
+    label: "Users",
+    level: "people",
+    group: "People",
+    description:
+      "See everyone in every team of the company, with their teams, roles, company level, last sign-in and two-step sign-in.",
+  },
   {
     key: "teams",
     label: "Teams",
@@ -111,7 +121,14 @@ export const ADMIN_TABS = [
 ] as const satisfies readonly {
   key: string;
   label: string;
-  level: "team" | "teams" | "owner" | "organisation" | "directory" | "company";
+  level:
+    | "team"
+    | "teams"
+    | "people"
+    | "owner"
+    | "organisation"
+    | "directory"
+    | "company";
   group: AdminGroup;
   description: string;
 }[];
@@ -143,6 +160,9 @@ export function adminTabs({
   const shown: Record<AdminTab["level"], boolean> = {
     team,
     teams: team || company,
+    people:
+      companyLevel === "owner" ||
+      (companyLevel === "admin" && adminAreas.includes("people")),
     owner: companyLevel === "owner",
     organisation:
       companyLevel === "owner" ||

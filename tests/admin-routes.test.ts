@@ -298,6 +298,11 @@ describe("admin pages check access on the server (TST-002)", () => {
       teamId: "route-team-b",
       role: "recruiter",
     });
+    const peopleAdmin = await seedIdentity(db, {
+      userId: "route-people-admin",
+      teamId: "route-team-b",
+      role: "recruiter",
+    });
     await db.insert(user).values({
       id: "route-no-team",
       name: "Fictional Test User",
@@ -308,7 +313,8 @@ describe("admin pages check access on the server (TST-002)", () => {
     await harness.client.exec(
       `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES
         ('${COMPANY}','route-company-admin','admin','{fields}'),
-        ('${COMPANY}','route-organisation-admin','admin','{organisation}')`,
+        ('${COMPANY}','route-organisation-admin','admin','{organisation}'),
+        ('${COMPANY}','route-people-admin','admin','{people}')`,
     );
     callers.anonymous = { kind: "anonymous" };
     callers.bearer = { kind: "bearer" };
@@ -319,6 +325,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     signIn("viewer", viewer);
     signIn("company admin", companyAdmin);
     signIn("company admin with organisation", organisationAdmin);
+    signIn("company admin with people", peopleAdmin);
     signIn("company owner and team owner", owner);
     signIn("company owner as recruiter", ownerAsRecruiter);
     signIn("no team", { userId: "route-no-team" });
@@ -339,9 +346,11 @@ describe("admin pages check access on the server (TST-002)", () => {
       "organisation",
       "history",
     ];
+    allowed["company admin with people"] = [null, "users", "teams", "history"];
     allowed["company owner and team owner"] = [null, ...KEYS];
     allowed["company owner as recruiter"] = [
       null,
+      "users",
       "teams",
       "roles",
       "organisation",
@@ -375,6 +384,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     viewer: "refused",
     "company admin": "not-a-member",
     "company admin with organisation": "not-a-member",
+    "company admin with people": "not-a-member",
     "company owner and team owner": "allowed",
     "company owner as recruiter": "allowed",
     "no team": "refused",
@@ -417,6 +427,27 @@ describe("admin pages check access on the server (TST-002)", () => {
       ["bearer", "sign-in"],
     ] as const)
       expect(await open(callers[name], "[tab]/page.tsx", "teams"), name).toBe(
+        outcome,
+      );
+  });
+
+  it("opens Users for company owners and the company admin with people only (ADM-07)", async () => {
+    for (const [name, outcome] of [
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["company admin with people", "allowed"],
+      ["company admin", "refused"],
+      ["company admin with organisation", "refused"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(await open(callers[name], "[tab]/page.tsx", "users"), name).toBe(
         outcome,
       );
   });

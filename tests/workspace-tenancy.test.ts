@@ -396,6 +396,109 @@ describe("company workspace authority under the split runtime roles", () => {
     );
   });
 
+  it("accepts people for an admin in the area check, and refuses it twice or on an owner row (0042)", async () => {
+    const admins = await look.admins();
+    const audits = await look.audits();
+    const write = async (statement: string) => {
+      await harness.asOwner();
+      return harness.client.query(statement);
+    };
+    await write(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','ws-loner','admin','{people,fields}')`,
+    );
+    for (const statement of [
+      `UPDATE app.workspace_admins SET areas = '{people,people}' WHERE user_id = 'ws-loner'`,
+      `UPDATE app.workspace_admins SET level = 'owner', areas = '{people}' WHERE user_id = 'ws-loner'`,
+      `UPDATE app.workspace_admins SET areas = '{people,roles}' WHERE user_id = 'ws-loner'`,
+    ])
+      await expect(write(statement), statement).rejects.toMatchObject({
+        code: "23514",
+        constraint: "workspace_admins_areas_check",
+      });
+    await write(`DELETE FROM app.workspace_admins WHERE user_id = 'ws-loner'`);
+    expect(await look.admins()).toEqual(admins);
+    expect(await look.audits()).toEqual(audits);
+  });
+
+  it("grants, changes and removes people with one audited row each (0042)", async () => {
+    const before = (await look.audits()).length;
+    expect(
+      await setAuthority(owner, "ws-viewer", "admin", ["people"], false),
+    ).toBe(true);
+    expect(
+      await setAuthority(
+        owner,
+        "ws-viewer",
+        "admin",
+        ["people", "fields"],
+        false,
+      ),
+    ).toBe(true);
+    expect(
+      (await look.admins()).find((row) => row.user_id === "ws-viewer"),
+    ).toMatchObject({ level: "admin", areas: ["fields", "people"] });
+    expect(await setAuthority(owner, "ws-viewer", null, null, null)).toBe(true);
+    await refused(
+      () =>
+        setAuthority(owner, "ws-viewer", "admin", ["people", "people"], false),
+      "22023",
+    );
+    await refused(
+      () => setAuthority(owner, "ws-viewer", "owner", ["people"], false),
+      "22023",
+    );
+    const rows = (await look.audits()).slice(before);
+    expect(rows.map((row) => [row.action, row.metadata])).toEqual([
+      [
+        "workspace_authority.changed",
+        {
+          targetUserId: "ws-viewer",
+          before: null,
+          after: {
+            level: "admin",
+            areas: ["people"],
+            planAccess: false,
+            suspended: false,
+          },
+        },
+      ],
+      [
+        "workspace_authority.changed",
+        {
+          targetUserId: "ws-viewer",
+          before: {
+            level: "admin",
+            areas: ["people"],
+            planAccess: false,
+            suspended: false,
+          },
+          after: {
+            level: "admin",
+            areas: ["fields", "people"],
+            planAccess: false,
+            suspended: false,
+          },
+        },
+      ],
+      [
+        "workspace_authority.changed",
+        {
+          targetUserId: "ws-viewer",
+          before: {
+            level: "admin",
+            areas: ["fields", "people"],
+            planAccess: false,
+            suspended: false,
+          },
+          after: null,
+        },
+      ],
+    ]);
+    expect(
+      (await look.admins()).find((row) => row.user_id === "ws-viewer"),
+    ).toBeUndefined();
+  });
+
   it("lets a second unsuspended owner be present so the first can be demoted, and promoted back", async () => {
     // Clears the suspended owner row seeded above, audited.
     expect(

@@ -190,6 +190,11 @@ const areaLabels: Record<GrantableArea, string> = {
   boards: "Boards",
   organisation: "Organisation",
   templates: "Templates",
+  people: "People",
+};
+const areaHints: Partial<Record<GrantableArea, string>> = {
+  people:
+    "Shows the names and email addresses of everyone in every team of the company, with their teams and roles.",
 };
 const box = {
   border: "1px solid var(--border, #e2e4eb)",
@@ -1301,24 +1306,41 @@ export function AuthorityFields({
         <fieldset style={box} disabled={disabled}>
           <legend>Areas</legend>
           <div style={checks}>
-            {GRANTABLE_ADMIN_AREAS.map((area) => (
-              <label key={area} className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={areas.includes(area)}
-                  onChange={(e) =>
-                    onChange({
-                      level,
-                      planAccess,
-                      areas: GRANTABLE_ADMIN_AREAS.filter((item) =>
-                        item === area ? e.target.checked : areas.includes(item),
-                      ),
-                    })
-                  }
-                />
-                {areaLabels[area]}
-              </label>
-            ))}
+            {GRANTABLE_ADMIN_AREAS.map((area) => {
+              const areaHint = areaHints[area];
+              const checkbox = (
+                <label key={area} className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={areas.includes(area)}
+                    aria-describedby={areaHint ? `${hint}-${area}` : undefined}
+                    onChange={(e) =>
+                      onChange({
+                        level,
+                        planAccess,
+                        areas: GRANTABLE_ADMIN_AREAS.filter((item) =>
+                          item === area
+                            ? e.target.checked
+                            : areas.includes(item),
+                        ),
+                      })
+                    }
+                  />
+                  {areaLabels[area]}
+                </label>
+              );
+              // An area with a description takes its own line, the description under its checkbox.
+              return areaHint ? (
+                <div key={area} style={{ flexBasis: "100%" }}>
+                  {checkbox}
+                  <small id={`${hint}-${area}`} className="muted">
+                    {areaHint}
+                  </small>
+                </div>
+              ) : (
+                checkbox
+              );
+            })}
           </div>
         </fieldset>
       )}

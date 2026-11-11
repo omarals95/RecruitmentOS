@@ -1262,6 +1262,56 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  const peopleShape =
+    '{data:[{userId, name, email, teams:[{team, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, status:"active"|"invited", lastSignInAt, twoStep}], roles:[{key, name}], pagination:{pageSize, hasMore, nextCursor}}';
+  paths["/api/v1/admin/users"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the people of every team for the Admin portal",
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active or invited), level (owner, admin or none) and role (a configured role key; invited rows never match it); an unknown slug or key returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
+      },
+      { "200": { description: peopleShape } },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "team",
+            in: "query",
+            schema: {
+              type: "string",
+              maxLength: 70,
+              pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            },
+          },
+          {
+            name: "status",
+            in: "query",
+            schema: { enum: ["active", "invited"] },
+          },
+          {
+            name: "level",
+            in: "query",
+            schema: { enum: ["owner", "admin", "none"] },
+          },
+          {
+            name: "role",
+            in: "query",
+            schema: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" },
+          },
+          {
+            name: "cursor",
+            in: "query",
+            schema: {
+              type: "string",
+              maxLength: 2048,
+              pattern: "^[A-Za-z0-9_-]+$",
+            },
+          },
+        ],
+      },
+    ),
+  };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.
   const roleWriteRule =
     "Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners and admins without company authority included, gets 403 config_forbidden.";
@@ -1462,6 +1512,7 @@ export function GET() {
     "boards",
     "organisation",
     "templates",
+    "people",
   ];
   paths["/api/v1/company-authority"] = {
     get: operation(
