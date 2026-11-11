@@ -74,6 +74,12 @@
  *   context lacks plans:write reads the fixture but writes nothing; and the team A owner holding
  *   the grant and both plan scopes reads it, inserts a draft and edits it (rolled back), while
  *   an API token of theirs holding every scope reads and writes nothing.
+ *   User anonymisation (0049): the team B owner without company authority, the same person as a
+ *   company admin with the people area, and a token context of the company owner holding every
+ *   scope cannot call tenant_context.anonymise_user (42501), while the company owner's session
+ *   reaches its name check (RQ003, rolled back); the data role cannot select, insert or update
+ *   app.user_anonymisations, nor set app.activity.user_anonymisation_id, even under the company
+ *   owner's session.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -126,7 +132,10 @@
  *   company admin, removing the row in that check. In each salary bracket check it writes one draft
  *   bracket version, created_by the team A owner, with one bracket, removing both in that check,
  *   and briefly sets the Plan & pay access of the team A or team C owner, setting it back; the
- *   last of them briefly adds one more API token holding every scope for the team A owner.
+ *   last of them briefly adds one more API token holding every scope for the team A owner. In the
+ *   first anonymisation check it briefly makes the team B owner a company admin with the people
+ *   area and adds one more API token holding every scope for the team A owner, removing both in
+ *   that check; nothing of an anonymisation commits.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -5351,6 +5360,181 @@ async function runChecks(run: Run) {
             [f.pattern],
           )) === 0,
       ])
+    );
+  });
+
+  // tenant_context.anonymise_user (0049) needs a company owner session. The team B owner, a
+  // company admin with the people area only for this check, the team B owner without company
+  // authority and a token context of the company owner holding every scope are refused on the team
+  // A recruiter; the company owner's session reaches the name check (a wrong name, rolled back).
+  const anonymiseSql =
+    "SELECT tenant_context.anonymise_user($1, $2, 'app') AS result";
+  /** Committed tombstones, anonymisation rows and placeholder accounts of the fixture. */
+  const anonymisationsCommitted = async () =>
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.user_anonymisations WHERE anonymised_by LIKE $1 OR user_id LIKE $1",
+      [f.pattern],
+    )) +
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.activity WHERE team_id LIKE $1 AND (kind = 'user-anonymisation' OR user_anonymisation_id IS NOT NULL)",
+      [f.pattern],
+    )) +
+    (await count(
+      owner,
+      `SELECT count(*)::int AS n FROM auth."user" WHERE id LIKE $1 AND email LIKE 'anonymised-%'`,
+      [f.pattern],
+    ));
+  await check("user-anonymisation-owner-only", async (probe) => {
+    const asPrincipal = (principal: Principal, name: string) =>
+      transaction(data, async () => {
+        const { access } = await installAs(data, signer, principal);
+        return {
+          access,
+          outcome: await attempt(data, anonymiseSql, [f.users.a2, name]),
+        };
+      });
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-anonymise`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    const token: Principal = {
+      team: f.teams.a,
+      actor: f.users.a1,
+      auth: "token",
+      token: tokenId,
+      scopes: ALL_SCOPES,
+    };
+    let pass: boolean;
+    try {
+      probe.at("outcome");
+      const teamOwner = await asPrincipal(p.ownerB, "Fictional member");
+      const tokenOutcome = await asPrincipal(token, "Fictional member");
+      probe.at("setup");
+      const granted = await owner.query(
+        "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{people}')",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+      probe.at("outcome");
+      const peopleAdmin = await asPrincipal(p.ownerB, "Fictional member");
+      probe.at("positive-control");
+      const control = await asPrincipal(p.ownerA, "Fictional someone else");
+      pass = probe.all(
+        [
+          "setup",
+          stored.rowCount === 1 &&
+            granted.rowCount === 1 &&
+            teamOwner.access.companyLevel === null &&
+            tokenOutcome.access.companyLevel === "owner" &&
+            peopleAdmin.access.companyAreas.join(",") === "people",
+        ],
+        failsWith(teamOwner.outcome, "42501"),
+        failsWith(tokenOutcome.outcome, "42501"),
+        failsWith(peopleAdmin.outcome, "42501"),
+        outcomeIs(
+          control.outcome.ok === false && control.outcome.code === "RQ003",
+          control.outcome,
+          "positive-control",
+        ),
+      );
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await anonymisationsCommitted()) === 0 &&
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.b1],
+          )) === 0,
+      ])
+    );
+  });
+
+  // The data role selects, inserts and updates no anonymisation tombstone, even under the company
+  // owner's session; the same transaction still reads the fixture people.
+  await check("user-anonymisation-tombstone-denied", async (probe) => {
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const read = await attempt(
+        data,
+        "SELECT count(*)::int AS n FROM app.user_anonymisations",
+      );
+      const inserted = await attempt(
+        data,
+        "INSERT INTO app.user_anonymisations(id,workspace_id,user_id,anonymised_by,anonymised_at,erasure_source) VALUES(gen_random_uuid(),$1::uuid,$2,$3,now(),'app')",
+        [COMPANY_WORKSPACE, f.users.a2, f.users.a1],
+      );
+      const updated = await attempt(
+        data,
+        "UPDATE app.user_anonymisations SET anonymised_at = now() WHERE anonymised_by LIKE $1",
+        [f.pattern],
+      );
+      probe.at("positive-control");
+      const people = await count(
+        data,
+        "SELECT count(*)::int AS n FROM app.records WHERE team_id = $1 AND kind = 'candidate'",
+        [f.teams.a],
+      );
+      return probe.all(denial(read), denial(inserted), denial(updated), [
+        "positive-control",
+        people > 0,
+      ]);
+    });
+    probe.at("end-state");
+    return (
+      pass && probe.all(["end-state", (await anonymisationsCommitted()) === 0])
+    );
+  });
+
+  // The data role cannot point an activity row at an anonymisation tombstone, even under the
+  // company owner's session: the statement is refused and no fixture row carries one.
+  await check("user-anonymisation-activity-denied", async (probe) => {
+    const pass = await transaction(data, async () => {
+      probe.at("install");
+      await installAs(data, signer, p.ownerA);
+      probe.at("outcome");
+      const updated = await attempt(
+        data,
+        "UPDATE app.activity SET user_anonymisation_id = gen_random_uuid() WHERE team_id = $1",
+        [f.teams.a],
+      );
+      probe.at("positive-control");
+      const visible = await count(
+        data,
+        "SELECT count(*)::int AS n FROM app.activity WHERE team_id = $1",
+        [f.teams.a],
+      );
+      return probe.all(outcomeIs(!updated.ok, updated), [
+        "positive-control",
+        visible > 0,
+      ]);
+    });
+    probe.at("end-state");
+    return (
+      pass && probe.all(["end-state", (await anonymisationsCommitted()) === 0])
     );
   });
 
