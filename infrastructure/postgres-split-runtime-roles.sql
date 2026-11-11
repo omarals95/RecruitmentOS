@@ -124,6 +124,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.member_roles TO recruitmentos_
 -- Salary brackets under allows_plan and the immutability guard; no runtime delete (0048).
 GRANT SELECT, INSERT, UPDATE ON TABLE app.salary_bracket_versions TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.salary_brackets TO recruitmentos_data;
+-- Record files under the upload guards, the ledger triggers and record scope; no runtime delete (0049).
+GRANT SELECT, INSERT, UPDATE ON TABLE app.record_files TO recruitmentos_data;
 -- Read only: assignments are written only through tenant_context.add_assignment and remove_assignment.
 GRANT SELECT ON TABLE app.record_assignments TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;

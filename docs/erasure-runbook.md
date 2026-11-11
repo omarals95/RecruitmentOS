@@ -37,6 +37,8 @@ Only a team owner can erase, and only while signed in (the app or the owner-run 
 
 A second erasure of the same candidate is safe: it returns the earlier erasure (`alreadyErased: true`) and repeats the CV deletion.
 
+**Files of file fields (R2b-06).** The files stored in file fields of the erased records (the candidate, its applications, interviews, offers, onboarding, checklist items and the comments on any of them) are removed with them: each `app.record_files` row becomes rejected, nameless and unlinked from its record, and its Blob object is deleted, confirmed missing and its charge released by the same cleanup as CV files. The counts show them as `recordFiles`, next to `cvFiles`, and `cvStorage` (deleted, waiting, deleteAfter) counts CV files and record files together. Files on tasks linked to the candidate stay, as the tasks do.
+
 ## Erase with the script
 
 For requests received outside the app, or when the owner prefers a terminal:
@@ -74,21 +76,24 @@ npm run erase:candidate -- --team <team id or slug> --candidate <candidate id> -
      (SELECT count(*) FROM app.records WHERE team_id = :'team' AND id = :'candidate') AS candidate_rows,
      (SELECT count(*) FROM app.candidate_states WHERE team_id = :'team' AND candidate_id = :'candidate') AS follow_up_states,
      (SELECT count(*) FROM app.uploads WHERE team_id = :'team' AND candidate_id = :'candidate') AS linked_uploads,
+     (SELECT count(*) FROM app.record_files WHERE team_id = :'team' AND record_id = :'candidate') AS linked_record_files,
      (SELECT count(*) FROM app.bulk_intake_items WHERE team_id = :'team' AND candidate_id = :'candidate') AS linked_bulk_items,
      (SELECT count(*) FROM app.records WHERE team_id = :'team' AND kind = 'task' AND candidate_id = :'candidate') AS linked_tasks;
    SELECT e.id AS erasure_id, e.erased_at, e.erased_by,
      (SELECT count(*) FROM app.activity a WHERE a.erasure_id = e.id) AS activity_rows,
-     (SELECT count(*) FILTER (WHERE u.blob_deleted_at IS NULL AND u.storage_provider = 'blob') FROM app.uploads u WHERE u.erasure_id = e.id) AS blob_files_waiting
+     (SELECT count(*) FILTER (WHERE u.blob_deleted_at IS NULL AND u.storage_provider = 'blob') FROM app.uploads u WHERE u.erasure_id = e.id) AS blob_files_waiting,
+     (SELECT count(*) FILTER (WHERE f.blob_deleted_at IS NULL) FROM app.record_files f WHERE f.erasure_id = e.id) AS record_files_waiting
    FROM app.candidate_erasures e WHERE e.team_id = :'team' AND e.candidate_id = :'candidate';
    ```
 
-   Every count in the first result is 0. The second result has exactly one row, and `blob_files_waiting` reaches 0 after the cleanup.
+   Every count in the first result is 0. The second result has exactly one row, and `blob_files_waiting` and `record_files_waiting` reach 0 after the cleanup.
 
 ## What remains and why
 
 - **The tombstone** in `app.candidate_erasures`: the erasure id, team, candidate id, erasing owner and time. It is the audit record and makes a retry return the earlier erasure instead of failing.
 - **Redacted activity rows**: the type, time and actor of each event about the erased records, with no record link, a fixed summary and empty details, so the audit trail keeps who did what and when. AI suggestion records keep only their request id, so a used request is still refused.
 - **Erased upload rows**: object key, size, type, store, times and ledger state, with no file name and no candidate link. Pathnames are never reused and the storage quota ledger needs the rows to account for each file until its deletion is confirmed.
+- **Erased record-file rows** (`app.record_files`, files of file fields): the same, with no file name, no digest and no record link, for the same reasons.
 - **Bulk import item tombstones**, holding only ids, the batch and times, until their batch is purged (within 24 hours). Without them an uncertain retry of the import could create the candidate again.
 - **Idempotency keys** with a one-way SHA-256 hash of the original request. Their stored responses are replaced and they are expired, so a replay returns 409 `idempotency_expired` and never recreates the candidate.
 - **Possible-duplicate counts** on other candidates' import evidence (a number, never a name or id).

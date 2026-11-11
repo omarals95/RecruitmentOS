@@ -184,6 +184,7 @@ Each write is checked against the kind's current published kind schema, which th
 | 400 `invalid_reference`     | an org unit value that is not a current unit of your company, open and not archived ("{field label} does not reference a current unit of this company.")                                                                                                                 |
 | 400 `invalid_reference`     | a lookup value that is not a record of the field's target kind in your team and record scope ("{field label} does not reference the expected record in this team."), the same answer for a missing record, another kind, another team's record or one outside your scope |
 | 400 `archived_reference`    | a lookup value naming an archived record ("{field label} references an archived record."); an import of an archived record may name one                                                                                                                                  |
+| 400 `invalid_reference`     | a file value that is not a ready file of this record in your team (below): the same answer and message as a lookup for a random ID, a pending, rejected or erased file, another record's file or another team's file; on a create every file value                       |
 
 A value carried over unchanged from the stored record is not checked again, so a field removed or tightened later, or made mandatory later and left empty, never blocks an unrelated edit. `null` and `""` are empty values of any field.
 
@@ -207,6 +208,49 @@ curl --fail-with-body "$RECRUITMENTOS_URL/api/v1/vacancies" \
 ```
 
 The example names `9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f`, a fictional short-text field "Cost centre" of a published vacancy kind schema; on the built-in default schemas it answers 400 `unknown_custom_field`. No route publishes kind schemas yet. The values come back in `data.customValues` only on records that have them; existing records are unchanged and never gain the key. The values are not shown in the app, exports or MCP, and OpenAPI does not list them. A role that hides any field of a kind also hides that kind's `customValues` from its members, in responses and search, unless it names its own rule for `customValues`. Tasks keep their team task fields: a key that is one of the team's task fields is checked as before, every value on each write, and any other key by the rules above against the task kind schema. No response includes the kind schema version a record was last saved against.
+
+### File fields
+
+A file field's value is the ID of a record file (`app.record_files`) stored for that record, never the file itself. Files go through the private CV storage path: the same formats (PDF, DOC, DOCX, JPG/JPEG/JFIF, PNG and Pages), 10 MiB cap, tickets, format checks, digest and storage limits as CVs, on private Vercel Blob only. Uploading needs `cvs:write` and permission to edit the record; downloading needs `cvs:read` and permission to view it.
+
+1. Reserve the file for an active record you may edit. The body takes exactly these five keys:
+
+   ```bash
+   curl --fail-with-body -X POST "$RECRUITMENTOS_URL/api/v1/record-files/uploads"      -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"      -H "Content-Type: application/json"      --data '{"recordId":"'"$CANDIDATE_ID"'","originalName":"fictional-certificate.pdf","mimeType":"application/pdf","sizeBytes":48213,"clientUploadId":"8f1e2d3c-4b5a-4c6d-9e7f-0a1b2c3d4e5f"}'
+   ```
+
+   It answers 201 with `data` (`id`, `recordId`, `originalName`, `mimeType`, `sizeBytes`, `status`, `createdAt`, `completedAt`, `expiresAt`, `downloadProtocol`) and an `upload` of protocol `blob-put-v1`: send the file with `PUT` to `upload.url` with exactly `upload.headers` and no credentials, as for a CV. The URL is a secret capability; never log it.
+
+2. Complete it. The server reads the stored object, checks its size, type and format and records its SHA-256:
+
+   ```bash
+   curl --fail-with-body -X POST "$RECRUITMENTOS_URL/api/v1/record-files/uploads/$FILE_ID/complete"      -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"
+   ```
+
+3. Store it in the field by updating the record with the file's ID; the update checks it (table above):
+
+   ```bash
+   curl --fail-with-body -X PATCH "$RECRUITMENTOS_URL/api/v1/candidates/$CANDIDATE_ID"      -H "Authorization: Bearer $RECRUITMENTOS_TOKEN"      -H "Content-Type: application/json"      --data '{"version":4,"data":{"customValues":{"5e0f1a2b-3c4d-4e5f-9a6b-7c8d9e0f1a2b":"'"$FILE_ID"'"}}}'
+   ```
+
+   `5e0f1a2b-…` is a fictional file field "Certificate" of a published candidate kind schema. A file cannot be set on a create, because no record owns it yet: create the record, then upload and update.
+
+4. Download it as a CV: `GET /api/v1/record-files/{id}/manifest` returns the `blob-chunks-v1` manifest, and `GET /api/v1/record-files/{id}/chunks?index=N` each chunk as an `application/octet-stream` attachment, never inline, with the `X-CV-*` headers. Verify the SHA-256 after assembling every chunk.
+
+Refusals:
+
+| Response                       | When                                                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 404 `RECORD_NOT_FOUND`         | the record is missing, archived, in another team, outside your record scope, of a kind without custom fields or of a kind you may not view             |
+| 403 `forbidden`                | you may view the record but not edit it                                                                                                                |
+| 400 `INVALID_FILE`             | the file details or the stored bytes do not fit the formats, the reserved size or the type; the upload is rejected                                     |
+| 409 `FILE_STORAGE_UNSUPPORTED` | the deployment does not use private Vercel Blob; nothing is reserved                                                                                   |
+| 409 `FILE_UPLOAD_TICKET_LIMIT` | the reservation has used its 5 upload links; select the file again after it expires                                                                    |
+| 409 `STORAGE_QUOTA_EXCEEDED`   | the team or store storage limit is reached                                                                                                             |
+| 429 `CV_UPLOAD_RATE_LIMITED`   | the team's upload rate is reached; CV and file reservations count together                                                                             |
+| 404 `FILE_NOT_FOUND`           | on download, one answer for a file that is not ready, not stored in a field of its record you may see, of a record you may not see, or of another team |
+
+Erasing a candidate removes the files of its erased records ([erasure runbook](erasure-runbook.md)).
 
 ## Upload a CV
 

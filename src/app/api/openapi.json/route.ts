@@ -472,7 +472,7 @@ export function GET() {
       {
         summary: "Permanently erase a candidate",
         description:
-          "Session only, for data-protection requests: a signed-in team owner; admins, recruiters and viewers get 403 erasure_forbidden and Bearer tokens 403 session_required. There is no MCP tool. Send {confirmName} with the candidate's name exactly as shown (1 to 300 characters, compared after trimming, case-sensitive); a different name returns 400 erasure_confirmation_mismatch and an invalid id or body 400 invalid_input. A candidate that is not in the team, or an id of another kind of record, returns 404 not_found. In one transaction it deletes the candidate, its applications, their interviews, offers, onboarding and checklist items, and every comment on any of them; deletes every member's follow-up state and the notification reads of those records; unlinks linked tasks and replaces the name in their title, context and description with [erased candidate]; clears saved-view searches that contain the name as a whole phrase (case-insensitive, with no letter or digit directly before or after it, for names of at least 3 characters), the email or the phone; tombstones the candidate's bulk import items; makes its CV uploads rejected and nameless; replaces the stored responses of idempotency keys that name an erased record, so a replay returns 409 idempotency_expired; and redacts the activity rows about those records and the candidate's AI suggestion records, keeping their type, time and actor. It records a tombstone with only the candidate id, team, owner and time, and one candidate.erased activity row with counts. Each CV file in Blob storage is deleted, confirmed missing and its charge released only once its last upload ticket expired at least 10 minutes ago; a file still waiting is deleted by a later CV storage cleanup (see /api/v1/cvs/storage-reconciliation) or a retry of this call. A retry for an erased candidate returns 200 with alreadyErased true, the same erasureId and removed null, and repeats that CV deletion. Exports already downloaded are not affected. When the team's CV storage records cannot settle a CV's charge it returns 500 erasure_storage_settlement_failed with a correlation id and changes nothing. Returns {data:{erasureId, alreadyErased, erasedAt, removed:{applications, interviews, offers, onboarding, checklistItems, comments, followUpStates, tasksUnlinked, savedViewsCleared, bulkItems, cvFiles, activityRedacted, notificationReads, idempotencyKeys} or null, cvStorage:{deleted, waiting, deleteAfter}}}: deleted and waiting count this erasure's Blob CV files with and without a confirmed deletion, and deleteAfter is the latest time after which a waiting file can be deleted, or null.",
+          "Session only, for data-protection requests: a signed-in team owner; admins, recruiters and viewers get 403 erasure_forbidden and Bearer tokens 403 session_required. There is no MCP tool. Send {confirmName} with the candidate's name exactly as shown (1 to 300 characters, compared after trimming, case-sensitive); a different name returns 400 erasure_confirmation_mismatch and an invalid id or body 400 invalid_input. A candidate that is not in the team, or an id of another kind of record, returns 404 not_found. In one transaction it deletes the candidate, its applications, their interviews, offers, onboarding and checklist items, and every comment on any of them; deletes every member's follow-up state and the notification reads of those records; unlinks linked tasks and replaces the name in their title, context and description with [erased candidate]; clears saved-view searches that contain the name as a whole phrase (case-insensitive, with no letter or digit directly before or after it, for names of at least 3 characters), the email or the phone; tombstones the candidate's bulk import items; makes its CV uploads rejected and nameless; removes the files of the erased records (file field values, /api/v1/record-files) the same way, rejected, nameless and unlinked; replaces the stored responses of idempotency keys that name an erased record, so a replay returns 409 idempotency_expired; and redacts the activity rows about those records and the candidate's AI suggestion records, keeping their type, time and actor. It records a tombstone with only the candidate id, team, owner and time, and one candidate.erased activity row with counts. Each CV file and record file in Blob storage is deleted, confirmed missing and its charge released only once its last upload ticket expired at least 10 minutes ago; a file still waiting is deleted by a later CV storage cleanup (see /api/v1/cvs/storage-reconciliation) or a retry of this call. A retry for an erased candidate returns 200 with alreadyErased true, the same erasureId and removed null, and repeats that CV deletion. Exports already downloaded are not affected. When the team's CV storage records cannot settle a CV's charge it returns 500 erasure_storage_settlement_failed with a correlation id and changes nothing. Returns {data:{erasureId, alreadyErased, erasedAt, removed:{applications, interviews, offers, onboarding, checklistItems, comments, followUpStates, tasksUnlinked, savedViewsCleared, bulkItems, cvFiles, recordFiles, activityRedacted, notificationReads, idempotencyKeys} or null, cvStorage:{deleted, waiting, deleteAfter}}}: recordFiles counts the removed files of the erased records; deleted and waiting count this erasure's Blob CV files and record files together, with and without a confirmed deletion, and deleteAfter is the latest time after which a waiting file can be deleted, or null.",
         requestBody: jsonBody(
           {
             type: "object",
@@ -2812,6 +2812,149 @@ export function GET() {
         summary: "Read one verified Blob CV chunk",
         description:
           "Requires cvs:read and candidates:read; without candidates:read it returns 403 scope_required before any storage call. The bytes are always sent as application/octet-stream with Content-Disposition: attachment and nosniff, never as the stored type. Reauthorizes the caller, reads the whole stored object and releases the 4 MiB slice only after its SHA-256 matches the validated digest. Send exactly one index parameter. Replaced, missing or altered objects return 409 CV_INTEGRITY_FAILED with no file bytes; S3 references return 409 CV_DOWNLOAD_PROTOCOL_MISMATCH; storage timeouts return 503. Verify the final SHA-256 after assembling every chunk.",
+      },
+      {
+        "200": {
+          description:
+            "The raw chunk bytes. The X-CV-* headers come from the validated reference.",
+          headers: {
+            "X-CV-Upload-Id": { schema: { type: "string", format: "uuid" } },
+            "X-CV-Chunk-Index": { schema: { type: "integer", minimum: 0 } },
+            "X-CV-Chunk-Offset": { schema: { type: "integer", minimum: 0 } },
+            "X-CV-Size-Bytes": { schema: { type: "integer", minimum: 1 } },
+            "X-CV-SHA256": {
+              schema: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            },
+          },
+          content: {
+            "application/octet-stream": {
+              schema: { type: "string", format: "binary" },
+            },
+          },
+        },
+      },
+      {
+        params: [
+          idParameter,
+          {
+            name: "index",
+            in: "query",
+            required: true,
+            schema: { type: "integer", minimum: 0 },
+            description:
+              "Zero-based chunk index below chunkCount, in decimal without leading zeros.",
+          },
+        ],
+      },
+    ),
+  };
+  // File fields (R2b-06): the CV storage path for one record's files. Blob only; no MCP tool.
+  const recordFileRead =
+    "Requires cvs:read. Serves a file only while it is ready, its record is in the caller's team and record scope, the caller may view the record's kind (a candidate also needs candidates:read), and the record's customValues hold the file's id under a field the caller may see; anything else, including a file of another team, returns 404 FILE_NOT_FOUND with one identical body. Archived records' files stay readable.";
+  paths["/api/v1/record-files/uploads"] = {
+    post: operation(
+      ["cvs:write"],
+      {
+        summary: "Reserve a private file upload for a file field",
+        description:
+          "Requires cvs:write. Reserves one file for a record the caller may edit (a configurable kind, active, in the caller's record scope); any record the caller may not see returns 404 RECORD_NOT_FOUND and one it may not edit 403 forbidden. Formats, the 10 MiB cap, the 15-minute reservation, the 5-ticket cap (409 FILE_UPLOAD_TICKET_LIMIT), the upload rate (429 CV_UPLOAD_RATE_LIMITED with Retry-After: 60, CV and file reservations counted together; a replay is not refused) and the storage limits (409 STORAGE_QUOTA_EXCEEDED) are those of CV uploads. Private Vercel Blob only: another storage provider returns 409 FILE_STORAGE_UNSUPPORTED before any reservation. Invalid file details return 400 INVALID_FILE. upload is always blob-put-v1: PUT the file with exactly the returned headers and no credentials, then complete it. The upload URL is a secret capability and must not be logged. A ready replay returns upload:null. Store the file in a file field by updating the record with its id; that update checks the id. Returns 503 STORAGE_SETUP_REQUIRED when storage is not set up.",
+        requestBody: jsonBody(
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "recordId",
+              "originalName",
+              "mimeType",
+              "sizeBytes",
+              "clientUploadId",
+            ],
+            properties: {
+              recordId: { type: "string", format: "uuid" },
+              originalName: { type: "string", maxLength: 180 },
+              mimeType: { type: "string", maxLength: 150 },
+              sizeBytes: { type: "integer", minimum: 1, maximum: 10485760 },
+              clientUploadId: { type: "string", format: "uuid" },
+            },
+          },
+          {
+            recordId: exampleIds.candidate,
+            originalName: "fictional-certificate.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 48213,
+            clientUploadId: exampleIds.parent,
+          },
+        ),
+      },
+      {
+        "201": {
+          description:
+            "{data:{id, recordId, originalName, mimeType, sizeBytes, status, createdAt, completedAt, expiresAt, downloadProtocol}, upload}; never an object key, store, URL or digest in data.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["data", "upload"],
+                properties: {
+                  data: { type: "object" },
+                  upload: {
+                    oneOf: [
+                      { type: "null" },
+                      { $ref: "#/components/schemas/BlobPutUploadV1" },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    ),
+  };
+  paths["/api/v1/record-files/uploads/{id}/complete"] = {
+    post: operation(
+      ["cvs:write"],
+      {
+        summary: "Validate an uploaded file field file",
+        description:
+          "Requires cvs:write. Idempotent. Reads the stored object itself and returns a ready file only after the size, type and format checks of CVs and a SHA-256 of the exact reserved size computed by the server; a rejected or expired upload returns 400 INVALID_FILE and its charge waits for cleanup, and a missing object leaves it pending (503). Any request body is ignored. Writes no activity row. Settling it also starts the team's cooldown-gated storage cleanup, which never changes this response.",
+      },
+      { "200": { description: "{data: file reference}." } },
+      { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/record-files/{id}/manifest"] = {
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "Read a file field file's download manifest",
+        description: `${recordFileRead} The blob-chunks-v1 manifest of CVs; makes no storage call and returns no provider URL or pathname. The manifest grants nothing by itself: every chunk request is authorized again.`,
+      },
+      {
+        "200": {
+          description: "{data: blob-chunks-v1 manifest}.",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["data"],
+                properties: {
+                  data: { $ref: "#/components/schemas/BlobCvManifestV1" },
+                },
+              },
+            },
+          },
+        },
+      },
+      { params: [idParameter] },
+    ),
+  };
+  paths["/api/v1/record-files/{id}/chunks"] = {
+    get: operation(
+      ["cvs:read"],
+      {
+        summary: "Read one verified file field file chunk",
+        description: `${recordFileRead} As /api/v1/cvs/{id}/chunks: the bytes are always sent as application/octet-stream with Content-Disposition: attachment and nosniff, never inline or as the stored type, and the 4 MiB slice is released only after the whole object matches its validated SHA-256. Send exactly one index parameter. Replaced, missing or altered objects return 409 FILE_INTEGRITY_FAILED with no file bytes; storage timeouts return 503.`,
       },
       {
         "200": {

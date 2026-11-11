@@ -22,17 +22,27 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 
 import { createToken } from "@/lib/api-tokens";
 import { beginCvUpload, completeCvUpload } from "@/lib/cvs";
-import { createRecord } from "@/lib/records";
+import {
+  beginRecordFileUpload,
+  completeRecordFileUpload,
+} from "@/lib/record-files";
+import { createRecord, updateRecord } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import { attachmentDisposition } from "@/lib/storage";
 import { GET as chunkRoute } from "@/app/api/v1/cvs/[id]/chunks/route";
+import { GET as fileChunkRoute } from "@/app/api/v1/record-files/[id]/chunks/route";
 import { createTestDb, seedIdentity } from "./helpers/db";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 import { blobBinding, fakeBlob } from "./helpers/fake-blob";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 
 /**
- * Every CV route, keyed by its path under src/app/api/v1. A new route.ts fails the first test until
- * it is classified here; only "bytes" routes may return CV content.
+ * Every CV and record file route, keyed by its path under src/app/api/v1. A new route.ts fails the
+ * first test until it is classified here; only "bytes" routes may return file content.
  */
 const CV_ROUTES: Record<string, "bytes" | "json"> = {
   "candidates/[id]/cvs/route.ts": "json",
@@ -47,11 +57,17 @@ const CV_ROUTES: Record<string, "bytes" | "json"> = {
   "cvs/bulk-capabilities/route.ts": "json",
   "cvs/storage-reconciliation/route.ts": "json",
   "cvs/uploads/[id]/complete/route.ts": "json",
+  // File fields (R2b-06) go through the same attachment-only download.
+  "record-files/[id]/chunks/route.ts": "bytes",
+  "record-files/[id]/manifest/route.ts": "json",
+  "record-files/uploads/[id]/complete/route.ts": "json",
+  "record-files/uploads/route.ts": "json",
 };
 const API_ROOT = "src/app/api/v1/";
 const discovered = [
   ...globSync(`${API_ROOT}cvs/**/route.ts`),
   ...globSync(`${API_ROOT}candidates/*/cvs/**/route.ts`),
+  ...globSync(`${API_ROOT}record-files/**/route.ts`),
 ]
   .map((path) => path.replaceAll("\\", "/").slice(API_ROOT.length))
   .sort();
@@ -97,13 +113,24 @@ function docx(): Buffer {
 }
 
 describe("CV routes never return inline content (DEC-07)", () => {
-  it("classifies every CV route.ts on disk, with the chunks route as the only one returning bytes", () => {
+  it("classifies every CV and record file route.ts on disk, with the two chunks routes as the only ones returning bytes", () => {
     expect(discovered).toEqual(Object.keys(CV_ROUTES).sort());
+    expect(
+      discovered.filter((path) => path.startsWith("record-files/")),
+    ).toEqual([
+      "record-files/[id]/chunks/route.ts",
+      "record-files/[id]/manifest/route.ts",
+      "record-files/uploads/[id]/complete/route.ts",
+      "record-files/uploads/route.ts",
+    ]);
     expect(
       Object.entries(CV_ROUTES)
         .filter(([, kind]) => kind === "bytes")
         .map(([path]) => path),
-    ).toEqual(["cvs/[id]/chunks/route.ts"]);
+    ).toEqual([
+      "cvs/[id]/chunks/route.ts",
+      "record-files/[id]/chunks/route.ts",
+    ]);
   });
 
   for (const [path, kind] of Object.entries(CV_ROUTES))
@@ -196,6 +223,23 @@ describe("CV routes never return inline content (DEC-07)", () => {
     }
   });
 
+  const FILES = [
+    [
+      "fictional-cv.pdf",
+      "application/pdf",
+      Buffer.from("%PDF-1.7\nfictional inline check\n"),
+    ],
+    [
+      "fictional-cv.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      docx(),
+    ],
+    [
+      "fictional-cv.png",
+      "image/png",
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]),
+    ],
+  ] as const;
   describe("the chunks route", () => {
     let fixture: Awaited<ReturnType<typeof createTestDb>>;
     let owner: Principal;
@@ -225,23 +269,7 @@ describe("CV routes never return inline content (DEC-07)", () => {
       await fixture?.close();
     });
 
-    for (const [originalName, mimeType, bytes] of [
-      [
-        "fictional-cv.pdf",
-        "application/pdf",
-        Buffer.from("%PDF-1.7\nfictional inline check\n"),
-      ],
-      [
-        "fictional-cv.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        docx(),
-      ],
-      [
-        "fictional-cv.png",
-        "image/png",
-        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]),
-      ],
-    ] as const)
+    for (const [originalName, mimeType, bytes] of FILES)
       it(`sends a ${mimeType} CV as an octet-stream attachment, never as its stored type`, async () => {
         const fake = fakeBlob();
         configured.current = { binding: blobBinding, gateway: fake.gateway };
@@ -296,5 +324,73 @@ describe("CV routes never return inline content (DEC-07)", () => {
           Buffer.from(bytes),
         );
       });
+
+    it("sends a record file of a file field as an octet-stream attachment, never as its stored type", async () => {
+      const field = customField("Fictional inline certificate", "file");
+      await insertKindSchema(
+        fixture.client,
+        owner.userId,
+        kindBody("candidate", [field]),
+      );
+      const fake = fakeBlob();
+      configured.current = { binding: blobBinding, gateway: fake.gateway };
+      let version = 1;
+      for (const [originalName, mimeType, bytes] of FILES) {
+        const reserved = await beginRecordFileUpload(
+          owner,
+          {
+            recordId: candidateId,
+            originalName,
+            mimeType,
+            sizeBytes: bytes.length,
+            clientUploadId: randomUUID(),
+          },
+          fake.gateway,
+        );
+        const [row] = (
+          await fixture.client.query<{ object_key: string }>(
+            "SELECT object_key FROM app.record_files WHERE id=$1",
+            [reserved.data.id],
+          )
+        ).rows;
+        fake.objects.set(row.object_key, {
+          bytes: Buffer.from(bytes),
+          mimeType,
+        });
+        const ready = await completeRecordFileUpload(
+          owner,
+          reserved.data.id,
+          fake.gateway,
+        );
+        version = (
+          await updateRecord(owner, "candidates", candidateId, {
+            version,
+            data: { customValues: { [field.key]: ready.id } },
+          })
+        ).version;
+        const response = await fileChunkRoute(
+          new Request(
+            `http://localhost:3000/api/v1/record-files/${ready.id}/chunks?index=0`,
+            { headers: { authorization: `Bearer ${token}` } },
+          ),
+          { params: Promise.resolve({ id: ready.id }) },
+        );
+        expect(response.status, mimeType).toBe(200);
+        expect(response.headers.get("content-type")).toBe(
+          "application/octet-stream",
+        );
+        expect(response.headers.get("content-disposition")).toMatch(
+          /^attachment;/,
+        );
+        expect(response.headers.get("content-disposition")).not.toMatch(
+          /inline/i,
+        );
+        expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+        expect(response.headers.get("cache-control")).toBe("private, no-store");
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(
+          Buffer.from(bytes),
+        );
+      }
+    });
   });
 });

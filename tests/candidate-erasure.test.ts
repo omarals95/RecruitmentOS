@@ -69,10 +69,16 @@ import { markNotifications, notifications } from "@/lib/insights";
 import { listTools, TOOLS } from "@/lib/mcp/tools";
 import type { Principal } from "@/lib/principal";
 import {
+  beginRecordFileUpload,
+  completeRecordFileUpload,
+  getRecordFileManifest,
+} from "@/lib/record-files";
+import {
   bootstrapTeam,
   createRecord,
   listRecords,
   updateCandidateState,
+  updateRecord,
 } from "@/lib/records";
 import { POST as erasureRoute } from "@/app/api/v1/candidates/[id]/erasure/route";
 import {
@@ -91,6 +97,11 @@ import {
 } from "./helpers/db";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 import { blobBinding, fakeBlob } from "./helpers/fake-blob";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 import { setDbForTests } from "@/db";
 
 // Fictional people, teams and synthetic PDF bytes only; the fake Blob client stores nothing remote.
@@ -123,6 +134,7 @@ const COUNT_KEYS = [
   "savedViewsCleared",
   "bulkItems",
   "cvFiles",
+  "recordFiles",
   "activityRedacted",
   "notificationReads",
   "idempotencyKeys",
@@ -787,6 +799,7 @@ describe("candidate erasure", () => {
           savedViewsCleared: 1,
           bulkItems: 0,
           cvFiles: 1,
+          recordFiles: 0,
           activityRedacted: activityBefore.length,
           notificationReads: 4,
           // Candidate, two applications, the comment, the task, the CV reservation and the view.
@@ -1234,6 +1247,203 @@ describe("candidate erasure", () => {
         plus(plus(before, "used", -pdf.length), "retained", pdf.length),
       );
       expect(await deletedAt(cv.id)).toBeNull();
+    });
+  });
+
+  // File fields (R2b-06): the files of the records an erasure deletes go with them, through the same
+  // Blob cleanup as CVs; a file of another candidate stays exactly as it was.
+  describe("record files of erased records", () => {
+    const field = customField("Fictional erasure certificate", "file");
+    const fileRows = (ids: string[]) =>
+      asOwner(
+        "SELECT id, status, record_id, original_name, blob_sha256, erasure_id, blob_deleted_at IS NOT NULL AS deleted FROM app.record_files WHERE id = ANY($1::uuid[]) ORDER BY id",
+        [ids],
+      );
+    async function recordFile(recordId: string, ready = true) {
+      const reserved = await beginRecordFileUpload(
+        ownerA,
+        {
+          recordId,
+          originalName: "fictional-erasure-certificate.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: pdf.length,
+          clientUploadId: randomUUID(),
+        },
+        fake.gateway,
+      );
+      const [{ object_key: key }] = await asOwner<{ object_key: string }>(
+        "SELECT object_key FROM app.record_files WHERE id=$1",
+        [reserved.data.id],
+      );
+      if (ready) {
+        fake.objects.set(key, { bytes: pdf, mimeType: "application/pdf" });
+        await completeRecordFileUpload(ownerA, reserved.data.id, fake.gateway);
+      }
+      return { id: reserved.data.id, key };
+    }
+    const expireFile = (id: string, minutes = 11) =>
+      asOwner(
+        "UPDATE app.record_files SET expires_at=now()-make_interval(mins=>$2) WHERE id=$1",
+        [id, minutes],
+      );
+    const setValue = async (
+      resource: "candidates" | "applications",
+      id: string,
+      value: string,
+    ) => {
+      const [{ version }] = await asOwner<{ version: number }>(
+        "SELECT version FROM app.records WHERE id=$1",
+        [id],
+      );
+      await updateRecord(ownerA, resource, id, {
+        version,
+        data: { customValues: { [field.key]: value } },
+      });
+    };
+
+    beforeAll(async () => {
+      await fixture.client.exec("RESET ROLE");
+      try {
+        for (const kind of ["candidate", "application"] as const)
+          await insertKindSchema(
+            fixture.client,
+            ownerA.userId,
+            kindBody(kind, [field]),
+          );
+      } finally {
+        await fixture.client.exec("SET ROLE recruitment_test_runtime");
+      }
+    });
+
+    it("rejects, unlinks and counts the files of the candidate and its application, deletes their objects after the grace period and leaves another candidate's file", async () => {
+      const name = "Fictional File Erasure Candidate";
+      const vacancy = (
+        await createRecord(ownerA, "vacancies", {
+          data: { title: "Fictional file erasure vacancy", status: "Open" },
+        })
+      ).id;
+      const candidate = (
+        await createRecord(ownerA, "candidates", { data: { name } })
+      ).id;
+      const application = (
+        await createRecord(ownerA, "applications", {
+          candidateId: candidate,
+          vacancyId: vacancy,
+          data: { stage: "Interview" },
+        })
+      ).id;
+      const kept = (
+        await createRecord(ownerA, "candidates", {
+          data: { name: "Fictional Kept File Candidate" },
+        })
+      ).id;
+      const onCandidate = await recordFile(candidate);
+      const onApplication = await recordFile(application);
+      const pending = await recordFile(candidate, false);
+      const keptFile = await recordFile(kept);
+      await setValue("candidates", candidate, onCandidate.id);
+      await setValue("applications", application, onApplication.id);
+      await setValue("candidates", kept, keptFile.id);
+      // The application's file keeps an unexpired ticket, so its object waits for the grace period.
+      await expireFile(onCandidate.id);
+      await expireFile(pending.id);
+      const keptBefore = await asOwner(
+        "SELECT * FROM app.record_files WHERE id=$1",
+        [keptFile.id],
+      );
+      const before = await ledger();
+      fake.state.calls = [];
+      const result = await eraseCandidate(ownerA, candidate, {
+        confirmName: name,
+      });
+      expect(result.removed).toMatchObject({
+        applications: 1,
+        cvFiles: 0,
+        recordFiles: 3,
+      });
+      expect(result.cvStorage).toMatchObject({ deleted: 2, waiting: 1 });
+      expect(Date.parse(result.cvStorage.deleteAfter!)).toBeGreaterThan(
+        Date.now(),
+      );
+      const erased = [onCandidate, onApplication, pending].map(({ id }) => id);
+      expect(await fileRows(erased)).toEqual(
+        erased.sort().map((id) => ({
+          id,
+          status: "rejected",
+          record_id: null,
+          original_name: null,
+          blob_sha256: null,
+          erasure_id: result.erasureId,
+          deleted: id !== onApplication.id,
+        })),
+      );
+      const [audit] = await asOwner<{ metadata: Record<string, unknown> }>(
+        "SELECT metadata FROM app.activity WHERE erasure_id=$1 AND action='candidate.erased'",
+        [result.erasureId],
+      );
+      expect(audit.metadata).toMatchObject({ recordFiles: 3, cvFiles: 0 });
+      expect([...fake.state.calls].sort()).toEqual(
+        [
+          `delete:${onCandidate.key}`,
+          `head:${onCandidate.key}`,
+          `delete:${pending.key}`,
+          `head:${pending.key}`,
+        ].sort(),
+      );
+      expect(fake.objects.has(onCandidate.key)).toBe(false);
+      expect(fake.objects.has(onApplication.key)).toBe(true);
+      // The two ready files' used charge moved to retained; the candidate's is released, the
+      // application's still waits.
+      const moved = (row: Ledger["store"][number]) => ({
+        ...row,
+        used: row.used - 2 * pdf.length,
+        usedFiles: row.usedFiles - 2,
+        retained: row.retained + pdf.length,
+        retainedFiles: row.retainedFiles + 1,
+      });
+      expect(await ledger()).toEqual({
+        store: before.store.map(moved),
+        team: before.team.map(moved),
+      });
+      // After the grace period a retry deletes it, confirms it and releases the charge.
+      await expireFile(onApplication.id);
+      fake.state.calls = [];
+      const retry = await eraseCandidate(ownerA, candidate, {
+        confirmName: "x",
+      });
+      expect(retry).toMatchObject({
+        alreadyErased: true,
+        removed: null,
+        cvStorage: { deleted: 3, waiting: 0, deleteAfter: null },
+      });
+      expect(fake.state.calls).toEqual([
+        `delete:${onApplication.key}`,
+        `head:${onApplication.key}`,
+      ]);
+      expect(fake.objects.has(onApplication.key)).toBe(false);
+      const released = (row: Ledger["store"][number]) => ({
+        ...row,
+        used: row.used - 2 * pdf.length,
+        usedFiles: row.usedFiles - 2,
+      });
+      expect(await ledger()).toEqual({
+        store: before.store.map(released),
+        team: before.team.map(released),
+      });
+      // The other candidate's file and object are untouched and still served.
+      expect(
+        await asOwner("SELECT * FROM app.record_files WHERE id=$1", [
+          keptFile.id,
+        ]),
+      ).toEqual(keptBefore);
+      expect(fake.objects.has(keptFile.key)).toBe(true);
+      await expect(
+        getRecordFileManifest(ownerA, keptFile.id, fake.gateway),
+      ).resolves.toMatchObject({ uploadId: keptFile.id });
+      for (const { id } of [onCandidate, onApplication])
+        await expect(
+          getRecordFileManifest(ownerA, id, fake.gateway),
+        ).rejects.toMatchObject({ status: 404, code: "FILE_NOT_FOUND" });
     });
   });
 

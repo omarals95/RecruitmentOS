@@ -104,6 +104,8 @@ const appTables = [
   "notification_reads",
   "bulk_intake_batches",
   "bulk_intake_items",
+  // Record files under the upload guards and record scope; no runtime delete (0049).
+  "record_files",
 ];
 const authTables = [
   '"user"',
@@ -1071,6 +1073,36 @@ describe("split runtime role template", () => {
         path: true,
       },
       { fn: helper, owned: true, definer: true, path: true },
+    ]);
+  });
+
+  it("grants the data role SELECT, INSERT and UPDATE on record files with no DELETE or TRUNCATE, and the identity role nothing (0049)", async () => {
+    await harness.asSuperuser();
+    const granted = async (grantee: string) =>
+      (
+        await harness.client.query<{ privilege: string }>(
+          `SELECT privilege_type AS privilege FROM information_schema.role_table_grants
+           WHERE grantee = $1 AND table_schema = 'app' AND table_name = 'record_files' ORDER BY 1`,
+          [grantee],
+        )
+      ).rows.map((row) => row.privilege);
+    expect(await granted(splitRoles.data)).toEqual([
+      "INSERT",
+      "SELECT",
+      "UPDATE",
+    ]);
+    expect(await granted(splitRoles.identity)).toEqual([]);
+    expect(await granted("PUBLIC")).toEqual([]);
+    await harness.dataDb();
+    await expectDenied([
+      "DELETE FROM app.record_files",
+      "TRUNCATE app.record_files",
+    ]);
+    await harness.identityDb();
+    await expectDenied([
+      "SELECT * FROM app.record_files",
+      "UPDATE app.record_files SET status = status",
+      "DELETE FROM app.record_files",
     ]);
   });
 

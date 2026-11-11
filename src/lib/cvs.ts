@@ -17,6 +17,7 @@ import { z } from "zod";
 import {
   activity,
   idempotency,
+  recordFiles,
   records,
   storageUsage,
   uploads,
@@ -119,7 +120,7 @@ function validId(id: string) {
     );
 }
 /** Setup refusals all show one plain message; their own text can name a provider or setting. */
-function storageFailure(error: unknown): never {
+export function storageFailure(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof StorageConfigurationError)
     throw storageSetupRequired(error);
@@ -189,7 +190,7 @@ const protocolMismatch = () =>
     "This CV uses a different download method. Refresh the CV list and try again.",
   );
 /** Maps ledger refusals by SQLSTATE; database message text never reaches the client. */
-function ledgerFailure(error: unknown): never {
+export function ledgerFailure(error: unknown): never {
   const cause = error instanceof DrizzleQueryError ? error.cause : error;
   const code = (cause as { code?: unknown } | undefined)?.code;
   if (code === "RQ001")
@@ -254,7 +255,7 @@ async function audit(
  * and expiry share one lock order: store, then team, then ticket. The helper also releases the
  * store's expired S3 reservations for every team before any new charge is checked.
  */
-async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
+export async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
   try {
     await tx.execute(
       sql`select tenant_context.lock_storage_allocation(${binding.provider}, ${binding.environment}, ${binding.store})`,
@@ -269,7 +270,7 @@ async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
  * helper). The lease commits before the read and fails fast over a cap instead of queueing. Release
  * is best effort: a lease left behind by a crash or a failed release expires on its own after 30 s.
  */
-async function withBlobReadLease<T>(
+export async function withBlobReadLease<T>(
   p: Principal,
   store: string,
   read: () => Promise<T>,
@@ -466,23 +467,27 @@ export async function listCandidateCvs(
 /** PUT tickets per Blob reservation, the first included; 0019 holds the same cap. */
 const BLOB_PUT_TICKET_LIMIT = 5;
 
-/** The refusal for one more new reservation under the team's upload rate, or null when it is off. */
-async function uploadRateRefusal(tx: TeamTx, p: Principal, now: Date) {
+/**
+ * The refusal for one more new reservation under the team's upload rate, or null when it is off.
+ * New CV and record file reservations count together.
+ */
+export async function uploadRateRefusal(tx: TeamTx, p: Principal, now: Date) {
   const [usage] = await tx
     .select({ rate: storageUsage.uploadRequestsPerMinute })
     .from(storageUsage)
     .where(eq(storageUsage.teamId, p.teamId));
   if (!usage?.rate) return null;
+  const since = new Date(now.getTime() - 60_000);
   const [{ recent }] = await tx
-    .select({ recent: count() })
+    .select({
+      recent: sql<number>`(${count()}) + (select count(*) from ${recordFiles} where ${and(
+        eq(recordFiles.teamId, p.teamId),
+        gt(recordFiles.createdAt, since),
+      )})::int`,
+    })
     .from(uploads)
-    .where(
-      and(
-        eq(uploads.teamId, p.teamId),
-        gt(uploads.createdAt, new Date(now.getTime() - 60_000)),
-      ),
-    );
-  return recent >= usage.rate
+    .where(and(eq(uploads.teamId, p.teamId), gt(uploads.createdAt, since)));
+  return Number(recent) >= usage.rate
     ? new ApiError(
         429,
         "CV_UPLOAD_RATE_LIMITED",
@@ -492,7 +497,7 @@ async function uploadRateRefusal(tx: TeamTx, p: Principal, now: Date) {
 }
 
 /** Whether the request names an existing reservation, which the upload rate never refuses. */
-async function isUploadReplay(
+export async function isUploadReplay(
   tx: TeamTx,
   p: Principal,
   operation: string,

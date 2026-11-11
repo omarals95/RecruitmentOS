@@ -1,6 +1,6 @@
 import { waitUntil } from "@vercel/functions";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
-import { uploads } from "@/db/schema";
+import { recordFiles, uploads } from "@/db/schema";
 import type { BlobGateway } from "@/lib/blob-storage";
 import {
   BLOB_RESERVATION_MS,
@@ -13,6 +13,7 @@ import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import { requireScope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import { expireRecordFileReservations } from "@/lib/record-files";
 import type { StorageGateway } from "@/lib/storage";
 
 /** No ticket for a pathname is valid after its row's expires_at; this grace covers in-flight PUTs. */
@@ -41,11 +42,12 @@ function assertSweep(p: Principal, gateway: BlobGateway) {
 }
 
 /**
- * Row pass. Each rejected Blob upload of the team on this store whose last ticket expired at least
- * 10 minutes ago is deleted, then confirmed missing by head, and only then has its retained charge
- * released by the owner-run helper. A failed delete or head, or an object still present, keeps the
- * charge; a later run repeats the deletion. Pathnames, IDs and provider errors are never returned.
- * erasureId limits the pass to the uploads of one candidate erasure.
+ * Row pass. Each rejected Blob upload or record file of the team on this store whose last ticket
+ * expired at least 10 minutes ago is deleted, then confirmed missing by head, and only then has its
+ * retained charge released by the owner-run helper. A failed delete or head, or an object still
+ * present, keeps the charge; a later run repeats the deletion. Pathnames, IDs and provider errors are
+ * never returned. erasureId limits the pass to the files of one candidate erasure. Both tables share
+ * the maxRows bound, oldest expiry first.
  */
 export async function releaseRetainedBlobCharges(
   p: Principal,
@@ -54,29 +56,42 @@ export async function releaseRetainedBlobCharges(
 ) {
   assertSweep(p, gateway);
   const { store } = gateway.binding;
-  const rows = await withTeam(p, (tx) =>
-    tx
-      .select({ id: uploads.id, objectKey: uploads.objectKey })
-      .from(uploads)
-      .where(
-        and(
-          eq(uploads.teamId, p.teamId),
-          eq(uploads.storageProvider, "blob"),
-          eq(uploads.storageStore, store),
-          eq(uploads.status, "rejected"),
-          isNull(uploads.blobDeletedAt),
-          lte(
-            uploads.expiresAt,
-            new Date(options.now.getTime() - DELETE_GRACE_MS),
-          ),
-          ...(options.erasureId
-            ? [eq(uploads.erasureId, options.erasureId)]
-            : []),
-        ),
+  const cutoff = new Date(options.now.getTime() - DELETE_GRACE_MS);
+  const rows = await withTeam(p, async (tx) => {
+    const found = [];
+    for (const table of [uploads, recordFiles])
+      found.push(
+        ...(await tx
+          .select({
+            id: table.id,
+            objectKey: table.objectKey,
+            expiresAt: table.expiresAt,
+          })
+          .from(table)
+          .where(
+            and(
+              eq(table.teamId, p.teamId),
+              eq(table.storageProvider, "blob"),
+              eq(table.storageStore, store),
+              eq(table.status, "rejected"),
+              isNull(table.blobDeletedAt),
+              lte(table.expiresAt, cutoff),
+              ...(options.erasureId
+                ? [eq(table.erasureId, options.erasureId)]
+                : []),
+            ),
+          )
+          .orderBy(asc(table.expiresAt), asc(table.id))
+          .limit(options.maxRows + 1)),
+      );
+    return found
+      .sort(
+        (a, b) =>
+          a.expiresAt.getTime() - b.expiresAt.getTime() ||
+          (a.id < b.id ? -1 : 1),
       )
-      .orderBy(asc(uploads.expiresAt), asc(uploads.id))
-      .limit(options.maxRows + 1),
-  );
+      .slice(0, options.maxRows + 1);
+  });
   let chargesReleased = 0,
     failures = 0,
     complete = rows.length <= options.maxRows;
@@ -112,7 +127,7 @@ export async function releaseRetainedBlobCharges(
 
 /**
  * One bounded, idempotent sweep of the team's own Blob prefix on this store. It expires the team's
- * old tickets, releases retained charges whose objects are confirmed deleted (row pass), then lists
+ * old CV and record file tickets, releases retained charges whose objects are confirmed deleted (row pass), then lists
  * teams/<team>/cvs/ and deletes objects with no upload row once older than any ticket could be,
  * and objects whose row expired at least 10 minutes ago unless it is ready with a matching size
  * (list pass), counting a deletion only once head confirms the object missing. Pending unexpired
@@ -134,8 +149,11 @@ export async function reconcileBlobStorage(
   const { binding } = gateway;
   const now = options.now ?? new Date();
   const deadline = Date.now() + options.budgetMs;
-  const expiredReservations = await withTeam(p, (tx) =>
-    expireCvReservations(tx, p.teamId, binding, now),
+  const expiredReservations = await withTeam(
+    p,
+    async (tx) =>
+      (await expireCvReservations(tx, p.teamId, binding, now)) +
+      (await expireRecordFileReservations(tx, p.teamId, binding, now)),
   );
   const released = await releaseRetainedBlobCharges(p, gateway, {
     maxRows: options.maxRows,

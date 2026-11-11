@@ -38,8 +38,16 @@ import {
   listCandidateCvs,
   listCandidateCvsPage,
 } from "@/lib/cvs";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { withTeam } from "@/lib/db-team";
-import { createRecord } from "@/lib/records";
+import { assignMemberRole } from "@/lib/member-roles";
+import {
+  beginRecordFileUpload,
+  completeRecordFileUpload,
+  getRecordFileChunk,
+  getRecordFileManifest,
+} from "@/lib/record-files";
+import { createRecord, updateRecord } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
 import type { StorageBinding, StorageGateway } from "@/lib/storage";
 import { downloadVerifiedCv } from "@/components/cv-transfer";
@@ -49,6 +57,16 @@ import { GET as listRoute } from "@/app/api/v1/candidates/[id]/cvs/route";
 import { GET as downloadRoute } from "@/app/api/v1/cvs/[id]/download/route";
 import { GET as manifestRoute } from "@/app/api/v1/cvs/[id]/manifest/route";
 import { GET as chunkRoute } from "@/app/api/v1/cvs/[id]/chunks/route";
+import { GET as fileManifestRoute } from "@/app/api/v1/record-files/[id]/manifest/route";
+import { GET as fileChunkRoute } from "@/app/api/v1/record-files/[id]/chunks/route";
+import { RECRUITER_ROLE } from "@/domain/config-defaults";
+import type { RoleBody } from "@/domain/config";
+import { docxWithText } from "./helpers/cv-fixtures";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 import { createTestDb, seedIdentity } from "./helpers/db";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
 import {
@@ -267,7 +285,7 @@ describe("private Blob CV transfer behind a fake client", () => {
   beforeEach(async () => {
     configured.current = undefined;
     await fixture.client.exec(
-      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.blob_reconciliation_claims; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
+      "TRUNCATE app.activity; DELETE FROM app.uploads; DELETE FROM app.record_files; DELETE FROM app.idempotency; DELETE FROM app.storage_usage; DELETE FROM storage_ledger.blob_read_leases; DELETE FROM storage_ledger.blob_reconciliation_claims; DELETE FROM storage_ledger.stores; DELETE FROM auth.api_tokens; DELETE FROM auth.api_rate_limits;",
     );
   });
   afterAll(async () => {
@@ -1468,6 +1486,425 @@ describe("private Blob CV transfer behind a fake client", () => {
       ).rejects.toMatchObject(mismatch);
       expect(otherS3.calls).toEqual([]);
       expect(otherBlob.state).toMatchObject({ signs: 0, reads: 0 });
+    });
+  });
+  // File fields (R2b-06): a record file goes through the same tickets, checks, digest, ledger and
+  // read leases as a Blob CV, and is served only while a visible custom value of its record holds it.
+  describe("record files of file fields", () => {
+    const field = customField("Fictional certificate", "file");
+    let hidden: Principal, scoped: Principal;
+    const fileInput = (
+      sizeBytes: number,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      recordId: candidateId,
+      originalName: "fictional-certificate.pdf",
+      mimeType: "application/pdf",
+      sizeBytes,
+      clientUploadId: randomUUID(),
+      ...extra,
+    });
+    const fileRow = async (id: string) =>
+      (
+        (await rows(
+          "SELECT object_key, status, blob_sha256, blob_size_bytes::int, put_tickets_issued FROM app.record_files WHERE id=$1",
+          [id],
+        )) as {
+          object_key: string;
+          status: string;
+          blob_sha256: string | null;
+          blob_size_bytes: number | null;
+          put_tickets_issued: number;
+        }[]
+      )[0];
+    /** A ready record file of the candidate whose validated bytes sit in the fake store. */
+    async function readyFile(
+      fake: ReturnType<typeof fakeBlob>,
+      bytes: Buffer,
+      extra: Record<string, unknown> = {},
+    ) {
+      const input = fileInput(bytes.length, extra);
+      const reserved = await beginRecordFileUpload(owner, input, fake.gateway);
+      fake.objects.set((await fileRow(reserved.data.id)).object_key, {
+        bytes,
+        mimeType: input.mimeType,
+      });
+      const ready = await completeRecordFileUpload(
+        owner,
+        reserved.data.id,
+        fake.gateway,
+      );
+      expect(ready.status).toBe("ready");
+      return ready.id;
+    }
+    /** Stores the file's id as the candidate's file field value through a record update. */
+    async function setValue(fileId: string) {
+      const [{ version }] = (await rows(
+        "SELECT version FROM app.records WHERE id=$1",
+        [candidateId],
+      )) as { version: number }[];
+      await updateRecord(owner, "candidates", candidateId, {
+        version,
+        data: { customValues: { [field.key]: fileId } },
+      });
+    }
+    async function role(key: string, body: RoleBody, member: Principal) {
+      const { objectId, versionId } = await createConfigDraft(owner, {
+        type: "role",
+        key,
+        body,
+      });
+      await publishConfigVersion(owner, versionId);
+      await assignMemberRole(
+        owner,
+        { userId: member.userId, roleObjectId: objectId },
+        new Headers(),
+      );
+    }
+
+    beforeAll(async () => {
+      await insertKindSchema(
+        fixture.client,
+        owner.userId,
+        kindBody("candidate", [field]),
+      );
+      hidden = await seedIdentity(fixture.db, {
+        userId: "blob-hidden-member",
+        teamId: "blob-team",
+        role: "recruiter",
+      });
+      scoped = await seedIdentity(fixture.db, {
+        userId: "blob-scoped-member",
+        teamId: "blob-team",
+        role: "recruiter",
+      });
+      // Custom values readable, the file field itself hidden.
+      await role(
+        "blob-file-hidden",
+        {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional file-hidden recruiter",
+          fields: {
+            candidate: { customValues: "read", [field.key]: "hidden" },
+          },
+        } as RoleBody,
+        hidden,
+      );
+      // A unit scope with no home unit: no candidate is in scope.
+      await role(
+        "blob-file-scoped",
+        {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional unit recruiter without a home",
+          recordScope: { pipeline: "unit", candidates: "unit", tasks: "unit" },
+        } as RoleBody,
+        scoped,
+      );
+    });
+
+    it("issues a blob-put-v1 ticket under the record's files path without signing material, at most five per reservation", async () => {
+      const fake = fakeBlob();
+      const input = fileInput(1000);
+      const first = await beginRecordFileUpload(owner, input, fake.gateway);
+      const upload = first.upload!;
+      expect(upload).toMatchObject({
+        protocol: "blob-put-v1",
+        method: "PUT",
+        headers: { "content-type": "application/pdf" },
+        maxBytes: 1000,
+      });
+      const key = (await fileRow(first.data.id)).object_key;
+      expect(key).toMatch(
+        new RegExp(
+          `^teams/${owner.teamId}/files/${candidateId}/${first.data.id}/[0-9a-f-]{36}\\.pdf$`,
+        ),
+      );
+      expect(new URL(upload.url).searchParams.get("pathname")).toBe(key);
+      expect(Object.keys(first.data).sort()).toEqual(
+        [
+          "completedAt",
+          "createdAt",
+          "downloadProtocol",
+          "expiresAt",
+          "id",
+          "mimeType",
+          "originalName",
+          "recordId",
+          "sizeBytes",
+          "status",
+        ].sort(),
+      );
+      expect(JSON.stringify(first.data)).not.toContain(key);
+      expect(JSON.stringify(first)).not.toContain(signingSecret);
+      expect(await counters()).toEqual(ledger(0, 1, 0));
+      for (let replay = 1; replay <= 4; replay++) {
+        const again = await beginRecordFileUpload(owner, input, fake.gateway);
+        expect(again.data.id, `replay ${replay}`).toBe(first.data.id);
+        expect(again.upload?.protocol).toBe("blob-put-v1");
+      }
+      expect(fake.state.signs).toBe(5);
+      expect((await fileRow(first.data.id)).put_tickets_issued).toBe(5);
+      await expect(
+        beginRecordFileUpload(owner, input, fake.gateway),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "FILE_UPLOAD_TICKET_LIMIT",
+      });
+      expect(fake.state.signs).toBe(5);
+      expect(await counters()).toEqual(ledger(0, 1, 0));
+      // The upload rate counts CV and record file reservations together; a replay is exempt.
+      await rows(
+        "UPDATE app.storage_usage SET upload_requests_per_minute=2 WHERE team_id=$1",
+        [owner.teamId],
+      );
+      await beginCvUpload(owner, candidateId, metadata(1000), fake.gateway);
+      await expect(
+        beginRecordFileUpload(owner, fileInput(1000), fake.gateway),
+      ).rejects.toMatchObject({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" });
+      await expect(
+        beginCvUpload(owner, candidateId, metadata(1000), fake.gateway),
+      ).rejects.toMatchObject({ status: 429, code: "CV_UPLOAD_RATE_LIMITED" });
+    });
+
+    it("refuses an S3 binding with 409 FILE_STORAGE_UNSUPPORTED before any row or provider call", async () => {
+      const s3 = fakeS3();
+      await expect(
+        beginRecordFileUpload(owner, fileInput(s3.size), s3.gateway),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "FILE_STORAGE_UNSUPPORTED",
+      });
+      expect(s3.calls).toEqual([]);
+      expect(
+        await rows("SELECT count(*)::int AS n FROM app.record_files"),
+      ).toEqual([{ n: 0 }]);
+      expect(await counters()).toEqual({ store: [], team: [] });
+    });
+
+    it("refuses a record the caller cannot see, an archived record and invalid file details before any signer call", async () => {
+      const fake = fakeBlob();
+      for (const [who, recordId] of [
+        [owner, archivedCandidateId],
+        [owner, randomUUID()],
+        [other, candidateId],
+        [scoped, candidateId],
+      ] as const)
+        await expect(
+          beginRecordFileUpload(
+            who,
+            fileInput(1000, { recordId }),
+            fake.gateway,
+          ),
+        ).rejects.toMatchObject({
+          status: 404,
+          code: "RECORD_NOT_FOUND",
+          message: "This record is not available in the selected team.",
+        });
+      for (const extra of [
+        { originalName: "fictional.exe" },
+        { mimeType: "image/png" },
+      ])
+        await expect(
+          beginRecordFileUpload(owner, fileInput(1000, extra), fake.gateway),
+        ).rejects.toMatchObject({ status: 400, code: "INVALID_FILE" });
+      expect(fake.state.signs).toBe(0);
+      expect(
+        await rows("SELECT count(*)::int AS n FROM app.record_files"),
+      ).toEqual([{ n: 0 }]);
+    });
+
+    it("refuses a reservation over the team limit with 409 STORAGE_QUOTA_EXCEEDED and changes no counter", async () => {
+      const fake = fakeBlob();
+      await beginRecordFileUpload(owner, fileInput(1000), fake.gateway);
+      await rows(
+        "UPDATE app.storage_usage SET max_bytes=1000000, max_files=1 WHERE team_id=$1",
+        [owner.teamId],
+      );
+      const signs = fake.state.signs;
+      await expect(
+        beginRecordFileUpload(owner, fileInput(1000), fake.gateway),
+      ).rejects.toMatchObject({ status: 409, code: "STORAGE_QUOTA_EXCEEDED" });
+      expect(fake.state.signs).toBe(signs);
+      expect(await counters()).toEqual(ledger(0, 1, 0));
+      expect(
+        await rows("SELECT count(*)::int AS n FROM app.record_files"),
+      ).toEqual([{ n: 1 }]);
+    });
+
+    it("completes PDF, DOCX, PNG and JPEG files with the server-computed digest and moves the charge to used", async () => {
+      const fake = fakeBlob();
+      const files: [string, string, Buffer][] = [
+        ["fictional-certificate.pdf", "application/pdf", fictionalPdf(1000)],
+        [
+          "fictional-certificate.docx",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          docxWithText(["Fictional certificate"]),
+        ],
+        [
+          "fictional-photo.png",
+          "image/png",
+          Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]),
+        ],
+        [
+          "fictional-photo.jpg",
+          "image/jpeg",
+          Buffer.from([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1]),
+        ],
+      ];
+      for (const [originalName, mimeType, bytes] of files) {
+        const id = await readyFile(fake, bytes, { originalName, mimeType });
+        expect(await fileRow(id), originalName).toMatchObject({
+          status: "ready",
+          blob_sha256: sha256(bytes),
+          blob_size_bytes: bytes.length,
+        });
+      }
+      expect(await counters()).toEqual(ledger(4, 0, 0));
+      // No activity row: the record update storing the id is the audited change.
+      expect(await rows("SELECT action FROM app.activity")).toEqual([]);
+    });
+
+    it("rejects a wrong magic byte, a mismatched size and an expired reservation with the charge retained", async () => {
+      const fake = fakeBlob();
+      const reserve = async () => {
+        const reserved = await beginRecordFileUpload(
+          owner,
+          fileInput(1000),
+          fake.gateway,
+        );
+        return {
+          id: reserved.data.id,
+          key: (await fileRow(reserved.data.id)).object_key,
+        };
+      };
+      const wrongMagic = await reserve();
+      fake.objects.set(wrongMagic.key, {
+        bytes: Buffer.alloc(1000, "x"),
+        mimeType: "application/pdf",
+      });
+      const wrongSize = await reserve();
+      fake.objects.set(wrongSize.key, {
+        bytes: fictionalPdf(1000),
+        mimeType: "application/pdf",
+        reportedSize: 1001,
+      });
+      const expired = await reserve();
+      fake.objects.set(expired.key, {
+        bytes: fictionalPdf(1000),
+        mimeType: "application/pdf",
+      });
+      await rows(
+        "UPDATE app.record_files SET expires_at=now()-interval '1 minute' WHERE id=$1",
+        [expired.id],
+      );
+      expect(await counters()).toEqual(ledger(0, 3, 0));
+      const reads = fake.state.reads;
+      // The expired one first: the cleanup sweep after a settled upload expires it as well.
+      for (const { id } of [expired, wrongMagic, wrongSize])
+        await expect(
+          completeRecordFileUpload(owner, id, fake.gateway),
+        ).rejects.toMatchObject({ status: 400, code: "INVALID_FILE" });
+      // The expired reservation is rejected without reading its object.
+      expect(fake.state.reads).toBe(reads + 1);
+      for (const { id } of [wrongMagic, wrongSize, expired])
+        expect((await fileRow(id)).status).toBe("rejected");
+      expect(await counters()).toEqual(ledger(0, 0, 3));
+      await expect(
+        completeRecordFileUpload(owner, expired.id, fake.gateway),
+      ).rejects.toMatchObject({ status: 409, code: "FILE_UPLOAD_REJECTED" });
+    });
+
+    it("serves the manifest and chunks of a referenced file with the CV chunk headers, as an attachment", async () => {
+      const fake = fakeBlob();
+      configured.current = { binding: blobBinding, gateway: fake.gateway };
+      const bytes = fictionalPdf(1000);
+      const id = await readyFile(fake, bytes);
+      await setValue(id);
+      const { token } = await bearer(["candidates:read", "cvs:read"]);
+      const reads = fake.state.reads;
+      const manifest = await fileManifestRoute(
+        request(`/api/v1/record-files/${id}/manifest`, token),
+        params(id),
+      );
+      expect(manifest.status).toBe(200);
+      const text = await manifest.text();
+      expect(JSON.parse(text)).toEqual({
+        data: {
+          protocol: "blob-chunks-v1",
+          uploadId: id,
+          originalName: "fictional-certificate.pdf",
+          contentType: "application/pdf",
+          sizeBytes: 1000,
+          sha256: sha256(bytes),
+          chunkSize: 4194304,
+          chunkCount: 1,
+        },
+      });
+      expect(text).not.toContain((await fileRow(id)).object_key);
+      expect(fake.state.reads).toBe(reads);
+      const chunk = await fileChunkRoute(
+        request(`/api/v1/record-files/${id}/chunks?index=0`, token),
+        params(id),
+      );
+      expect(chunk.status).toBe(200);
+      const body = Buffer.from(await chunk.arrayBuffer());
+      expect(body.equals(bytes)).toBe(true);
+      expect(Object.fromEntries(chunk.headers)).toMatchObject({
+        "content-type": "application/octet-stream",
+        "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff",
+        "content-length": "1000",
+        "x-cv-upload-id": id,
+        "x-cv-chunk-index": "0",
+        "x-cv-chunk-offset": "0",
+        "x-cv-size-bytes": "1000",
+        "x-cv-sha256": sha256(bytes),
+      });
+      expect(chunk.headers.get("content-disposition")).toMatch(/^attachment;/);
+      expect(chunk.headers.get("content-disposition")).not.toMatch(/inline/i);
+      expect(fake.state.reads).toBe(reads + 1);
+    });
+
+    it("answers one identical 404 FILE_NOT_FOUND for an unreferenced file, a hidden field, a record out of scope and another team", async () => {
+      const fake = fakeBlob();
+      const unreferenced = await readyFile(fake, fictionalPdf(1000));
+      const referenced = await readyFile(fake, fictionalPdf(1000, 3));
+      await setValue(referenced);
+      // The positive control: the owner reads the referenced file.
+      await expect(
+        getRecordFileManifest(owner, referenced, fake.gateway),
+      ).resolves.toMatchObject({ uploadId: referenced });
+      const reads = fake.state.reads;
+      const refusals = [];
+      for (const [who, id] of [
+        [owner, unreferenced],
+        [hidden, referenced],
+        [scoped, referenced],
+        [other, referenced],
+        [owner, randomUUID()],
+      ] as const)
+        for (const read of [
+          () => getRecordFileManifest(who, id, fake.gateway),
+          () => getRecordFileChunk(who, id, 0, fake.gateway),
+        ])
+          refusals.push(
+            await read().then(
+              () => expect.fail(`${who.userId} read ${id}`),
+              (error: { status: number; code: string; message: string }) => ({
+                status: error.status,
+                code: error.code,
+                message: error.message,
+              }),
+            ),
+          );
+      expect(refusals).toEqual(
+        Array(10).fill({
+          status: 404,
+          code: "FILE_NOT_FOUND",
+          message: "This file is not available in the selected team.",
+        }),
+      );
+      expect(fake.state.reads).toBe(reads);
     });
   });
 });
