@@ -85,6 +85,11 @@ import {
   retryWithFreshSession,
   type ReauthClient,
 } from "../src/components/settings/fresh-session-dialog";
+import {
+  NO_USER_FILTERS,
+  UsersPanel,
+  type WorkspacePersonRow,
+} from "../src/components/settings/users-tab";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -113,7 +118,6 @@ const NOT_YET = [
 ];
 // Pages of architecture §14.1 that are not built, or deferred by D29: no link, card or entry.
 const UNBUILT = [
-  "users",
   "groups",
   "company-authority",
   "permissions",
@@ -200,7 +204,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the ten pages that exist, by group, in order", () => {
+  it("defines exactly the eleven pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -212,6 +216,7 @@ describe("admin portal tabs", () => {
       "Monitoring",
     ]);
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label, tab.group])).toEqual([
+      ["users", "Users", "People"],
       ["teams", "Teams", "People"],
       ["members", "Members", "People"],
       ["cv-storage", "CV storage", "People"],
@@ -228,7 +233,15 @@ describe("admin portal tabs", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
     for (const tab of ADMIN_TABS) {
       expect(
-        ["team", "teams", "owner", "organisation", "directory", "company"],
+        [
+          "team",
+          "teams",
+          "people",
+          "owner",
+          "organisation",
+          "directory",
+          "company",
+        ],
         tab.key,
       ).toContain(tab.level);
       expect(tab.description, tab.key).toMatch(/^[A-Z][^.]*\.$/);
@@ -248,7 +261,7 @@ describe("admin portal tabs", () => {
               ? team
               : key === "teams"
                 ? team || companyLevel !== null
-                : key === "roles" || key === "organisation"
+                : key === "users" || key === "roles" || key === "organisation"
                   ? companyLevel === "owner"
                   : key === "history"
                     ? companyLevel !== null
@@ -284,6 +297,9 @@ describe("admin portal tabs", () => {
             const label = `${teamRole} / ${companyLevel} / ${adminAreas.join(",")} / ${actions.directory?.join(",") ?? "-"}`;
             const team = teamRole === "owner" || teamRole === "admin";
             const shown: Record<AdminTabKey, boolean> = {
+              users:
+                companyLevel === "owner" ||
+                (companyLevel === "admin" && adminAreas.includes("people")),
               teams: team || companyLevel !== null,
               members: team,
               "cv-storage": team,
@@ -365,19 +381,33 @@ describe("admin home", () => {
     }
   });
 
-  it("shows the Teams card first under People to team owners and admins and to company owners and admins only", () => {
-    for (const [name, value] of callers) {
+  it("shows the Users card first under People to company owners, then Teams to team owners and admins and to company owners and admins", () => {
+    for (const [name, value] of [
+      ...callers,
+      [
+        "company admin with people",
+        access("viewer", "admin", { adminAreas: ["people"] }),
+      ] as [string, MeAccess],
+    ]) {
       const home = content(render(null, value));
       const shown =
         value.teamRole === "owner" ||
         value.teamRole === "admin" ||
         value.companyLevel !== null;
+      const users =
+        value.companyLevel === "owner" ||
+        (value.companyLevel === "admin" && value.adminAreas.includes("people"));
       expect(home.includes('href="/app/admin/teams">Teams</a>'), name).toBe(
         shown,
       );
+      expect(home.includes('href="/app/admin/users">Users</a>'), name).toBe(
+        users,
+      );
       if (shown)
         expect(home, name).toMatch(
-          /<h2>People<\/h2><ul class="admin-cards"><li class="panel admin-card"><h3><a href="\/app\/admin\/teams">Teams<\/a><\/h3>/,
+          users
+            ? /<h2>People<\/h2><ul class="admin-cards"><li class="panel admin-card"><h3><a href="\/app\/admin\/users">Users<\/a><\/h3>[\s\S]*?<\/li><li class="panel admin-card"><h3><a href="\/app\/admin\/teams">Teams<\/a><\/h3>/
+            : /<h2>People<\/h2><ul class="admin-cards"><li class="panel admin-card"><h3><a href="\/app\/admin\/teams">Teams<\/a><\/h3>/,
         );
     }
   });
@@ -475,9 +505,10 @@ describe("admin sidebar", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all nine tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all ten tab links and nothing that does not exist yet", () => {
     const markup = render("members", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
+      "users",
       "teams",
       "members",
       "cv-storage",
@@ -569,6 +600,7 @@ describe("admin portal", () => {
   it("shows the access changes panel in History only for a company owner", () => {
     const owner = render("history", access("recruiter", "owner"));
     expect(tabLinks(owner)).toEqual([
+      "users",
       "teams",
       "organisation",
       "roles",
@@ -1228,9 +1260,10 @@ describe("company authority panel", () => {
       "Boards",
       "Organisation",
       "Templates",
+      "People",
     ])
       expect(asAdmin).toContain(`/>${label}</label>`);
-    expect(asAdmin.match(/type="checkbox"/g)).toHaveLength(6);
+    expect(asAdmin.match(/type="checkbox"/g)).toHaveLength(7);
     for (const area of [
       "roles",
       "ai",
@@ -1264,6 +1297,24 @@ describe("company authority panel", () => {
     );
     expect(last).toContain(
       "The last company owner cannot be removed. Make someone else a company owner first.",
+    );
+  });
+
+  it("describes the People area under its checkbox and names it in the holders list (ADM-07)", () => {
+    const asAdmin = fields("admin");
+    const checkbox =
+      /<input type="checkbox" aria-describedby="([^"]+)"\/>People<\/label><small id="([^"]+)" class="muted">([^<]+)<\/small>/.exec(
+        asAdmin,
+      );
+    expect(checkbox).not.toBeNull();
+    expect(checkbox![1]).toBe(checkbox![2]);
+    expect(checkbox![3]).toBe(
+      "Shows the names and email addresses of everyone in every team of the company, with their teams and roles.",
+    );
+    // The other areas have no description.
+    expect(asAdmin.match(/aria-describedby=/g)).toHaveLength(1);
+    expect(panel([owner, { ...admin, areas: ["fields", "people"] }])).toContain(
+      'data-label="Areas">Record fields, People<',
     );
   });
 });
@@ -2556,5 +2607,271 @@ describe("re-authentication for sensitive admin changes", () => {
     expect(markup).toContain("<h2>Company authority</h2>");
     expect(markup).not.toContain("Confirm it&#x27;s you");
     expect(markup).not.toContain("You are signed out on this device");
+  });
+});
+
+// ADM-07 (job 073): Admin > Users, the list of everyone in every team and every pending invitation.
+describe("users tab", () => {
+  const person = (
+    name: string,
+    changes: Partial<WorkspacePersonRow> = {},
+  ): WorkspacePersonRow => ({
+    userId: `fictional-${name.toLowerCase()}`,
+    name: `Fictional ${name}`,
+    email: `${name.toLowerCase()}@example.test`,
+    teams: [
+      { team: "Fictional Alpha", teamRole: "recruiter", configuredRole: null },
+    ],
+    companyLevel: null,
+    status: "active",
+    lastSignInAt: "2026-11-05T10:30:00.000Z",
+    twoStep: true,
+    ...changes,
+  });
+  const rows: WorkspacePersonRow[] = [
+    person("Owner", {
+      companyLevel: "owner",
+      teams: [
+        { team: "Fictional Alpha", teamRole: "owner", configuredRole: null },
+        {
+          team: "Fictional Bravo",
+          teamRole: "admin",
+          configuredRole: "Fictional Sourcer",
+        },
+      ],
+    }),
+    person("Admin", {
+      companyLevel: "admin",
+      lastSignInAt: null,
+      twoStep: false,
+    }),
+    person("Viewer", {
+      teams: [
+        { team: "Fictional Alpha", teamRole: "viewer", configuredRole: null },
+      ],
+    }),
+    {
+      userId: null,
+      name: null,
+      email: "invitee@example.test",
+      teams: [
+        {
+          team: "Fictional Alpha",
+          teamRole: "recruiter",
+          configuredRole: null,
+        },
+        { team: "Fictional Bravo", teamRole: null, configuredRole: null },
+      ],
+      companyLevel: null,
+      status: "invited",
+      lastSignInAt: null,
+      twoStep: false,
+    },
+  ];
+  const panel = (props: Partial<Parameters<typeof UsersPanel>[0]> = {}) =>
+    renderToStaticMarkup(
+      <UsersPanel
+        rows={rows}
+        error=""
+        filtered={false}
+        hasMore={false}
+        filters={NO_USER_FILTERS}
+        teams={[
+          { name: "Fictional Alpha", slug: "fictional-alpha" },
+          { name: "Fictional Bravo", slug: "fictional-bravo" },
+        ]}
+        roles={[{ key: "fictional-sourcer", name: "Fictional Sourcer" }]}
+        {...props}
+      />,
+    );
+  const rowsOf = (markup: string) =>
+    [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+      .map((match) => match[1])
+      .slice(1);
+  const body = (markup: string) =>
+    /<tbody>([\s\S]*?)<\/tbody>/.exec(markup)?.[1] ?? "";
+
+  it("lists Users first in People for a company owner and a company admin with people only", () => {
+    const areaSets: MeAccess["adminAreas"][] = [
+      [],
+      ["people"],
+      ["fields", "organisation"],
+    ];
+    for (const teamRole of [...TEAM_ROLES, null])
+      for (const companyLevel of COMPANY_LEVELS)
+        for (const adminAreas of areaSets) {
+          const keys = adminTabs({ teamRole, companyLevel, adminAreas }).map(
+            (tab) => tab.key,
+          );
+          const shown =
+            companyLevel === "owner" ||
+            (companyLevel === "admin" && adminAreas.includes("people"));
+          const label = `${teamRole} / ${companyLevel} / ${adminAreas.join(",")}`;
+          expect(keys.includes("users"), label).toBe(shown);
+          if (shown) expect(keys[0], label).toBe("users");
+        }
+    expect(ADMIN_TABS.find((tab) => tab.key === "users")).toEqual({
+      key: "users",
+      label: "Users",
+      level: "people",
+      group: "People",
+      description:
+        "See everyone in every team of the company, with their teams, roles, company level, last sign-in and two-step sign-in.",
+    });
+  });
+
+  it("renders the columns, the team lines and the invited, not recorded and not signed in texts", () => {
+    const markup = panel();
+    expect(markup).toContain("<h2>Users</h2>");
+    expect(markup).toContain(
+      "Everyone in every team of the company and everyone with a pending invitation, with their teams and roles.",
+    );
+    expect(markup).toMatch(
+      /<div class="records-panel"><div class="table-wrap"><table class="data-table compact"><caption class="sr-only">People, by name<\/caption>/,
+    );
+    expect(
+      [...markup.matchAll(/<th>([^<]+)<\/th>/g)].map((th) => th[1]),
+    ).toEqual([
+      "Name",
+      "Email",
+      "Teams",
+      "Company level",
+      "Status",
+      "Last sign-in",
+      "Two-step",
+    ]);
+    const [owner, admin, viewer, invited] = rowsOf(markup);
+    for (const row of [owner, admin, viewer, invited])
+      for (const label of [
+        "Name",
+        "Email",
+        "Teams",
+        "Company level",
+        "Status",
+        "Last sign-in",
+        "Two-step",
+      ])
+        expect(row).toContain(`data-label="${label}"`);
+    expect(owner).toContain('data-label="Name">Fictional Owner<');
+    expect(owner).toContain('data-label="Email">owner@example.test<');
+    expect(owner).toContain(
+      "<div>Fictional Alpha · Owner</div><div>Fictional Bravo · Admin · Fictional Sourcer</div>",
+    );
+    expect(owner).toContain('data-label="Company level">Company owner<');
+    expect(owner).toContain('data-label="Status">Active<');
+    expect(owner).toContain(
+      `data-label="Last sign-in">${formatDate("2026-11-05T10:30:00.000Z", true)}<`,
+    );
+    expect(owner).toContain('data-label="Two-step">On<');
+    expect(admin).toContain('data-label="Company level">Company admin<');
+    expect(admin).toContain('data-label="Last sign-in">Not recorded<');
+    expect(admin).toContain('data-label="Two-step">Off<');
+    expect(viewer).toContain("<div>Fictional Alpha · Viewer</div>");
+    expect(viewer).toContain('data-label="Company level">None<');
+    expect(invited).toContain('data-label="Name">Invited<');
+    expect(invited).toContain('data-label="Email">invitee@example.test<');
+    expect(invited).toContain(
+      "<div>Fictional Alpha · Recruiter</div><div>Fictional Bravo · Role not recorded</div>",
+    );
+    expect(invited).toContain('data-label="Status">Invited<');
+    expect(invited).toContain('data-label="Last sign-in">Not signed in yet<');
+    expect(markup).toContain(
+      '<p tabindex="-1" role="status" class="muted">Showing 4 people</p>',
+    );
+    // No link, button, checkbox or other control on any row.
+    expect(body(markup)).not.toMatch(/<a |<button|<input|<select|tabindex/);
+    for (const text of [
+      "Open",
+      "Invite ",
+      "Export",
+      "Deactivate",
+      "Select all",
+    ])
+      expect(markup, text).not.toContain(text);
+  });
+
+  it("offers the four filters with their choices and Apply filters", () => {
+    const markup = panel();
+    expect(markup).toContain('aria-label="User filters"');
+    for (const label of ["Team", "Status", "Company level", "Configured role"])
+      expect(markup).toContain(`<span>${label}</span><select`);
+    for (const option of [
+      '<option value="" selected="">Any team</option>',
+      '<option value="fictional-alpha">Fictional Alpha</option>',
+      '<option value="fictional-bravo">Fictional Bravo</option>',
+      '<option value="" selected="">Any status</option>',
+      '<option value="active">Active</option>',
+      '<option value="invited">Invited</option>',
+      '<option value="" selected="">Any level</option>',
+      '<option value="owner">Company owner</option>',
+      '<option value="admin">Company admin</option>',
+      '<option value="none">No company authority</option>',
+      '<option value="" selected="">Any configured role</option>',
+      '<option value="fictional-sourcer">Fictional Sourcer</option>',
+    ])
+      expect(markup).toContain(option);
+    expect(markup).toContain(
+      '<button type="submit" class="button">Apply filters</button>',
+    );
+    // Teams that cannot be loaded leave only Any team, with the reason.
+    const failed = panel({
+      teams: null,
+      teamsError: "The request could not be completed.",
+    });
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load the filter choices. The request could not be completed.</p>',
+    );
+    expect(failed).not.toContain('value="fictional-alpha"');
+    expect(failed).toContain("Any team");
+  });
+
+  it("shows Show more only while there are more people, busy while loading, and a separate error", () => {
+    expect(panel()).not.toContain("Show more");
+    expect(panel({ hasMore: true })).toContain(
+      '<button type="button" class="button secondary">Show more</button>',
+    );
+    expect(panel({ hasMore: true, busy: true })).toContain(
+      '<button type="button" class="button secondary" disabled="">Show more</button>',
+    );
+    const failed = panel({
+      hasMore: true,
+      moreError: "The request could not be completed.",
+    });
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load more people. The request could not be completed.</p>',
+    );
+    expect(rowsOf(failed)).toHaveLength(4);
+  });
+
+  it("shows the loading, error, refused and both empty states", () => {
+    expect(panel({ rows: null })).toContain(
+      '<p role="status">Loading people…</p>',
+    );
+    const failed = panel({
+      rows: null,
+      error: "The request could not be completed.",
+    });
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load the people. The request could not be completed.</p>',
+    );
+    expect(failed).not.toContain("<table");
+    const refused = panel({ rows: null, denied: true, error: "Forbidden" });
+    expect(refused).toContain(`<p>${NO_ACCESS}</p>`);
+    expect(refused).not.toMatch(/<table|<form|<select|Forbidden/);
+    expect(panel({ rows: [], filtered: true })).toContain(
+      '<p class="muted">No people match these filters.</p>',
+    );
+    expect(panel({ rows: [] })).toContain(
+      '<p class="muted">There are no people in the company&#x27;s teams yet.</p>',
+    );
+    expect(panel({ rows: [] })).not.toContain("<table");
+  });
+
+  it("renders the Users page in the portal for a company owner and refuses a company admin without people", () => {
+    const markup = render("users", access("recruiter", "owner"));
+    expect(markup).toContain('aria-current="page" href="/app/admin/users"');
+    expect(markup).toContain("<h2>Users</h2>");
+    expect(markup).toContain('<p role="status">Loading people…</p>');
+    onlyHeadingAndNoAccess(render("users", access("owner", "admin")));
   });
 });
