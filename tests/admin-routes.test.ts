@@ -300,6 +300,11 @@ describe("admin pages check access on the server (TST-002)", () => {
       teamId: "route-team-b",
       role: "recruiter",
     });
+    const noAreaAdmin = await seedIdentity(db, {
+      userId: "route-no-area-admin",
+      teamId: "route-team-b",
+      role: "recruiter",
+    });
     await db.insert(user).values({
       id: "route-no-team",
       name: "Fictional Test User",
@@ -311,7 +316,8 @@ describe("admin pages check access on the server (TST-002)", () => {
       `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES
         ('${COMPANY}','route-company-admin','admin','{fields}'),
         ('${COMPANY}','route-organisation-admin','admin','{organisation}'),
-        ('${COMPANY}','route-people-admin','admin','{people}')`,
+        ('${COMPANY}','route-people-admin','admin','{people}'),
+        ('${COMPANY}','route-no-area-admin','admin','{}')`,
     );
     callers.anonymous = { kind: "anonymous" };
     callers.bearer = { kind: "bearer" };
@@ -323,6 +329,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     signIn("company admin", companyAdmin);
     signIn("company admin with organisation", organisationAdmin);
     signIn("company admin with people", peopleAdmin);
+    signIn("company admin with no area", noAreaAdmin);
     signIn("company owner and team owner", owner);
     signIn("company owner as recruiter", ownerAsRecruiter);
     signIn("no team", { userId: "route-no-team" });
@@ -344,11 +351,13 @@ describe("admin pages check access on the server (TST-002)", () => {
       "history",
     ];
     allowed["company admin with people"] = [null, "users", "teams", "history"];
+    allowed["company admin with no area"] = [null, "teams", "history"];
     allowed["company owner and team owner"] = [null, ...KEYS];
     allowed["company owner as recruiter"] = [
       null,
       "users",
       "teams",
+      "company-authority",
       "roles",
       "organisation",
       "history",
@@ -382,6 +391,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     "company admin": "not-a-member",
     "company admin with organisation": "not-a-member",
     "company admin with people": "not-a-member",
+    "company admin with no area": "not-a-member",
     "company owner and team owner": "allowed",
     "company owner as recruiter": "allowed",
     "no team": "refused",
@@ -447,6 +457,32 @@ describe("admin pages check access on the server (TST-002)", () => {
       expect(await open(callers[name], "[tab]/page.tsx", "users"), name).toBe(
         outcome,
       );
+  });
+
+  // ADM-16 (job 077): Company authority is a company owner page only (D20), whatever the team role.
+  it("opens Company authority for company owners only (ADM-16)", async () => {
+    for (const [name, outcome] of [
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["company admin with no area", "refused"],
+      ["company admin", "refused"],
+      ["company admin with organisation", "refused"],
+      ["company admin with people", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(
+        await open(callers[name], "[tab]/page.tsx", "company-authority"),
+        name,
+      ).toBe(outcome);
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });
 
   it("gives every page to a company owner who is team owner, and no team page or Directory to a company owner as recruiter", async () => {

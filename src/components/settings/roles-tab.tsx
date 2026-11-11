@@ -7,16 +7,13 @@ import {
   useState,
   type FormEvent,
   type ReactNode,
-  type RefObject,
 } from "react";
-import { authClient } from "@/lib/auth-client";
-import type { CompanyAuthorityHolder } from "@/lib/company-authority";
+import Link from "next/link";
 import type { ConfigObject } from "@/lib/config-store";
 import {
   ACTION_RESOURCES,
   ACTIONS,
   FIELD_RULE_KINDS,
-  GRANTABLE_ADMIN_AREAS,
   PAGE_KEYS,
   RECORD_SCOPES,
   configKey,
@@ -56,20 +53,6 @@ import { REAUTH_CANCELLED, useFreshSession } from "./fresh-session-dialog";
 type Membership = RoleBody["membership"];
 type FieldKind = (typeof FIELD_RULE_KINDS)[number];
 type RecordGroup = keyof RoleBody["recordScope"];
-export type GrantableArea = (typeof GRANTABLE_ADMIN_AREAS)[number];
-export type AuthorityGrant =
-  | { userId: string; level: null }
-  | {
-      userId: string;
-      level: "owner" | "admin";
-      areas: GrantableArea[];
-      planAccess: boolean;
-    };
-export type AuthorityLevel = "" | "owner" | "admin";
-export interface TeamPerson {
-  userId: string;
-  name: string;
-}
 export interface RoleIssue {
   /** The control group the issue belongs to: name, pages, actions.<resource>, fields.<kind> or other. */
   group: string;
@@ -85,8 +68,6 @@ export const ROLE_TEMPLATE_LIST: readonly RoleTemplate[] = [
   HIRING_MANAGER_ROLE,
   INTERVIEWER_ROLE,
 ];
-const LAST_OWNER =
-  "The last company owner cannot be removed. Make someone else a company owner first.";
 const membershipLabels: Record<Membership, string> = {
   owner: "Owner",
   admin: "Admin",
@@ -155,7 +136,7 @@ const resourceLabel = (resource: ActionResource) =>
         teams: "Teams",
         "storage-settings": "CV storage settings",
       }[resource as "directory"];
-/** Plan access is a per-person grant; erase and the owner-only team actions no configured role holds. */
+/** Plan & pay access is a per-person grant; erase and the owner-only team actions no configured role holds. */
 const EDITABLE_RESOURCES = ACTION_RESOURCES.filter(
   (resource) => resource !== "plans",
 );
@@ -184,31 +165,23 @@ const scopeLabels: Record<RecordScope, string> = {
   unit: "My org unit and below",
   assigned: "Assigned records",
 };
-const areaLabels: Record<GrantableArea, string> = {
-  fields: "Record fields",
-  workflows: "Workflows",
-  boards: "Boards",
-  organisation: "Organisation",
-  templates: "Templates",
-  people: "People",
-};
-const areaHints: Partial<Record<GrantableArea, string>> = {
-  people:
-    "Shows the names and email addresses of everyone in every team of the company, with their teams and roles.",
-};
-const box = {
+export const box = {
   border: "1px solid var(--border, #e2e4eb)",
   borderRadius: 10,
   padding: 16,
   minWidth: 0,
 } as const;
-const checks = { display: "flex", flexWrap: "wrap", columnGap: 18 } as const;
+export const checks = {
+  display: "flex",
+  flexWrap: "wrap",
+  columnGap: 18,
+} as const;
 const laterHeading = { fontSize: 13, margin: "12px 0 0" } as const;
 // Row actions never break inside a word; a narrow table scrolls inside its .table-wrap.
-const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
+export const actionRow = { flexWrap: "wrap", overflowWrap: "normal" } as const;
 
 /** Only the API's own message: humanError adds draft advice to a 409 that does not fit here. */
-const plainError = (error: unknown) =>
+export const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
 const groupOf = (path: readonly PropertyKey[]) =>
   path[0] === "actions" || path[0] === "fields"
@@ -284,12 +257,19 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** The Roles & permissions tab: company roles and company authority, for company owners only. */
-export function RolesTab({ onAccessChanged }: { onAccessChanged: () => void }) {
+/** The Roles & permissions tab: company roles, for company owners only. */
+export function RolesTab() {
   return (
     <>
       <RolesPanel />
-      <CompanyAuthority onAccessChanged={onAccessChanged} />
+      <section className="panel">
+        <p>
+          Company authority has its own page.{" "}
+          <Link href="/app/admin/company-authority">
+            Open Company authority
+          </Link>
+        </p>
+      </section>
     </>
   );
 }
@@ -298,7 +278,7 @@ export function RolesTab({ onAccessChanged }: { onAccessChanged: () => void }) {
  * A ref and a request that focuses its element after the next render: where focus goes when the
  * control that had it is removed.
  */
-function useFocusAfter<T extends HTMLElement>() {
+export function useFocusAfter<T extends HTMLElement>() {
   const ref = useRef<T>(null);
   const [requested, setRequested] = useState(0);
   useEffect(() => {
@@ -977,8 +957,8 @@ export function RoleEditor({
       <fieldset style={box}>
         <legend>Actions per resource</legend>
         <p className="muted">
-          Plan access is a per-person grant in Company authority, never part of
-          a role.
+          Plan & pay access is a per-person grant in Company authority, never
+          part of a role.
         </p>
         <div className="stack">
           {EDITABLE_RESOURCES.map((resource) => {
@@ -1144,464 +1124,5 @@ export function RoleEditor({
         </p>
       )}
     </form>
-  );
-}
-
-function CompanyAuthority({
-  onAccessChanged,
-}: {
-  onAccessChanged: () => void;
-}) {
-  const { team, user } = useWorkspace();
-  const teamId = team?.id ?? null;
-  const holders = useApi<{ data: CompanyAuthorityHolder[] }>(
-    teamId ? "/api/v1/company-authority" : null,
-  );
-  const [members, setMembers] = useState<TeamPerson[] | null>(null);
-  const [memberError, setMemberError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const { confirm, dialog } = useConfirm();
-  const freshSession = useFreshSession();
-  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
-  useEffect(() => {
-    if (!teamId) return;
-    let active = true;
-    authClient.organization
-      .getFullOrganization({ query: { organizationId: teamId } })
-      .then((result) => {
-        if (result.error)
-          throw new Error(
-            result.error.message || "The team's members could not be loaded.",
-          );
-        const list = (result.data?.members ?? []) as {
-          userId: string;
-          user: { name: string };
-        }[];
-        if (active)
-          setMembers(
-            list.map((item) => ({ userId: item.userId, name: item.user.name })),
-          );
-      })
-      .catch((e) => {
-        if (active) setMemberError(humanError(e));
-      });
-    return () => {
-      active = false;
-    };
-  }, [teamId]);
-  async function submit(grant: AuthorityGrant, name: string) {
-    if (
-      grant.level === null &&
-      !(await confirm({
-        title: "Remove company authority?",
-        message: `Remove ${name}'s company authority? They keep their team roles, but lose every company area and plan access.`,
-        confirmLabel: "Remove authority",
-        destructive: true,
-      }))
-    )
-      return;
-    if (busy || !teamId) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await freshSession.withFreshSession(() =>
-        requestJson<{ data: { changed: boolean } }>(
-          teamId,
-          "/api/v1/company-authority",
-          { method: "POST", body: JSON.stringify(grant) },
-        ),
-      );
-      // A cancelled re-authentication sent nothing: the form stays as it was, with no message.
-      if (result === REAUTH_CANCELLED) return;
-      // The row's button may be gone after the change, so focus moves to the outcome.
-      focusNotice();
-      setNotice(
-        !result.data.changed
-          ? "Nothing changed."
-          : grant.level === null
-            ? "Company authority removed."
-            : "Company authority saved.",
-      );
-      if (result.data.changed && grant.userId === user.id) onAccessChanged();
-    } catch (e) {
-      setError(plainError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <>
-      <CompanyAuthorityPanel
-        holders={holders.data?.data ?? null}
-        members={members}
-        error={holders.error || memberError}
-        actionError={error}
-        notice={notice}
-        noticeRef={noticeRef}
-        busy={busy}
-        currentUserId={user.id}
-        onSubmit={(grant, name) => void submit(grant, name)}
-      />
-      {dialog}
-      {freshSession.dialog}
-    </>
-  );
-}
-
-/** Level, areas and plan access in standard controls, offering only grants the helper accepts. */
-export function AuthorityFields({
-  level,
-  areas,
-  planAccess,
-  lastOwner,
-  disabled = false,
-  onChange,
-}: {
-  level: AuthorityLevel;
-  areas: GrantableArea[];
-  planAccess: boolean;
-  lastOwner: boolean;
-  disabled?: boolean;
-  onChange: (next: {
-    level: AuthorityLevel;
-    areas: GrantableArea[];
-    planAccess: boolean;
-  }) => void;
-}) {
-  const hint = useId();
-  return (
-    <>
-      <label className="field">
-        <span>Company level</span>
-        <select
-          value={level}
-          disabled={disabled}
-          aria-describedby={lastOwner ? hint : undefined}
-          onChange={(e) =>
-            onChange({
-              level: e.target.value as AuthorityLevel,
-              areas: e.target.value === "admin" ? areas : [],
-              planAccess: e.target.value ? planAccess : false,
-            })
-          }
-        >
-          <option value="" disabled={lastOwner}>
-            No company authority
-          </option>
-          <option value="admin" disabled={lastOwner}>
-            Company admin
-          </option>
-          <option value="owner">Company owner</option>
-        </select>
-        {lastOwner && (
-          <small id={hint} className="muted">
-            {LAST_OWNER}
-          </small>
-        )}
-      </label>
-      {level === "admin" && (
-        <fieldset style={box} disabled={disabled}>
-          <legend>Areas</legend>
-          <div style={checks}>
-            {GRANTABLE_ADMIN_AREAS.map((area) => {
-              const areaHint = areaHints[area];
-              const checkbox = (
-                <label key={area} className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={areas.includes(area)}
-                    aria-describedby={areaHint ? `${hint}-${area}` : undefined}
-                    onChange={(e) =>
-                      onChange({
-                        level,
-                        planAccess,
-                        areas: GRANTABLE_ADMIN_AREAS.filter((item) =>
-                          item === area
-                            ? e.target.checked
-                            : areas.includes(item),
-                        ),
-                      })
-                    }
-                  />
-                  {areaLabels[area]}
-                </label>
-              );
-              // An area with a description takes its own line, the description under its checkbox.
-              return areaHint ? (
-                <div key={area} style={{ flexBasis: "100%" }}>
-                  {checkbox}
-                  <small id={`${hint}-${area}`} className="muted">
-                    {areaHint}
-                  </small>
-                </div>
-              ) : (
-                checkbox
-              );
-            })}
-          </div>
-        </fieldset>
-      )}
-      {level !== "" && (
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={planAccess}
-            disabled={disabled}
-            onChange={(e) =>
-              onChange({ level, areas, planAccess: e.target.checked })
-            }
-          />
-          Plan access (a per-person grant, audited like every change here)
-        </label>
-      )}
-    </>
-  );
-}
-
-const areasText = (holder: CompanyAuthorityHolder) =>
-  holder.level === "owner"
-    ? "All areas"
-    : holder.areas.length
-      ? holder.areas
-          .map((area) =>
-            Object.hasOwn(areaLabels, area)
-              ? areaLabels[area as GrantableArea]
-              : area,
-          )
-          .join(", ")
-      : "No areas";
-const grantOf = (holder: CompanyAuthorityHolder): AuthorityGrant => ({
-  userId: holder.userId,
-  level: holder.level,
-  areas:
-    holder.level === "owner"
-      ? []
-      : GRANTABLE_ADMIN_AREAS.filter((area) => holder.areas.includes(area)),
-  planAccess: holder.planAccess,
-});
-
-/** Holders of company authority, and a form to grant, change or remove it. */
-export function CompanyAuthorityPanel({
-  holders,
-  members,
-  error,
-  actionError = "",
-  notice = "",
-  noticeRef,
-  busy = false,
-  currentUserId,
-  onSubmit = () => {},
-}: {
-  holders: CompanyAuthorityHolder[] | null;
-  /** The current team's members. */
-  members: TeamPerson[] | null;
-  error: string;
-  actionError?: string;
-  notice?: string;
-  noticeRef?: RefObject<HTMLParagraphElement | null>;
-  busy?: boolean;
-  currentUserId: string;
-  onSubmit?: (grant: AuthorityGrant, name: string) => void;
-}) {
-  const [person, setPerson] = useState("");
-  const [choice, setChoice] = useState<{
-    level: AuthorityLevel;
-    areas: GrantableArea[];
-    planAccess: boolean;
-  }>({ level: "", areas: [], planAccess: false });
-  const activeOwners = (holders ?? []).filter(
-    (holder) => holder.level === "owner" && !holder.suspended,
-  );
-  const lastOwnerId = activeOwners.length === 1 ? activeOwners[0].userId : null;
-  const nameOf = (holder: { name: string | null }) =>
-    holder.name ?? "Name not recorded";
-  const people = new Map<string, string>();
-  for (const member of members ?? []) people.set(member.userId, member.name);
-  for (const holder of holders ?? [])
-    if (!people.has(holder.userId)) people.set(holder.userId, nameOf(holder));
-  const options = [...people.entries()].sort((a, b) =>
-    a[1].localeCompare(b[1]),
-  );
-  function choosePerson(userId: string) {
-    setPerson(userId);
-    const holder = holders?.find((item) => item.userId === userId);
-    const grant = holder ? grantOf(holder) : null;
-    setChoice(
-      grant?.level
-        ? {
-            level: grant.level,
-            areas: grant.areas,
-            planAccess: grant.planAccess,
-          }
-        : { level: "", areas: [], planAccess: false },
-    );
-  }
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!person) return;
-    onSubmit(
-      choice.level === ""
-        ? { userId: person, level: null }
-        : {
-            userId: person,
-            level: choice.level,
-            areas: choice.level === "admin" ? choice.areas : [],
-            planAccess: choice.planAccess,
-          },
-      people.get(person) ?? "this person",
-    );
-  }
-  return (
-    <section className="panel stack">
-      <h2>Company authority</h2>
-      <p className="muted">
-        Company owners manage roles, company authority and every company area.
-        Company admins manage only the areas they are given. Only company owners
-        see this panel, and every change is recorded in the activity of your
-        team.
-      </p>
-      {actionError && (
-        <p className="notice error" role="alert">
-          {actionError}
-        </p>
-      )}
-      {notice && (
-        <p
-          ref={noticeRef}
-          tabIndex={-1}
-          className="notice success"
-          role="status"
-        >
-          {notice}
-        </p>
-      )}
-      {error ? (
-        <p className="notice error" role="alert">
-          Could not load company authority. {error}
-        </p>
-      ) : !holders || !members ? (
-        <p role="status">Loading company authority…</p>
-      ) : (
-        <>
-          <div className="table-wrap">
-            <table className="data-table">
-              <caption className="sr-only">Company owners and admins</caption>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Level</th>
-                  <th>Areas</th>
-                  <th>Plan access</th>
-                  <th>Status</th>
-                  <th>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {holders.map((holder) => {
-                  const last = holder.userId === lastOwnerId;
-                  return (
-                    <tr key={holder.userId}>
-                      <td data-label="Name">
-                        {nameOf(holder)}
-                        {holder.userId === currentUserId && " (you)"}
-                      </td>
-                      <td data-label="Level">
-                        {holder.level === "owner"
-                          ? "Company owner"
-                          : "Company admin"}
-                      </td>
-                      <td data-label="Areas">{areasText(holder)}</td>
-                      <td data-label="Plan access">
-                        {holder.planAccess ? "Yes" : "No"}
-                      </td>
-                      <td data-label="Status">
-                        {holder.suspended
-                          ? "Suspended: left every team of this company"
-                          : "Active"}
-                      </td>
-                      <td data-label="Actions">
-                        <div className="row" style={actionRow}>
-                          {holder.suspended && (
-                            <button
-                              type="button"
-                              className="button secondary"
-                              disabled={busy}
-                              onClick={() =>
-                                onSubmit(grantOf(holder), nameOf(holder))
-                              }
-                            >
-                              Restore authority
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="button secondary"
-                            disabled={busy || last}
-                            onClick={() =>
-                              onSubmit(
-                                { userId: holder.userId, level: null },
-                                nameOf(holder),
-                              )
-                            }
-                          >
-                            Remove
-                          </button>
-                        </div>
-                        {last && <small className="muted">{LAST_OWNER}</small>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <form className="stack" style={box} onSubmit={submit}>
-            <h3>Grant or change company authority</h3>
-            <label className="field">
-              <span>Person</span>
-              <select
-                value={person}
-                disabled={busy}
-                onChange={(e) => choosePerson(e.target.value)}
-              >
-                <option value="">Choose a person</option>
-                {options.map(([userId, name]) => (
-                  <option key={userId} value={userId}>
-                    {name}
-                    {userId === currentUserId ? " (you)" : ""}
-                  </option>
-                ))}
-              </select>
-              <small className="muted">
-                Members of this team and everyone who already holds company
-                authority.
-              </small>
-            </label>
-            {person && (
-              <AuthorityFields
-                {...choice}
-                lastOwner={person === lastOwnerId}
-                disabled={busy}
-                onChange={setChoice}
-              />
-            )}
-            <div>
-              <button
-                type="submit"
-                className="button"
-                disabled={busy || !person}
-              >
-                Save company authority
-              </button>
-            </div>
-          </form>
-        </>
-      )}
-    </section>
   );
 }

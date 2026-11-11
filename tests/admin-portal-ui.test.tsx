@@ -54,6 +54,8 @@ import {
 import {
   AuthorityFields,
   CompanyAuthorityPanel,
+} from "../src/components/settings/company-authority-tab";
+import {
   RoleEditor,
   RoleTemplateView,
   RolesList,
@@ -163,7 +165,6 @@ const NOT_YET = [
 // Pages of architecture §14.1 that are not built, or deferred by D29: no link, card or entry.
 const UNBUILT = [
   "groups",
-  "company-authority",
   "permissions",
   "permission-helper",
   "sign-in",
@@ -248,7 +249,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the seven pages that exist, by group, in order", () => {
+  it("defines exactly the eight pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -264,6 +265,7 @@ describe("admin portal tabs", () => {
       ["teams", "Teams", "People"],
       ["organisation", "Organisation", "People"],
       ["directory", "Directory", "People"],
+      ["company-authority", "Company authority", "Access"],
       ["roles", "Roles & permissions", "Access"],
       ["tokens", "API tokens", "Integrations"],
       ["history", "History", "Monitoring"],
@@ -301,7 +303,10 @@ describe("admin portal tabs", () => {
               ? team
               : key === "teams"
                 ? team || companyLevel !== null
-                : key === "users" || key === "roles" || key === "organisation"
+                : key === "users" ||
+                    key === "company-authority" ||
+                    key === "roles" ||
+                    key === "organisation"
                   ? companyLevel === "owner"
                   : key === "history"
                     ? companyLevel !== null
@@ -347,6 +352,7 @@ describe("admin portal tabs", () => {
                 (companyLevel === "admin" &&
                   adminAreas.includes("organisation")),
               directory: !!actions.directory?.includes("view"),
+              "company-authority": companyLevel === "owner",
               roles: companyLevel === "owner",
               history: companyLevel !== null,
             };
@@ -397,7 +403,7 @@ describe("admin home", () => {
           `<h3><a href="/app/admin/${tab.key}">${tab.label.replace("&", "&amp;")}</a></h3>`,
         );
         expect(cards[index], `${name}: ${tab.key}`).toContain(
-          `<p class="muted">${tab.description.replaceAll("'", "&#x27;")}</p>`,
+          `<p class="muted">${tab.description.replaceAll("&", "&amp;").replaceAll("'", "&#x27;")}</p>`,
         );
       });
       expect(
@@ -553,12 +559,13 @@ describe("admin sidebar", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all six tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all seven tab links and nothing that does not exist yet", () => {
     const markup = render("tokens", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
       "users",
       "teams",
       "organisation",
+      "company-authority",
       "roles",
       "tokens",
       "history",
@@ -647,6 +654,7 @@ describe("admin portal", () => {
       "users",
       "teams",
       "organisation",
+      "company-authority",
       "roles",
       "history",
     ]);
@@ -890,14 +898,18 @@ describe("roles and permissions tab", () => {
       />,
     );
 
-  it("shows the tab and both panels only to a company owner, and the no-access text to everyone else", () => {
+  it("shows the tab, the roles panel and the Company authority link only to a company owner, and the no-access text to everyone else", () => {
     for (const teamRole of TEAM_ROLES)
       for (const companyLevel of COMPANY_LEVELS) {
         const markup = render("roles", access(teamRole, companyLevel));
         if (companyLevel === "owner") {
           expect(tabLinks(markup)).toContain("roles");
           expect(markup).toContain('<h2 tabindex="-1">Roles</h2>');
-          expect(markup).toContain("<h2>Company authority</h2>");
+          // ADM-16 (job 077): the panel has its own page; one sentence links to it.
+          expect(markup).not.toContain("<h2>Company authority</h2>");
+          expect(content(markup)).toContain(
+            '<p>Company authority has its own page. <a href="/app/admin/company-authority">Open Company authority</a></p>',
+          );
           expect(markup).toContain(
             'aria-current="page" href="/app/admin/roles"',
           );
@@ -1087,7 +1099,7 @@ describe("roles and permissions tab", () => {
       ">Manage</label>",
     );
     expect(markup).toContain(
-      "Plan access is a per-person grant in Company authority, never part of a role.",
+      "Plan &amp; pay access is a per-person grant in Company authority, never part of a role.",
     );
     // Field rules: one labelled select per system field, with the four plain options.
     const candidates = fieldset(markup, "Field rules for Candidates");
@@ -1250,6 +1262,8 @@ describe("company authority panel", () => {
     areas: [],
     planAccess: true,
     suspended: false,
+    twoStep: true,
+    since: "2026-11-02T09:30:00.000Z",
   };
   const suspended: CompanyAuthorityHolder = {
     userId: "fictional-suspended",
@@ -1258,6 +1272,8 @@ describe("company authority panel", () => {
     areas: ["fields", "organisation"],
     planAccess: false,
     suspended: true,
+    twoStep: false,
+    since: "2026-10-15T12:00:00.000Z",
   };
   const admin: CompanyAuthorityHolder = {
     userId: "fictional-admin",
@@ -1266,13 +1282,16 @@ describe("company authority panel", () => {
     areas: [],
     planAccess: true,
     suspended: false,
+    twoStep: true,
+    since: "2026-11-05T08:00:00.000Z",
   };
-  const panel = (holders: CompanyAuthorityHolder[] | null) =>
+  const panel = (holders: CompanyAuthorityHolder[] | null, actionError = "") =>
     renderToStaticMarkup(
       <CompanyAuthorityPanel
         holders={holders}
         members={[{ userId: "fictional-member", name: "Fictional Member" }]}
         error=""
+        actionError={actionError}
         currentUserId="fictional-owner"
       />,
     );
@@ -1296,7 +1315,11 @@ describe("company authority panel", () => {
     expect(rows[0]).toContain("Fictional Company Owner (you)");
     expect(rows[0]).toContain('data-label="Level">Company owner<');
     expect(rows[0]).toContain('data-label="Areas">All areas<');
-    expect(rows[0]).toContain('data-label="Plan access">Yes<');
+    expect(rows[0]).toContain('data-label="Plan &amp; pay access">Yes<');
+    expect(rows[0]).toContain('data-label="Two-step">On<');
+    expect(rows[0]).toContain(
+      `data-label="Since">${formatDate("2026-11-02T09:30:00.000Z")}<`,
+    );
     expect(rows[0]).toContain('data-label="Status">Active<');
     expect(rows[0]).toMatch(
       /<button type="button" class="button secondary" disabled="">Remove<\/button>/,
@@ -1308,13 +1331,35 @@ describe("company authority panel", () => {
     expect(rows[1]).toContain(
       'data-label="Areas">Record fields, Organisation<',
     );
-    expect(rows[1]).toContain('data-label="Plan access">No<');
+    expect(rows[1]).toContain('data-label="Plan &amp; pay access">No<');
+    expect(rows[1]).toContain('data-label="Two-step">Off<');
     expect(rows[1]).toContain("Suspended: left every team of this company");
     expect(rows[1]).toContain(">Restore authority</button>");
     expect(rows[1]).toMatch(
       /<button type="button" class="button secondary">Remove<\/button>/,
     );
     expect(rows[2]).toContain('data-label="Areas">No areas<');
+    // The eight columns, every cell labelled for the narrow layout.
+    expect(
+      [...markup.matchAll(/<th>([\s\S]*?)<\/th>/g)].map((th) => th[1]),
+    ).toEqual([
+      "Name",
+      "Level",
+      "Areas",
+      "Plan &amp; pay access",
+      "Two-step",
+      "Since",
+      "Status",
+      '<span class="sr-only">Actions</span>',
+    ]);
+    for (const row of rows)
+      expect(row.match(/<td data-label="/g)).toHaveLength(8);
+    // The intro names the page's audience, the audit and the two-step rule.
+    for (const text of [
+      "Only company owners see this page, and every change is recorded in the activity of your team.",
+      "Company owners and admins must use two-step sign-in. Someone shown with two-step Off is asked to set it up at their next sign-in, and cannot be given a level until they do.",
+    ])
+      expect(markup).toContain(text);
     expect(rows[2]).not.toContain("Restore authority");
     expect(markup.match(/Restore authority/g)).toHaveLength(1);
     // The person select lists this team's members and every holder.
@@ -1333,7 +1378,7 @@ describe("company authority panel", () => {
     );
   });
 
-  it("offers areas only for Company admin, plan access only with a level, and only the grantable areas", () => {
+  it("offers areas only for Company admin, Plan & pay access only with a level, and only the grantable areas", () => {
     const asAdmin = fields("admin");
     for (const label of [
       "Record fields",
@@ -1355,11 +1400,24 @@ describe("company authority panel", () => {
       "Home units",
     ])
       expect(asAdmin, area).not.toContain(`/>${area}</label>`);
-    expect(asAdmin).toContain("Plan access");
+    expect(asAdmin).toContain("Plan &amp; pay access");
     const asOwner = fields("owner");
     expect(asOwner).not.toContain("<legend>Areas</legend>");
     expect(asOwner.match(/type="checkbox"/g)).toHaveLength(1);
-    expect(asOwner).toContain("Plan access");
+    expect(asOwner).toContain("Plan &amp; pay access");
+    // Plan & pay access is one switch, described by what it opens today, and no other control.
+    for (const markup of [asAdmin, asOwner]) {
+      const control = /<input type="checkbox" role="switch"[^>]*>/.exec(
+        markup,
+      )?.[0];
+      expect(control).toContain('checked=""');
+      const described = / aria-describedby="([^"]+)"/.exec(control!)?.[1];
+      expect(markup).toContain(
+        `${control}Plan &amp; pay access</label><small id="${described}" class="muted">For confidential recruitment plan figures and salary brackets. Neither exists yet, so this opens nothing today. Only a company owner gives it, one person at a time.</small>`,
+      );
+      expect(markup.match(/role="switch"/g)).toHaveLength(1);
+    }
+    expect(asOwner.match(/<select/g)).toHaveLength(1);
     const none = fields("");
     expect(none).not.toContain('type="checkbox"');
     for (const option of [
@@ -1381,6 +1439,51 @@ describe("company authority panel", () => {
     );
   });
 
+  // ADM-16 (job 077): the helper's refusals reach the page as their plain API message.
+  it("shows the two-step and last-owner refusals as plain alerts", () => {
+    for (const message of [
+      "This person must set up two-step sign-in before they can hold company authority. Ask them to turn it on in My profile, then try again.",
+      "The last company owner cannot be removed or demoted. Make someone else a company owner first.",
+    ])
+      expect(panel([owner, admin], message)).toContain(
+        `<p class="notice error" role="alert">${message}</p>`,
+      );
+  });
+
+  it("opens the Company authority page for company owners only, first in Access, and the no-access text to everyone else", () => {
+    for (const teamRole of TEAM_ROLES)
+      for (const companyLevel of COMPANY_LEVELS) {
+        const markup = render(
+          "company-authority",
+          access(teamRole, companyLevel),
+        );
+        if (companyLevel === "owner") {
+          expect(markup).toContain(
+            'aria-current="page" href="/app/admin/company-authority"',
+          );
+          expect(markup).toContain("<h2>Company authority</h2>");
+          expect(markup).toContain(
+            '<p role="status">Loading company authority…</p>',
+          );
+          expect(tabLinks(markup)).toEqual(
+            expect.arrayContaining(["company-authority", "roles"]),
+          );
+          expect(tabLinks(markup).indexOf("company-authority")).toBe(
+            tabLinks(markup).indexOf("roles") - 1,
+          );
+          expect(sidebarGroups(markup)).toContain("Access");
+        } else onlyHeadingAndNoAccess(markup);
+      }
+    // The Admin home card, under Access, before Roles & permissions.
+    const home = content(render(null, access("recruiter", "owner")));
+    expect(home).toContain(
+      '<h3><a href="/app/admin/company-authority">Company authority</a></h3><p class="muted">Choose who holds company authority: company owners, company admins and their areas, and Plan &amp; pay access.</p>',
+    );
+    expect(home.indexOf("/app/admin/company-authority")).toBeLessThan(
+      home.indexOf("/app/admin/roles"),
+    );
+  });
+
   it("describes the People area under its checkbox and names it in the holders list (ADM-07)", () => {
     const asAdmin = fields("admin");
     const checkbox =
@@ -1392,8 +1495,12 @@ describe("company authority panel", () => {
     expect(checkbox![3]).toBe(
       "Shows the names and email addresses of everyone in every team of the company, with their teams and roles.",
     );
-    // The other areas have no description.
-    expect(asAdmin.match(/aria-describedby=/g)).toHaveLength(1);
+    // The other areas have no description; the Plan & pay access switch below them has its own.
+    expect(
+      /<fieldset[\s\S]*?<\/fieldset>/
+        .exec(asAdmin)![0]
+        .match(/aria-describedby=/g),
+    ).toHaveLength(1);
     expect(panel([owner, { ...admin, areas: ["fields", "people"] }])).toContain(
       'data-label="Areas">Record fields, People<',
     );
@@ -2950,8 +3057,8 @@ describe("re-authentication for sensitive admin changes", () => {
     expect(plain).not.toContain("one-time-code");
   });
 
-  it("never shows the dialog when a company owner opens Roles & permissions", () => {
-    const markup = render("roles", access("owner", "owner"));
+  it("never shows the dialog when a company owner opens Company authority", () => {
+    const markup = render("company-authority", access("owner", "owner"));
     expect(markup).toContain("<h2>Company authority</h2>");
     expect(markup).not.toContain("Confirm it&#x27;s you");
     expect(markup).not.toContain("You are signed out on this device");

@@ -22,9 +22,9 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
 /**
  * The Admin portal pages that exist today, one row per page, ordered by group. API tokens, the one
  * team page left here, follows the team role (a team's Members, CV storage, Speed and Task boards
- * are tabs of its detail page under Teams); History follows company authority, Roles & permissions
- * the company owner level only (D1), Organisation a company owner or a company admin with the
- * organisation area, and Directory the role's directory view action, so a team role never yields
+ * are tabs of its detail page under Teams); History follows company authority, Company authority
+ * and Roles & permissions the company owner level only (D1, D20), Organisation a company owner or
+ * a company admin with the organisation area, and Directory the role's directory view action, so a team role never yields
  * any of them and company authority never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
  * other team by name only, never its data. Users follows a company owner or a company admin with
@@ -65,12 +65,20 @@ export const ADMIN_TABS = [
       "Find employees by name or employee number and keep their records up to date.",
   },
   {
+    key: "company-authority",
+    label: "Company authority",
+    level: "owner",
+    group: "Access",
+    description:
+      "Choose who holds company authority: company owners, company admins and their areas, and Plan & pay access.",
+  },
+  {
     key: "roles",
     label: "Roles & permissions",
     level: "owner",
     group: "Access",
     description:
-      "Create and publish the roles that narrow what members can do, and choose who holds company authority.",
+      "Create and publish the roles that narrow what members can do.",
   },
   {
     key: "tokens",

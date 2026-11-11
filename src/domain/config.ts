@@ -309,7 +309,7 @@ function ceilingIssue(
   const ceiling = roleScopes(membership);
   const write = !(READ_ACTIONS as readonly string[]).includes(action);
   if (resource === "plans")
-    return "Plan access is a per-person company grant, never part of a role.";
+    return "Plan & pay access is a per-person company grant, never part of a role.";
   if (write && membership === "viewer")
     return "Viewer membership cannot hold a write action.";
   if (action === "import" && !ceiling.includes("imports:write"))
