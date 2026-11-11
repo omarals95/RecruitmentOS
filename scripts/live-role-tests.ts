@@ -54,7 +54,7 @@
  *   owner, who holds no company authority, cannot call tenant_context.workspace_team_list (0041).
  *   Neither the team B owner nor a company admin without the people area (the team C owner, given
  *   the organisation area by the owner for that check and then removed) can call
- *   tenant_context.workspace_people (0042).
+ *   tenant_context.workspace_people (0042) or tenant_context.workspace_person (0043).
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -4082,6 +4082,74 @@ async function runChecks(run: Run) {
               access.companyAreas.join(",") === "organisation",
           ],
           denial(listed),
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.c1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all(
+        ["setup", granted.rowCount === 1],
+        [
+          "end-state",
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.c1],
+          )) === 0,
+        ],
+      )
+    );
+  });
+
+  // The team B owner, who holds no company authority, reads no workspace person, not even a member
+  // of their own team (0043).
+  await check("workspace-person-team-b-owner-denied", async (probe) => {
+    probe.at("setup");
+    return transaction(data, async () => {
+      probe.at("install");
+      const { access } = await installAs(data, signer, p.ownerB);
+      probe.at("outcome");
+      const read = await attempt(
+        data,
+        "SELECT * FROM tenant_context.workspace_person($1)",
+        [f.users.b2],
+      );
+      return probe.all(["setup", access.companyLevel === null], denial(read));
+    });
+  });
+
+  // The team C owner, made a company admin with the organisation area only for this check, reads
+  // no workspace person either: it needs the people area (0043).
+  await check("workspace-person-admin-without-people-denied", async (probe) => {
+    probe.at("setup");
+    const granted = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{organisation}')",
+      [COMPANY_WORKSPACE, f.users.c1],
+    );
+    let pass: boolean;
+    try {
+      pass = await transaction(data, async () => {
+        probe.at("install");
+        const { access } = await installAs(data, signer, p.ownerC);
+        probe.at("outcome");
+        const read = await attempt(
+          data,
+          "SELECT * FROM tenant_context.workspace_person($1)",
+          [f.users.a1],
+        );
+        return probe.all(
+          [
+            "setup",
+            access.companyLevel === "admin" &&
+              access.companyAreas.join(",") === "organisation",
+          ],
+          denial(read),
         );
       });
     } finally {
