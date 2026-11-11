@@ -209,6 +209,53 @@ export const uploads = appSchema.table(
       .where(sql`${t.erasureId} IS NOT NULL`),
   ],
 );
+/**
+ * Files of a record's file fields (0049): private Blob references stored like CVs, under team RLS and
+ * the record-scope policy keyed by recordId. A file field's value is the row's id.
+ */
+export const recordFiles = appSchema.table(
+  "record_files",
+  {
+    id: uuid("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => organization.id),
+    /** Null only on an erased row, as is originalName. */
+    recordId: uuid("record_id"),
+    originalName: text("original_name"),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    status: text("status").notNull(),
+    objectKey: text("object_key").notNull(),
+    storageProvider: text("storage_provider").notNull(),
+    storageEnvironment: text("storage_environment").notNull(),
+    storageStore: text("storage_store").notNull(),
+    blobSha256: text("blob_sha256"),
+    blobSizeBytes: bigint("blob_size_bytes", { mode: "number" }),
+    blobDeletedAt: time("blob_deleted_at"),
+    putTicketsIssued: integer("put_tickets_issued").notNull().default(0),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id),
+    createdAt: time("created_at").notNull().defaultNow(),
+    completedAt: time("completed_at"),
+    expiresAt: time("expires_at").notNull(),
+    /** The candidate erasure that made this row rejected, nameless and unlinked; set once. */
+    erasureId: uuid("erasure_id"),
+  },
+  (t) => [
+    unique("record_files_team_id_id_key").on(t.teamId, t.id),
+    uniqueIndex("record_files_object_key_unique").on(t.objectKey),
+    index("record_files_team_record_idx").on(t.teamId, t.recordId),
+    index("record_files_team_created_idx").on(t.teamId, t.createdAt),
+    index("record_files_blob_cleanup_idx")
+      .on(t.teamId, t.storageStore, t.expiresAt)
+      .where(sql`${t.status} = 'rejected' AND ${t.blobDeletedAt} IS NULL`),
+    index("record_files_erasure_idx")
+      .on(t.teamId, t.erasureId)
+      .where(sql`${t.erasureId} IS NOT NULL`),
+  ],
+);
 export const storageUsage = appSchema.table("storage_usage", {
   teamId: text("team_id")
     .primaryKey()
