@@ -34,7 +34,7 @@ import {
   searchWorkspace,
 } from "@/lib/insights";
 import { appOrigin } from "@/lib/oauth";
-import type { Scope } from "@/lib/permissions";
+import { TEAM_ARCHIVED, type Scope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import {
   bulkApplications,
@@ -2329,6 +2329,8 @@ export const TOOLS: McpTool[] = [
  */
 export function toolAllowed(ctx: AccessContext, definition: McpTool) {
   return (
+    // An archived team is read-only: no write tool, whatever the scopes say.
+    (definition.effect === "read" || !ctx.access.teamArchived) &&
     definition.scopes.every((scope) => ctx.scopes.includes(scope)) &&
     definition.access.every((entry) =>
       (Array.isArray(entry) ? entry : [entry]).some((request) =>
@@ -2411,6 +2413,12 @@ export async function callTool(
   } catch (error) {
     return failureFrom(error);
   }
+  if (
+    decision === "denied" &&
+    definition.effect !== "read" &&
+    ctx.access.teamArchived
+  )
+    return failure("team_archived", TEAM_ARCHIVED);
   if (decision === "denied")
     return failure(
       "scope_required",

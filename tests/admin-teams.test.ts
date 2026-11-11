@@ -16,6 +16,7 @@ import { requireVerifiedIdentity } from "@/lib/auth-policy";
 import { getVerifiedSession } from "@/lib/auth-session";
 import { withTeam } from "@/lib/db-team";
 import type { Principal } from "@/lib/principal";
+import { GET as archivedTeamsRoute } from "@/app/api/v1/me/archived-teams/route";
 import { GET as teamsRoute } from "@/app/api/v1/teams/route";
 import {
   addMember,
@@ -32,6 +33,7 @@ const COMPANY = "00000000-0000-4000-a000-000000000001";
 const SECOND = "00000000-0000-4000-a000-000000000069";
 const ORIGIN = "http://localhost:3000";
 const ROW_KEYS = [
+  "archived",
   "createdAt",
   "current",
   "name",
@@ -47,6 +49,7 @@ type Row = {
   createdAt: string;
   teamRole: string | null;
   current: boolean;
+  archived: boolean;
 };
 
 const signIn = (p: { userId: string; teamId: string }) =>
@@ -54,10 +57,11 @@ const signIn = (p: { userId: string; teamId: string }) =>
     user: { id: p.userId, twoFactorEnabled: true },
     session: { activeOrganizationId: p.teamId },
   } as never);
-/** GET /api/v1/teams as a signed-in member, a Bearer token or nobody. */
+/** GET /api/v1/teams (or another read) as a signed-in member, a Bearer token or nobody. */
 async function get(
   as: Principal | "bearer" | "anonymous",
   path = "/api/v1/teams",
+  route: (request: Request) => Promise<Response> = teamsRoute,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<{ status: number; text: string; body: any }> {
   if (as === "anonymous")
@@ -65,7 +69,7 @@ async function get(
       async () => requireVerifiedIdentity(null) as never,
     );
   else if (as !== "bearer") signIn(as);
-  const response = await teamsRoute(
+  const response = await route(
     new Request(`${ORIGIN}${path}`, {
       headers: {
         origin: ORIGIN,
@@ -179,7 +183,9 @@ describe("the workspace team list under the split runtime roles", () => {
       expect(
         rows.map((row) => Object.keys(row)),
         p.userId,
-      ).toEqual(rows.map(() => ["id", "name", "slug", "created_at"]));
+      ).toEqual(
+        rows.map(() => ["id", "name", "slug", "created_at", "archived"]),
+      );
       expect(
         rows.map((row) => ({
           ...row,
@@ -192,6 +198,7 @@ describe("the workspace team list under the split runtime roles", () => {
           name: `Fictional ${letter.toUpperCase()} Team`,
           slug: `fictional-${letter}`,
           created_at: created[`teams-team-${letter}`],
+          archived: false,
         })),
       );
     }
@@ -233,6 +240,7 @@ describe("the workspace team list under the split runtime roles", () => {
           createdAt: created["teams-team-b"],
           teamRole: "owner",
           current: true,
+          archived: false,
         },
       ],
     });
@@ -255,6 +263,7 @@ describe("the workspace team list under the split runtime roles", () => {
           createdAt: created["teams-team-a"],
           teamRole: role,
           current: true,
+          archived: false,
         },
         ...["b", "c"].map((letter) => ({
           teamId: null,
@@ -263,6 +272,7 @@ describe("the workspace team list under the split runtime roles", () => {
           createdAt: created[`teams-team-${letter}`],
           teamRole: null,
           current: false,
+          archived: false,
         })),
       ]);
       // No member name, email or user id, and no id of a team the caller is not in.
@@ -292,6 +302,115 @@ describe("the workspace team list under the split runtime roles", () => {
     const query = await get(owner, "/api/v1/teams?archived=true");
     expect(query.status).toBe(400);
     expect(query.body.error.code).toBe("invalid_input");
+  });
+
+  // ADM-05 (job 078): the archived state, for a company owner's other teams from the workspace list
+  // and for a team owner's own teams from the member read helper, which names only the caller's own
+  // archived teams.
+  describe("with archived teams", () => {
+    const ARCHIVED_PATH = "/api/v1/me/archived-teams";
+    const archived = (path = ARCHIVED_PATH, as: Principal | "bearer" = owner) =>
+      get(as, path, archivedTeamsRoute);
+    const setArchived = async (teamId: string, value: boolean) => {
+      await harness.asOwner();
+      await harness.client.query(
+        "UPDATE app.workspace_teams SET archived_at = CASE WHEN $2 THEN now() END, archived_by = CASE WHEN $2 THEN 'teams-owner-b' END WHERE team_id = $1",
+        [teamId, value],
+      );
+    };
+    beforeAll(async () => {
+      await setArchived("teams-team-b", true);
+      await setArchived("teams-team-c", true);
+    });
+    afterAll(async () => {
+      await setArchived("teams-team-b", false);
+      await setArchived("teams-team-c", false);
+    });
+
+    it("marks the workspace list's archived teams for a company owner and admin, members or not", async () => {
+      for (const p of [owner, companyAdmin]) {
+        const { status, body } = await get(p);
+        expect(status, p.userId).toBe(200);
+        expect(
+          body.data.map((row: Row) => [row.slug, row.teamId, row.archived]),
+          p.userId,
+        ).toEqual([
+          ["fictional-a", "teams-team-a", false],
+          ["fictional-b", null, true],
+          ["fictional-c", null, true],
+        ]);
+      }
+      expect(
+        ((await helper(owner)) as { id: string; archived: boolean }[]).map(
+          (row) => [row.id, row.archived],
+        ),
+      ).toEqual([
+        ["teams-team-a", false],
+        ["teams-team-b", true],
+        ["teams-team-c", true],
+      ]);
+    });
+
+    it("marks a team-only owner's own archived team from the member read helper", async () => {
+      const { status, body } = await get(teamOwnerB);
+      expect(status).toBe(200);
+      expect(body.data).toEqual([
+        expect.objectContaining({
+          teamId: "teams-team-b",
+          teamRole: "owner",
+          current: true,
+          archived: true,
+        }),
+      ]);
+    });
+
+    it("returns only the caller's own archived teams, never a team they are not in", async () => {
+      // The company owner is a member of team A only: B and C are archived but not theirs.
+      expect((await archived()).body).toEqual({ data: { teamIds: [] } });
+      // A recruiter of team A and owner of team B, from either team's context.
+      for (const p of [
+        teamOwnerB,
+        { ...teamOwnerB, teamId: "teams-team-a", role: "recruiter" as const },
+      ]) {
+        const { status, body, text } = await archived(ARCHIVED_PATH, p);
+        expect(status, p.teamId).toBe(200);
+        expect(body, p.teamId).toEqual({ data: { teamIds: ["teams-team-b"] } });
+        expect(text, p.teamId).not.toContain("teams-team-c");
+      }
+      // A viewer of team A, a member of no archived team.
+      expect((await archived(ARCHIVED_PATH, viewer)).body).toEqual({
+        data: { teamIds: [] },
+      });
+      // Never another workspace's team, archived or not.
+      await setArchived("teams-team-d", true);
+      try {
+        expect((await archived(ARCHIVED_PATH, ownerD)).body).toEqual({
+          data: { teamIds: ["teams-team-d"] },
+        });
+        for (const p of [owner, teamOwnerB])
+          expect((await archived(ARCHIVED_PATH, p)).text).not.toContain(
+            "teams-team-d",
+          );
+      } finally {
+        await setArchived("teams-team-d", false);
+      }
+    });
+
+    it("refuses a Bearer token, a token context of the helper and any query key", async () => {
+      const bearer = await archived(ARCHIVED_PATH, "bearer");
+      expect(bearer.status).toBe(403);
+      expect(bearer.body.error.code).toBe("session_required");
+      const token = await seedApiToken(await harness.asOwner(), teamOwnerB);
+      await harness.dataDb();
+      await expect(
+        withTeam(token, (tx) =>
+          tx.execute(sql`select * from tenant_context.member_archived_teams()`),
+        ),
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+      const query = await archived(`${ARCHIVED_PATH}?team=teams-team-b`);
+      expect(query.status).toBe(400);
+      expect(query.body.error.code).toBe("invalid_input");
+    });
   });
 });
 

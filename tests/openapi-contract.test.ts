@@ -31,6 +31,7 @@ interface Operation {
   responses: Record<
     string,
     {
+      description?: string;
       headers?: Record<string, { $ref?: string }>;
       content?: Record<string, { schema?: { $ref?: string } }>;
     }
@@ -763,6 +764,45 @@ describe("OpenAPI contract", () => {
       expect(JSON.stringify(users)).toContain(text);
   });
 
+  it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
+    const archive = document.paths["/api/v1/teams/archive"].put;
+    const archived = document.paths["/api/v1/me/archived-teams"].get;
+    for (const operation of [archive, archived]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(["200", "400", "401", "403", "500"]),
+      );
+      expect(JSON.stringify(operation)).toContain("session_required");
+    }
+    for (const text of [
+      "team_archive_forbidden",
+      "Only an owner of this team can archive or restore it.",
+      "team_access_denied",
+      "invalid_input",
+      "{data:{archived, changed}}",
+      "team.archived or team.restored",
+      '"example":{"archived":true}',
+      '"additionalProperties":false',
+    ])
+      expect(JSON.stringify(archive)).toContain(text);
+    for (const text of ["{data:{teamIds:[<team id>]}}", "invalid_input"])
+      expect(JSON.stringify(archived)).toContain(text);
+    expect(JSON.stringify(document.paths["/api/v1/me/access"].get)).toContain(
+      "teamArchived",
+    );
+    expect(JSON.stringify(document.paths["/api/v1/teams"].get)).toContain(
+      "current, archived",
+    );
+    // The shared 403 names the refusal and its exact message.
+    const forbidden =
+      document.paths["/api/v1/candidates"].post.responses["403"].description;
+    expect(forbidden).toContain("team_archived");
+    expect(forbidden).toContain(
+      "This team is archived. You can still read everything, but nothing can be changed until a team owner restores it.",
+    );
+  });
+
   it("documents customValues only on tasks and never names the record pins (R2b-02)", () => {
     const found: string[] = [];
     const walk = (value: unknown, path: string[]) => {
@@ -920,6 +960,8 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",
         "GET /api/v1/teams",
+        "PUT /api/v1/teams/archive",
+        "GET /api/v1/me/archived-teams",
         "GET /api/v1/admin/users",
         "GET /api/v1/roles",
         "POST /api/v1/roles",

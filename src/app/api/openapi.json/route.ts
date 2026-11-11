@@ -97,7 +97,7 @@ const errors = {
   "400": errorResponse("Invalid fields, references, query or JSON."),
   "401": errorResponse("Missing, invalid, expired or revoked credentials."),
   "403": errorResponse(
-    "Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required.",
+    'Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required. Any write to the data or task boards of an archived team gets team_archived ("This team is archived. You can still read everything, but nothing can be changed until a team owner restores it.").',
   ),
   "404": errorResponse("Record, resource or CV not found in this team."),
   "409": errorResponse(
@@ -1197,13 +1197,13 @@ export function GET() {
   };
   // The Admin portal's reads (R2a-11): session only, no MCP tool and no API token access.
   const meAccessShape =
-    "{data:{teamRole, companyLevel, role:{name, membership}|null, scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit}}, adminAreas}}";
+    "{data:{teamRole, companyLevel, teamArchived, role:{name, membership}|null, scopes, pages, actions:{<resource>:[action]}, fields:{<record kind>:{<field>:hidden|read|edit}}, adminAreas}}";
   paths["/api/v1/me/access"] = {
     get: operation(
       [],
       {
         summary: "Read your own access",
-        description: `Session only: any signed-in member of the team; Bearer tokens get 403 session_required. Returns only your own access in the active team, as the server decides it: teamRole (your team role), companyLevel (owner, admin or null), role (the name and membership of your role: the built-in template of your team role or the configured role assigned to you; null when no role applies, and then pages, actions and fields are empty), scopes (your effective scopes), pages, actions (the allowed actions per resource; a resource with none is left out), fields (the field rules of each record kind you may view) and adminAreas (the company areas you hold). It holds no user, team, workspace, role, version or configuration object id and no configuration body. Nothing is audited. Returns ${meAccessShape}.`,
+        description: `Session only: any signed-in member of the team; Bearer tokens get 403 session_required. Returns only your own access in the active team, as the server decides it: teamRole (your team role), companyLevel (owner, admin or null), teamArchived (true when the active team is archived: your scopes then hold only read scopes, and every write gets 403 team_archived), role (the name and membership of your role: the built-in template of your team role or the configured role assigned to you; null when no role applies, and then pages, actions and fields are empty), scopes (your effective scopes), pages, actions (the allowed actions per resource; a resource with none is left out), fields (the field rules of each record kind you may view) and adminAreas (the company areas you hold). It holds no user, team, workspace, role, version or configuration object id and no configuration body. Nothing is audited. Returns ${meAccessShape}.`,
       },
       { "200": { description: meAccessShape } },
       { sessionOnly: true },
@@ -1250,15 +1250,48 @@ export function GET() {
     ),
   };
   const teamsShape =
-    '{data:[{teamId, name, slug, createdAt, teamRole:"owner"|"admin"|"recruiter"|"viewer"|null, current}]}';
+    '{data:[{teamId, name, slug, createdAt, teamRole:"owner"|"admin"|"recruiter"|"viewer"|null, current, archived}]}';
   paths["/api/v1/teams"] = {
     get: operation(
       [],
       {
         summary: "List the teams for the Admin portal",
-        description: `Session only: a signed-in owner or admin of the active team, or a company owner or company admin; Bearer tokens get 403 session_required, and anyone else, recruiters and viewers without company authority included, gets 403 teams_forbidden. A team owner or admin gets the teams where they are owner or admin. A company owner or admin also gets every other team of the workspace, by name, slug and created date only, through the owner-run helper tenant_context.workspace_team_list. teamRole is your role in the team, null when you are not a member; teamId is the team's id only where you are a member, null otherwise; current is true for the active team. A team you are not a member of carries no id, members, member count, record count, storage figure or activity. Ordered by name, then slug. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${teamsShape}.`,
+        description: `Session only: a signed-in owner or admin of the active team, or a company owner or company admin; Bearer tokens get 403 session_required, and anyone else, recruiters and viewers without company authority included, gets 403 teams_forbidden. A team owner or admin gets the teams where they are owner or admin. A company owner or admin also gets every other team of the workspace, by name, slug, created date and archived state only, through the owner-run helper tenant_context.workspace_team_list. teamRole is your role in the team, null when you are not a member; teamId is the team's id only where you are a member, null otherwise; current is true for the active team; archived is true for an archived team (your own teams take it from tenant_context.member_archived_teams). A team you are not a member of carries no id, members, member count, record count, storage figure or activity. Ordered by name, then slug. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${teamsShape}.`,
       },
       { "200": { description: teamsShape } },
+      { sessionOnly: true },
+    ),
+  };
+  const teamArchiveShape = "{data:{archived, changed}}";
+  paths["/api/v1/teams/archive"] = {
+    put: operation(
+      [],
+      {
+        summary: "Archive or restore the team",
+        description: `Session only: a signed-in owner of the team (X-Team-Id or the active team); Bearer tokens get 403 session_required, a non-member using X-Team-Id gets 403 team_access_denied, and anyone else, team admins, recruiters, viewers and company owners or admins who are not an owner of that team included, gets 403 team_archive_forbidden ("Only an owner of this team can archive or restore it."). Send {archived:true} to archive or {archived:false} to restore, at most 1 KiB; anything else, including an unknown key, returns 400 invalid_input. Archiving deletes and rewrites nothing: members keep reading everything, and from the next request every write to the team's data and task boards gets 403 team_archived, while membership, roles, rename, CV storage settings, API tokens and candidate erasure keep working. Each change writes one team-archive activity row (team.archived or team.restored); a request for the state the team is already in returns changed false and writes none. Returns ${teamArchiveShape}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["archived"],
+            additionalProperties: false,
+            properties: { archived: { type: "boolean" } },
+          },
+          { archived: true },
+        ),
+      },
+      { "200": { description: teamArchiveShape } },
+      { sessionOnly: true },
+    ),
+  };
+  const archivedTeamsShape = "{data:{teamIds:[<team id>]}}";
+  paths["/api/v1/me/archived-teams"] = {
+    get: operation(
+      [],
+      {
+        summary: "List your archived teams",
+        description: `Session only: any signed-in member of the active team; Bearer tokens get 403 session_required. Returns the ids of the archived teams you are a member of, from the read helper tenant_context.member_archived_teams, never a team you are not in. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${archivedTeamsShape}.`,
+      },
+      { "200": { description: archivedTeamsShape } },
       { sessionOnly: true },
     ),
   };

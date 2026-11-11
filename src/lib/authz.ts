@@ -5,6 +5,7 @@ import {
   ROLE_UNAVAILABLE,
   SCOPES,
   roleScopes,
+  teamArchived,
   type Role,
   type Scope,
 } from "@/lib/permissions";
@@ -58,7 +59,11 @@ export type AccessContext = {
     Partial<
       Pick<
         TenantAccess,
-        "roleVersionId" | "documents" | "recordScope" | "homeUnits"
+        | "roleVersionId"
+        | "documents"
+        | "recordScope"
+        | "homeUnits"
+        | "teamArchived"
       >
     >;
   /**
@@ -285,6 +290,12 @@ export function authorize(
   request: AccessRequest,
 ): AccessDecision {
   if (!allows(ctx, request)) {
+    // An archived team stores no write scope: every refused change says why.
+    if (
+      ctx.access.teamArchived &&
+      !(READ_ACTIONS as readonly string[]).includes(request.action)
+    )
+      throw teamArchived();
     const refusal =
       request.action === "import" ? importForbidden() : forbidden();
     // An assigned role install could not use: the same refusal, in plain words.
@@ -374,10 +385,14 @@ export function accessMap(ctx: AccessContext): AccessMap {
   };
 }
 
-/** GET /api/v1/me/access and the admin pages: the team role, company level and accessMap(). */
+/**
+ * GET /api/v1/me/access and the admin pages: the team role, company level, the team's archived state
+ * and accessMap().
+ */
 export type MeAccess = AccessMap & {
   teamRole: string | null;
   companyLevel: "owner" | "admin" | null;
+  teamArchived: boolean;
 };
 export function meAccess(
   principal: Principal,
@@ -386,6 +401,7 @@ export function meAccess(
   return {
     teamRole: principal.role,
     companyLevel: access.companyLevel,
+    teamArchived: access.teamArchived ?? false,
     ...accessMap(accessContext(principal, access)),
   };
 }

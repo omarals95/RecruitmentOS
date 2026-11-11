@@ -73,10 +73,26 @@ const roleUnavailable = new WeakSet<object>();
 export function markRoleUnavailable(p: object) {
   roleUnavailable.add(p);
 }
+/** The one refusal of every write in an archived team (ADM-05). */
+export const TEAM_ARCHIVED =
+  "This team is archived. You can still read everything, but nothing can be changed until a team owner restores it.";
+export const teamArchived = () =>
+  new ApiError(403, "team_archived", TEAM_ARCHIVED);
+// Principals whose context install found their team archived; withTeam marks them.
+const archivedTeam = new WeakSet<object>();
+export function markTeamArchived(p: object) {
+  archivedTeam.add(p);
+}
 // The scopes each principal has passed requireScope with, so withTeam can refuse a request whose
 // stored scopes lack one that was checked before the transaction.
 const passed = new WeakMap<object, Set<Scope>>();
 export function requireScope(p: { scopes: readonly string[] }, scope: Scope) {
+  if (
+    !p.scopes.includes(scope) &&
+    scope.endsWith(":write") &&
+    archivedTeam.has(p)
+  )
+    throw teamArchived();
   if (!p.scopes.includes(scope))
     throw new ApiError(
       403,

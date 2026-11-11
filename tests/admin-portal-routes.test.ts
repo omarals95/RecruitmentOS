@@ -335,6 +335,7 @@ describe("Admin portal routes under the split runtime roles", () => {
           data: {
             teamRole,
             companyLevel,
+            teamArchived: false,
             role: { name: role.name, membership: role.membership },
             scopes: ctx.scopes,
             pages: PAGE_KEYS.filter((page) => ctx.role!.pages.includes(page)),
@@ -351,6 +352,7 @@ describe("Admin portal routes under the split runtime roles", () => {
             "pages",
             "role",
             "scopes",
+            "teamArchived",
             "teamRole",
           ].sort(),
         );

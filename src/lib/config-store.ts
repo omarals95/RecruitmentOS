@@ -18,6 +18,7 @@ import { accessContext } from "@/lib/authz";
 import type { ConfigDocument } from "@/lib/config-cache";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
+import { teamArchived } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { checkTaskBoardReferences } from "@/lib/records";
 import type { TenantAccess } from "@/lib/tenant-context";
@@ -113,10 +114,12 @@ function assertSize(value: unknown) {
 
 /**
  * tenant_context.allows_workspace for write, read from the access state install returned: a session,
- * and company authority for the type's area, or for a task board the team owner or admin role.
+ * and company authority for the type's area, or for a task board the team owner or admin role in a
+ * team that is not archived (team_archived first, for every caller).
  */
 function requireWrite(p: Principal, access: TenantAccess, type: ConfigType) {
   const area = CONFIG_TYPE_AREAS[type];
+  if (area === "task-board" && access.teamArchived) throw teamArchived();
   const allowed =
     p.authType === "session" &&
     (area === "task-board"

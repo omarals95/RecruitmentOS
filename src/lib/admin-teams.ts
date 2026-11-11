@@ -14,6 +14,7 @@ export type AdminTeamRow = {
   createdAt: string;
   teamRole: Role | null;
   current: boolean;
+  archived: boolean;
 };
 
 const teamsForbidden = () =>
@@ -26,28 +27,50 @@ const manages = (role: Role | null) => role === "owner" || role === "admin";
 
 /**
  * Signed-in team owners and admins of the active team: their own owner and admin teams. Company
- * owners and admins also get every team of the workspace by name, slug and created date only,
- * through the owner-run helper, never its members, counts, records, storage or activity (TST-005).
+ * owners and admins also get every team of the workspace by name, slug, created date and archived
+ * state only, through the owner-run helper, never its members, counts, records, storage or activity
+ * (TST-005). The caller's own teams take their archived state from the member read helper.
  */
 export async function listAdminTeams(p: Principal): Promise<AdminTeamRow[]> {
-  let workspace: { id: string; name: string; slug: string; createdAt: Date }[];
+  let workspace: {
+    id: string;
+    name: string;
+    slug: string;
+    createdAt: Date;
+    archived: boolean;
+  }[];
+  let archivedTeams: Set<string>;
   try {
-    workspace = await withTeam(p, async (tx, access) => {
+    ({ workspace, archivedTeams } = await withTeam(p, async (tx, access) => {
       const company = access.companyLevel !== null;
       if (p.authType !== "session" || (!manages(p.role) && !company))
         throw teamsForbidden();
-      if (!company) return [];
-      return (
-        await tx.execute<{
-          id: string;
-          name: string;
-          slug: string;
-          createdAt: Date;
-        }>(
-          sql`select id, name, slug, created_at as "createdAt" from tenant_context.workspace_team_list()`,
-        )
-      ).rows;
-    });
+      if (company)
+        return {
+          workspace: (
+            await tx.execute<{
+              id: string;
+              name: string;
+              slug: string;
+              createdAt: Date;
+              archived: boolean;
+            }>(
+              sql`select id, name, slug, created_at as "createdAt", archived from tenant_context.workspace_team_list()`,
+            )
+          ).rows,
+          archivedTeams: new Set<string>(),
+        };
+      return {
+        workspace: [],
+        archivedTeams: new Set(
+          (
+            await tx.execute<{ team_id: string }>(
+              sql`select team_id from tenant_context.member_archived_teams()`,
+            )
+          ).rows.map((row) => row.team_id),
+        ),
+      };
+    }));
   } catch (error) {
     const code = (
       (error instanceof DrizzleQueryError ? error.cause : error) as
@@ -74,7 +97,7 @@ export async function listAdminTeams(p: Principal): Promise<AdminTeamRow[]> {
   const teams = new Map(workspace.map((row) => [row.id, row]));
   for (const row of memberships)
     if (manages(roles.get(row.id) ?? null) && !teams.has(row.id))
-      teams.set(row.id, row);
+      teams.set(row.id, { ...row, archived: archivedTeams.has(row.id) });
   return [...teams.values()]
     .map((row) => {
       const teamRole = roles.get(row.id) ?? null;
@@ -85,6 +108,7 @@ export async function listAdminTeams(p: Principal): Promise<AdminTeamRow[]> {
         createdAt: new Date(row.createdAt).toISOString(),
         teamRole,
         current: row.id === p.teamId,
+        archived: row.archived,
       };
     })
     .sort(
