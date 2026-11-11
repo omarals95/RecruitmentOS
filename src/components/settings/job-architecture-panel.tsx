@@ -402,6 +402,12 @@ const plainError = (error: unknown) =>
   error instanceof ClientError ? error.message : humanError(error);
 // A table's actions stay on one line; the column is as narrow as its buttons.
 const actionCell = { width: "1%", whiteSpace: "nowrap" } as const;
+// As on the Levels table: the button never breaks inside its word.
+const actionRow = {
+  flexWrap: "nowrap",
+  overflowWrap: "normal",
+  gap: 8,
+} as const;
 
 /**
  * Job architecture on Organisation (ADM-26): job grades, job titles and job families, edited as a
@@ -435,6 +441,15 @@ export function JobArchitecturePanel({
     ? gradesInOrder(state.current.body)
     : [];
   const publishedCodes = publishedGrades.map((grade) => grade.code);
+  // A team change starts again with the switch off and no figures held.
+  const [teamRequest, setTeamRequest] = useState(() => request);
+  if (teamRequest !== request) {
+    setTeamRequest(() => request);
+    setShowing(false);
+    setBrackets(null);
+    setBracketError("");
+    setEditingBrackets(false);
+  }
 
   useEffect(() => {
     if (!request) return;
@@ -448,6 +463,8 @@ export function JobArchitecturePanel({
       });
     return () => {
       active = false;
+      // Bracket figures still loading for the previous team are dropped.
+      shown.current = false;
     };
   }, [request]);
 
@@ -776,14 +793,17 @@ function EditButton({
 }) {
   return (
     <td data-label="Actions" style={actionCell}>
-      <button
-        type="button"
-        className="button secondary small"
-        disabled={busy}
-        onClick={onClick}
-      >
-        Edit<span className="sr-only">: {label}</span>
-      </button>
+      <div className="row" style={actionRow}>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={busy}
+          aria-label={`Edit: ${label}`}
+          onClick={onClick}
+        >
+          Edit
+        </button>
+      </div>
     </td>
   );
 }

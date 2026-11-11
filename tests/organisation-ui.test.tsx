@@ -1653,7 +1653,9 @@ describe("job architecture (ADM-26)", () => {
       const markup = view(value, published, { showBrackets: true, brackets });
       expect(markup).toContain(notice);
       expect(markup).toContain("Add grade");
-      expect(markup).toContain('Edit<span class="sr-only">: FG1</span>');
+      expect(markup).toContain(
+        '<div class="row" style="flex-wrap:nowrap;overflow-wrap:normal;gap:8px"><button type="button" class="button secondary small" aria-label="Edit: FG1">Edit</button></div>',
+      );
       for (const text of [
         "Show salary brackets",
         'role="switch"',
