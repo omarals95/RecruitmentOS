@@ -118,8 +118,12 @@ const authTables = [
   "api_tokens",
   "api_rate_limits",
 ];
-/** Owner-only app tables: neither runtime role holds any privilege on them (0021, 0036). */
-const ownerOnlyAppTables = ["app.candidate_erasures", "app.employee_erasures"];
+/** Owner-only app tables: neither runtime role holds any privilege on them (0021, 0036, 0049). */
+const ownerOnlyAppTables = [
+  "app.candidate_erasures",
+  "app.employee_erasures",
+  "app.user_anonymisations",
+];
 /** Read-only for the data role and closed to the identity role (0028, 0047). */
 const workspaceTables = [
   "workspaces",
@@ -432,6 +436,7 @@ describe("split runtime role template", () => {
         "tenant_context.purge_bulk_intake(uuid)",
         "tenant_context.erase_candidate(uuid,text,text)",
         "tenant_context.erase_employee(uuid,text,text)",
+        "tenant_context.anonymise_user(text,text,text)",
         "tenant_context.set_mcp_cv_text_access(boolean)",
         "tenant_context.audit_mcp_cv_read(text,uuid)",
         "tenant_context.set_workspace_authority(text,text,text[],boolean)",
@@ -584,6 +589,8 @@ describe("split runtime role template", () => {
       "TRUNCATE app.candidate_erasures",
       "SELECT * FROM app.employee_erasures",
       "TRUNCATE app.employee_erasures",
+      "SELECT * FROM app.user_anonymisations",
+      "TRUNCATE app.user_anonymisations",
       "DELETE FROM app.records",
       "DELETE FROM app.activity",
       "SELECT tenant_context.audit_token('fictional','token.created')",
@@ -613,6 +620,7 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.purge_bulk_intake(NULL)",
       "SELECT tenant_context.erase_candidate(gen_random_uuid(), 'Fictional', 'app')",
       "SELECT tenant_context.erase_employee(gen_random_uuid(), 'Fictional', 'app')",
+      "SELECT tenant_context.anonymise_user('fictional', 'Fictional', 'app')",
       "SELECT tenant_context.set_mcp_cv_text_access(false)",
       "SELECT tenant_context.audit_mcp_cv_read('get_cv_text', gen_random_uuid())",
       "SELECT tenant_context.set_workspace_authority('fictional', 'admin', '{fields}', true)",
@@ -633,6 +641,8 @@ describe("split runtime role template", () => {
       "SELECT * FROM app.candidate_erasures",
       "SELECT * FROM app.employee_erasures",
       "TRUNCATE app.employee_erasures",
+      "SELECT * FROM app.user_anonymisations",
+      "TRUNCATE app.user_anonymisations",
       "INSERT INTO auth.initial_admin_claim(id) VALUES (true)",
       "UPDATE auth.initial_admin_claim SET completed_at = NULL",
       "DELETE FROM auth.initial_admin_claim",
@@ -1072,6 +1082,80 @@ describe("split runtime role template", () => {
       },
       { fn: helper, owned: true, definer: true, path: true },
     ]);
+  });
+
+  it("grants the data role the user anonymisation helper only, no tombstone access, and refuses forged anonymisation activity (0049)", async () => {
+    const statements = [
+      "SELECT * FROM app.user_anonymisations",
+      "INSERT INTO app.user_anonymisations(id,workspace_id,user_id,anonymised_by,anonymised_at,erasure_source) VALUES (gen_random_uuid(),'00000000-0000-4000-a000-000000000001','fictional','fictional',now(),'app')",
+      "UPDATE app.user_anonymisations SET anonymised_at = now()",
+      "DELETE FROM app.user_anonymisations",
+      "TRUNCATE app.user_anonymisations",
+    ];
+    for (const role of ["dataDb", "identityDb"] as const) {
+      await harness[role]();
+      await expectDenied(statements);
+    }
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    const forged = (kind: string, action: string, pointer: string) =>
+      `INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary,metadata,user_anonymisation_id) VALUES ('${owner.teamId}','${owner.userId}','session','${action}','${kind}','Forged','{}',${pointer})`;
+    for (const statement of [
+      forged("user-anonymisation", "user.anonymised", "NULL"),
+      forged("user-anonymisation", "user.anonymised", "gen_random_uuid()"),
+      forged("record", "record.updated", "gen_random_uuid()"),
+      forged("user-account", "user.deactivated", "gen_random_uuid()"),
+      `UPDATE app.activity SET user_anonymisation_id = gen_random_uuid() WHERE team_id = '${owner.teamId}'`,
+    ])
+      await expect(
+        harness.dataDb().then((db) =>
+          withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+            await installTenantContext(tx, owner, snapshot);
+            return tx.execute(sql.raw(statement));
+          }),
+        ),
+        statement,
+      ).rejects.toBeTruthy();
+    await harness.asSuperuser();
+    const helper = "tenant_context.anonymise_user(text,text,text)";
+    const allowed = async (grantee: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, helper],
+        )
+      ).rows[0].allowed;
+    expect(await allowed(splitRoles.data)).toBe(true);
+    expect(await allowed(splitRoles.identity)).toBe(false);
+    expect(await allowed("public")).toBe(false);
+    expect(
+      (
+        await harness.client.query(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, p.proconfig AS config
+           FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+          [helper],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        owned: true,
+        definer: true,
+        config: ["search_path=pg_catalog, pg_temp"],
+      },
+    ]);
+    for (const role of roles)
+      expect(
+        (
+          await harness.client.query(
+            "SELECT has_any_column_privilege($1, 'app.user_anonymisations', 'SELECT,INSERT,UPDATE,REFERENCES') AS any, has_table_privilege($1, 'app.user_anonymisations', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS table",
+            [role],
+          )
+        ).rows,
+        role,
+      ).toEqual([{ any: false, table: false }]);
   });
 
   it("grants the data role only reads of record assignments and the two helpers, the identity role nothing, and refuses forged assignment activity (0037)", async () => {

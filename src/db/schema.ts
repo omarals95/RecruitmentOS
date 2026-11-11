@@ -144,6 +144,10 @@ export const activity = appSchema.table(
     employeeErasureId: uuid("employee_erasure_id").references(
       () => employeeErasures.id,
     ),
+    /** Set once by the user anonymisation helper, which also redacts summary and metadata (0049). */
+    userAnonymisationId: uuid("user_anonymisation_id").references(
+      () => userAnonymisations.id,
+    ),
   },
   (t) => [
     index("activity_team_created_idx").on(t.teamId, t.createdAt),
@@ -153,6 +157,9 @@ export const activity = appSchema.table(
     index("activity_employee_erasure_idx")
       .on(t.employeeErasureId)
       .where(sql`${t.employeeErasureId} IS NOT NULL`),
+    index("activity_user_anonymisation_idx")
+      .on(t.userAnonymisationId)
+      .where(sql`${t.userAnonymisationId} IS NOT NULL`),
   ],
 );
 export const uploads = appSchema.table(
@@ -367,6 +374,32 @@ export const employeeErasures = appSchema.table(
     unique("employee_erasures_workspace_id_employee_id_key").on(
       t.workspaceId,
       t.employeeId,
+    ),
+  ],
+);
+/**
+ * User anonymisation tombstones (0049): ids, workspace, anonymising owner, time and source only,
+ * never a name or email. Owner-only table; workspace_id references app.workspaces, which is raw
+ * SQL only.
+ */
+export const userAnonymisations = appSchema.table(
+  "user_anonymisations",
+  {
+    id: uuid("id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id),
+    anonymisedBy: text("anonymised_by")
+      .notNull()
+      .references(() => user.id),
+    anonymisedAt: time("anonymised_at").notNull(),
+    erasureSource: text("erasure_source").$type<"app" | "script">().notNull(),
+  },
+  (t) => [
+    unique("user_anonymisations_workspace_id_user_id_key").on(
+      t.workspaceId,
+      t.userId,
     ),
   ],
 );
