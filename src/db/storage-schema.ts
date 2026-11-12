@@ -7,10 +7,11 @@ import { ApiError } from "../lib/errors";
  * through install, organisation hierarchy, positions and employees, configured member roles,
  * employee erasure and retention, record scope and assignment, record scope row-level security,
  * record pin, workspace team list, workspace people, company authority two-step, team archive, job
- * architecture, workspace person, user deactivation, salary bracket, record file, job title usage
- * and user anonymisation schema this code was written for (`0051_user_anonymisation.sql`).
+ * architecture, workspace person, user deactivation, salary bracket, record file, job title usage,
+ * user anonymisation and company groups schema this code was written for
+ * (`0052_company_groups.sql`).
  */
-export const STORAGE_SCHEMA_VERSION = 29;
+export const STORAGE_SCHEMA_VERSION = 30;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {
