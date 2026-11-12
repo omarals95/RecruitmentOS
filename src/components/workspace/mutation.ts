@@ -14,6 +14,7 @@ import {
   type ReferenceField,
 } from "@/domain/records";
 import { screenFor, shownKeys, type Screen } from "@/domain/screens";
+import type { AccessDecision } from "@/lib/authz";
 
 /**
  * The kind schema body a configurable kind's editor and profile render from: the given one, else
@@ -42,7 +43,9 @@ export function shownSystemFields(
  * Validate separately, then send only user-editable properties. Zod defaults must not add
  * importer-owned source fields. A task's assigneeIds is left out: assigneeInput adds it. A
  * configurable kind sends only the system fields its create or edit screen shows, and a task's
- * custom values leave out the kind schema's custom fields that screen does not show (R2b-07).
+ * custom values leave out the kind schema's custom fields that screen does not show (R2b-07). With
+ * the caller's field `rules` for the kind (GET /api/v1/me/access), a field or custom id whose rule
+ * is hidden or read is left out too, so a save never names it (R2b-08).
  */
 export function recordMutation(
   resource: ResourceName,
@@ -50,11 +53,16 @@ export function recordMutation(
   refs: Partial<Record<ReferenceField, string>>,
   record?: RecordDto,
   schema?: KindSchemaBody,
+  rules?: AccessDecision["fields"],
 ) {
   const config = RESOURCE_CONFIG[resource];
   const body = kindSchemaBodyOf(config.kind, schema);
   const screen = body && screenFor(body, null, record ? "edit" : "create");
   const shown = new Set(screen ? shownKeys(screen) : []);
+  const locked = (key: string) =>
+    !!rules &&
+    Object.hasOwn(rules, key) &&
+    (rules[key] === "hidden" || rules[key] === "read");
   const data: Record<string, unknown> = {};
   for (const field of body && screen
     ? shownSystemFields(body, screen)
@@ -62,7 +70,8 @@ export function recordMutation(
     if (
       field.readOnly ||
       field.key === "legacyAuthorLabel" ||
-      field.key === "assigneeIds"
+      field.key === "assigneeIds" ||
+      locked(field.key)
     )
       continue;
     let value = values[field.key];
@@ -70,8 +79,11 @@ export function recordMutation(
       value = Object.fromEntries(
         Object.entries(value as Record<string, unknown>).filter(
           ([key]) =>
-            shown.has(key) ||
-            !body.fields.some((custom) => !custom.system && custom.key === key),
+            !locked(key) &&
+            (shown.has(key) ||
+              !body.fields.some(
+                (custom) => !custom.system && custom.key === key,
+              )),
         ),
       );
     if (field.type === "tags" && typeof value === "string")
