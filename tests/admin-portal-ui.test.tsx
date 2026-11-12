@@ -5258,7 +5258,7 @@ describe("fields page", () => {
     expect(table(markup)).not.toMatch(/<select|Delete|Remove/);
     // The first field of a group cannot move up.
     expect(table(markup)).toMatch(
-      /<button type="button" class="button secondary" disabled="" aria-label="Move up Name \(Candidate\)">Move up<\/button>/,
+      /<button type="button" class="button secondary small" disabled="" aria-label="Move up Name \(Candidate\)">Move up<\/button>/,
     );
     expect(markup).toContain(
       '<option value="" selected="">All record kinds</option>',

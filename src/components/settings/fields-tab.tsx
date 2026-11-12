@@ -42,7 +42,7 @@ import {
 } from "@/components/workspace/client";
 import { Dialog } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { actionRow, box, checks, plainError } from "./roles-tab";
+import { actionRow, box, checks, plainError, useFocusAfter } from "./roles-tab";
 
 type Field = KindSchemaBody["fields"][number];
 type CustomFieldBody = Extract<Field, { system: false }>;
@@ -56,6 +56,8 @@ export type KindView = {
 };
 
 const ALL = "";
+// Row actions wrap to new lines; settings.css sizes their cell.
+const rowActions = { ...actionRow, gap: 6 } as const;
 const SENSITIVE_OWNER_ONLY =
   "Only a company owner can mark a field sensitive or remove the mark.";
 export const OWNER_MUST_PUBLISH =
@@ -553,6 +555,8 @@ export function FieldsPanel({
   const [refusal, setRefusal] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
+  // Where focus goes when the control that had it is gone: Archive, or Publish with its draft.
+  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
   const views = (kinds ?? []).map(kindView);
   const shown = views.filter(
     (view) => filter === ALL || view.state.kind === filter,
@@ -597,7 +601,8 @@ export function FieldsPanel({
       }))
     )
       return;
-    await save(view, withField(view.body, { ...field, archived: true }));
+    if (await save(view, withField(view.body, { ...field, archived: true })))
+      focusNotice();
   }
   async function publish(view: KindView) {
     if (busy) return;
@@ -605,6 +610,7 @@ export function FieldsPanel({
     setRefusal([]);
     try {
       const number = await onPublish(view.state, view.body);
+      focusNotice();
       setOpen(null);
       setNotice(`Published ${view.body.singular} version ${number}.`);
     } catch (e) {
@@ -625,7 +631,12 @@ export function FieldsPanel({
         values; no field can be deleted.
       </p>
       {notice && (
-        <p className="notice success" role="status">
+        <p
+          ref={noticeRef}
+          tabIndex={-1}
+          className="notice success"
+          role="status"
+        >
           {notice}
         </p>
       )}
@@ -717,7 +728,7 @@ export function FieldsPanel({
           {/* The record screens' phone layout: one labelled card per field at 720 px and below. */}
           <div className="records-panel">
             <div className="table-wrap">
-              <table className="data-table compact">
+              <table className="data-table compact fields-table">
                 <caption className="sr-only">
                   Fields of{" "}
                   {filter === ALL ? "every record kind" : shown[0]?.body.label}
@@ -774,11 +785,11 @@ export function FieldsPanel({
                         <td data-label="Type">{typeLabel(field)}</td>
                         <td data-label="Record kind">{view.body.singular}</td>
                         <td data-label="Group">{group}</td>
-                        <td data-label="Actions">
-                          <div className="row" style={actionRow}>
+                        <td data-label="Actions" className="fields-actions">
+                          <div className="row" style={rowActions}>
                             <button
                               type="button"
-                              className="button secondary"
+                              className="button secondary small"
                               disabled={busy}
                               aria-label={`Edit ${name}`}
                               onClick={() => {
@@ -791,7 +802,7 @@ export function FieldsPanel({
                             </button>
                             <button
                               type="button"
-                              className="button secondary"
+                              className="button secondary small"
                               disabled={
                                 busy || !canMove(view.body, field.key, -1)
                               }
@@ -807,7 +818,7 @@ export function FieldsPanel({
                             </button>
                             <button
                               type="button"
-                              className="button secondary"
+                              className="button secondary small"
                               disabled={
                                 busy || !canMove(view.body, field.key, 1)
                               }
@@ -824,7 +835,7 @@ export function FieldsPanel({
                             {!field.system && !archived && (
                               <button
                                 type="button"
-                                className="button secondary"
+                                className="button secondary small"
                                 disabled={busy}
                                 aria-label={`Archive ${name}`}
                                 onClick={() => void archive(view, field)}
