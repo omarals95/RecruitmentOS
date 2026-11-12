@@ -2146,14 +2146,15 @@ describe("configuration body schemas", () => {
   });
 
   it("refuses any key beyond the envelope, so no record id or value is stored", () => {
-    // Kind schemas, roles, task boards and the job architecture (job-architecture.test.ts) have
-    // their own bodies.
+    // Kind schemas, roles, task boards, the job architecture (job-architecture.test.ts) and
+    // branding (branding.test.ts) have their own bodies.
     for (const type of CONFIG_TYPES.filter(
       (type) =>
         type !== "kind-schema" &&
         type !== "role" &&
         type !== "task-board" &&
-        type !== "job-architecture",
+        type !== "job-architecture" &&
+        type !== "branding",
     )) {
       expect(configBodySchemas[type].parse({ label: " Fictional " })).toEqual({
         label: "Fictional",

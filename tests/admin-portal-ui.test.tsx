@@ -834,6 +834,15 @@ describe("configuration history", () => {
       fromVersionNumber: null,
       actorName: "Fictional Company Admin",
     },
+    {
+      occurredAt: "2026-11-05T08:00:00.000Z",
+      action: "config.published",
+      objectType: "branding",
+      objectKey: "company",
+      versionNumber: 3,
+      fromVersionNumber: 2,
+      actorName: "Fictional Company Admin",
+    },
   ];
   it("lists time, action, type and key, versions and actor in plain words", () => {
     const markup = renderToStaticMarkup(
@@ -856,6 +865,7 @@ describe("configuration history", () => {
       "config.future_action",
       "future-type: fictional-key",
       "Version 1<",
+      "Branding: company",
     ])
       expect(markup, text).toContain(text);
     expect(markup).not.toContain("Show older changes");
@@ -1489,9 +1499,10 @@ describe("company authority panel", () => {
       "Organisation",
       "Templates",
       "People",
+      "Branding",
     ])
       expect(asAdmin).toContain(`/>${label}</label>`);
-    expect(asAdmin.match(/type="checkbox"/g)).toHaveLength(7);
+    expect(asAdmin.match(/type="checkbox"/g)).toHaveLength(8);
     for (const area of [
       "roles",
       "ai",

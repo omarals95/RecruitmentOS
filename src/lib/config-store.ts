@@ -2,6 +2,12 @@ import { DrizzleQueryError, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { TeamTx } from "@/db";
 import {
+  brandingContrastFailures,
+  contrastFailureText,
+  type BrandingBody,
+} from "@/domain/branding";
+import {
+  BRANDING_KEY,
   CONFIGURABLE_KINDS,
   CONFIG_TYPES,
   CONFIG_TYPE_AREAS,
@@ -206,13 +212,14 @@ async function findVersion(
 }
 
 /**
- * The type's strict body. A kind schema's refusals carry their reasons, up to 8 as `path: message`
- * as readBody gives them, so a refused screen rule reaches the user; other types keep the plain
- * invalid_input of errorResponse.
+ * The type's strict body. Kind schema and branding refusals carry their reasons, up to 8 as
+ * `path: message` as readBody gives them, so a refused screen rule or colour reaches the user;
+ * other types keep the plain invalid_input of errorResponse.
  */
 function parseBody(type: ConfigType, body: unknown) {
-  if (type !== "kind-schema") return configBodySchemas[type].parse(body);
-  const parsed = kindSchemaBodySchema.safeParse(body);
+  if (type !== "kind-schema" && type !== "branding")
+    return configBodySchemas[type].parse(body);
+  const parsed = configBodySchemas[type].safeParse(body);
   if (!parsed.success)
     throw new ApiError(400, "invalid_input", issueList(parsed.error.issues));
   return parsed.data;
@@ -285,8 +292,8 @@ const versionJson = (column: string) =>
 
 /**
  * Creates the object when it does not exist (a task board in the caller's team) and its one draft
- * with the given body, and audits config.draft_created. An archived object takes no new draft, and
- * the job architecture takes no key but JOB_ARCHITECTURE_KEY.
+ * with the given body, and audits config.draft_created. An archived object takes no new draft, the
+ * job architecture takes no key but JOB_ARCHITECTURE_KEY and branding none but BRANDING_KEY.
  */
 export async function createConfigDraft(
   p: Principal,
@@ -301,6 +308,12 @@ export async function createConfigDraft(
         400,
         "invalid_input",
         `The job architecture key is always ${JOB_ARCHITECTURE_KEY}.`,
+      );
+    if (type === "branding" && key !== BRANDING_KEY)
+      throw new ApiError(
+        400,
+        "invalid_input",
+        `The branding key is always ${BRANDING_KEY}.`,
       );
     const parsed = parseBody(type, body);
     await checkBody(tx, p, access, { type, key }, parsed);
@@ -367,8 +380,10 @@ export async function updateConfigDraft(
 
 /**
  * Publishes the object's draft through the owner-run helper, which audits it; returns its number.
- * A kind schema draft is locked, then its body is parsed and checked again against the version in
- * force first. With options.type, a version of another type is not found.
+ * A kind schema or branding draft is locked, then its body is parsed and checked again first: a
+ * kind schema against the version in force, branding for WCAG 2.2 AA contrast in both themes (400
+ * branding_contrast listing every failing pair). With options.type, a version of another type is
+ * not found.
  */
 export async function publishConfigVersion(
   p: Principal,
@@ -378,7 +393,10 @@ export async function publishConfigVersion(
   return inStore(p, async (tx, access) => {
     const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
-    if (target.type === "kind-schema" && target.state === "draft") {
+    if (
+      (target.type === "kind-schema" || target.type === "branding") &&
+      target.state === "draft"
+    ) {
       // The body checked is the body published: the row stays locked to the publish, so a draft
       // save cannot land between the two. Only a writer sees the row (RLS), hence after requireWrite.
       const [locked] = (
@@ -388,13 +406,18 @@ export async function publishConfigVersion(
       ).rows;
       if (!locked) throw notFound();
       if (locked.state !== "draft") throw stateConflict();
-      await checkBody(
-        tx,
-        p,
-        access,
-        target,
-        parseBody(target.type, locked.body),
-      );
+      const body = parseBody(target.type, locked.body);
+      await checkBody(tx, p, access, target, body);
+      const failures =
+        target.type === "branding"
+          ? brandingContrastFailures(body as BrandingBody)
+          : [];
+      if (failures.length)
+        throw new ApiError(
+          400,
+          "branding_contrast",
+          `Below WCAG 2.2 AA contrast: ${failures.map(contrastFailureText).join("; ")}.`,
+        );
     }
     const { rows } = await tx.execute<{ number: number }>(
       sql`select tenant_context.publish_config_version(${target.versionId}::uuid) as number`,
