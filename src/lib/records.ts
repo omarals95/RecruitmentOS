@@ -74,6 +74,7 @@ import {
   fieldValueSchema,
   type CustomField,
 } from "@/domain/field-types";
+import { screenFor, shownKeys } from "@/domain/screens";
 import { kindSchemaFor } from "@/lib/config-store";
 import { requireJobTitle } from "@/lib/job-architecture";
 import { publishedTaskBoards } from "@/lib/task-boards";
@@ -663,6 +664,31 @@ function validateRelations(kind: RecordKind, data: Data) {
       );
   }
 }
+/**
+ * The custom values an update merges in place of the sent map: the sent map plus the stored value
+ * of each custom field of the kind schema that the edit screen for the record's type does not show
+ * and the map leaves out, so a value the editor never showed is never lost (R2b-07). Sent values,
+ * null and "" included, and a task's team task-field keys are taken as sent.
+ */
+function keptCustomValues(
+  schema: KindSchema,
+  existing: Pick<DbRecord, "data" | "typeId">,
+  sent: Data,
+): Data {
+  const shown = new Set(
+    shownKeys(screenFor(schema.body, existing.typeId, "edit")),
+  );
+  const stored = (existing.data.customValues ?? {}) as Data;
+  const kept = schema.body.fields.flatMap((field) =>
+    !field.system &&
+    !shown.has(field.key) &&
+    !Object.hasOwn(sent, field.key) &&
+    Object.hasOwn(stored, field.key)
+      ? [[field.key, stored[field.key]]]
+      : [],
+  );
+  return kept.length ? { ...sent, ...Object.fromEntries(kept) } : sent;
+}
 // Empty for a mandatory rule (architecture 1.5 item 5); false is a value.
 const isEmpty = (value: unknown) =>
   value === undefined ||
@@ -674,14 +700,15 @@ const isEmpty = (value: unknown) =>
  * (architecture 1.5), after the strict parse. Only an added or changed value is checked, so a value
  * carried over unchanged never blocks an unrelated edit; an archived field's value can be neither
  * changed nor removed unless the write is imported. Then the mandatory rules: a create needs every
- * mandatory field of the create screen, and an edit may not empty a filled one of the edit screen.
- * A task's team task-field keys are left to checkCustomValues. It runs no statement and returns the
- * added or changed values for checkFieldReferences.
+ * mandatory field of the default create screen (records get no type on create until R2b-11), and an
+ * edit may not empty a filled one of the edit screen for the stored record's type. A task's team
+ * task-field keys are left to checkCustomValues. It runs no statement and returns the added or
+ * changed values for checkFieldReferences.
  */
 function checkKindValues(
   schema: KindSchema,
   data: Data,
-  existing: Data | undefined,
+  existing: Pick<DbRecord, "data" | "typeId"> | undefined,
   importing: boolean,
   teamFields: ReadonlySet<string> = new Set(),
 ): Data {
@@ -694,7 +721,7 @@ function checkKindValues(
       ),
     );
   const values = own(data);
-  const oldValues = own(existing);
+  const oldValues = own(existing?.data);
   const archived = new Set(compiled.archived);
   const changed = Object.fromEntries(
     Object.entries(values).filter(
@@ -734,14 +761,16 @@ function checkKindValues(
   const valueOf = (map: Data, custom: Data, key: string) =>
     fields.get(key)?.system ? map[key] : custom[key];
   const mandatory = existing
-    ? (compiled.mandatory.edit ?? []).filter(
-        (key) =>
-          !isEmpty(valueOf(existing, oldValues, key)) &&
-          isEmpty(valueOf(data, values, key)),
-      )
-    : (compiled.mandatory.create ?? []).filter((key) =>
-        isEmpty(valueOf(data, values, key)),
-      );
+    ? compiled
+        .mandatoryFor(existing.typeId, "edit")
+        .filter(
+          (key) =>
+            !isEmpty(valueOf(existing.data, oldValues, key)) &&
+            isEmpty(valueOf(data, values, key)),
+        )
+    : compiled
+        .mandatoryFor(null, "create")
+        .filter((key) => isEmpty(valueOf(data, values, key)));
   if (mandatory.length) {
     const field = fields.get(mandatory[0])!;
     throw field.system
@@ -961,7 +990,7 @@ async function checkCustomValues(
   const changed = checkKindValues(
     schema,
     data,
-    existing?.data,
+    existing,
     importing,
     new Set(fields.map((field) => field.id)),
   );
@@ -2264,9 +2293,14 @@ async function updateOnce(
         "version_conflict",
         "This record changed. Refresh it and review your draft before saving.",
       );
+    const schema = kindSchemaOf(ctx, kind);
+    const sent = patch.data?.customValues as Data | undefined;
     const data = parse(recordDataSchemas[kind], {
       ...existing.data,
       ...patch.data,
+      ...(schema && sent
+        ? { customValues: keptCustomValues(schema, existing, sent) }
+        : {}),
     }) as Data;
     const input = { ...patch, data };
     const imported = importedInput(
@@ -2297,11 +2331,10 @@ async function updateOnce(
     );
     const refs = refsFor(patch, existing);
     await uniqueChecks(tx, ctx, kind, data, refs, existing, archived);
-    const schema = kindSchemaOf(ctx, kind);
     const changed =
       kind === "task"
         ? await checkCustomValues(tx, ctx, schema!, data, existing, imported)
-        : schema && checkKindValues(schema, data, existing.data, imported);
+        : schema && checkKindValues(schema, data, existing, imported);
     if (changed)
       await checkFieldReferences(
         tx,
