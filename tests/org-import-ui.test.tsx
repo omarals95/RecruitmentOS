@@ -80,6 +80,8 @@ const report = (changes: Partial<ImportReport> = {}): ImportReport => ({
     },
   ],
   flagged: [{ sheet: "Employees", row: 2, column: "Work phone" }],
+  jobTitles: [],
+  ignored: [],
   truncated: false,
   ...changes,
 });
@@ -121,7 +123,7 @@ describe("Import from Excel panel", () => {
       );
       expect(markup).toContain("<h2>Import from Excel</h2>");
       expect(markup).toContain(
-        "Units (Code, Name, Level, Parent code), Positions (Code, Title, Unit code, Manager) and Employees (Employee number, Name, Work email, Work phone, Position codes, Primary position)",
+        '<p class="muted">One .xlsx workbook, row 1 naming the columns: Units (Code, Name, Level, Parent code), Positions (Code, Title, Unit code, Manager, and optionally Job title and Grade) and Employees (Employee number, Name, Work email, Work phone, Position codes, Primary position). Other columns are ignored.</p>',
       );
       expect(markup).toMatch(/<input type="file" accept="\.xlsx,/);
       expect(button(markup, "Check file")).toContain("disabled");
@@ -203,6 +205,63 @@ describe("Import from Excel panel", () => {
     expect(view({ error: "The file is larger than 5 MiB." })).toContain(
       '<p class="notice error" role="alert">The file is larger than 5 MiB.</p>',
     );
+  });
+
+  it("lists the job title and grade each position would get and the ignored columns, only when there are some (ADM-28)", () => {
+    const markup = view({
+      report: report({
+        jobTitles: [
+          {
+            row: 2,
+            code: "P-PAY",
+            titleKey: "payroll-lead",
+            titleName: "Fictional Payroll Lead",
+            gradeCode: "G7",
+            gradeName: "Fictional Lead",
+          },
+        ],
+        ignored: [
+          { sheet: "Positions", column: "Salary" },
+          { sheet: "Positions", column: "Column G" },
+        ],
+      }),
+    });
+    expect(markup).toContain("<h3>Job titles</h3>");
+    expect(markup).toContain(
+      '<p class="muted">The job title and grade each position would get.</p>',
+    );
+    expect(markup).toContain('<caption class="sr-only">Job titles</caption>');
+    expect(markup).toMatch(/<td data-label="Row"[^>]*>2<\/td>/);
+    expect(markup).toMatch(/<td data-label="Position"[^>]*>P-PAY<\/td>/);
+    expect(markup).toMatch(
+      /<td data-label="Job title"[^>]*>Fictional Payroll Lead \(payroll-lead\)<\/td>/,
+    );
+    expect(markup).toMatch(
+      /<td data-label="Grade"[^>]*>G7 · Fictional Lead<\/td>/,
+    );
+    expect(markup).toContain("<h3>Ignored columns</h3>");
+    expect(markup).toContain(
+      '<p class="muted">These columns are not read or stored.</p>',
+    );
+    expect(markup).toContain(
+      '<caption class="sr-only">Ignored columns</caption>',
+    );
+    expect(markup).toMatch(/<td data-label="Column"[^>]*>Salary<\/td>/);
+    expect(markup).toMatch(/<td data-label="Column"[^>]*>Column G<\/td>/);
+    // Between Rejected rows and Flagged cells, in that order.
+    const at = (text: string) => markup.indexOf(text);
+    expect(at("<h3>Rejected rows</h3>")).toBeLessThan(
+      at("<h3>Job titles</h3>"),
+    );
+    expect(at("<h3>Job titles</h3>")).toBeLessThan(
+      at("<h3>Ignored columns</h3>"),
+    );
+    expect(at("<h3>Ignored columns</h3>")).toBeLessThan(
+      at("<h3>Flagged cells</h3>"),
+    );
+    const empty = view({ report: report() });
+    expect(empty).not.toContain("Job titles");
+    expect(empty).not.toContain("Ignored columns");
   });
 
   it("offers Apply company owner changes only to company owners, and tells company admins who applies them", () => {
