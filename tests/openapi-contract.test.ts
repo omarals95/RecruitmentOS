@@ -1231,6 +1231,39 @@ describe("OpenAPI contract", () => {
         ).not.toContain("jobTitleKey");
   });
 
+  it("documents the Fields operations as session-only, with their codes (R2b-09)", () => {
+    const text = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method]);
+    const labels = [
+      ["/api/v1/admin/fields", "get"],
+      ["/api/v1/admin/fields", "post"],
+      ["/api/v1/admin/fields/drafts/{versionId}", "put"],
+      ["/api/v1/admin/fields/drafts/{versionId}/publish", "post"],
+    ] as const;
+    for (const [path, method] of labels) {
+      const operation = document.paths[path][method];
+      expect(operation["x-session-only"], path).toBe(true);
+      expect(operation["x-required-scopes"], path).toEqual([]);
+      expect(Object.keys(operation.responses), path).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      for (const code of ["session_required", "config_forbidden"])
+        expect(text(path, method), path).toContain(code);
+      expect(text(path, method), path).not.toContain("SESSION_NOT_FRESH");
+    }
+    for (const [path, method] of labels.slice(1))
+      expect(text(path, method), path).toContain("invalid_input");
+    expect(text("/api/v1/admin/fields", "post")).toContain(
+      "config_draft_exists",
+    );
+    for (const [path, method] of labels.slice(2))
+      for (const code of ["not_found", "config_state_conflict"])
+        expect(text(path, method), path).toContain(code);
+    expect(text("/api/v1/admin/fields", "get")).toContain(
+      "{data:[{kind, current:{versionId, number|null, body}, draft:",
+    );
+  });
+
   it("documents the salary bracket operations as session-only and confidential, with their codes (ADM-25)", () => {
     const text = (path: string, method: string) =>
       JSON.stringify(document.paths[path][method]);
@@ -1380,6 +1413,10 @@ describe("OpenAPI contract", () => {
         "PATCH /api/v1/admin/groups/{group}",
         "POST /api/v1/admin/groups/{group}/members",
         "DELETE /api/v1/admin/groups/{group}/members",
+        "GET /api/v1/admin/fields",
+        "POST /api/v1/admin/fields",
+        "PUT /api/v1/admin/fields/drafts/{versionId}",
+        "POST /api/v1/admin/fields/drafts/{versionId}/publish",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",

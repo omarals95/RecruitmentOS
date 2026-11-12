@@ -15,6 +15,7 @@ import {
   ACTION_RESOURCES,
   ACTIONS,
   ADMIN_AREAS,
+  CONFIGURABLE_KINDS,
   GRANTABLE_ADMIN_AREAS,
   PAGE_KEYS,
   READ_ACTIONS,
@@ -25,11 +26,13 @@ import {
   type Action,
   type ActionResource,
   type AdminArea,
+  type ConfigurableKind,
   type PageKey,
   type RecordScope,
   type RoleBody,
 } from "@/domain/config";
 import { builtInRoleFor } from "@/domain/config-defaults";
+import { kindSchemaFor } from "@/lib/config-store";
 import {
   SENSITIVE_CANDIDATE_FIELDS,
   recordDataSchemas,
@@ -783,15 +786,32 @@ function ruleHiddenKeys(role: RoleBody, kind: RecordKind): Set<string> {
 
 /**
  * The keys of one kind the caller may not see: data keys, custom field ids and top-level keys whose
- * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus
- * SENSITIVE_CANDIDATE_FIELDS for an MCP candidate. Every output that leaves fields out, redact()
- * included, takes them from here.
+ * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus over MCP
+ * SENSITIVE_CANDIDATE_FIELDS for a candidate and what the kind schema in force marks sensitive
+ * (R2b-09), with no statement. Every output that leaves fields out, redact() included, takes them
+ * from here.
  */
 export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
   if (!ctx.role) throw forbidden();
   const hidden = ruleHiddenKeys(ctx.role, kind);
   if (ctx.channel === "mcp" && kind === "candidate")
     for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
+  if (
+    ctx.channel === "mcp" &&
+    (CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)
+  ) {
+    // An access state without documents never came from install and holds no published schema.
+    const { fields } = kindSchemaFor(
+      { documents: ctx.access.documents ?? {} },
+      kind as ConfigurableKind,
+    ).body;
+    for (const field of fields)
+      if (field.system && field.sensitive) hidden.add(field.key);
+    // MCP results carry custom values as one map, and update_task merges the stored values whose
+    // id is not hidden, so a sensitive custom field hides the kind's whole map, never its id alone.
+    if (fields.some((field) => !field.system && field.sensitive))
+      hidden.add("customValues");
+  }
   return hidden;
 }
 

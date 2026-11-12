@@ -7,6 +7,8 @@ import {
   systemFieldKeys,
   type RecordKind,
 } from "@/domain/records";
+import { CONFIGURABLE_KINDS } from "@/domain/config";
+import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import { EXPORT_RESOURCES } from "@/domain/export";
 import { XLSX_TYPE } from "@/domain/org";
 import { MCP_SCOPES, type Scope } from "@/lib/permissions";
@@ -1615,6 +1617,85 @@ export function GET() {
       },
       { "200": { description: userGroupsShape } },
       { sessionOnly: true, params: [userPath] },
+    ),
+  };
+  // Fields (R2b-09): kind schemas, session only, company owners and admins with fields, no MCP tool.
+  const fieldsWriteRule =
+    "Session only: a signed-in company owner, or a company admin with the fields area; Bearer tokens, including MCP OAuth tokens, get 403 session_required, and anyone else, team owners and admins without company authority and company admins without fields included, gets 403 config_forbidden.";
+  const fieldsBodyRule =
+    "body is the whole kind schema of the kind: {kind, label, singular, fields, screens}, with the kind's system fields {key, system:true, label, help?, type, options?, required, readOnly, sensitive} and custom fields {key (a uuid), system:false, label, help?, type (one of the 18 field types), required, archived?, sensitive?, and the attributes the type takes}, and screens {type?, action, groups:[{label?, fields:[{key, hidden?, mandatory?}]}]}. The strict schema refuses any other key, a system field with another type or options, a loosened required or read-only flag, a sensitive candidate field unmarked, and a broken screen rule (a missing default create, edit or view screen, a required system field left off or hidden on a create screen, an entry both hidden and mandatory or listed twice) with 400 invalid_input naming up to 8 reasons as path: message. Against the kind schema in force, every field is kept with the same system flag and type (a field cannot be removed; archive it instead, and its key never changes), and no custom field is mandatory on a create screen yet; both refuse with 400 invalid_input naming the key. Only a company owner may mark a field sensitive or remove the mark: anyone else gets 403 config_forbidden. Nothing is stored on a refusal.";
+  const fieldsShape =
+    "{data:[{kind, current:{versionId, number|null, body}, draft:{versionId, body, note, createdAt}|null}]}";
+  const fieldsVersionParameter = { ...idParameter, name: "versionId" };
+  const fieldsExample = {
+    kind: "checklist",
+    body: DEFAULT_KIND_SCHEMAS.checklist.body,
+  };
+  paths["/api/v1/admin/fields"] = {
+    get: operation(
+      [],
+      {
+        summary: "List every record kind's fields for the Admin portal",
+        description: `${fieldsWriteRule} Returns the nine configurable kinds in order (candidate, job-role, vacancy, application, task, interview, offer, onboarding, checklist), each with the kind schema in force, read from the request context with no statement of its own (number null for the built-in default), and its draft or null. Field definitions only, never a record, value or count. Nothing is audited. Returns ${fieldsShape}.`,
+      },
+      { "200": { description: fieldsShape } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a kind schema draft",
+        description: `${fieldsWriteRule} Send {kind, body, note?}; kind is one of the nine configurable kinds and body.kind must equal it, otherwise 400 invalid_input. ${fieldsBodyRule} A kind that already has a draft returns 409 config_draft_exists. Writes one config.draft_created row, listed in GET /api/v1/config-history. Body at most 512 KiB. Returns 201 {data:{objectId, versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["kind", "body"],
+            additionalProperties: false,
+            properties: {
+              kind: { enum: [...CONFIGURABLE_KINDS] },
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          fieldsExample,
+        ),
+      },
+      { "201": { description: "{data:{objectId, versionId}}." } },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/admin/fields/drafts/{versionId}"] = {
+    put: operation(
+      [],
+      {
+        summary: "Replace a kind schema draft's body",
+        description: `${fieldsWriteRule} versionId is the draft's version id. Send {body, note?}. ${fieldsBodyRule} The sensitive marks compare with the draft being replaced. A version of another configuration type returns 404 not_found; a version that is no longer a draft returns 409 config_state_conflict. Nothing is audited. Body at most 512 KiB. Returns {data:{versionId}}.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["body"],
+            additionalProperties: false,
+            properties: {
+              body: { type: "object" },
+              note: { type: "string", maxLength: 500 },
+            },
+          },
+          { body: fieldsExample.body },
+        ),
+      },
+      { "200": { description: "{data:{versionId}}." } },
+      { sessionOnly: true, params: [fieldsVersionParameter] },
+    ),
+  };
+  paths["/api/v1/admin/fields/drafts/{versionId}/publish"] = {
+    post: operation(
+      [],
+      {
+        summary: "Publish a kind schema draft",
+        description: `${fieldsWriteRule} versionId is the draft's version id. The draft is parsed and checked again against the kind schema in force before it is published, so a broken screen rule or a removed field returns 400 invalid_input with the reason and nothing is published; a draft whose sensitive marks differ from the version in force is published only by a company owner (403 config_forbidden otherwise). Publishing makes the draft the version in force with the next number, read at once by saving, validation and exports; older versions stay as they were. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+      },
+      { "200": { description: "{data:{versionId, number}}." } },
+      { sessionOnly: true, params: [fieldsVersionParameter] },
     ),
   };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.

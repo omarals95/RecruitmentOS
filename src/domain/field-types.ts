@@ -194,61 +194,66 @@ const bounds = <S extends z.ZodType>(schema: S) => ({
 });
 // Configuration holds no record ids or values, so the reference types take no default (§1.2).
 const withDefault = { default: z.unknown().optional() };
-const definition = <T extends CustomFieldType, S extends z.ZodRawShape>(
-  type: T,
-  shape: S,
-) =>
-  z
-    .object({
-      key: uuidSchema,
-      system: z.literal(false),
-      label: configLabel,
-      help: configHelpText.optional(),
-      type: z.literal(type),
-      required: z.boolean(),
-      // Absent means active. An archived field keeps its values and is never mandatory (§1.5).
-      archived: z.boolean().optional(),
-      ...shape,
-    })
-    .strict();
-const customFieldShape = z.discriminatedUnion("type", [
-  definition("short-text", {
-    ...bounds(length),
-    pattern: z
-      .string()
-      .superRefine((source, ctx) => {
-        const reason = patternIssue(source);
-        if (reason) ctx.addIssue({ code: "custom", message: reason });
+/** The definitions of every type; `extra` adds the attributes a kind schema holds beside them. */
+function definitions<E extends z.ZodRawShape>(extra: E) {
+  const definition = <T extends CustomFieldType, S extends z.ZodRawShape>(
+    type: T,
+    shape: S,
+  ) =>
+    z
+      .object({
+        key: uuidSchema,
+        system: z.literal(false),
+        label: configLabel,
+        help: configHelpText.optional(),
+        type: z.literal(type),
+        required: z.boolean(),
+        // Absent means active. An archived field keeps its values and is never mandatory (§1.5).
+        archived: z.boolean().optional(),
+        ...extra,
+        ...shape,
       })
-      .optional(),
-    ...withDefault,
-  }),
-  definition("long-text", { ...bounds(length), ...withDefault }),
-  definition("rich-text", { ...bounds(length), ...withDefault }),
-  definition("number", { ...bounds(z.number()), ...withDefault }),
-  definition("money", {
-    currency: z.string().regex(/^[A-Z]{3}$/),
-    ...bounds(z.number().min(0).max(1000000000)),
-    ...withDefault,
-  }),
-  definition("percentage", { ...bounds(z.number()), ...withDefault }),
-  definition("date", { ...bounds(daySchema), ...withDefault }),
-  definition("date-time", { ...bounds(dateTimeSchema), ...withDefault }),
-  definition("dropdown", { options, ...withDefault }),
-  definition("multi-select", {
-    options,
-    ...bounds(selections),
-    ...withDefault,
-  }),
-  definition("checkbox", withDefault),
-  definition("person", {}),
-  definition("org-unit", {}),
-  definition("url", withDefault),
-  definition("email", withDefault),
-  definition("phone", withDefault),
-  definition("file", {}),
-  definition("lookup", { target: z.enum(CONFIGURABLE_KINDS) }),
-]);
+      .strict();
+  return z.discriminatedUnion("type", [
+    definition("short-text", {
+      ...bounds(length),
+      pattern: z
+        .string()
+        .superRefine((source, ctx) => {
+          const reason = patternIssue(source);
+          if (reason) ctx.addIssue({ code: "custom", message: reason });
+        })
+        .optional(),
+      ...withDefault,
+    }),
+    definition("long-text", { ...bounds(length), ...withDefault }),
+    definition("rich-text", { ...bounds(length), ...withDefault }),
+    definition("number", { ...bounds(z.number()), ...withDefault }),
+    definition("money", {
+      currency: z.string().regex(/^[A-Z]{3}$/),
+      ...bounds(z.number().min(0).max(1000000000)),
+      ...withDefault,
+    }),
+    definition("percentage", { ...bounds(z.number()), ...withDefault }),
+    definition("date", { ...bounds(daySchema), ...withDefault }),
+    definition("date-time", { ...bounds(dateTimeSchema), ...withDefault }),
+    definition("dropdown", { options, ...withDefault }),
+    definition("multi-select", {
+      options,
+      ...bounds(selections),
+      ...withDefault,
+    }),
+    definition("checkbox", withDefault),
+    definition("person", {}),
+    definition("org-unit", {}),
+    definition("url", withDefault),
+    definition("email", withDefault),
+    definition("phone", withDefault),
+    definition("file", {}),
+    definition("lookup", { target: z.enum(CONFIGURABLE_KINDS) }),
+  ]);
+}
+const customFieldShape = definitions({});
 export type CustomField = z.output<typeof customFieldShape>;
 
 // Days (read as UTC midnight) and date-times compare as instants, every other bound as a number.
@@ -265,34 +270,43 @@ const within = (
 // never compiled or run against the default.
 const noIssues = (payload: { issues: unknown[] }) =>
   payload.issues.length === 0;
+const checked = <S extends z.ZodType<CustomField>>(schema: S) =>
+  schema
+    .refine(
+      (field: CustomField) =>
+        !("min" in field) ||
+        field.min === undefined ||
+        field.max === undefined ||
+        instant(field.min) <= instant(field.max),
+      {
+        path: ["max"],
+        message: "The maximum may not be below the minimum.",
+        when: noIssues,
+      },
+    )
+    .refine(
+      (field: CustomField) =>
+        !("default" in field) ||
+        field.default === undefined ||
+        fieldValueSchema(field).safeParse(field.default).success,
+      {
+        path: ["default"],
+        message: "The default must be a valid value of the field.",
+        when: noIssues,
+      },
+    );
 /**
  * One custom field definition (architecture §1.5): a uuid key, a cleaned label and help, and only
  * the attributes its type lists. Its default must be a valid value of the field itself.
  */
-export const customFieldSchema = customFieldShape
-  .refine(
-    (field) =>
-      !("min" in field) ||
-      field.min === undefined ||
-      field.max === undefined ||
-      instant(field.min) <= instant(field.max),
-    {
-      path: ["max"],
-      message: "The maximum may not be below the minimum.",
-      when: noIssues,
-    },
-  )
-  .refine(
-    (field) =>
-      !("default" in field) ||
-      field.default === undefined ||
-      fieldValueSchema(field).safeParse(field.default).success,
-    {
-      path: ["default"],
-      message: "The default must be a valid value of the field.",
-      when: noIssues,
-    },
-  );
+export const customFieldSchema = checked(customFieldShape);
+/**
+ * A custom field as a kind schema holds it: its definition and the company owner's sensitive mark,
+ * absent meaning false (R2b-09).
+ */
+export const kindSchemaCustomFieldSchema = checked(
+  definitions({ sensitive: z.boolean().optional() }),
+);
 
 // One non-empty value of the field. Person, org unit, file and lookup check the shape only; their
 // references (a file value is the id of a record file of the record) are checked by the records

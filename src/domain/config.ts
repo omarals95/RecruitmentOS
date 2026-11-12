@@ -5,9 +5,14 @@ import {
   configHelpText,
   configLabel,
   configOptionValue,
-  customFieldSchema,
+  kindSchemaCustomFieldSchema,
 } from "./field-types";
-import { configKey, recordDataSchemas, uuidSchema } from "./record-schemas";
+import {
+  SENSITIVE_CANDIDATE_FIELDS,
+  configKey,
+  recordDataSchemas,
+  uuidSchema,
+} from "./record-schemas";
 import type { FieldType, RecordKind, ResourceName } from "./records";
 import { screenKey } from "./screens";
 import { systemFieldConfig } from "./system-fields";
@@ -81,6 +86,7 @@ const kindSchemaField = z
     key: z.string(),
     system: z.literal(true),
     label: configLabel,
+    help: configHelpText.optional(),
     type: z.enum(Object.keys(fieldTypes) as [FieldType, ...FieldType[]]),
     options: z
       .array(configOptionValue)
@@ -103,7 +109,10 @@ const kindSchemaShape = z
     singular: configLabel,
     fields: z
       .array(
-        z.discriminatedUnion("system", [kindSchemaField, customFieldSchema]),
+        z.discriminatedUnion("system", [
+          kindSchemaField,
+          kindSchemaCustomFieldSchema,
+        ]),
       )
       .min(1)
       .max(150),
@@ -162,7 +171,8 @@ function kindSchemaIssues(
       issue(["fields", index, "key"], "Field keys must be unique.");
     else if (field.system) {
       // Configuration only tightens a system field (§1.5 item 3): relabel it, require it or make
-      // it read-only, never change its type or options or loosen it.
+      // it read-only, never change its type or options or loosen it. The sensitive candidate
+      // fields stay sensitive (D14).
       const builtIn = systemFieldConfig(body.kind, field.key);
       if (field.type !== builtIn.type)
         issue(["fields", index, "type"], "A system field keeps its type.");
@@ -185,6 +195,15 @@ function kindSchemaIssues(
         issue(
           ["fields", index, "readOnly"],
           "A read-only field stays read-only.",
+        );
+      if (
+        body.kind === "candidate" &&
+        (SENSITIVE_CANDIDATE_FIELDS as readonly string[]).includes(field.key) &&
+        !field.sensitive
+      )
+        issue(
+          ["fields", index, "sensitive"],
+          "A sensitive field stays sensitive.",
         );
     }
     keys.add(field.key);
@@ -639,10 +658,10 @@ export const jobArchitectureBodySchema = jobArchitectureShape.superRefine(
 );
 export type JobArchitectureBody = z.output<typeof jobArchitectureBodySchema>;
 
-// Role, task-board and job architecture drafts carry real bodies; every other type keeps the envelope
-// until its own item.
+// Kind schema, role, task-board and job architecture drafts carry real bodies; every other type keeps
+// the envelope until its own item.
 export const configBodySchemas = {
-  "kind-schema": envelope,
+  "kind-schema": kindSchemaBodySchema,
   workflow: envelope,
   board: envelope,
   role: roleBodySchema,

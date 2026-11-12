@@ -994,6 +994,71 @@ describe("field rules in every output (R2b-08)", () => {
     await same(tool("list_tasks", { bucketId: id.bucket }));
   });
 
+  // R2b-09 (job 094): the published kind schema's sensitive marks also leave fields out of MCP.
+  it("leaves the fields a published kind schema marks sensitive out of MCP results only (R2b-09)", async () => {
+    const mcpCandidate = async () =>
+      mcpData<Row>(
+        await mcp(ownerToken, "get_candidate", { id: id.candidate }),
+      );
+    const mcpTask = async () =>
+      mcpData<Row[]>(
+        await mcp(ownerToken, "list_tasks", { bucketId: id.bucket }),
+      ).find((row) => row.id === id.task)!;
+    /** Publishes both kind schemas again, with or without the marks. */
+    const publish = (marked: boolean) =>
+      asOwner(async () => {
+        const candidate = kindBody("candidate", [visible, hidden, readOnly]);
+        Object.assign(
+          candidate.fields.find((field) => field.key === "certifications")!,
+          { sensitive: marked },
+        );
+        await insertKindSchema(fixture.client, owner.userId, candidate);
+        await insertKindSchema(
+          fixture.client,
+          owner.userId,
+          kindBody("task", [
+            hiddenTask,
+            { ...visibleTask, ...(marked ? { sensitive: true } : {}) },
+          ]),
+        );
+      });
+    const shown = async () => {
+      const candidate = await mcpCandidate();
+      const task = await mcpTask();
+      return [
+        Object.hasOwn(candidate.facts as Row, "certifications"),
+        // A sensitive custom field leaves the task's whole custom map out of MCP results.
+        Object.hasOwn((task.customValues ?? {}) as Row, visibleTask.key),
+      ];
+    };
+    expect(await shown()).toEqual([true, true]);
+    const taskValue = () =>
+      get(owner, "tasks", id.task).then(
+        (task) => customOf(task.body.data)[visibleTask.key],
+      );
+    const stored = await taskValue();
+    expect(stored).toEqual(expect.any(String));
+    await publish(true);
+    expect(await shown()).toEqual([false, false]);
+    // An MCP update of the task's custom values keeps the sensitive value it cannot see.
+    const { version } = await mcpTask();
+    mcpData(
+      await mcp(ownerToken, "update_task", {
+        id: id.task,
+        version,
+        customValues: { [hiddenTask.key]: HIDDEN_TASK_VALUE },
+      }),
+    );
+    // REST still returns both to the owner.
+    expect(
+      (await get(owner, "candidates", id.candidate)).body.data.data
+        .certifications,
+    ).toEqual(["Fictional Certificate"]);
+    expect(await taskValue()).toBe(stored);
+    await publish(false);
+    expect(await shown()).toEqual([true, true]);
+  });
+
   it("serves one static OpenAPI document with no label of the published kind schemas", async () => {
     const text = await (await openapiRoute()).text();
     expect(text).toContain("field_forbidden");
