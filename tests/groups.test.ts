@@ -1049,6 +1049,75 @@ describe("company groups under the split runtime roles", () => {
     });
   });
 
+  describe("contexts that expire during a statement", () => {
+    let approval: Group, plain: Group;
+    const person = () => loadUsers[7].userId;
+    beforeAll(async () => {
+      approval = await createGroup(owner, {
+        name: "Fictional Expiry Approvers",
+      });
+      plain = await createGroup(owner, { name: "Fictional Expiry List" });
+      for (const group of [approval, plain]) {
+        await addGroupMember(owner, group.id, { userId: person() });
+        await sqlAs(
+          owner,
+          `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${group.id}', '${COMPANY}', '${person()}')`,
+        );
+      }
+      await setGroupApproval(owner, approval.id, { approval: true });
+      // Test-only, on this PGlite: a function the data role calls in a WHERE clause, after the read
+      // policy has passed for the row, that moves its own context's expiry into the past.
+      await harness.asSuperuser();
+      await harness.client.exec(`CREATE SCHEMA fictional_expiry;
+        CREATE FUNCTION fictional_expiry.expire() RETURNS boolean LANGUAGE sql SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS $$
+          UPDATE tenant_context.contexts SET expires_at = clock_timestamp() - interval '1 second'
+            WHERE pid = pg_backend_pid() RETURNING true $$;
+        GRANT USAGE ON SCHEMA fictional_expiry TO recruitmentos_data;
+        GRANT EXECUTE ON FUNCTION fictional_expiry.expire() TO recruitmentos_data;`);
+    });
+    afterAll(async () => {
+      await harness.asSuperuser();
+      await harness.client.exec("DROP SCHEMA fictional_expiry CASCADE");
+    });
+
+    it("refuses a member or manager delete whose context expired after the read policy passed, with 42501", async () => {
+      for (const group of [approval, plain])
+        for (const table of ["group_members", "group_managers"])
+          for (const p of [peopleAdmin, owner])
+            await refused(
+              () =>
+                sqlAs(
+                  p,
+                  `DELETE FROM app.${table} WHERE group_id = '${group.id}' AND user_id = '${person()}' AND fictional_expiry.expire()`,
+                ),
+              "42501",
+            );
+      // The same delete of the plain group's member under a live context passes, with its audit row.
+      expectAudit(
+        await audited(() =>
+          sqlAs(
+            peopleAdmin,
+            `DELETE FROM app.group_members WHERE group_id = '${plain.id}' AND user_id = '${person()}'`,
+          ),
+        ),
+        "group.member_removed",
+        peopleAdmin,
+        plain.id,
+        { targetUserId: person() },
+      );
+      await expectEffective();
+    });
+
+    it("stamps a group's creation time on a context insert", async () => {
+      const [row] = (await sqlAs(
+        peopleAdmin,
+        `INSERT INTO app.groups(workspace_id, name, created_at) VALUES ('${COMPANY}', 'Fictional Backdated', '2001-01-01') RETURNING created_at`,
+      )) as { created_at: string }[];
+      expect(new Date(row.created_at).getFullYear()).toBeGreaterThan(2001);
+    });
+  });
+
   describe("effective membership is read-only to the runtime roles", () => {
     it("refuses every write of app.group_effective_members by the data role, even for a company owner", async () => {
       const [row] = await look<{ group_id: string; user_id: string }>(

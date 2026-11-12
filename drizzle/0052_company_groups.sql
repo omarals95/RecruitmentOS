@@ -181,19 +181,21 @@ END $group_rls$;
 
 -- Every group, member and manager write. A security definer function, because only the owner reads
 -- the context table, so current_user is the owner here: the owner's own SQL (the migration,
--- fixtures) is told apart as in app.guard_scope_sources, by having no context row, and no runtime
--- role writes these tables without one (every runtime policy needs it). An owner-run helper called
--- under a context, such as anonymise_user, needs a company owner context and passes the checks
--- below. Any other write needs an unexpired session context of the row's workspace whose company
--- level is owner, or admin holding people (42501 otherwise: tokens, team-only owners and admins,
--- admins without people, other workspaces). The workspace row lock then serialises grant checks,
+-- fixtures) is told apart as in app.guard_scope_sources, by having no context row of this backend
+-- and transaction at all, and no runtime role writes these tables without one (every runtime
+-- policy needs it). A context row that has expired fails closed (42501): a delete has no WITH
+-- CHECK, so a scan that passed the read policy and outlived its context must not pass here. An
+-- owner-run helper called under a context, such as anonymise_user, needs a company owner context
+-- and passes the checks below. Any other write needs an unexpired session context of the row's
+-- workspace whose company level is owner, or admin holding people (42501 otherwise: expired
+-- contexts, tokens, team-only owners and admins, admins without people, other workspaces). The workspace row lock then serialises grant checks,
 -- nesting changes and rebuilds per workspace. Below company owner, a change to a group for which
 -- group_grants is true (the group itself, or a member, child or manager row of it, OLD and NEW), an
 -- approval group insert and any change of the flag are 42501. Row rules for context writes: a
 -- group's id, workspace, creator and creation time never change, an insert is never archived, and
 -- member and manager rows are inserted and deleted, never updated (42501). An archived group stays
 -- archived, for the owner too. A user member or manager must be in a team of the workspace (RQ006).
--- added_by and added_at come from the context.
+-- added_by and added_at, and a group's created_at, come from the context write.
 CREATE FUNCTION app.guard_group_write() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -206,8 +208,7 @@ BEGIN
     END IF;
   END IF;
   SELECT * INTO ctx FROM tenant_context.contexts c
-    WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
-      AND c.expires_at > clock_timestamp();
+    WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned();
   IF NOT FOUND THEN
     IF TG_OP = 'DELETE' THEN
       RETURN OLD;
@@ -219,7 +220,7 @@ BEGIN
   ELSE
     row_workspace := NEW.workspace_id;
   END IF;
-  IF ctx.auth_type IS DISTINCT FROM 'session' OR ctx.workspace_id IS DISTINCT FROM row_workspace
+  IF ctx.expires_at <= clock_timestamp() OR ctx.auth_type IS DISTINCT FROM 'session' OR ctx.workspace_id IS DISTINCT FROM row_workspace
      OR (TG_OP = 'UPDATE' AND OLD.workspace_id IS DISTINCT FROM row_workspace)
      OR NOT coalesce(ctx.company_level = 'owner' OR (ctx.company_level = 'admin' AND 'people' = ANY(ctx.company_areas)), false) THEN
     RAISE EXCEPTION 'Changing groups needs a company owner, or a company admin with the people area' USING ERRCODE = '42501';
@@ -260,6 +261,7 @@ BEGIN
       IF NEW.archived_at IS NOT NULL THEN
         RAISE EXCEPTION 'Group row rejected' USING ERRCODE = '42501';
       END IF;
+      NEW.created_at := now();
     ELSIF (NEW.id, NEW.workspace_id, NEW.created_by, NEW.created_at)
         IS DISTINCT FROM (OLD.id, OLD.workspace_id, OLD.created_by, OLD.created_at) THEN
       RAISE EXCEPTION 'Group row rejected' USING ERRCODE = '42501';
@@ -359,7 +361,8 @@ CREATE TRIGGER group_members_maintain AFTER INSERT OR UPDATE OR DELETE ON app.gr
 -- team; an update that changes several things writes one row per action, as app.audit_org_change.
 -- Metadata holds ids only, never a name, description or email: the workspace and group, plus
 -- targetUserId for a user member or manager (so user anonymisation redacts it) or childGroupId for
--- a child group. The owner's own SQL has no context row and writes nothing.
+-- a child group. The owner's own SQL has no context row and writes nothing; an expired context
+-- row fails closed (42501), so no change of a context write goes unaudited.
 CREATE FUNCTION app.audit_group_change() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -376,9 +379,12 @@ BEGIN
   END IF;
   SELECT * INTO ctx FROM tenant_context.contexts c
     WHERE c.pid = pg_backend_pid() AND c.xid = pg_current_xact_id_if_assigned()
-      AND c.expires_at > clock_timestamp() AND c.workspace_id = (changed_row->>'workspace_id')::uuid;
+      AND c.workspace_id = (changed_row->>'workspace_id')::uuid;
   IF NOT FOUND THEN
     RETURN NULL;
+  END IF;
+  IF ctx.expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'Group change rejected' USING ERRCODE = '42501';
   END IF;
   IF TG_TABLE_NAME = 'groups' THEN
     IF TG_OP = 'INSERT' THEN
