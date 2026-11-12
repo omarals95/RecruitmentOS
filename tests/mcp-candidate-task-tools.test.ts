@@ -1528,7 +1528,8 @@ describe("MCP candidate, task and collaboration tools over real migrations and R
     // A published candidate custom field (R2b-04), written by the owner as an admin writer would.
     const field = randomUUID();
     const body = structuredClone(DEFAULT_KIND_SCHEMAS.candidate.body);
-    for (const screen of body.screens) screen.fields.push(field);
+    for (const screen of body.screens)
+      screen.groups[0].fields.push({ key: field });
     const [object] = await query<{ id: string }>(
       "INSERT INTO app.config_objects(workspace_id, type, key, created_by) VALUES ('00000000-0000-4000-a000-000000000001', 'kind-schema', 'candidate', $1) RETURNING id",
       [owner.userId],

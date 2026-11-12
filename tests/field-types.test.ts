@@ -632,12 +632,18 @@ describe("field type engine (R2b-03)", () => {
   const withCustom = (custom: unknown[], screens?: string[][]) => {
     const body = structuredClone(DEFAULT_KIND_SCHEMAS.candidate.body) as {
       fields: unknown[];
-      screens: { action: string; fields: string[] }[];
+      screens: {
+        type?: string;
+        action: string;
+        groups: { fields: { key: string }[] }[];
+      }[];
     };
     body.fields.push(...custom);
     const keys = (custom as { key: string }[]).map((field) => field.key);
     body.screens.forEach((screen, index) =>
-      screen.fields.push(...(screens?.[index] ?? keys)),
+      screen.groups[0].fields.push(
+        ...(screens?.[index] ?? keys).map((key) => ({ key })),
+      ),
     );
     return body;
   };
@@ -819,8 +825,6 @@ describe("field type engine (R2b-03)", () => {
   });
 
   it("compiles the largest configuration within 20 ms", () => {
-    // 40 screens and 30 types per kind cannot be expressed until R2b-07 and R2b-11: the body has
-    // one screen per action, so this is the largest body it can hold today.
     const valueOf = (type: CustomFieldType, n: number): unknown => {
       switch (type) {
         case "short-text":
@@ -874,8 +878,18 @@ describe("field type engine (R2b-03)", () => {
       );
     });
     const raw = withCustom(custom);
+    // 40 screens of 150 fields each: the three default screens and 37 typed ones.
+    const typed = ["create", "edit", "view", "transition"];
+    for (let n = 0; n < 37; n++)
+      raw.screens.push({
+        ...structuredClone(raw.screens[0]),
+        type: uuid(3000 + Math.floor(n / typed.length)),
+        action: typed[n % typed.length],
+      });
     expect(raw.fields).toHaveLength(150);
-    for (const screen of raw.screens) expect(screen.fields).toHaveLength(150);
+    expect(raw.screens).toHaveLength(40);
+    for (const screen of raw.screens)
+      expect(screen.groups[0].fields).toHaveLength(150);
     expect(
       new TextEncoder().encode(JSON.stringify(raw)).byteLength,
     ).toBeLessThanOrEqual(524288);

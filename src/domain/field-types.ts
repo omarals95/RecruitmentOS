@@ -1,6 +1,7 @@
 // The field type engine (architecture §1.5 item 4): the fixed R2-02 data types, a bounded value
 // schema per custom field definition and compileKindSchema. Pure: no I/O, no environment, and the
-// compile cache is its only state. It imports ./config for types only, since config.ts imports it.
+// compile cache is its only state. It imports ./config for types only, since config.ts imports it,
+// and ./screens, which imports nothing at run time.
 import { z } from "zod";
 import { cleanClientName } from "../lib/client-name";
 import {
@@ -10,6 +11,12 @@ import {
   uuidSchema,
 } from "./record-schemas";
 import type { KindSchemaBody } from "./config";
+import {
+  mandatoryKeys,
+  screenFor,
+  screenKey,
+  type ScreenAction,
+} from "./screens";
 
 // Invisible, control, format and bidi characters are removed first, then the length is checked.
 const cleanText = (min: number, max: number) =>
@@ -349,13 +356,20 @@ export function fieldValueSchema(field: CustomField): z.ZodType {
   return z.union([z.null(), z.literal(""), filledValue(field)]);
 }
 
-type ScreenAction = KindSchemaBody["screens"][number]["action"];
 export type CompiledKindSchema = Readonly<{
   versionId: string;
   /** One optional key per custom field of the body; any other key is refused. */
   customValues: z.ZodType<Record<string, unknown>>;
-  /** Per screen action, the required active fields listed on that screen, in screen order. */
-  mandatory: Readonly<Partial<Record<ScreenAction, readonly string[]>>>;
+  /** Per screen key (screenKey), the mandatory keys of that screen (mandatoryKeys). */
+  mandatory: Readonly<Record<string, readonly string[]>>;
+  /**
+   * The mandatory keys of the screen screenFor gives a record of `typeId` for `action`; none for a
+   * transition without a screen.
+   */
+  mandatoryFor: (
+    typeId: string | null,
+    action: ScreenAction,
+  ) => readonly string[];
   /** The keys of the archived custom fields, in body order. */
   archived: readonly string[];
 }>;
@@ -384,11 +398,15 @@ export function compileKindSchema(version: {
   const archived = fields.flatMap((field) =>
     !field.system && field.archived ? [field.key] : [],
   );
-  const required = new Set(
-    fields
-      .filter((field) => field.required && !archived.includes(field.key))
-      .map((field) => field.key),
+  const mandatory: Readonly<Record<string, readonly string[]>> = Object.freeze(
+    Object.fromEntries(
+      screens.map((screen) => [
+        screenKey(screen),
+        Object.freeze(mandatoryKeys(version.body, screen)),
+      ]),
+    ),
   );
+  const none: readonly string[] = Object.freeze([]);
   const result: CompiledKindSchema = Object.freeze({
     versionId: version.versionId,
     customValues: z
@@ -402,14 +420,11 @@ export function compileKindSchema(version: {
         ),
       )
       .strict(),
-    mandatory: Object.freeze(
-      Object.fromEntries(
-        screens.map((screen) => [
-          screen.action,
-          Object.freeze(screen.fields.filter((key) => required.has(key))),
-        ]),
-      ),
-    ),
+    mandatory,
+    mandatoryFor: (typeId, action) => {
+      const screen = screenFor(version.body, typeId, action);
+      return screen ? mandatory[screenKey(screen)] : none;
+    },
     archived: Object.freeze(archived),
   });
   compiled.set(version.versionId, result);
