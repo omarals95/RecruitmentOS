@@ -291,8 +291,8 @@ const typedKeys: [FieldType, string[]][] = [
   ],
 ];
 const REQUIRED_KEYS = ["name", "title", "body", "startAt"];
-// A vacancy's job title is set through the API only until the title picker (ADM-26), so the editor
-// neither renders nor sends it.
+// A vacancy's job title is never a generic editor field: the editor's own job title picker (ADM-27)
+// renders it and sends it only when it changed.
 const READ_ONLY_KEYS = [
   "rawSource",
   "evidence",

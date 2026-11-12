@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { DrizzleQueryError, sql } from "drizzle-orm";
 import {
   JOB_ARCHITECTURE_KEY,
   jobArchitectureBodySchema,
@@ -14,6 +14,11 @@ export type JobArchitecture = {
   versionId: string;
   number: number;
   body: JobArchitectureBody;
+};
+export type JobTitleUsage = {
+  positions: number;
+  openVacancies: number;
+  openOffers: number;
 };
 export type JobArchitectureDraft = {
   id: string;
@@ -84,4 +89,44 @@ export function requireJobTitle(
       "invalid_reference",
       "jobTitleKey is not a job title of the published job architecture.",
     );
+}
+
+const configForbidden = () =>
+  new ApiError(
+    403,
+    "config_forbidden",
+    "You do not have company authority to change this configuration.",
+  );
+
+/**
+ * Counts only, before a title's grade changes: current positions, open vacancies and open offers of
+ * the whole company that use the title (tenant_context.job_title_usage). Company owners and admins
+ * with organisation, signed in; everyone else is refused before the helper runs, and the helper's
+ * own 42501 is the same refusal. Writes no activity.
+ */
+export async function jobTitleUsage(
+  p: Principal,
+  titleKey: string,
+): Promise<JobTitleUsage> {
+  try {
+    return await withTeam(p, async (tx, access) => {
+      if (!mayWriteConfig(p, access, "job-architecture"))
+        throw configForbidden();
+      const { rows } = await tx.execute<{
+        positions: number;
+        open_vacancies: number;
+        open_offers: number;
+      }>(sql`select * from tenant_context.job_title_usage(${titleKey})`);
+      return {
+        positions: rows[0].positions,
+        openVacancies: rows[0].open_vacancies,
+        openOffers: rows[0].open_offers,
+      };
+    });
+  } catch (error) {
+    const cause = (error instanceof DrizzleQueryError ? error.cause : error) as
+      { code?: unknown } | undefined;
+    if (cause?.code === "42501") throw configForbidden();
+    throw error;
+  }
 }

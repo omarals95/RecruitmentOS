@@ -16,6 +16,7 @@ import {
 import type {
   JobArchitecture,
   JobArchitectureDraft,
+  JobTitleUsage,
 } from "@/lib/job-architecture";
 import type {
   SalaryBracket,
@@ -72,6 +73,12 @@ export interface BracketValues {
   effectiveFrom: string;
   rows: BracketRow[];
 }
+/** A title's grade change awaiting confirmation: what uses the title, and the two grade codes. */
+export interface TitleImpact {
+  usage: JobTitleUsage;
+  from: string;
+  to: string;
+}
 export interface JobHandlers {
   view: (view: JobView) => void;
   open: (form: JobForm) => void;
@@ -83,6 +90,7 @@ export interface JobHandlers {
 
 export const JOB_ARCHITECTURE_PATH = "/api/v1/job-architecture";
 export const SALARY_BRACKETS_PATH = "/api/v1/salary-brackets";
+export const JOB_TITLE_USAGE_PATH = `${JOB_ARCHITECTURE_PATH}/usage`;
 const JOB_VIEWS: [JobView, string][] = [
   ["grades", "Job grades & salary brackets"],
   ["titles", "Job titles"],
@@ -92,11 +100,11 @@ const PAY_PERIOD_LABELS: Record<PayPeriod, string> = {
   monthly: "Monthly",
   annual: "Annual",
 };
-const PER_PERIOD: Record<PayPeriod, string> = {
+export const PER_PERIOD: Record<PayPeriod, string> = {
   monthly: "AED a month",
   annual: "AED a year",
 };
-const COVER_LABELS: Record<BracketCover, string> = {
+export const COVER_LABELS: Record<BracketCover, string> = {
   basic: "Basic salary only",
   "basic-housing-transport": "Basic + housing + transport",
   "total-cash": "Total cash",
@@ -146,6 +154,43 @@ export const saveJobArchitecture = (
         body,
       })
     : send(request, JOB_ARCHITECTURE_PATH, "POST", { body });
+/** Counts only, of what uses one title across the company; asked for only before a grade change. */
+export const loadTitleUsage = (request: Requester, key: string) =>
+  request<{ data: JobTitleUsage }>(
+    `${JOB_TITLE_USAGE_PATH}?titleKey=${encodeURIComponent(key)}`,
+  ).then((found) => found.data);
+/**
+ * One step of saving the job form. A grade change of an existing title without its usage yet only
+ * asks for the usage and returns it; anything else, or the confirmation with the usage shown, saves
+ * the next body into the draft.
+ */
+export async function stepTitleSave(
+  request: Requester,
+  state: JobArchitectureState,
+  form: JobForm,
+  values: JobValues,
+  body: JobArchitectureBody,
+  usage: JobTitleUsage | null,
+): Promise<{ usage: JobTitleUsage } | { saved: true }> {
+  if (
+    form.kind === "title" &&
+    form.title &&
+    values.gradeCode !== form.title.gradeCode &&
+    !usage
+  )
+    return { usage: await loadTitleUsage(request, form.title.key) };
+  await saveJobArchitecture(request, state, body);
+  return { saved: true };
+}
+const plural = (count: number, one: string, many: string) =>
+  `${formatNumber(count)} ${count === 1 ? one : many}`;
+/** The impact notice's words; the counts cover every team of the company. */
+export function impactText(name: string, impact: TitleImpact) {
+  const { positions, openVacancies, openOffers } = impact.usage;
+  if (!positions && !openVacancies && !openOffers)
+    return `No current position, open vacancy or open offer uses ${name}. The new grade applies once the job architecture is published.`;
+  return `Changing ${name} from ${impact.from} to ${impact.to} affects ${plural(positions, "position", "positions")}, ${plural(openVacancies, "open vacancy", "open vacancies")} and ${plural(openOffers, "open offer", "open offers")} across the company. They follow the new grade once the job architecture is published.`;
+}
 /** Exactly the expected codes, each once, as the bracket service compares them. */
 const sameCodes = (codes: string[], expected: string[]) => {
   const held = new Set(codes);
@@ -496,10 +541,8 @@ export function JobArchitecturePanel({
       setBusy(false);
     }
   }
-  /** Sends the open form's next body; a refusal throws, so the dialog shows it. */
-  async function save(body: JobArchitectureBody) {
-    if (!request || !state) return;
-    await saveJobArchitecture(request, state, body);
+  /** After the open form saved its next body; a refusal throws in the dialog, so it shows it. */
+  async function saved() {
     await reload();
     setNotice("");
     setForm(null);
@@ -581,11 +624,13 @@ export function JobArchitecturePanel({
         noticeRef={noticeRef}
         on={on}
       />
-      {form && (
+      {form && request && state && (
         <JobFormDialog
           form={form}
           body={body ?? EMPTY_BODY}
-          onSubmit={save}
+          request={request}
+          state={state}
+          onSaved={saved}
           onClose={() => setForm(null)}
         />
       )}
@@ -1261,22 +1306,31 @@ const jobFormTitles: Record<JobForm["kind"], [string, string, string]> = {
   family: ["Add job family", "Edit job family", "Save job family"],
 };
 
-/** One grade, title or family in a dialog; the client check runs first and sends nothing on a refusal. */
+/**
+ * One grade, title or family in a dialog; the client check runs first and sends nothing on a refusal.
+ * A title's grade change first shows its impact, and saves only on Change grade and save.
+ */
 function JobFormDialog({
   form,
   body,
-  onSubmit,
+  request,
+  state,
+  onSaved,
   onClose,
 }: {
   form: JobForm;
   body: JobArchitectureBody;
-  onSubmit: (body: JobArchitectureBody) => Promise<void>;
+  request: Requester;
+  state: JobArchitectureState;
+  onSaved: () => Promise<void>;
   onClose: () => void;
 }) {
   const [values, setValues] = useState<JobValues>(() => startValues(form));
   const [keyEdited, setKeyEdited] = useState(false);
+  const [impact, setImpact] = useState<TitleImpact | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [impactRef, focusImpact] = useFocusAfter<HTMLParagraphElement>();
   const set = (change: Partial<JobValues>) =>
     setValues((current) => ({ ...current, ...change }));
   async function submit(event: FormEvent) {
@@ -1289,7 +1343,25 @@ function JobFormDialog({
     setBusy(true);
     setError("");
     try {
-      await onSubmit(nextBody(body, form, values));
+      const step = await stepTitleSave(
+        request,
+        state,
+        form,
+        values,
+        nextBody(body, form, values),
+        impact?.usage ?? null,
+      );
+      if ("usage" in step) {
+        setImpact({
+          usage: step.usage,
+          from: form.kind === "title" ? (form.title?.gradeCode ?? "") : "",
+          to: values.gradeCode,
+        });
+        setBusy(false);
+        focusImpact();
+        return;
+      }
+      await onSaved();
     } catch (e) {
       setError(plainError(e));
       setBusy(false);
@@ -1300,10 +1372,14 @@ function JobFormDialog({
       form={form}
       body={body}
       values={values}
+      impact={impact}
+      impactRef={impactRef}
       busy={busy}
       error={error}
       onChange={(change) => {
         if (change.key !== undefined) setKeyEdited(true);
+        // Another grade asks for the impact again before anything is saved.
+        if (change.gradeCode !== undefined) setImpact(null);
         set(
           change.name !== undefined && !keyEdited
             ? { ...change, key: keyFor(change.name) }
@@ -1320,6 +1396,8 @@ export function JobFormView({
   form,
   body,
   values,
+  impact = null,
+  impactRef,
   busy = false,
   error = "",
   onChange = () => {},
@@ -1329,6 +1407,9 @@ export function JobFormView({
   form: JobForm;
   body: JobArchitectureBody;
   values: JobValues;
+  /** A title's grade change awaiting confirmation; the submit button then confirms it. */
+  impact?: TitleImpact | null;
+  impactRef?: Ref<HTMLParagraphElement>;
   busy?: boolean;
   error?: string;
   onChange?: (change: Partial<JobValues>) => void;
@@ -1357,7 +1438,9 @@ export function JobFormView({
   return (
     <FormDialog
       title={editing ? `${editTitle}: ${subject}` : addTitle}
-      submitLabel={editing ? saveLabel : addTitle}
+      submitLabel={
+        impact ? "Change grade and save" : editing ? saveLabel : addTitle
+      }
       busy={busy}
       error={error}
       onSubmit={onSubmit}
@@ -1447,6 +1530,11 @@ export function JobFormView({
               ))}
             </select>
           </label>
+          {impact && form.title && (
+            <p ref={impactRef} tabIndex={-1} className="notice" role="status">
+              {impactText(form.title.name, impact)}
+            </p>
+          )}
         </>
       )}
     </FormDialog>

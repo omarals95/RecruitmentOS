@@ -79,6 +79,10 @@
  *   recruiter, direct SQL reads no fixture record file of the out-of-scope candidate and cannot
  *   insert one for it, while it can for the vacancy in scope; the team A owner reads it, and a team
  *   B owner context reads no record file of team A.
+ *   Job title usage (0050): the team B owner, who holds no company authority, the team B owner made
+ *   a company admin with the fields area only, and an API token of the company owner holding every
+ *   scope cannot call tenant_context.job_title_usage, while the team A owner's company owner session
+ *   gets its one row of three counts, and nothing else, for a key no fixture uses.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -131,7 +135,10 @@
  *   company admin, removing the row in that check. In each salary bracket check it writes one draft
  *   bracket version, created_by the team A owner, with one bracket, removing both in that check,
  *   and briefly sets the Plan & pay access of the team A or team C owner, setting it back; the
- *   last of them briefly adds one more API token holding every scope for the team A owner.
+ *   last of them briefly adds one more API token holding every scope for the team A owner. In the
+ *   job title usage checks it briefly makes the team B owner a company admin with the fields area,
+ *   and briefly adds one more API token holding every scope for the team A owner, removing each in
+ *   its check.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -5802,6 +5809,154 @@ async function runChecks(run: Run) {
     }
     probe.at("end-state");
     return pass && probe.all(["end-state", await bracketsGone()]);
+  });
+
+  // Job title usage (0050) is counts only, for a company owner or a company admin with
+  // organisation in a session. Each check calls it for a run-prefixed key no fixture uses, so the
+  // company owner's positive control gets exactly one row of three zero counts and nothing else.
+  const usageKey = `${f.prefix}-title`.toLowerCase();
+  const usage = (principal: Principal) =>
+    transaction(data, async () => {
+      const { access } = await installAs(data, signer, principal);
+      return {
+        access,
+        outcome: await attempt(
+          data,
+          "SELECT * FROM tenant_context.job_title_usage($1)",
+          [usageKey],
+        ),
+      };
+    });
+  const countsOnly = (outcome: Outcome) =>
+    outcomeIs(
+      outcome.ok &&
+        outcome.rows.length === 1 &&
+        Object.keys(outcome.rows[0]).join(",") ===
+          "positions,open_vacancies,open_offers" &&
+        outcome.rows[0].positions === 0 &&
+        outcome.rows[0].open_vacancies === 0 &&
+        outcome.rows[0].open_offers === 0,
+      outcome,
+      "positive-control",
+    );
+
+  // The team B owner holds no company authority and gets no counts; the company owner does.
+  await check("job-title-usage-team-b-owner-denied", async (probe) => {
+    probe.at("outcome");
+    const denied = await usage(p.ownerB);
+    probe.at("positive-control");
+    const allowed = await usage(p.ownerA);
+    return probe.all(
+      [
+        "setup",
+        denied.access.companyLevel === null &&
+          allowed.access.companyLevel === "owner",
+      ],
+      failsWith(denied.outcome, "42501"),
+      countsOnly(allowed.outcome),
+    );
+  });
+
+  // The team B owner, made a company admin with the fields area only for this check, gets no
+  // counts either: the helper needs organisation. The company owner gets them.
+  await check(
+    "job-title-usage-admin-without-organisation-denied",
+    async (probe) => {
+      probe.at("setup");
+      const granted = await owner.query(
+        "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{fields}')",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+      let pass: boolean;
+      try {
+        probe.at("outcome");
+        const denied = await usage(p.ownerB);
+        probe.at("positive-control");
+        const allowed = await usage(p.ownerA);
+        pass = probe.all(
+          [
+            "setup",
+            granted.rowCount === 1 &&
+              denied.access.companyLevel === "admin" &&
+              denied.access.companyAreas.join(",") === "fields",
+          ],
+          failsWith(denied.outcome, "42501"),
+          countsOnly(allowed.outcome),
+        );
+      } finally {
+        await owner.query(
+          "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+          [COMPANY_WORKSPACE, f.users.b1],
+        );
+      }
+      probe.at("end-state");
+      return (
+        pass &&
+        probe.all([
+          "end-state",
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.b1],
+          )) === 0,
+        ])
+      );
+    },
+  );
+
+  // An API token of the company owner holding every scope gets no counts: the helper takes
+  // sessions only. The same owner's session gets them.
+  await check("job-title-usage-token-denied", async (probe) => {
+    probe.at("setup");
+    const tokenId = `${f.prefix}-token-usage`;
+    const stored = await owner.query(
+      `INSERT INTO auth.api_tokens(id,team_id,user_id,name,token_hash,prefix,scopes,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '1 hour')`,
+      [
+        tokenId,
+        f.teams.a,
+        f.users.a1,
+        `Fictional token ${tokenId}`,
+        createHash("sha256").update(tokenId).digest("hex"),
+        tokenId,
+        JSON.stringify(ALL_SCOPES),
+      ],
+    );
+    let pass: boolean;
+    try {
+      probe.at("outcome");
+      const denied = await usage({
+        team: f.teams.a,
+        actor: f.users.a1,
+        auth: "token",
+        token: tokenId,
+        scopes: ALL_SCOPES,
+      });
+      probe.at("positive-control");
+      const allowed = await usage(p.ownerA);
+      pass = probe.all(
+        [
+          "setup",
+          stored.rowCount === 1 && allowed.access.companyLevel === "owner",
+        ],
+        failsWith(denied.outcome, "42501"),
+        countsOnly(allowed.outcome),
+      );
+    } finally {
+      await owner.query("DELETE FROM auth.api_tokens WHERE id = $1", [tokenId]);
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await count(
+          owner,
+          "SELECT count(*)::int AS n FROM auth.api_tokens WHERE id = $1",
+          [tokenId],
+        )) === 0,
+      ])
+    );
   });
 }
 

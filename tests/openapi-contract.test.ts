@@ -1251,6 +1251,7 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/company-authority",
         "POST /api/v1/company-authority",
         "GET /api/v1/job-architecture",
+        "GET /api/v1/job-architecture/usage",
         "POST /api/v1/job-architecture",
         "PUT /api/v1/job-architecture/{versionId}",
         "POST /api/v1/job-architecture/{versionId}/publish",

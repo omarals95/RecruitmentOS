@@ -46,7 +46,15 @@ import {
 import {
   assigneeInput,
   recordMutation,
+  vacancyTitleInput,
 } from "../src/components/workspace/mutation";
+import {
+  JobTitlePickerView,
+  loadJobTitleChoices,
+} from "../src/components/settings/job-title-picker";
+import type { Requester } from "../src/components/workspace/optimistic";
+import type { JobArchitecture } from "../src/lib/job-architecture";
+import type { SalaryBracketVersion } from "../src/lib/pay-brackets";
 import {
   defaultListQuery,
   listSearchParams,
@@ -1472,5 +1480,145 @@ describe("task board switcher", () => {
     const on = control(false);
     expect(on).not.toContain("disabled");
     expect(on).not.toContain("Choose All buckets");
+  });
+});
+
+// The vacancy editor's job title picker (ADM-27, job 088). Fictional titles, grades, figures and
+// ids only.
+describe("vacancy job title picker", () => {
+  const current: JobArchitecture = {
+    versionId: "00000000-0000-4000-8000-000000000901",
+    number: 4,
+    body: {
+      families: [{ key: "finance", name: "Fictional Finance" }],
+      grades: [
+        { code: "G5", name: "Fictional Associate", order: 5 },
+        { code: "G7", name: "Fictional Senior", order: 7 },
+      ],
+      titles: [
+        {
+          key: "payroll-lead",
+          name: "Fictional Payroll Lead",
+          familyKey: "finance",
+          gradeCode: "G7",
+        },
+        {
+          key: "people-partner",
+          name: "Fictional People Partner",
+          familyKey: "finance",
+          gradeCode: "G5",
+        },
+      ],
+    },
+  };
+  const brackets: SalaryBracketVersion = {
+    versionId: "00000000-0000-4000-8000-000000000902",
+    number: 2,
+    state: "published",
+    payPeriod: "annual",
+    covers: "total-cash",
+    effectiveFrom: "2027-01-01",
+    createdAt: "2026-11-12T09:00:00.000Z",
+    publishedAt: "2026-11-12T10:00:00.000Z",
+    brackets: [
+      {
+        gradeCode: "G7",
+        minimumFils: 24_000_000,
+        midpointFils: 30_000_000,
+        maximumFils: 36_000_000,
+      },
+    ],
+  };
+  const vacancy = {
+    id: "00000000-0000-4000-8000-000000000903",
+    kind: "vacancy",
+    data: {
+      title: "Fictional Payroll Vacancy",
+      status: "Open",
+      jobTitleKey: "payroll-lead",
+    },
+    version: 1,
+    legacyId: null,
+    createdBy: "fictional-user",
+    privateOwnerId: null,
+    createdAt: "2026-11-12T10:00:00.000Z",
+    updatedAt: "2026-11-12T10:00:00.000Z",
+    archivedAt: null,
+    candidateId: null,
+    vacancyId: null,
+    applicationId: null,
+    onboardingId: null,
+    bucketId: null,
+    jobRoleId: null,
+    parentRecordId: null,
+  } as RecordDto;
+
+  it("renders the job title block in the editor and never the generic field", () => {
+    const editor = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordEditor
+          resource="vacancies"
+          record={vacancy}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+    // Effects do not run here, so the picker still waits for the caller's access.
+    expect(editor).toContain('<p role="status">Loading job titles…</p>');
+    expect(editor).not.toContain('id="editor-jobTitleKey"');
+    expect(editor).not.toContain('for="editor-jobTitleKey"');
+    expect(editor).toContain("<legend>Org unit</legend>");
+  });
+
+  it("offers no No job title once a title is saved, and the bracket only to a holder", async () => {
+    const view = (extra: { brackets?: SalaryBracketVersion }) =>
+      renderToStaticMarkup(
+        <JobTitlePickerView
+          current={current}
+          value="payroll-lead"
+          allowNone={false}
+          {...extra}
+        />,
+      );
+    const plain = view({});
+    expect(plain).not.toContain("No job title");
+    expect(plain).toContain(
+      '<option value="payroll-lead" selected="">Fictional Payroll Lead · G7</option>',
+    );
+    expect(plain).toContain("Grade: G7 · Fictional Senior");
+    for (const text of [
+      "Salary bracket",
+      "AED",
+      "240,000",
+      "300,000",
+      "360,000",
+    ])
+      expect(plain, text).not.toContain(text);
+    expect(view({ brackets })).toContain(
+      "Salary bracket: AED 240,000 to AED 360,000 a year, midpoint AED 300,000 · total cash · version 2",
+    );
+    const sent: string[] = [];
+    const request = (async (path: string) => {
+      sent.push(path);
+      return { data: { current, draft: null } };
+    }) as Requester;
+    await loadJobTitleChoices(request, {
+      planAccess: { read: false, write: false },
+    });
+    expect(sent).toEqual(["/api/v1/job-architecture"]);
+  });
+
+  it("sends the title only when another one is chosen, never through the generic fields", () => {
+    expect(vacancyTitleInput(undefined, "")).toEqual({});
+    expect(vacancyTitleInput("payroll-lead", "payroll-lead")).toEqual({});
+    expect(vacancyTitleInput("payroll-lead", "people-partner")).toEqual({
+      jobTitleKey: "people-partner",
+    });
+    expect(vacancyTitleInput(undefined, "payroll-lead")).toEqual({
+      jobTitleKey: "payroll-lead",
+    });
+    const body = recordMutation("vacancies", { ...vacancy.data }, {}, vacancy);
+    expect(body.data).not.toHaveProperty("jobTitleKey");
   });
 });
