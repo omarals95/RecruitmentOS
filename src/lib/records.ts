@@ -30,6 +30,7 @@ import {
   authorize,
   checkFieldWrite,
   decide,
+  hiddenFieldRefusal,
   hiddenKeys,
   readOnlyKeys,
   recordScopeRule,
@@ -1276,10 +1277,11 @@ export async function getRecord(
   p: Principal,
   resource: ResourceName,
   recordId: string,
+  channel?: "mcp",
 ): Promise<RecordDto> {
   const kind = kindOf(resource);
   return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel });
     authorize(ctx, { resource, action: "view" });
     id(recordId);
     return redact(
@@ -1340,20 +1342,20 @@ export const candidateDuplicateQuerySchema = z
   );
 
 /** Contact matches are possible duplicates for review, never an identity decision. */
-export async function findCandidateDuplicates(p: Principal, input: unknown) {
+export async function findCandidateDuplicates(
+  p: Principal,
+  input: unknown,
+  channel?: "mcp",
+) {
   return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel });
     authorize(ctx, { resource: "candidates", action: "view" });
     const query = parse(candidateDuplicateQuerySchema, input);
     // A hidden contact field is neither matched on nor returned.
     const hidden = hiddenKeys(ctx, "candidate");
     for (const key of ["email", "phone"] as const)
       if (query[key] && hidden.has(key))
-        throw new ApiError(
-          400,
-          "invalid_query",
-          `Your role cannot see ${key}, so you cannot filter by it.`,
-        );
+        throw hiddenFieldRefusal(ctx, "candidate", key, "filter");
     const result = await matchCandidateContacts(tx, ctx, query);
     return {
       ...result,
@@ -1597,11 +1599,7 @@ function recordQuery(
       !(kind === "candidate" && key === "status") &&
       !["", "[]"].includes(value.trim())
     )
-      throw new ApiError(
-        400,
-        "invalid_query",
-        `Your role cannot see ${field}, so you cannot filter by it.`,
-      );
+      throw hiddenFieldRefusal(ctx, kind, field, "filter");
   }
   const search = parse(z.string().trim().max(500), query.get("search") ?? "");
   const order = parse(z.enum(["asc", "desc"]), query.get("direction") || "asc");
@@ -1618,12 +1616,7 @@ function recordQuery(
     query.get("sort") ||
       (hidden.has(defaultSort(kind)) ? "createdAt" : defaultSort(kind)),
   );
-  if (hidden.has(sort))
-    throw new ApiError(
-      400,
-      "invalid_query",
-      `Your role cannot see ${sort}, so you cannot sort by it.`,
-    );
+  if (hidden.has(sort)) throw hiddenFieldRefusal(ctx, kind, sort, "sort");
   const where: SQL[] = scopeFilter(ctx, kind, { once: true });
   if (query.has("includeArchived"))
     parse(z.enum(["true", "false"]), query.get("includeArchived"));
@@ -1943,11 +1936,17 @@ export async function listRecords(
   p: Principal,
   resource: ResourceName,
   query: URLSearchParams,
-  options: { omitFromSearch?: readonly string[] } = {},
+  options: { omitFromSearch?: readonly string[]; channel?: "mcp" } = {},
 ) {
   kindOf(resource);
   return withTeam(p, (tx, access) =>
-    listInside(tx, accessContext(p, access), resource, query, options),
+    listInside(
+      tx,
+      accessContext(p, access, { channel: options.channel }),
+      resource,
+      query,
+      options,
+    ),
   );
 }
 

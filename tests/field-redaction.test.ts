@@ -226,6 +226,38 @@ describe("field rules in every output (R2b-08)", () => {
   };
   const customOf = (row: { data: unknown }) =>
     ((row.data as Row).customValues ?? {}) as Row;
+  /**
+   * Publishes the candidate, task, vacancy and application kind schemas again with the fixture's
+   * custom fields, the given system keys and custom field ids marked sensitive (R2b-09).
+   */
+  const publishMarks = (...marks: string[]) =>
+    asOwner(async () => {
+      for (const body of structuredClone([
+        kindBody("candidate", [visible, hidden, readOnly]),
+        kindBody("task", [hiddenTask, visibleTask]),
+        kindBody("vacancy", []),
+        kindBody("application", []),
+      ])) {
+        for (const field of body.fields)
+          if (marks.includes(field.key)) field.sensitive = true;
+        await insertKindSchema(fixture.client, owner.userId, body);
+      }
+    });
+  /** The record ids an MCP search finds for the owner: search_candidates, then search_workspace. */
+  const mcpFound = async (query: string) => [
+    mcpData<Row[]>(await mcp(ownerToken, "search_candidates", { query })).map(
+      (row) => row.id,
+    ),
+    mcpData<{ groups: { results: Row[] }[] }>(
+      await mcp(ownerToken, "search_workspace", { query }),
+    ).groups.flatMap((group) => group.results.map((row) => row.id)),
+  ];
+  /** The MCP refusal of one call as the owner. */
+  const mcpError = async (name: string, args: Row) => {
+    const result = await mcp(ownerToken, name, args);
+    expect(result.isError, name).toBe(true);
+    return result.structuredContent.error;
+  };
   /** A configured role published by the company owner and assigned to the member. */
   async function assign(
     p: Principal,
@@ -1027,11 +1059,12 @@ describe("field rules in every output (R2b-08)", () => {
       const task = await mcpTask();
       return [
         Object.hasOwn(candidate.facts as Row, "certifications"),
-        // A sensitive custom field leaves the task's whole custom map out of MCP results.
+        // A sensitive custom field leaves only its own id out of the task's custom map (job 096).
         Object.hasOwn((task.customValues ?? {}) as Row, visibleTask.key),
+        Object.hasOwn((task.customValues ?? {}) as Row, hiddenTask.key),
       ];
     };
-    expect(await shown()).toEqual([true, true]);
+    expect(await shown()).toEqual([true, true, true]);
     const taskValue = () =>
       get(owner, "tasks", id.task).then(
         (task) => customOf(task.body.data)[visibleTask.key],
@@ -1039,7 +1072,7 @@ describe("field rules in every output (R2b-08)", () => {
     const stored = await taskValue();
     expect(stored).toEqual(expect.any(String));
     await publish(true);
-    expect(await shown()).toEqual([false, false]);
+    expect(await shown()).toEqual([false, false, true]);
     // An MCP update of the task's custom values keeps the sensitive value it cannot see.
     const { version } = await mcpTask();
     mcpData(
@@ -1056,7 +1089,231 @@ describe("field rules in every output (R2b-08)", () => {
     ).toEqual(["Fictional Certificate"]);
     expect(await taskValue()).toBe(stored);
     await publish(false);
-    expect(await shown()).toEqual([true, true]);
+    expect(await shown()).toEqual([true, true, true]);
+  });
+
+  // R2b-09 (job 096): a marked field is a field the role hides to every MCP read, never to REST.
+  it("never matches or filters a marked candidate field over MCP, and does again once unmarked (R2b-09)", async () => {
+    // The visible custom value as created, whatever an earlier case changed it to.
+    const before = await stored("candidates", id.candidate);
+    await updateRecord(owner, "candidates", id.candidate, {
+      version: before.version,
+      data: {
+        customValues: { ...customOf(before), [visible.key]: VISIBLE_VALUE },
+      },
+    });
+    const filter = { certifications: ["Fictional Certificate"] };
+    const filtered = async () =>
+      mcpData<Row[]>(await mcp(ownerToken, "search_candidates", filter)).map(
+        (row) => row.id,
+      );
+    const restFound = async (q: string) => [
+      (await list(owner, "candidates", { search: q })).body.data.map(
+        (row: Row) => row.id,
+      ),
+      (
+        await request(
+          owner,
+          searchRoute as Handler,
+          `/api/v1/search?${new URLSearchParams({ q })}`,
+        )
+      ).body.data.map((row: Row) => row.id),
+    ];
+    const phrases = ['"Fictional Certificate"', `"${VISIBLE_VALUE}"`];
+    const unmarked = async () => {
+      for (const q of phrases)
+        for (const ids of await mcpFound(q))
+          expect(ids, q).toContain(id.candidate);
+      expect(await filtered()).toContain(id.candidate);
+    };
+    await unmarked();
+    await publishMarks("certifications", visible.key);
+    for (const q of phrases) {
+      for (const ids of await mcpFound(q))
+        expect(ids, q).not.toContain(id.candidate);
+      for (const ids of await restFound(q))
+        expect(ids, q).toContain(id.candidate);
+    }
+    expect(await mcpError("search_candidates", filter)).toEqual({
+      code: "invalid_query",
+      message:
+        "certifications is marked sensitive, so you cannot filter by it.",
+    });
+    expect(
+      (
+        await list(owner, "candidates", {
+          certifications: JSON.stringify(filter.certifications),
+        })
+      ).body.data.map((row: Row) => row.id),
+    ).toContain(id.candidate);
+    await publishMarks();
+    await unmarked();
+  });
+
+  it("refuses an MCP sort or duplicate lookup on a marked candidate field, and allows it again once unmarked (R2b-09)", async () => {
+    const email = { email: "fictional.redaction@example.test" };
+    const allowed = async () => {
+      mcpData(
+        await mcp(ownerToken, "search_candidates", { sort: "yearsExperience" }),
+      );
+      expect(
+        mcpData<{ matches: Row[] }>(
+          await mcp(ownerToken, "find_duplicate_candidates", email),
+        ).matches.map((row) => row.id),
+      ).toEqual([id.candidate]);
+    };
+    await allowed();
+    await publishMarks("yearsExperience", "email");
+    expect(
+      await mcpError("search_candidates", { sort: "yearsExperience" }),
+    ).toEqual({
+      code: "invalid_query",
+      message: "yearsExperience is marked sensitive, so you cannot sort by it.",
+    });
+    expect(await mcpError("find_duplicate_candidates", email)).toEqual({
+      code: "invalid_query",
+      message: "email is marked sensitive, so you cannot filter by it.",
+    });
+    const rest = await request(
+      owner,
+      duplicatesRoute as Handler,
+      "/api/v1/candidates/duplicates",
+      { method: "POST", body: email },
+    );
+    expect(rest.status).toBe(200);
+    expect(rest.body.data).toEqual([
+      expect.objectContaining({
+        id: id.candidate,
+        email: email.email,
+        matches: ["email"],
+      }),
+    ]);
+    await publishMarks();
+    await allowed();
+  });
+
+  it("leaves a marked task system field and custom field out of MCP on their own, and keeps the stored value an update leaves out (R2b-09)", async () => {
+    // Overdue, so get_overview lists it too.
+    const before = await stored("tasks", id.task);
+    await updateRecord(owner, "tasks", id.task, {
+      version: before.version,
+      data: { dueDate: "2020-01-02" },
+    });
+    const value = String(customOf(before)[visibleTask.key]);
+    const { priority } = before.data as Row;
+    const listed = async (args: Row = {}) =>
+      mcpData<Row[]>(
+        await mcp(ownerToken, "list_tasks", { bucketId: id.bucket, ...args }),
+      ).find((row) => row.id === id.task);
+    const overdue = async () =>
+      mcpData<{ overdueTasks: Row[] }>(
+        await mcp(ownerToken, "get_overview", {}),
+      ).overdueTasks.find((row) => row.id === id.task)!;
+    const foundTasks = async () =>
+      mcpData<{ groups: { type: string; results: Row[] }[] }>(
+        await mcp(ownerToken, "search_workspace", { query: `"${value}"` }),
+      )
+        .groups.filter((group) => group.type === "tasks")
+        .flatMap((group) => group.results.map((row) => row.id));
+    const unmarked = async () => {
+      for (const task of [await listed(), await overdue()]) {
+        expect(task).toMatchObject({ priority });
+        expect(task?.customValues).toEqual({
+          [hiddenTask.key]: HIDDEN_TASK_VALUE,
+          [visibleTask.key]: value,
+        });
+      }
+      expect(await listed({ priority })).toBeDefined();
+      expect(await foundTasks()).toContain(id.task);
+    };
+    await unmarked();
+    await publishMarks("priority", visibleTask.key);
+    expect(await mcpError("list_tasks", { priority })).toEqual({
+      code: "invalid_query",
+      message: "priority is marked sensitive, so you cannot filter by it.",
+    });
+    for (const task of [await listed(), await overdue()]) {
+      expect(Object.hasOwn(task!, "priority")).toBe(false);
+      // Only the marked id leaves the map; the owner still sees the other.
+      expect(task?.customValues).toEqual({
+        [hiddenTask.key]: HIDDEN_TASK_VALUE,
+      });
+    }
+    expect(await foundTasks()).not.toContain(id.task);
+    // An update sending only another id keeps the marked value it cannot see.
+    mcpData(
+      await mcp(ownerToken, "update_task", {
+        id: id.task,
+        version: (await listed())?.version,
+        customValues: { [hiddenTask.key]: HIDDEN_TASK_VALUE },
+      }),
+    );
+    expect(
+      customOf((await get(owner, "tasks", id.task)).body.data),
+    ).toMatchObject({ [visibleTask.key]: value });
+    await publishMarks();
+    await unmarked();
+  });
+
+  it("leaves a marked name, title or stage out of MCP labels, analytics, the overview, activity and reminders, never out of REST (R2b-09)", async () => {
+    const NAME = "Fictional Redaction Candidate";
+    const text = async (name: string, args: Row) =>
+      JSON.stringify(mcpData(await mcp(ownerToken, name, args)));
+    const stages = async (name: string) =>
+      mcpData<{ stages: unknown[] }>(await mcp(ownerToken, name, {})).stages;
+    const activity = async () =>
+      mcpData<{ metadata: Row }[]>(
+        await mcp(ownerToken, "list_activity", { recordId: id.application }),
+      );
+    const labels = async () => [
+      await text("get_application", { id: id.application }),
+      await text("list_applications", { vacancyId: id.vacancy }),
+    ];
+    for (const label of await labels()) expect(label).toContain(NAME);
+    await publishMarks("name", "title", "stage");
+    for (const label of await labels())
+      for (const value of [NAME, VACANCY_TITLE])
+        expect(label).not.toContain(value);
+    for (const name of ["get_analytics", "get_overview"])
+      expect(await stages(name), name).toEqual([]);
+    const rows = await activity();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(Object.hasOwn(row.metadata, "fromStage")).toBe(false);
+      expect(Object.hasOwn(row.metadata, "toStage")).toBe(false);
+    }
+    expect(await text("list_notifications", {})).not.toContain(VACANCY_TITLE);
+    // REST and the app, as the owner, still have them.
+    expect(
+      (await get(owner, "applications", id.application)).body.data,
+    ).toMatchObject({
+      candidateLabel: NAME,
+      vacancyLabel: VACANCY_TITLE,
+    });
+    expect(
+      (await list(owner, "applications", { vacancyId: id.vacancy })).text,
+    ).toContain(VACANCY_TITLE);
+    expect((await analytics(owner, new URLSearchParams())).stages).not.toEqual(
+      [],
+    );
+    expect((await overview(owner)).stages).not.toEqual([]);
+    expect(
+      (
+        await listActivity(
+          owner,
+          new URLSearchParams({ recordId: id.application, pageSize: "100" }),
+        )
+      ).data.some((row) => row.metadata.toStage === "Screening"),
+    ).toBe(true);
+    expect(JSON.stringify(await notifications(owner))).toContain(VACANCY_TITLE);
+    await publishMarks();
+    for (const label of await labels()) expect(label).toContain(NAME);
+    for (const name of ["get_analytics", "get_overview"])
+      expect(await stages(name), name).not.toEqual([]);
+    expect(
+      (await activity()).some((row) => row.metadata.toStage === "Screening"),
+    ).toBe(true);
+    expect(await text("list_notifications", {})).toContain(VACANCY_TITLE);
   });
 
   it("serves one static OpenAPI document with no label of the published kind schemas", async () => {
