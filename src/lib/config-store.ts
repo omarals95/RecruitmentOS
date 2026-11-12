@@ -367,8 +367,8 @@ export async function updateConfigDraft(
 
 /**
  * Publishes the object's draft through the owner-run helper, which audits it; returns its number.
- * A kind schema draft is parsed and checked again against the version in force first. With
- * options.type, a version of another type is not found.
+ * A kind schema draft is locked, then its body is parsed and checked again against the version in
+ * force first. With options.type, a version of another type is not found.
  */
 export async function publishConfigVersion(
   p: Principal,
@@ -378,14 +378,24 @@ export async function publishConfigVersion(
   return inStore(p, async (tx, access) => {
     const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
-    if (target.type === "kind-schema" && target.state === "draft")
+    if (target.type === "kind-schema" && target.state === "draft") {
+      // The body checked is the body published: the row stays locked to the publish, so a draft
+      // save cannot land between the two. Only a writer sees the row (RLS), hence after requireWrite.
+      const [locked] = (
+        await tx.execute<{ body: unknown; state: ConfigVersion["state"] }>(
+          sql`select body, state from app.config_versions where id = ${target.versionId}::uuid for update`,
+        )
+      ).rows;
+      if (!locked) throw notFound();
+      if (locked.state !== "draft") throw stateConflict();
       await checkBody(
         tx,
         p,
         access,
         target,
-        parseBody(target.type, target.body),
+        parseBody(target.type, locked.body),
       );
+    }
     const { rows } = await tx.execute<{ number: number }>(
       sql`select tenant_context.publish_config_version(${target.versionId}::uuid) as number`,
     );

@@ -1749,6 +1749,116 @@ describe("versioned configuration store under the split runtime roles", () => {
       ]);
     });
 
+    // R2b-09 (job 096): the publish re-check reads the body it publishes under a row lock.
+    it("locks a kind schema draft after the write check and never publishes a mark the admin changed", async () => {
+      /** The statements the call's transactions send to the PGlite client, in order. */
+      const statements = async (call: () => Promise<unknown>) => {
+        const texts: string[] = [];
+        const transaction = harness.client.transaction.bind(harness.client);
+        const spy = vi
+          .spyOn(harness.client, "transaction")
+          .mockImplementation((work) =>
+            transaction((tx) =>
+              work(
+                new Proxy(tx, {
+                  get: (target, key) => {
+                    const value = Reflect.get(target, key);
+                    return key === "query" || key === "exec"
+                      ? (text: string, ...rest: unknown[]) => {
+                          texts.push(text);
+                          return value.call(target, text, ...rest);
+                        }
+                      : value;
+                  },
+                }),
+              ),
+            ),
+          );
+        try {
+          await run(call);
+          return texts;
+        } finally {
+          spy.mockRestore();
+        }
+      };
+      const lock =
+        /^select body, state from app\.config_versions where id = .+ for update$/;
+      const first = await run(
+        save(owner, "interview", kindBody("interview", [])),
+      );
+      const texts = await statements(() =>
+        publishConfigVersion(owner, first.versionId),
+      );
+      const found = texts.findIndex((text) =>
+        text.includes("from app.config_versions v join app.config_objects o"),
+      );
+      const locked = texts.findIndex((text) => lock.test(text));
+      const published = texts.findIndex((text) =>
+        text.includes("tenant_context.publish_config_version"),
+      );
+      expect(found).toBeGreaterThanOrEqual(0);
+      expect(locked).toBeGreaterThan(found);
+      expect(published).toBeGreaterThan(locked);
+      expect((await version(first.versionId)).state).toBe("published");
+
+      // The admin publishes the owner's draft while the owner marks a field in it.
+      const note = customField("Fictional race note", "short-text");
+      const pending = await run(
+        save(owner, "interview", kindBody("interview", [note])),
+      );
+      // Neither a team admin nor a company admin without fields locks or publishes it.
+      await harness.asOwner();
+      await harness.client.exec(
+        `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','cfg-recruiter-a','admin','{organisation}')`,
+      );
+      try {
+        for (const p of [adminA, recruiterA]) {
+          const before = [await snapshot(), await audits()];
+          const refusal = await statements(() =>
+            expect(
+              publishConfigVersion(p, pending.versionId),
+            ).rejects.toMatchObject({ status: 403, code: "config_forbidden" }),
+          );
+          expect(
+            refusal.some((text) => lock.test(text)),
+            p.userId,
+          ).toBe(false);
+          expect([await snapshot(), await audits()]).toEqual(before);
+        }
+      } finally {
+        await harness.asOwner();
+        await harness.client.exec(
+          `DELETE FROM app.workspace_admins WHERE user_id = 'cfg-recruiter-a'`,
+        );
+      }
+      await harness.dataDb();
+      const [publish, update] = await Promise.allSettled([
+        publishConfigVersion(fieldsAdmin, pending.versionId),
+        updateConfigDraft(owner, pending.versionId, {
+          body: kindBody("interview", [
+            { ...note, sensitive: true } as unknown as CustomField,
+          ]),
+        }),
+      ]);
+      if (publish.status === "fulfilled") {
+        expect(update).toMatchObject({
+          status: "rejected",
+          reason: { status: 409, code: "config_state_conflict" },
+        });
+      } else {
+        expect(publish.reason).toMatchObject({
+          status: 403,
+          code: "config_forbidden",
+        });
+        expect(update.status).toBe("fulfilled");
+        await dropDraft(pending.versionId);
+      }
+      const marked = await look<{ count: number }>(
+        `SELECT count(*)::int AS count FROM app.config_versions v JOIN app.config_objects o ON o.id = v.object_id WHERE o.workspace_id = '${COMPANY}' AND o.type = 'kind-schema' AND o.key = 'interview' AND v.state <> 'draft' AND v.body::text LIKE '%"sensitive": true%'`,
+      );
+      expect(marked).toEqual([{ count: 0 }]);
+    });
+
     it("refuses a kind schema whose kind is not its key", async () => {
       await refusedWith(
         save(owner, "checklist", kindBody("task", [])),
