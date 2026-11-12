@@ -582,6 +582,26 @@ Keys are 1 to 63 lowercase letters, digits and hyphens; names are 1 to 120 chara
 | 409 `config_draft_exists`   | A draft is already pending; edit or publish it first                      |
 | 409 `config_state_conflict` | The version is no longer a draft                                          |
 
+### Job title usage
+
+Before a title's grade changes, `GET /api/v1/job-architecture/usage?titleKey=payroll-lead` counts what uses the title across every team of the company, for a company owner or a company admin with the organisation area:
+
+```json
+{ "data": { "positions": 2, "openVacancies": 1, "openOffers": 1 } }
+```
+
+- `positions`: current positions (not ended and not archived) with the title.
+- `openVacancies`: vacancies with status `Open` and the title, not archived.
+- `openOffers`: offers with status `Draft` or `Sent`, not archived, whose application's vacancy has the title, whatever that vacancy's status.
+
+It returns these three counts only: no id, name, team, date or per-team breakdown, and never a salary figure. A key nothing uses, including one that is not a published title, returns three zeros. Nothing is audited.
+
+| Error                  | When                                                                                          |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| 403 `session_required` | A Bearer token, including an MCP OAuth token                                                  |
+| 403 `config_forbidden` | Anyone but a company owner, or a company admin with the organisation area                     |
+| 400 `invalid_input`    | `titleKey` missing or not a key (lowercase letters, digits and hyphens), or another query key |
+
 ## Salary brackets
 
 Salary brackets give each job grade of the published job architecture a minimum, midpoint and maximum in AED fils (whole numbers, 100 fils to the dirham), versioned like the job architecture. They are confidential: the database lets only a signed-in session holding **Plan & pay access** (a per-person grant only a company owner gives, themselves included) and the `plans:read` scope of their team role read them. A Bearer token, including an MCP OAuth token, gets 403 `session_required`; there is no MCP tool, and brackets never appear in exports, search, notifications, analytics or activity, which holds the version number only.
