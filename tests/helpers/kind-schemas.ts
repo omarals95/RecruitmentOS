@@ -7,9 +7,9 @@ import {
   type KindSchemaBody,
 } from "@/domain/config";
 import type { CustomField, CustomFieldType } from "@/domain/field-types";
+import type { ScreenAction } from "@/domain/screens";
 
 // Kind schemas as an admin writer would publish them until R2b-09 adds a route.
-type ScreenAction = KindSchemaBody["screens"][number]["action"];
 /** The fictional default workspace every seeded team joins. */
 export const WORKSPACE = "00000000-0000-4000-a000-000000000001";
 /** A fictional custom field definition; a fresh key unless one is given. */
@@ -28,8 +28,8 @@ export const customField = (
     ...extra,
   }) as CustomField;
 /**
- * The kind's default body plus the given custom fields, each listed on every screen unless
- * `screens` names the custom keys of a screen.
+ * The kind's default body plus the given custom fields, each listed at the end of every default
+ * screen's group unless `screens` names the custom keys of a screen's action.
  */
 export const kindBody = (
   kind: ConfigurableKind,
@@ -41,10 +41,39 @@ export const kindBody = (
   ) as KindSchemaBody;
   body.fields.push(...custom);
   for (const screen of body.screens)
-    screen.fields.push(
-      ...(screens[screen.action] ?? custom.map((field) => field.key)),
+    screen.groups[0].fields.push(
+      ...(screens[screen.action] ?? custom.map((field) => field.key)).map(
+        (key) => ({ key }),
+      ),
     );
   return body;
+};
+/**
+ * A fictional candidate body whose create, edit and view screens list every other key in an
+ * unlabelled group, then a "Fictional contact" group with phone before email, the given flags on
+ * email, and employer hidden (R2b-07).
+ */
+export const contactBody = (email: { mandatory?: boolean } = {}) => {
+  const body = structuredClone(
+    DEFAULT_KIND_SCHEMAS.candidate.body,
+  ) as KindSchemaBody;
+  for (const screen of body.screens)
+    screen.groups = [
+      {
+        fields: screen.groups[0].fields.filter(
+          ({ key }) => !["phone", "email", "employer"].includes(key),
+        ),
+      },
+      {
+        label: "Fictional contact",
+        fields: [
+          { key: "phone" },
+          { key: "email", ...email },
+          { key: "employer", hidden: true },
+        ],
+      },
+    ];
+  return kindSchemaBodySchema.parse(body);
 };
 /**
  * Publishes the body as the kind's next current version of the default workspace, or with `draft`

@@ -44,6 +44,8 @@ import {
   customValueDefaults,
 } from "../src/components/workspace/mutation";
 import { createRecordSchemas, type RecordDto } from "../src/domain/records";
+import { DEFAULT_KIND_SCHEMAS } from "../src/domain/config-defaults";
+import { contactBody, customField, kindBody } from "./helpers/kind-schemas";
 import {
   aggregateSeries,
   seriesLabel,
@@ -853,5 +855,88 @@ describe("server export file", () => {
       "2026-11-01T00:00:00.000Z",
       "2026-11-02T00:00:00.000Z",
     ]);
+  });
+});
+
+// R2b-07 (job 090): the editor never sends a field its screen does not show.
+describe("screen-driven record payloads", () => {
+  const candidate = {
+    id: "00000000-0000-4000-8000-000000000991",
+    kind: "candidate",
+    data: {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      employer: "Fictional Employer",
+    },
+    version: 4,
+  } as RecordDto;
+  it("leaves a hidden system field out of a create and an edit", () => {
+    const values = {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      phone: "+971 50 000 0003",
+      employer: "Fictional Employer",
+    };
+    for (const record of [undefined, candidate]) {
+      const payload = recordMutation(
+        "candidates",
+        values,
+        {},
+        record,
+        contactBody(),
+      );
+      expect(payload.data).not.toHaveProperty("employer");
+      expect(payload.data).toMatchObject({
+        name: "Fictional Candidate",
+        email: "candidate@example.test",
+        phone: "+971 50 000 0003",
+      });
+      expect(payload.data).not.toHaveProperty("rawSource");
+    }
+    // The default screens send every editable field, as before.
+    expect(recordMutation("candidates", values, {}, candidate).data).toEqual(
+      recordMutation(
+        "candidates",
+        values,
+        {},
+        candidate,
+        DEFAULT_KIND_SCHEMAS.candidate.body,
+      ).data,
+    );
+    expect(
+      recordMutation("candidates", values, {}, candidate).data,
+    ).toHaveProperty("employer", "Fictional Employer");
+  });
+  it("leaves a task's hidden central custom values out, keeping team task-field and shown keys", () => {
+    const hidden = customField("Fictional hidden", "short-text");
+    const shown = customField("Fictional shown", "short-text");
+    const team = "00000000-0000-4000-8000-000000000992";
+    const body = kindBody("task", [hidden, shown]);
+    const edit = body.screens.find((screen) => screen.action === "edit")!;
+    edit.groups[0].fields.find(({ key }) => key === hidden.key)!.hidden = true;
+    const task = {
+      id: "00000000-0000-4000-8000-000000000993",
+      kind: "task",
+      data: { title: "Fictional task" },
+      version: 1,
+    } as RecordDto;
+    const values = {
+      title: "Fictional task",
+      customValues: { [hidden.key]: "Kept", [shown.key]: "Sent", [team]: 3 },
+    };
+    expect(
+      recordMutation("tasks", values, {}, task, body).data.customValues,
+    ).toEqual({ [shown.key]: "Sent", [team]: 3 });
+    // On create the field is shown, so it is sent.
+    expect(
+      recordMutation("tasks", values, {}, undefined, body).data.customValues,
+    ).toEqual(values.customValues);
+    // A screen that does not show customValues sends none.
+    edit.groups[0].fields = edit.groups[0].fields.filter(
+      ({ key }) => key !== "customValues",
+    );
+    expect(
+      recordMutation("tasks", values, {}, task, body).data,
+    ).not.toHaveProperty("customValues");
   });
 });

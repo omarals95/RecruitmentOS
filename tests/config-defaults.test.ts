@@ -351,15 +351,15 @@ describe("built-in default kind schemas (R2b-01)", () => {
     });
   });
 
-  it("has one screen per action with every field in schema order", () => {
+  it("has a default create, edit and view screen, each one unlabelled group of every field in schema order", () => {
     for (const kind of CONFIGURABLE_KINDS)
-      expect(DEFAULT_KIND_SCHEMAS[kind].body.screens).toEqual(
-        SCREEN_ACTIONS.map((action) => ({
+      expect(DEFAULT_KIND_SCHEMAS[kind].body.screens).toStrictEqual(
+        ["create", "edit", "view"].map((action) => ({
           action,
-          fields: todayKeys(kind),
+          groups: [{ fields: todayKeys(kind).map((key) => ({ key })) }],
         })),
       );
-    expect(SCREEN_ACTIONS).toEqual(["create", "edit", "view"]);
+    expect(SCREEN_ACTIONS).toEqual(["create", "edit", "view", "transition"]);
   });
 
   it("passes every default through the kind-schema body schema unchanged", () => {
@@ -379,7 +379,10 @@ describe("built-in default kind schemas (R2b-01)", () => {
     type Field = Record<string, unknown>;
     const fields = (body: Record<string, unknown>) => body.fields as Field[];
     const screens = (body: Record<string, unknown>) =>
-      body.screens as (Field & { action: string; fields: string[] })[];
+      body.screens as (Field & {
+        action: string;
+        groups: { fields: { key: string }[] }[];
+      })[];
     const payPeriod = (body: Record<string, unknown>) =>
       fields(body).find((field) => field.key === "payPeriod")!;
     expect(refused(() => {})).toBe(false);
@@ -416,15 +419,22 @@ describe("built-in default kind schemas (R2b-01)", () => {
     expect(
       refused((body) => (payPeriod(body).options = ["x".repeat(201)])),
     ).toBe(true);
+    // Any other options are refused too: a system field keeps its options (R2b-07).
     expect(
       refused((body) => (payPeriod(body).options = ["x".repeat(200)])),
-    ).toBe(false);
+    ).toBe(true);
     expect(refused((body) => (fields(body)[0].type = "rich-text"))).toBe(true);
     // Screens name only fields of the schema, once each, one screen per action.
-    expect(refused((body) => screens(body)[0].fields.push("suitability"))).toBe(
-      true,
-    );
-    expect(refused((body) => screens(body)[0].fields.push("title"))).toBe(true);
+    expect(
+      refused((body) =>
+        screens(body)[0].groups[0].fields.push({ key: "suitability" }),
+      ),
+    ).toBe(true);
+    expect(
+      refused((body) =>
+        screens(body)[0].groups[0].fields.push({ key: "title" }),
+      ),
+    ).toBe(true);
     expect(refused((body) => (screens(body)[1].action = "create"))).toBe(true);
     expect(refused((body) => (screens(body)[0].action = "approve"))).toBe(true);
     expect(refused((body) => (body.screens = []))).toBe(true);
@@ -509,7 +519,12 @@ describe("built-in default kind schemas (R2b-01)", () => {
         expect(field, kind).toBeUndefined();
         expect(config, kind).toBeUndefined();
         for (const screen of DEFAULT_KIND_SCHEMAS[kind].body.screens)
-          expect(screen.fields, kind).not.toContain("customValues");
+          expect(
+            screen.groups.flatMap((group) =>
+              group.fields.map(({ key }) => key),
+            ),
+            kind,
+          ).not.toContain("customValues");
       }
     }
     // The interviewer template hides every candidate key but name and job title, custom values too.

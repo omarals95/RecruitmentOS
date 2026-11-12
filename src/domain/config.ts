@@ -9,6 +9,8 @@ import {
 } from "./field-types";
 import { configKey, recordDataSchemas, uuidSchema } from "./record-schemas";
 import type { FieldType, RecordKind, ResourceName } from "./records";
+import { screenKey } from "./screens";
+import { systemFieldConfig } from "./system-fields";
 
 // The cleaned text schemas and the kind list live in field-types.ts, and the key schema in
 // record-schemas.ts, neither of which can import this file.
@@ -56,7 +58,11 @@ const envelope = z
   .strict();
 
 export type ConfigurableKind = (typeof CONFIGURABLE_KINDS)[number];
-export const SCREEN_ACTIONS = ["create", "edit", "view"] as const;
+export const SCREEN_ACTIONS = ["create", "edit", "view", "transition"] as const;
+/** The actions every kind schema has a default (untyped) screen for; transition is optional. */
+const DEFAULT_SCREEN_ACTIONS = ["create", "edit", "view"] as const;
+/** Most fields one screen lists across its groups, as many as a body holds. */
+const SCREEN_ENTRIES_MAX = 150;
 
 // Keyed by FieldType, so the list can neither miss nor add a type.
 const fieldTypes = {
@@ -101,12 +107,36 @@ const kindSchemaShape = z
       )
       .min(1)
       .max(150),
+    // A screen's key is the body's kind, its type (absent: the default screen) and its action.
     screens: z
       .array(
         z
           .object({
+            type: uuidSchema.optional(),
             action: z.enum(SCREEN_ACTIONS),
-            fields: z.array(z.string()).min(1).max(150),
+            groups: z
+              .array(
+                z
+                  .object({
+                    label: configLabel.optional(),
+                    fields: z
+                      .array(
+                        // Absent flags mean false, like archived on a custom field.
+                        z
+                          .object({
+                            key: z.string(),
+                            hidden: z.boolean().optional(),
+                            mandatory: z.boolean().optional(),
+                          })
+                          .strict(),
+                      )
+                      .min(1)
+                      .max(SCREEN_ENTRIES_MAX),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(20),
           })
           .strict(),
       )
@@ -121,6 +151,7 @@ function kindSchemaIssues(
   const issue = (path: (string | number)[], message: string) =>
     ctx.addIssue({ code: "custom", path, message });
   const keys = new Set<string>();
+  const required = new Set<string>();
   body.fields.forEach((field, index) => {
     if (
       field.system &&
@@ -129,7 +160,35 @@ function kindSchemaIssues(
       issue(["fields", index, "key"], `Not a field of ${body.kind}.`);
     else if (keys.has(field.key))
       issue(["fields", index, "key"], "Field keys must be unique.");
+    else if (field.system) {
+      // Configuration only tightens a system field (§1.5 item 3): relabel it, require it or make
+      // it read-only, never change its type or options or loosen it.
+      const builtIn = systemFieldConfig(body.kind, field.key);
+      if (field.type !== builtIn.type)
+        issue(["fields", index, "type"], "A system field keeps its type.");
+      if (
+        field.options !== undefined &&
+        builtIn.options !== undefined &&
+        (field.options.length !== builtIn.options.length ||
+          field.options.some((option, at) => option !== builtIn.options![at]))
+      )
+        issue(
+          ["fields", index, "options"],
+          "A system field keeps its options.",
+        );
+      if (builtIn.required && !field.required)
+        issue(
+          ["fields", index, "required"],
+          "A required field stays required.",
+        );
+      if (builtIn.readOnly && !field.readOnly)
+        issue(
+          ["fields", index, "readOnly"],
+          "A read-only field stays read-only.",
+        );
+    }
     keys.add(field.key);
+    if (field.system && field.required) required.add(field.key);
     if (
       field.system &&
       (field.type === "select") !== (field.options !== undefined)
@@ -139,25 +198,66 @@ function kindSchemaIssues(
         "Dropdown fields need options, and only dropdown fields have them.",
       );
   });
-  const actions = new Set<string>();
+  const screenKeys = new Set<string>();
   body.screens.forEach((screen, index) => {
-    if (actions.has(screen.action))
-      issue(["screens", index, "action"], "Screen actions must be unique.");
-    actions.add(screen.action);
+    const key = screenKey(screen);
+    if (screenKeys.has(key))
+      issue(["screens", index, "action"], "One screen per type and action.");
+    screenKeys.add(key);
     const listed = new Set<string>();
-    screen.fields.forEach((key, position) => {
-      if (!keys.has(key))
-        issue(["screens", index, "fields", position], "Not a schema field.");
-      else if (listed.has(key))
-        issue(["screens", index, "fields", position], "Listed twice.");
-      listed.add(key);
-    });
+    screen.groups.forEach((group, groupIndex) =>
+      group.fields.forEach((entry, position) => {
+        const path = [
+          "screens",
+          index,
+          "groups",
+          groupIndex,
+          "fields",
+          position,
+        ];
+        if (!keys.has(entry.key))
+          issue([...path, "key"], "Not a schema field.");
+        else if (listed.has(entry.key))
+          issue([...path, "key"], "Listed twice.");
+        listed.add(entry.key);
+        if (entry.hidden && entry.mandatory)
+          issue(path, "A hidden field cannot be mandatory.");
+        if (
+          screen.action === "create" &&
+          entry.hidden &&
+          required.has(entry.key)
+        )
+          issue(
+            [...path, "hidden"],
+            "A create screen shows every required system field.",
+          );
+      }),
+    );
+    if (
+      screen.groups.reduce((total, group) => total + group.fields.length, 0) >
+      SCREEN_ENTRIES_MAX
+    )
+      issue(
+        ["screens", index, "groups"],
+        `A screen lists at most ${SCREEN_ENTRIES_MAX} fields.`,
+      );
+    if (screen.action === "create")
+      for (const field of required)
+        if (!listed.has(field))
+          issue(
+            ["screens", index, "groups"],
+            `A create screen lists the required field ${field}.`,
+          );
   });
+  for (const action of DEFAULT_SCREEN_ACTIONS)
+    if (!screenKeys.has(screenKey({ action })))
+      issue(["screens"], `A default ${action} screen is required.`);
 }
 /**
  * A kind schema (architecture §1.4): the kind's system fields, its custom fields (field-types.ts)
- * and one screen per action. Strict on every level, so a body cannot carry record ids or record
- * values; a custom field may carry a default, but no reference type takes one.
+ * and its screens per type and action, each of ordered groups of ordered fields with hidden and
+ * mandatory flags. Strict on every level, so a body cannot carry record ids or record values; a
+ * custom field may carry a default, but no reference type takes one.
  */
 export const kindSchemaBodySchema =
   kindSchemaShape.superRefine(kindSchemaIssues);

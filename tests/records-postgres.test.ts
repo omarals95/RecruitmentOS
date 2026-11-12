@@ -3686,6 +3686,246 @@ describe("dynamic validation of custom values with real PostgreSQL migrations an
   });
 });
 
+// Screens per kind, type and action (R2b-07, job 090), on a database of its own so the kind schemas
+// published here reach no other case. Each case publishes the versions it needs first.
+describe("screens per type and action with real PostgreSQL migrations and RLS", () => {
+  const TYPE = "00000000-0000-4000-8000-000000009001";
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  const publish = (body: KindSchemaBody) =>
+    publishKindSchema(fixture, owner.userId, body);
+  /** Runs SQL as the database owner outside RLS. */
+  const asOwner = async <T>(work: () => Promise<T>) => {
+    await fixture.client.exec("RESET ROLE");
+    try {
+      return await work();
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+  };
+  const stored = (id: string) =>
+    asOwner(
+      async () =>
+        (
+          await fixture.client.query<{
+            data: Record<string, unknown>;
+            schema_version_id: string | null;
+          }>(
+            "SELECT data, schema_version_id::text FROM app.records WHERE id = $1",
+            [id],
+          )
+        ).rows[0],
+    );
+  const valuesOf = async (id: string) =>
+    (await stored(id)).data.customValues as Record<string, unknown>;
+  /** The body's edit screen entry for `key`, on the screen of `type` or the default one. */
+  const editEntry = (body: KindSchemaBody, key: string, type?: string) =>
+    body.screens
+      .find((screen) => screen.action === "edit" && screen.type === type)!
+      .groups[0].fields.find((entry) => entry.key === key)!;
+
+  beforeAll(async () => {
+    fixture = await createTestDb();
+    owner = await seedIdentity(fixture.db, {
+      userId: "screens-owner",
+      teamId: "screens-team",
+    });
+    await enforceTestRls(fixture.db);
+  });
+  afterAll(async () => {
+    await fixture?.close();
+  });
+
+  it("keeps the values of fields the edit screen does not show when a save leaves them out", async () => {
+    const shown = customField("Fictional shown", "short-text");
+    const hidden = customField("Fictional hidden", "short-text");
+    const unlisted = customField("Fictional unlisted", "short-text");
+    const body = kindBody("candidate", [shown, hidden, unlisted], {
+      edit: [shown.key, hidden.key],
+    });
+    editEntry(body, hidden.key).hidden = true;
+    editEntry(body, "employer").hidden = true;
+    // A typed edit screen shows all three custom fields.
+    body.screens.push({
+      type: TYPE,
+      action: "edit",
+      groups: [
+        {
+          fields: body.screens[0].groups[0].fields.map(({ key }) => ({ key })),
+        },
+      ],
+    });
+    await publish(body);
+    const values = {
+      [shown.key]: "Fictional S",
+      [hidden.key]: "Fictional H",
+      [unlisted.key]: "Fictional U",
+    };
+    const create = () =>
+      createRecord(owner, "candidates", {
+        data: {
+          name: "Fictional Screened Candidate",
+          employer: "Fictional Employer",
+          customValues: values,
+        },
+      });
+    const person = await create();
+    await updateRecord(owner, "candidates", person.id, {
+      version: 1,
+      data: { customValues: { [shown.key]: "Fictional S2" } },
+    });
+    expect(await valuesOf(person.id)).toEqual({
+      ...values,
+      [shown.key]: "Fictional S2",
+    });
+    await updateRecord(owner, "candidates", person.id, {
+      version: 2,
+      data: { customValues: {} },
+    });
+    expect(await valuesOf(person.id)).toEqual({
+      [hidden.key]: "Fictional H",
+      [unlisted.key]: "Fictional U",
+    });
+    await updateRecord(owner, "candidates", person.id, {
+      version: 3,
+      data: { customValues: { [hidden.key]: null } },
+    });
+    expect(await valuesOf(person.id)).toEqual({
+      [hidden.key]: null,
+      [unlisted.key]: "Fictional U",
+    });
+    // A hidden system key left out of a save keeps its value.
+    const edited = await updateRecord(owner, "candidates", person.id, {
+      version: 4,
+      data: { phone: "+971 50 333 3333" },
+    });
+    expect(edited.data).toMatchObject({
+      employer: "Fictional Employer",
+      phone: "+971 50 333 3333",
+    });
+    // A record of the type uses the typed screen, which shows every field; one with no type does not.
+    const typed = await create();
+    const untyped = await create();
+    await asOwner(() =>
+      fixture.client.query(
+        "UPDATE app.records SET type_id = $1 WHERE id = $2",
+        [TYPE, typed.id],
+      ),
+    );
+    for (const record of [typed, untyped])
+      await updateRecord(owner, "candidates", record.id, {
+        version: 1,
+        data: { customValues: {} },
+      });
+    expect(await valuesOf(typed.id)).toEqual({});
+    expect(await valuesOf(untyped.id)).toEqual({
+      [hidden.key]: "Fictional H",
+      [unlisted.key]: "Fictional U",
+    });
+  });
+
+  it("keeps a task's hidden central value beside its team task-field values", async () => {
+    const bucket = await createRecord(owner, "buckets", {
+      data: { name: "Fictional screened bucket" },
+    });
+    const team = await createRecord(owner, "task-fields", {
+      data: { name: "Fictional team estimate", type: "Number" },
+    });
+    const central = customField("Fictional central note", "short-text");
+    const body = kindBody("task", [central]);
+    editEntry(body, central.key).hidden = true;
+    await publish(body);
+    const task = await createRecord(owner, "tasks", {
+      bucketId: bucket.id,
+      data: {
+        title: "Fictional screened task",
+        customValues: { [team.id]: 3, [central.key]: "Fictional C" },
+      },
+    });
+    await updateRecord(owner, "tasks", task.id, {
+      version: 1,
+      data: { customValues: { [team.id]: 4 } },
+    });
+    expect(await valuesOf(task.id)).toEqual({
+      [team.id]: 4,
+      [central.key]: "Fictional C",
+    });
+    // Team task-field keys keep today's replace behaviour.
+    await updateRecord(owner, "tasks", task.id, {
+      version: 2,
+      data: { customValues: {} },
+    });
+    expect(await valuesOf(task.id)).toEqual({ [central.key]: "Fictional C" });
+  });
+
+  it("enforces mandatory flags on create, and on edit only for a filled value", async () => {
+    const before = await createRecord(owner, "candidates", {
+      data: { name: "Fictional Earlier Candidate" },
+    });
+    const note = customField("Fictional mandatory note", "short-text");
+    const body = kindBody("candidate", [note]);
+    for (const screen of body.screens)
+      if (screen.action !== "view")
+        for (const entry of screen.groups[0].fields)
+          if (entry.key === "email" || entry.key === note.key)
+            entry.mandatory = true;
+    const versionId = await publish(body);
+    const emailRequired = {
+      status: 400,
+      code: "invalid_input",
+      message: "email: Email is required.",
+    };
+    const noteRequired = {
+      status: 400,
+      code: "required_custom_field",
+      message: "A valid value for Fictional mandatory note is required.",
+    };
+    await expect(
+      createRecord(owner, "candidates", {
+        data: {
+          name: "Fictional Flagged Candidate",
+          customValues: { [note.key]: "Fictional note" },
+        },
+      }),
+    ).rejects.toMatchObject(emailRequired);
+    await expect(
+      createRecord(owner, "candidates", {
+        data: {
+          name: "Fictional Flagged Candidate",
+          email: "flagged@example.test",
+        },
+      }),
+    ).rejects.toMatchObject(noteRequired);
+    const created = await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Flagged Candidate",
+        email: "flagged@example.test",
+        customValues: { [note.key]: "Fictional note" },
+      },
+    });
+    await expect(
+      updateRecord(owner, "candidates", created.id, {
+        version: 1,
+        data: { email: "" },
+      }),
+    ).rejects.toMatchObject(emailRequired);
+    await expect(
+      updateRecord(owner, "candidates", created.id, {
+        version: 1,
+        data: { customValues: { [note.key]: "" } },
+      }),
+    ).rejects.toMatchObject(noteRequired);
+    // A record from before the flags keeps both empty on an unrelated edit and re-pins.
+    expect((await stored(before.id)).schema_version_id).not.toBe(versionId);
+    const edited = await updateRecord(owner, "candidates", before.id, {
+      version: 1,
+      data: { phone: "+971 50 444 4444" },
+    });
+    expect(edited.data).toMatchObject({ email: "", phone: "+971 50 444 4444" });
+    expect((await stored(before.id)).schema_version_id).toBe(versionId);
+  });
+});
+
 // Person, org unit and lookup fields (R2b-05, job 084), on a database of its own so the kind schemas
 // published here reach no other case. The person member cases run under the split runtime roles in
 // tests/org-scope.test.ts.

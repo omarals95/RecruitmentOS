@@ -73,6 +73,7 @@ import {
   BULK_INTAKE_MAX_FILES,
   BULK_INTAKE_RECOVERY_HOURS,
   type RecordDto,
+  type ResourceName,
 } from "../src/domain/records";
 import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
 import {
@@ -83,6 +84,8 @@ import {
 import { AuthForm } from "../src/components/auth/auth-form";
 import { versionLabel } from "../src/lib/app-version";
 import { rules } from "./helpers/css";
+import { contactBody } from "./helpers/kind-schemas";
+import type { KindSchemaBody } from "../src/domain/config";
 
 const workspace = {
   user: {
@@ -1620,5 +1623,267 @@ describe("vacancy job title picker", () => {
     });
     const body = recordMutation("vacancies", { ...vacancy.data }, {}, vacancy);
     expect(body.data).not.toHaveProperty("jobTitleKey");
+  });
+});
+
+// R2b-07 (job 090): with the default kind schemas, the editor and the profile render exactly as
+// before screens. The golden file was written by main's code before the change.
+describe("default screens", () => {
+  const golden = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/default-screens-dom.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, { create: string; edit: string; view: string }>;
+  const fictional: Record<string, Record<string, unknown>> = {
+    candidates: {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      phone: "+971 50 000 0001",
+      university: "Fictional University",
+      employer: "Fictional Employer",
+      jobTitle: "Fictional Analyst",
+      yearsExperience: 4,
+      skills: ["Excel", "SQL"],
+      languages: ["English"],
+      reviewStatus: "Needs review",
+      sourceNotes: "Fictional note",
+      rawSource: { folder: "Fictional" },
+      evidence: {},
+      sourceReviews: [],
+    },
+    "job-roles": {
+      title: "Fictional Engineer",
+      department: "Fictional Department",
+      description: "Fictional description",
+      skills: ["TypeScript"],
+    },
+    vacancies: {
+      title: "Fictional Engineer",
+      requisitionId: "REQ-1",
+      openings: 2,
+      status: "Open",
+      targetDate: "2026-12-01",
+      jobTitleKey: "fictional-engineer",
+    },
+    applications: {
+      stage: "Screening",
+      source: "Fictional referral",
+      appliedDate: "2026-11-01",
+    },
+    tasks: {
+      title: "Fictional task",
+      priority: "High",
+      assigneeIds: ["fictional-member-alex"],
+      dueDate: "2026-11-20",
+      customValues: {},
+    },
+    interviews: {
+      title: "Fictional interview",
+      startAt: "2026-11-15T06:30:00.000Z",
+      minutes: 45,
+      status: "Scheduled",
+      meetingUrl: "https://example.test/meet",
+    },
+    offers: {
+      title: "Fictional offer",
+      amount: "12000",
+      currency: "AED",
+      payPeriod: "Monthly",
+      status: "Draft",
+    },
+    onboarding: { startDate: "2026-12-01", status: "Planned" },
+    checklist: {
+      title: "Fictional checklist item",
+      category: "Document",
+      status: "Pending",
+    },
+  };
+  const kinds: Record<string, string> = {
+    candidates: "candidate",
+    "job-roles": "job-role",
+    vacancies: "vacancy",
+    applications: "application",
+    tasks: "task",
+    interviews: "interview",
+    offers: "offer",
+    onboarding: "onboarding",
+    checklist: "checklist",
+  };
+  const recordOf = (resource: string, index: number) =>
+    ({
+      id: `00000000-0000-4000-8000-00000000090${index}`,
+      kind: kinds[resource],
+      data: fictional[resource],
+      version: 3,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+    }) as RecordDto;
+  const markup = (resource: string, index: number) => {
+    const record = recordOf(resource, index);
+    const wrap = (node: ReactNode) =>
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>{node}</WorkspaceProvider>,
+      );
+    return {
+      create: wrap(
+        <RecordEditor
+          resource={resource as ResourceName}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      ),
+      edit: wrap(
+        <RecordEditor
+          resource={resource as ResourceName}
+          record={record}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      ),
+      view: wrap(
+        <RecordDetail
+          record={record}
+          inline
+          onClose={() => {}}
+          onEdit={() => {}}
+          onRefresh={() => {}}
+          onCreate={() => {}}
+          onUpdated={() => {}}
+        />,
+      ),
+    };
+  };
+
+  it("renders every configurable kind's create, edit and view exactly as before screens", () => {
+    const resources = Object.keys(fictional);
+    expect(Object.keys(golden)).toEqual(resources);
+    // A new interview starts now, so the clock is fixed.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-12T08:00:00.000Z"));
+    try {
+      resources.forEach((resource, index) => {
+        const now = markup(resource, index);
+        expect(now.create, `${resource} create`).toBe(golden[resource].create);
+        expect(now.edit, `${resource} edit`).toBe(golden[resource].edit);
+        expect(now.view, `${resource} view`).toBe(golden[resource].view);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// R2b-07 (job 090): a fictional configured candidate screen with a group, a reordered field, a
+// hidden field and a mandatory flag.
+describe("configured screens", () => {
+  const candidate = (email: string) =>
+    ({
+      id: "00000000-0000-4000-8000-000000000990",
+      kind: "candidate",
+      data: {
+        name: "Fictional Candidate",
+        email,
+        phone: "+971 50 000 0002",
+        employer: "Fictional Employer",
+      },
+      version: 2,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+    }) as RecordDto;
+  const editor = (schema: KindSchemaBody, record?: RecordDto) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordEditor
+          resource="candidates"
+          record={record}
+          schema={schema}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  const emailLabel = (markup: string) =>
+    /<label for="editor-email">([\s\S]*?)<\/label><input id="editor-email"([^>]*)\/>/.exec(
+      markup,
+    );
+
+  it("renders the editor's groups in order, the labelled one as a fieldset, without hidden fields", () => {
+    for (const record of [undefined, candidate("candidate@example.test")]) {
+      const markup = editor(contactBody(), record);
+      expect(markup).toContain(
+        '<fieldset class="editor-fieldset full-width"><legend>Fictional contact</legend><div class="form-grid">',
+      );
+      const phone = markup.indexOf('id="editor-phone"');
+      const email = markup.indexOf('id="editor-email"');
+      expect(phone).toBeGreaterThan(markup.indexOf("Fictional contact"));
+      expect(phone).toBeLessThan(email);
+      expect(markup.indexOf('id="editor-name"')).toBeLessThan(phone);
+      expect(markup).not.toContain('id="editor-employer"');
+      // Without a flag, email is optional.
+      expect(emailLabel(markup)![1]).toBe("Email");
+      expect(emailLabel(markup)![2]).not.toContain("required");
+    }
+  });
+
+  it("shows the view screen's groups on the profile, without hidden fields", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordDetail
+          record={candidate("candidate@example.test")}
+          schema={contactBody()}
+          inline
+          onClose={() => {}}
+          onEdit={() => {}}
+          onRefresh={() => {}}
+          onCreate={() => {}}
+          onUpdated={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+    const heading = markup.indexOf("<h3>Fictional contact</h3>");
+    expect(heading).toBeGreaterThan(markup.indexOf("<dt>Name</dt>"));
+    expect(markup.slice(heading)).toMatch(
+      /^<h3>Fictional contact<\/h3><div class="detail-facts"><div class=""><dt>Phone<\/dt>[\s\S]*?<dt>Email<\/dt>/,
+    );
+    expect(markup).not.toContain("<dt>Employer</dt>");
+    expect(markup).not.toContain("Fictional Employer");
+  });
+
+  it("marks a mandatory field required on create, and on edit only when its stored value is filled", () => {
+    const schema = contactBody({ mandatory: true });
+    for (const markup of [
+      editor(schema),
+      editor(schema, candidate("candidate@example.test")),
+    ]) {
+      const [, label, input] = emailLabel(markup)!;
+      expect(label).toBe('Email<span aria-label="required"> *</span>');
+      expect(input).toContain('required=""');
+    }
+    const [, label, input] = emailLabel(editor(schema, candidate("")))!;
+    expect(label).toBe("Email");
+    expect(input).not.toContain("required");
   });
 });
