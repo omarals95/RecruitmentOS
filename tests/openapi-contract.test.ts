@@ -963,6 +963,58 @@ describe("OpenAPI contract", () => {
     expect(JSON.stringify(anonymise)).not.toContain('"in":"query"');
   });
 
+  it("documents the company group operations as session-only, with their codes, and the recent sign-in rule on granting groups only (ADM-12)", () => {
+    const groups = document.paths["/api/v1/admin/groups"];
+    const group = document.paths["/api/v1/admin/groups/{group}"];
+    const members = document.paths["/api/v1/admin/groups/{group}/members"];
+    const userGroups = document.paths["/api/v1/admin/users/{user}/groups"].get;
+    expect(Object.keys(groups)).toEqual(["get", "post"]);
+    expect(Object.keys(group)).toEqual(["get", "patch"]);
+    expect(Object.keys(members)).toEqual(["post", "delete"]);
+    const reads = [groups.get, group.get, userGroups];
+    const writes = [groups.post, group.patch, members.post, members.delete];
+    for (const operation of [...reads, ...writes]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      expect(JSON.stringify(operation)).toContain("session_required");
+    }
+    for (const operation of reads) {
+      expect(JSON.stringify(operation)).toContain("people_forbidden");
+      expect(JSON.stringify(operation)).not.toContain("SESSION_NOT_FRESH");
+    }
+    for (const operation of writes)
+      expect(JSON.stringify(operation)).toContain("group_forbidden");
+    expect(JSON.stringify(groups.post)).not.toContain("SESSION_NOT_FRESH");
+    for (const operation of [group.patch, members.post, members.delete])
+      for (const text of [
+        "SESSION_NOT_FRESH",
+        "group_owner_required",
+        "tenant_context.group_grants",
+      ])
+        expect(JSON.stringify(operation), text).toContain(text);
+    for (const text of ["group_cycle", "group_depth", "group_member_exists"])
+      expect(JSON.stringify(members.post), text).toContain(text);
+    for (const text of [
+      "computed:[{key, name, people}]",
+      "grants, directPeople, people",
+      "never returns a person's id, name or email",
+    ])
+      expect(JSON.stringify(groups.get), text).toContain(text);
+    for (const text of [
+      "memberOf:[{id, name, status, via}]",
+      "changes made from another team are shown in that team",
+      "not_found",
+    ])
+      expect(JSON.stringify(group.get), text).toContain(text);
+    expect(JSON.stringify(userGroups)).toContain("through:[<group name>]");
+    expect(JSON.stringify(document.paths["/api/v1/admin/users"].get)).toContain(
+      '"name":"group","in":"query"',
+    );
+  });
+
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
     const archive = document.paths["/api/v1/teams/archive"].put;
     const archived = document.paths["/api/v1/me/archived-teams"].get;
@@ -1233,7 +1285,7 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents the recent sign-in rule on exactly the nine sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10)", () => {
+  it("documents the recent sign-in rule on exactly the twelve sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12)", () => {
     const guarded = [
       "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
@@ -1244,6 +1296,10 @@ describe("OpenAPI contract", () => {
       "POST /api/v1/admin/users/{user}/sign-out",
       "POST /api/v1/admin/users/{user}/clear-lockout",
       "POST /api/v1/admin/users/{user}/anonymise",
+      // ADM-12: changes to a group that grants something only.
+      "PATCH /api/v1/admin/groups/{group}",
+      "POST /api/v1/admin/groups/{group}/members",
+      "DELETE /api/v1/admin/groups/{group}/members",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1317,6 +1373,13 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/admin/users/{user}/sign-out",
         "POST /api/v1/admin/users/{user}/clear-lockout",
         "POST /api/v1/admin/users/{user}/anonymise",
+        "GET /api/v1/admin/users/{user}/groups",
+        "GET /api/v1/admin/groups",
+        "POST /api/v1/admin/groups",
+        "GET /api/v1/admin/groups/{group}",
+        "PATCH /api/v1/admin/groups/{group}",
+        "POST /api/v1/admin/groups/{group}/members",
+        "DELETE /api/v1/admin/groups/{group}/members",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",
