@@ -804,6 +804,62 @@ describe("paging and filters over a few hundred fictional people", () => {
     ] as Record<string, string>[])
       expect(await walk(owner, filters), JSON.stringify(filters)).toEqual([]);
   });
+
+  // ADM-12 (job 095): a group's effective members, direct or through a nested group.
+  it("filters by a group across pages of 25, alone and combined, never listing an invitation", async () => {
+    // Outer holds every tenth person directly and Inner, which holds every sixth person.
+    await harness.asSuperuser();
+    const created = await harness.client.query<{ id: string }>(
+      `INSERT INTO app.groups(workspace_id, name) VALUES ('${COMPANY}', 'Fictional Bulk Outer'), ('${COMPANY}', 'Fictional Bulk Inner') RETURNING id`,
+    );
+    const [outer, inner] = created.rows.map((row) => row.id);
+    await harness.client.exec(`
+      INSERT INTO app.group_members(group_id, workspace_id, child_group_id) VALUES ('${outer}', '${COMPANY}', '${inner}');
+      INSERT INTO app.group_members(group_id, workspace_id, user_id)
+        SELECT '${outer}', '${COMPANY}', 'bulk-' || lpad(i::text, 3, '0') FROM generate_series(10, 300, 10) i;
+      INSERT INTO app.group_members(group_id, workspace_id, user_id)
+        SELECT '${inner}', '${COMPANY}', 'bulk-' || lpad(i::text, 3, '0') FROM generate_series(6, 300, 6) i;`);
+    const index = (person: Person) =>
+      Number(/^bulk-(\d{3})@/.exec(person.email)?.[1] ?? 0);
+    const inOuter = (person: Person) =>
+      index(person) > 0 &&
+      (index(person) % 10 === 0 || index(person) % 6 === 0);
+    const inInner = (person: Person) =>
+      index(person) > 0 && index(person) % 6 === 0;
+    for (const [filters, keep] of [
+      [{ group: outer }, inOuter],
+      [{ group: inner }, inInner],
+      [
+        { group: outer, team: "fictional-e" },
+        (person: Person) => inOuter(person) && person.teams.has("e"),
+      ],
+      [{ group: outer, status: "active" }, inOuter],
+      [
+        { group: outer, level: "admin" },
+        (person: Person) => inOuter(person) && person.level === "admin",
+      ],
+      [
+        { group: outer, team: "fictional-f", level: "none", status: "active" },
+        (person: Person) =>
+          inOuter(person) && person.teams.has("f") && person.level === null,
+      ],
+    ] as [Record<string, string>, (person: Person) => boolean][]) {
+      const want = expected(keep);
+      expect(want.length, JSON.stringify(filters)).toBeGreaterThan(0);
+      const rows = await walk(owner, filters);
+      expect(keysOf(rows), JSON.stringify(filters)).toEqual(want);
+      expect(new Set(rows.map((row) => row.email)).size).toBe(rows.length);
+    }
+    // More than one page: 80 people in Outer.
+    expect(expected(inOuter).length).toBeGreaterThan(50);
+    for (const filters of [
+      { group: outer, status: "invited" },
+      { group: "00000000-0000-4000-a000-0000000000ff" },
+    ] as Record<string, string>[])
+      expect(await walk(owner, filters), JSON.stringify(filters)).toEqual([]);
+    const { status, body } = await get(owner, "?group=not-a-uuid");
+    expect([status, body.error.code]).toEqual([400, "invalid_input"]);
+  });
 });
 
 // ADM-08 (job 076): one person through tenant_context.workspace_person and its route.
