@@ -34,6 +34,7 @@ import {
   SENSITIVE_CANDIDATE_FIELDS,
   recordDataSchemas,
   resourceToKind,
+  uuidSchema,
   type RecordDto,
   type RecordKind,
   type ResourceName,
@@ -356,8 +357,8 @@ export type AccessMap = {
 /**
  * Every answer of authorize() the screens need to hide what the server would refuse, with no
  * statement, no id and no configuration body: the role's name, membership and pages, the scopes,
- * the allowed actions per resource, the field rules of each record kind the caller may view and the
- * company areas.
+ * the allowed actions per resource, the field rules of each record kind the caller may view (with
+ * the custom field ids the role names) and the company areas.
  */
 export function accessMap(ctx: AccessContext): AccessMap {
   const actions: AccessMap["actions"] = {};
@@ -369,8 +370,27 @@ export function accessMap(ctx: AccessContext): AccessMap {
   }
   const fields: AccessMap["fields"] = {};
   for (const resource of RECORD_RESOURCES) {
+    const kind = resourceToKind[resource];
     const decision = decide(ctx, { resource, action: "view" });
-    if (decision) fields[resourceToKind[resource]] = decision.fields;
+    if (!decision) continue;
+    // A custom field id the role names follows its rule, inside what the kind's customValues allows.
+    const rules = fieldRules(ctx.role!, kind);
+    const custom = decision.fields.customValues;
+    const customRules = Object.keys(rules)
+      .filter((key) => uuidSchema.safeParse(key).success)
+      .map((key) => [
+        key,
+        rules[key] === "hidden" ||
+        rules[key] === "hidden-unless-approver" ||
+        custom === "hidden"
+          ? "hidden"
+          : rules[key] === "read" || custom !== "edit"
+            ? "read"
+            : "edit",
+      ]);
+    fields[kind] = customRules.length
+      ? { ...decision.fields, ...Object.fromEntries(customRules) }
+      : decision.fields;
   }
   const { role } = ctx;
   return {
@@ -748,6 +768,19 @@ function customValuesHiddenByDefault(
   );
 }
 
+/** The keys the role's rules hide on every channel, a non-task customValues hidden by default included. */
+function ruleHiddenKeys(role: RoleBody, kind: RecordKind): Set<string> {
+  const rules = fieldRules(role, kind);
+  const hidden = new Set(
+    Object.keys(rules).filter(
+      (key) =>
+        rules[key] === "hidden" || rules[key] === "hidden-unless-approver",
+    ),
+  );
+  if (customValuesHiddenByDefault(kind, rules)) hidden.add("customValues");
+  return hidden;
+}
+
 /**
  * The keys of one kind the caller may not see: data keys, custom field ids and top-level keys whose
  * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus
@@ -756,17 +789,45 @@ function customValuesHiddenByDefault(
  */
 export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
   if (!ctx.role) throw forbidden();
-  const rules = fieldRules(ctx.role, kind);
-  const hidden = new Set(
-    Object.keys(rules).filter(
-      (key) =>
-        rules[key] === "hidden" || rules[key] === "hidden-unless-approver",
-    ),
-  );
-  if (customValuesHiddenByDefault(kind, rules)) hidden.add("customValues");
+  const hidden = ruleHiddenKeys(ctx.role, kind);
   if (ctx.channel === "mcp" && kind === "candidate")
     for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
   return hidden;
+}
+
+/** The keys of one kind the caller's role makes read-only (rule read): data keys, custom field ids and top-level keys. */
+export function readOnlyKeys(
+  ctx: AccessContext,
+  kind: RecordKind,
+): Set<string> {
+  if (!ctx.role) throw forbidden();
+  const rules = fieldRules(ctx.role, kind);
+  return new Set(Object.keys(rules).filter((key) => rules[key] === "read"));
+}
+
+/**
+ * Refuses a write that names a field the caller's role hides or makes read-only, with no statement.
+ * `keys` are what the caller sent: the keys of data, the custom field ids of data.customValues and
+ * legacyId and importMeta when present; customValues itself is refused when the role hides it or
+ * makes it read-only. The refusal names the key as sent, never a configured label.
+ */
+export function checkFieldWrite(
+  ctx: AccessContext,
+  kind: RecordKind,
+  keys: Iterable<string>,
+) {
+  if (!ctx.role) throw forbidden();
+  const locked = new Set([
+    ...ruleHiddenKeys(ctx.role, kind),
+    ...readOnlyKeys(ctx, kind),
+  ]);
+  for (const key of keys)
+    if (locked.has(key))
+      throw new ApiError(
+        403,
+        "field_forbidden",
+        `Your role cannot change ${key}.`,
+      );
 }
 
 /**
