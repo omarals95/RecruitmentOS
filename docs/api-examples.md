@@ -169,7 +169,7 @@ Refusals roll back the whole write:
 
 ## Custom values on records
 
-Candidates, job roles, vacancies, applications, interviews, offers, onboarding records and checklist items take an optional `data.customValues` on `POST /api/v1/{resource}` and `PATCH /api/v1/{resource}/{id}`: a map from a field definition ID (a UUID) to a string of at most 4000 characters, a finite number, `true`, `false` or `null`. A key that is not a UUID, an object or array value, a longer string or a non-finite number answers 400 `invalid_input`, before any check below. On `PATCH`, a sent `customValues` replaces the whole stored map, and a `PATCH` without it leaves the map as it is.
+Candidates, job roles, vacancies, applications, interviews, offers, onboarding records and checklist items take an optional `data.customValues` on `POST /api/v1/{resource}` and `PATCH /api/v1/{resource}/{id}`: a map from a field definition ID (a UUID) to a string of at most 4000 characters, a finite number, `true`, `false` or `null`. A key that is not a UUID, an object or array value, a longer string or a non-finite number answers 400 `invalid_input`, before any check below. On `PATCH`, a sent `customValues` replaces the stored map, except that the stored value of a custom field the edit screen for the record's type does not show (not listed, or listed hidden) is kept when the sent map leaves it out; such a value is cleared only by sending `null` or `""` for it. A task's team task-field keys are always replaced. A `PATCH` without `customValues` leaves the map as it is.
 
 Each write is checked against the kind's current published kind schema, which the record then pins:
 
@@ -186,7 +186,7 @@ Each write is checked against the kind's current published kind schema, which th
 | 400 `archived_reference`    | a lookup value naming an archived record ("{field label} references an archived record."); an import of an archived record may name one                                                                                                                                  |
 | 400 `invalid_reference`     | a file value that is not a ready file of this record in your team (below): the same answer and message as a lookup for a random ID, a pending, rejected or erased file, another record's file or another team's file; on a create every file value                       |
 
-A value carried over unchanged from the stored record is not checked again, so a field removed or tightened later, or made mandatory later and left empty, never blocks an unrelated edit. `null` and `""` are empty values of any field.
+The mandatory fields of the `required_custom_field` and `invalid_input` rows come from the screen: the fields the create screen (on `POST`) or the edit screen for the record's type (on `PATCH`) shows that are required or flagged mandatory on that screen, never an archived field. A value carried over unchanged from the stored record is not checked again, so a field removed or tightened later, or made mandatory later and left empty, never blocks an unrelated edit. `null` and `""` are empty values of any field.
 
 Person, org unit and lookup values are bare IDs: a person value is a user ID, an org unit value the unit's ID and a lookup value the record's ID. They are checked only when added or changed, so a person who later leaves the team, or a unit or record archived later, never blocks an unrelated edit. Responses return the stored ID only, never a name or label.
 

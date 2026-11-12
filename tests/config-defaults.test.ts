@@ -431,7 +431,9 @@ describe("built-in default kind schemas (R2b-01)", () => {
       ),
     ).toBe(true);
     expect(
-      refused((body) => screens(body)[0].groups[0].fields.push({ key: "title" })),
+      refused((body) =>
+        screens(body)[0].groups[0].fields.push({ key: "title" }),
+      ),
     ).toBe(true);
     expect(refused((body) => (screens(body)[1].action = "create"))).toBe(true);
     expect(refused((body) => (screens(body)[0].action = "approve"))).toBe(true);
@@ -518,7 +520,9 @@ describe("built-in default kind schemas (R2b-01)", () => {
         expect(config, kind).toBeUndefined();
         for (const screen of DEFAULT_KIND_SCHEMAS[kind].body.screens)
           expect(
-            screen.groups.flatMap((group) => group.fields.map(({ key }) => key)),
+            screen.groups.flatMap((group) =>
+              group.fields.map(({ key }) => key),
+            ),
             kind,
           ).not.toContain("customValues");
       }
