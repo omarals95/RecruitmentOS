@@ -179,9 +179,10 @@ export function OrgImportView({
       <h2>Import from Excel</h2>
       <p className="muted">
         One .xlsx workbook, row 1 naming the columns: Units (Code, Name, Level,
-        Parent code), Positions (Code, Title, Unit code, Manager) and Employees
-        (Employee number, Name, Work email, Work phone, Position codes, Primary
-        position).
+        Parent code), Positions (Code, Title, Unit code, Manager, and optionally
+        Job title and Grade) and Employees (Employee number, Name, Work email,
+        Work phone, Position codes, Primary position). Other columns are
+        ignored.
       </p>
       <form
         className="row"
@@ -225,6 +226,74 @@ export function OrgImportView({
             </p>
           )}
           <IssueTable title="Rejected rows" rows={report.rejected} />
+          {!!report.jobTitles.length && (
+            <>
+              <h3>Job titles</h3>
+              <p className="muted">
+                The job title and grade each position would get.
+              </p>
+              <div className="table-wrap">
+                <table className="data-table compact">
+                  <caption className="sr-only">Job titles</caption>
+                  <thead>
+                    <tr>
+                      <th style={narrow}>Row</th>
+                      <th style={narrow}>Position</th>
+                      <th>Job title</th>
+                      <th style={free}>Grade</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.jobTitles.map((entry) => (
+                      <tr key={entry.row}>
+                        <td data-label="Row" style={narrow}>
+                          {entry.row}
+                        </td>
+                        <td data-label="Position" style={narrow}>
+                          {entry.code}
+                        </td>
+                        <td data-label="Job title">
+                          {entry.titleName} ({entry.titleKey})
+                        </td>
+                        <td data-label="Grade" style={free}>
+                          {entry.gradeCode} · {entry.gradeName}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          {!!report.ignored.length && (
+            <>
+              <h3>Ignored columns</h3>
+              <p className="muted">These columns are not read or stored.</p>
+              <div className="table-wrap">
+                <table className="data-table compact">
+                  <caption className="sr-only">Ignored columns</caption>
+                  <thead>
+                    <tr>
+                      <th style={narrow}>Sheet</th>
+                      <th style={free}>Column</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.ignored.map((column, i) => (
+                      <tr key={`${column.sheet}:${i}`}>
+                        <td data-label="Sheet" style={narrow}>
+                          {column.sheet}
+                        </td>
+                        <td data-label="Column" style={free}>
+                          {column.column}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           {!!report.flagged.length && (
             <>
               <h3>Flagged cells</h3>

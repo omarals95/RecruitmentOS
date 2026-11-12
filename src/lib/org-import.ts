@@ -4,7 +4,7 @@ import { sql, type SQL } from "drizzle-orm";
 import readXlsx from "read-excel-file/node";
 import type { TeamTx } from "@/db";
 import { activity } from "@/db/schema";
-import { configLabel } from "@/domain/config";
+import { configLabel, type JobArchitectureBody } from "@/domain/config";
 import { employeeInput } from "@/domain/directory";
 import { XLSX_TYPE } from "@/domain/org";
 import { ApiError, readLimitedBytes } from "@/lib/api";
@@ -16,6 +16,7 @@ import {
   requireDirectory,
   stateConflict,
 } from "@/lib/directory";
+import { jobArchitectureFor } from "@/lib/job-architecture";
 import { inOrg, requireWrite } from "@/lib/org";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
@@ -57,10 +58,31 @@ const COLUMNS = {
     "Primary position",
   ],
 } as const satisfies Record<ImportSheet, readonly string[]>;
+/** Columns a sheet may have; each row's cells hold them after the required ones. */
+const OPTIONAL = {
+  Units: [],
+  Positions: ["Job title", "Grade"],
+  Employees: [],
+} as const satisfies Record<ImportSheet, readonly string[]>;
+const sheetColumns = (name: ImportSheet): readonly string[] => [
+  ...COLUMNS[name],
+  ...OPTIONAL[name],
+];
 export type ImportGroup = "normal" | "owner";
 
 export type ImportIssue = { sheet: ImportSheet; row: number; reason: string };
 export type ImportFlag = { sheet: ImportSheet; row: number; column: string };
+/** A header the import does not read; the cells below it are never read, stored or returned. */
+export type ImportIgnored = { sheet: ImportSheet; column: string };
+/** A position row whose Job title matched a published title, with that title's grade. */
+export type ImportJobTitle = {
+  row: number;
+  code: string;
+  titleKey: string;
+  titleName: string;
+  gradeCode: string;
+  gradeName: string;
+};
 export type ImportCounts = {
   create: number;
   update: number;
@@ -74,6 +96,8 @@ export type ImportReport = {
   rejected: ImportIssue[];
   needsOwner: ImportIssue[];
   flagged: ImportFlag[];
+  jobTitles: ImportJobTitle[];
+  ignored: ImportIgnored[];
   truncated: boolean;
 };
 
@@ -90,6 +114,8 @@ type PositionRow = {
   title: string;
   unitCode: string;
   manager: boolean | null;
+  jobTitle: string | null;
+  grade: string | null;
 };
 type EmployeeRow = {
   row: number;
@@ -108,6 +134,7 @@ export type Workbook = {
   positions: (PositionRow | Invalid)[];
   employees: (EmployeeRow | Invalid)[];
   flagged: ImportFlag[];
+  ignored: ImportIgnored[];
 };
 
 const tooLarge = () =>
@@ -349,6 +376,10 @@ type CellValue = string | number | boolean | Date | null;
 class RowError extends Error {}
 /** The text a formula or CSV injection starts with, as safeCsvCell checks it. */
 const FORMULA_LIKE = /^\s*[=+\-@\t\r]/;
+/** A zero-based column index as its spreadsheet letters: A, B, …, Z, AA, … */
+const columnLetter = (index: number): string =>
+  (index >= 26 ? columnLetter(Math.floor(index / 26) - 1) : "") +
+  String.fromCharCode(65 + (index % 26));
 
 /**
  * Checks the archive, parses the workbook with read-excel-file (values only: a formula's cached
@@ -395,7 +426,7 @@ export async function parseWorkbook(bytes: Buffer): Promise<Workbook> {
     const header = found[name][0].map((cell) =>
       typeof cell === "string" ? cell.trim().toLowerCase() : "",
     );
-    columns[name] = COLUMNS[name].map((column) =>
+    columns[name] = sheetColumns(name).map((column) =>
       header.indexOf(column.toLowerCase()),
     );
     const absent = COLUMNS[name].filter((_, i) => columns[name][i] < 0);
@@ -408,11 +439,30 @@ export async function parseWorkbook(bytes: Buffer): Promise<Workbook> {
       "import_columns_missing",
       `Row 1 of each sheet names its columns, and ${missing.join("; ")}.`,
     );
+  // Every other non-blank header, by its text, or by its column letter when it is not text; the
+  // cells below it are never copied into a row.
+  const ignored: ImportIgnored[] = [];
+  for (const name of IMPORT_SHEETS) {
+    if (!found[name].length) continue;
+    found[name][0].forEach((cell, i) => {
+      const clean = typeof cell === "string" ? cleanClientName(cell) : null;
+      if (columns[name].includes(i) || cell === null || clean === "") return;
+      ignored.push({
+        sheet: name,
+        column:
+          clean === null
+            ? `Column ${columnLetter(i)}`
+            : [...clean].slice(0, 120).join(""),
+      });
+    });
+  }
   const flagged: ImportFlag[] = [];
   /** The non-blank data rows of a sheet as cells by column, with each formula-like cell flagged. */
   const dataRows = (name: ImportSheet) =>
     found[name].slice(1).flatMap((cells, index) => {
-      const values = columns[name].map((i) => cells[i] ?? null);
+      const values = columns[name].map((i) =>
+        i < 0 ? null : (cells[i] ?? null),
+      );
       if (
         cells.every(
           (cell) => cell === null || (typeof cell === "string" && !cell.trim()),
@@ -425,7 +475,7 @@ export async function parseWorkbook(bytes: Buffer): Promise<Workbook> {
           (typeof cell === "string" || typeof cell === "number") &&
           FORMULA_LIKE.test(String(cell))
         )
-          flagged.push({ sheet: name, row, column: COLUMNS[name][i] });
+          flagged.push({ sheet: name, row, column: sheetColumns(name)[i] });
       });
       return [{ row, values }];
     });
@@ -439,6 +489,7 @@ export async function parseWorkbook(bytes: Buffer): Promise<Workbook> {
       employeeRow(row, values),
     ),
     flagged,
+    ignored,
   };
   if (!book.units.length && !book.positions.length && !book.employees.length)
     throw new ApiError(
@@ -532,7 +583,9 @@ function positionRow(row: number, cells: CellValue[]) {
       else if (value)
         throw new RowError(`${subject}: Manager must be yes or no.`);
     }
-    return { row, code, title, unitCode, manager };
+    const jobTitle = label(cells[4], subject, "Job title", false);
+    const grade = label(cells[5], subject, "Grade", false);
+    return { row, code, title, unitCode, manager, jobTitle, grade };
   });
 }
 
@@ -617,6 +670,7 @@ type State = {
     title: string;
     isManager: boolean;
     unitId: string;
+    jobTitleKey: string | null;
     held: boolean;
   }[];
   positionLatest: { code: string; unitId: string; held: boolean }[];
@@ -653,7 +707,7 @@ async function readState(
       coalesce((select jsonb_agg(jsonb_build_object('id', l.id, 'name', l.name, 'depth', l.depth, 'archived', l.archived_at is not null)) from app.org_levels l where l.workspace_id = ${workspace}), '[]'::jsonb) as levels,
       coalesce((select jsonb_agg(jsonb_build_object('id', u.id, 'code', u.code, 'name', u.name, 'levelId', u.level_id, 'parentId', u.parent_id)) from app.org_units u where u.workspace_id = ${workspace} and u.valid_to is null and u.archived_at is null), '[]'::jsonb) as units,
       coalesce((select jsonb_agg(jsonb_build_object('code', t.code, 'parentId', t.parent_id)) from (select distinct on (u.code) u.code, u.parent_id from app.org_units u where u.workspace_id = ${workspace} and u.code in (select jsonb_array_elements_text(${keys(book.units, "code")}::jsonb)) order by u.code, u.valid_from desc, u.id desc) t), '[]'::jsonb) as "unitLatest",
-      coalesce((select jsonb_agg(jsonb_build_object('id', p.id, 'code', p.code, 'title', p.title, 'isManager', p.is_manager, 'unitId', p.org_unit_id, 'held', ${held(sql`p.id`)})) from app.positions p where p.workspace_id = ${workspace} and p.valid_to is null and p.archived_at is null), '[]'::jsonb) as positions,
+      coalesce((select jsonb_agg(jsonb_build_object('id', p.id, 'code', p.code, 'title', p.title, 'isManager', p.is_manager, 'unitId', p.org_unit_id, 'jobTitleKey', p.job_title_key, 'held', ${held(sql`p.id`)})) from app.positions p where p.workspace_id = ${workspace} and p.valid_to is null and p.archived_at is null), '[]'::jsonb) as positions,
       coalesce((select jsonb_agg(jsonb_build_object('code', t.code, 'unitId', t.org_unit_id, 'held', ${held(sql`t.id`)})) from (select distinct on (p.code) p.id, p.code, p.org_unit_id from app.positions p where p.workspace_id = ${workspace} and p.code in (select jsonb_array_elements_text(${keys(book.positions, "code")}::jsonb)) order by p.code, p.valid_from desc, p.id desc) t), '[]'::jsonb) as "positionLatest",
       coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'number', e.employee_number, 'name', e.display_name, 'email', e.work_email, 'phone', e.work_phone, 'linked', e.user_id is not null, 'archived', e.archived_at is not null,
         'positions', coalesce((select jsonb_agg(jsonb_build_object('positionId', ep.position_id, 'primary', ep."primary")) from app.employee_positions ep where ep.employee_id = e.id and ep.workspace_id = e.workspace_id and ep.valid_to is null), '[]'::jsonb)))
@@ -680,6 +734,8 @@ type PositionWrite = {
   isManager: boolean | null;
   /** Null when an existing position stays in its unit. */
   unit: Ref | null;
+  /** Null leaves an existing position's job title as it is. */
+  jobTitleKey: string | null;
 };
 type EmployeeWrite = {
   id: string | null;
@@ -696,6 +752,7 @@ type SheetPlan<W> = {
   counts: ImportCounts;
   rejected: ImportIssue[];
   needsOwner: ImportIssue[];
+  jobTitles: ImportJobTitle[];
   writes: W[];
 };
 type Plan = {
@@ -711,6 +768,7 @@ function sheetPlan<W>(sheet: ImportSheet, group: ImportGroup) {
     counts: { create: 0, update: 0, unchanged: 0, reject: 0, needsOwner: 0 },
     rejected: [],
     needsOwner: [],
+    jobTitles: [],
     writes: [],
   };
   return {
@@ -762,9 +820,16 @@ export function planImport(
   book: Workbook,
   state: State,
   group: ImportGroup,
+  architecture: JobArchitectureBody | null,
 ): Plan {
   const units = planUnits(book, state, group);
-  const positions = planPositions(book, state, group, units.statuses);
+  const positions = planPositions(
+    book,
+    state,
+    group,
+    units.statuses,
+    architecture,
+  );
   const employees = planEmployees(book, state, group, positions.statuses);
   return { Units: units, Positions: positions, Employees: employees };
 }
@@ -961,8 +1026,21 @@ function planPositions(
   state: State,
   group: ImportGroup,
   unitStatuses: Map<string, Status>,
+  architecture: JobArchitectureBody | null,
 ) {
   const { plan, reject, settle } = sheetPlan<PositionWrite>("Positions", group);
+  // A Job title cell is a published title's key or name, ignoring case; names are not unique.
+  type Title = JobArchitectureBody["titles"][number];
+  const titleByKey = new Map<string, Title>();
+  const titlesByName = new Map<string, Title[]>();
+  for (const title of architecture?.titles ?? []) {
+    titleByKey.set(title.key, title);
+    const name = title.name.toLowerCase();
+    titlesByName.set(name, [...(titlesByName.get(name) ?? []), title]);
+  }
+  const gradeNames = new Map(
+    (architecture?.grades ?? []).map((grade) => [grade.code, grade.name]),
+  );
   const units = new Map(state.units.map((unit) => [unit.code, unit]));
   const current = new Map(state.positions.map((row) => [row.code, row]));
   const latest = new Map(state.positionLatest.map((row) => [row.code, row]));
@@ -982,6 +1060,38 @@ function planPositions(
         `${subject}: duplicate code; it is on more than one row.`,
       );
       continue;
+    }
+    let title: Title | null = null;
+    if (row.jobTitle !== null) {
+      const cell = row.jobTitle.toLowerCase();
+      const matches = new Set(titlesByName.get(cell));
+      const byKey = titleByKey.get(cell);
+      if (byKey) matches.add(byKey);
+      if (matches.size !== 1) {
+        reject(
+          row.row,
+          row.code,
+          matches.size
+            ? `${subject}: job title "${row.jobTitle}" matches more than one job title; use its key.`
+            : `${subject}: unknown job title "${row.jobTitle}".`,
+        );
+        continue;
+      }
+      [title] = matches;
+    }
+    if (row.grade !== null) {
+      if (!title) {
+        reject(row.row, row.code, `${subject}: Grade needs a Job title.`);
+        continue;
+      }
+      if (row.grade.toLowerCase() !== title.gradeCode.toLowerCase()) {
+        reject(
+          row.row,
+          row.code,
+          `${subject}: grade "${row.grade}" does not agree with grade ${title.gradeCode} of job title ${title.name}.`,
+        );
+        continue;
+      }
     }
     const unit = resolve(
       row.unitCode,
@@ -1012,7 +1122,8 @@ function planPositions(
         status =
           moves ||
           position.title !== row.title ||
-          (row.manager !== null && row.manager !== position.isManager)
+          (row.manager !== null && row.manager !== position.isManager) ||
+          (title !== null && title.key !== position.jobTitleKey)
             ? "update"
             : "unchanged";
     } else {
@@ -1041,7 +1152,17 @@ function planPositions(
         "ref" in unit && !(position && target === position.unitId)
           ? unit.ref
           : null,
+      jobTitleKey: title?.key ?? null,
     });
+    if (title)
+      plan.jobTitles.push({
+        row: row.row,
+        code: row.code,
+        titleKey: title.key,
+        titleName: title.name,
+        gradeCode: title.gradeCode,
+        gradeName: gradeNames.get(title.gradeCode)!,
+      });
   }
   return plan;
 }
@@ -1234,28 +1355,30 @@ async function writePositions(
   const result: Written = { created: 0, updated: 0 };
   for (const chunk of chunks(writes.filter((w) => !w.id))) {
     const { rows } = await tx.execute(
-      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id) select u.workspace_id, u.id, r.title, r.code, r.is_manager, null, null from jsonb_to_recordset(${recordset(
+      sql`insert into app.positions as p (workspace_id, org_unit_id, title, code, is_manager, job_role_team_id, job_role_id, job_title_key) select u.workspace_id, u.id, r.title, r.code, r.is_manager, null, null, r.job_title_key from jsonb_to_recordset(${recordset(
         chunk.map((w) => ({
           org_unit_id: unitId(w.unit),
           title: w.title,
           code: w.code,
           is_manager: w.isManager ?? false,
+          job_title_key: w.jobTitleKey,
         })),
-      )}) as r(org_unit_id uuid, title text, code text, is_manager boolean) join app.org_units u on u.id = r.org_unit_id and u.workspace_id = ${workspace} and u.valid_to is null and u.archived_at is null returning p.id`,
+      )}) as r(org_unit_id uuid, title text, code text, is_manager boolean, job_title_key text) join app.org_units u on u.id = r.org_unit_id and u.workspace_id = ${workspace} and u.valid_to is null and u.archived_at is null returning p.id`,
     );
     if (rows.length !== chunk.length) throw stateConflict();
     result.created += rows.length;
   }
   for (const chunk of chunks(writes.filter((w) => w.id))) {
     const { rows } = await tx.execute(
-      sql`update app.positions p set title = r.title, is_manager = coalesce(r.is_manager, p.is_manager), org_unit_id = coalesce(r.org_unit_id, p.org_unit_id) from jsonb_to_recordset(${recordset(
+      sql`update app.positions p set title = r.title, is_manager = coalesce(r.is_manager, p.is_manager), org_unit_id = coalesce(r.org_unit_id, p.org_unit_id), job_title_key = coalesce(r.job_title_key, p.job_title_key) from jsonb_to_recordset(${recordset(
         chunk.map((w) => ({
           id: w.id,
           org_unit_id: unitId(w.unit),
           title: w.title,
           is_manager: w.isManager,
+          job_title_key: w.jobTitleKey,
         })),
-      )}) as r(id uuid, org_unit_id uuid, title text, is_manager boolean) where p.id = r.id and p.workspace_id = ${workspace} and p.valid_to is null and p.archived_at is null and (r.org_unit_id is null or exists (select 1 from app.org_units u where u.id = r.org_unit_id and u.workspace_id = ${workspace} and u.valid_to is null and u.archived_at is null)) returning p.id`,
+      )}) as r(id uuid, org_unit_id uuid, title text, is_manager boolean, job_title_key text) where p.id = r.id and p.workspace_id = ${workspace} and p.valid_to is null and p.archived_at is null and (r.org_unit_id is null or exists (select 1 from app.org_units u where u.id = r.org_unit_id and u.workspace_id = ${workspace} and u.valid_to is null and u.archived_at is null)) returning p.id`,
     );
     if (rows.length !== chunk.length) throw stateConflict();
     result.updated += rows.length;
@@ -1365,10 +1488,10 @@ const SHEET_KEYS = {
   Employees: "employees",
 } as const;
 
-/** One sheet's outcome: the counts written, and its rejected and owner-group rows. */
+/** One sheet's outcome: the counts written, its rejected and owner-group rows, and job titles. */
 export type SheetOutcome = Pick<
   SheetPlan<unknown>,
-  "counts" | "rejected" | "needsOwner"
+  "counts" | "rejected" | "needsOwner" | "jobTitles"
 >;
 
 /**
@@ -1385,9 +1508,12 @@ export async function applyImportSheet(
   sheet: ImportSheet,
   group: ImportGroup,
 ): Promise<SheetOutcome> {
-  const plan = planImport(book, await readState(tx, access, book), group)[
-    sheet
-  ];
+  const plan = planImport(
+    book,
+    await readState(tx, access, book),
+    group,
+    jobArchitectureFor(access)?.body ?? null,
+  )[sheet];
   const written =
     sheet === "Units"
       ? await writeUnits(tx, access, plan.writes as UnitWrite[], group)
@@ -1423,6 +1549,7 @@ export async function applyImportSheet(
     },
     rejected: plan.rejected,
     needsOwner: group === "owner" ? [] : plan.needsOwner,
+    jobTitles: plan.jobTitles,
   };
 }
 
@@ -1471,9 +1598,8 @@ function requireImport(
 }
 
 function report(
-  sha256: string,
+  book: Workbook,
   sheets: Record<ImportSheet, SheetOutcome>,
-  flagged: ImportFlag[],
 ): ImportReport {
   // By sheet, then by row.
   const list = (key: "rejected" | "needsOwner") =>
@@ -1482,8 +1608,12 @@ function report(
     );
   const rejected = list("rejected");
   const needsOwner = list("needsOwner");
+  const { flagged, ignored } = book;
+  const jobTitles = [...sheets.Positions.jobTitles].sort(
+    (a, b) => a.row - b.row,
+  );
   return {
-    sha256,
+    sha256: book.sha256,
     sheets: {
       units: sheets.Units.counts,
       positions: sheets.Positions.counts,
@@ -1492,7 +1622,9 @@ function report(
     rejected: rejected.slice(0, LIST_LIMIT),
     needsOwner: needsOwner.slice(0, LIST_LIMIT),
     flagged: flagged.slice(0, LIST_LIMIT),
-    truncated: [rejected, needsOwner, flagged].some(
+    jobTitles: jobTitles.slice(0, LIST_LIMIT),
+    ignored: ignored.slice(0, LIST_LIMIT),
+    truncated: [rejected, needsOwner, flagged, jobTitles, ignored].some(
       (list) => list.length > LIST_LIMIT,
     ),
   };
@@ -1508,8 +1640,13 @@ export async function dryRunOrgImport(
       sql`select set_config('transaction_read_only', 'on', true)`,
     );
     requireImport(p, access, book, "dry-run");
-    const plan = planImport(book, await readState(tx, access, book), "normal");
-    return report(book.sha256, plan, book.flagged);
+    const plan = planImport(
+      book,
+      await readState(tx, access, book),
+      "normal",
+      jobArchitectureFor(access)?.body ?? null,
+    );
+    return report(book, plan);
   });
 }
 
@@ -1541,7 +1678,7 @@ export async function applyOrgImport(
     }
     applied.push(sheet);
   }
-  return { ...report(book.sha256, sheets, book.flagged), group };
+  return { ...report(book, sheets), group };
 }
 
 /** A later sheet's failure, with the sheets already applied named. */

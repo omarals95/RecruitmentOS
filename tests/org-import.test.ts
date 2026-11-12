@@ -21,7 +21,12 @@ import readXlsx from "read-excel-file/node";
 import writeXlsx from "write-excel-file/node";
 import type { TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
+import {
+  JOB_ARCHITECTURE_KEY,
+  type JobArchitectureBody,
+} from "@/domain/config";
 import { getVerifiedSession } from "@/lib/auth-session";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import {
   archiveEmployee,
   createEmployee,
@@ -537,7 +542,46 @@ describe("organisation import from Excel", () => {
     expect(data.flagged).toEqual([
       { sheet: "Employees", row: 3, column: "Work phone" },
     ]);
+    expect(data.jobTitles).toEqual([]);
+    expect(data.ignored).toEqual([]);
     expect(data.truncated).toBe(false);
+  });
+
+  it("refuses a Job title when no job architecture is published, and a Grade without a Job title column", async () => {
+    const titled = await workbook({
+      Positions: [
+        [...POSITION_COLUMNS, "Job title"],
+        ["P-NOARCH", "Fictional Planner", "DIV-A", null, "payroll-lead"],
+      ],
+    });
+    const graded = await workbook({
+      Positions: [
+        [...POSITION_COLUMNS, "Grade"],
+        ["P-NOTITLE", "Fictional Planner", "DIV-A", null, "G7"],
+      ],
+    });
+    const before = await state();
+    const [first, second] = [
+      await dryRun(titled, owner),
+      await dryRun(graded, owner),
+    ];
+    expect(await state()).toEqual(before);
+    expect(first.body.data.rejected).toEqual([
+      {
+        sheet: "Positions",
+        row: 2,
+        reason: 'Position P-NOARCH: unknown job title "payroll-lead".',
+      },
+    ]);
+    expect(second.body.data.rejected).toEqual([
+      {
+        sheet: "Positions",
+        row: 2,
+        reason: "Position P-NOTITLE: Grade needs a Job title.",
+      },
+    ]);
+    for (const { body } of [first, second])
+      expect(body.data).toMatchObject({ jobTitles: [], ignored: [] });
   });
 
   it("refuses callers without company authority and the organisation area, without directory write for employees, and every token", async () => {
@@ -1076,6 +1120,500 @@ describe("organisation import from Excel", () => {
       expect(response.body.error.message).toContain("20,000");
       expect(pools.data).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("organisation import of job titles and grades (ADM-28)", () => {
+  let harness: Harness;
+  let owner: Principal, orgAdmin: Principal;
+  const TITLED = [...POSITION_COLUMNS, "Job title", "Grade"];
+  /** A fictional job architecture; two titles share the name "Fictional Coordinator". */
+  const architecture: JobArchitectureBody = {
+    families: [
+      { key: "finance", name: "Fictional Finance" },
+      { key: "people", name: "Fictional People" },
+    ],
+    grades: [
+      { code: "G5", name: "Fictional Associate", order: 5 },
+      { code: "G7", name: "Fictional Lead", order: 7 },
+    ],
+    titles: [
+      {
+        key: "payroll-lead",
+        name: "Fictional Payroll Lead",
+        familyKey: "finance",
+        gradeCode: "G7",
+      },
+      {
+        key: "payroll-associate",
+        name: "Fictional Payroll Associate",
+        familyKey: "finance",
+        gradeCode: "G5",
+      },
+      {
+        key: "coordinator-finance",
+        name: "Fictional Coordinator",
+        familyKey: "finance",
+        gradeCode: "G5",
+      },
+      {
+        key: "coordinator-people",
+        name: "Fictional Coordinator",
+        familyKey: "people",
+        gradeCode: "G7",
+      },
+    ],
+  };
+
+  const look = async <T = Record<string, unknown>>(
+    text: string,
+    params: unknown[] = [],
+  ) => {
+    await harness.asSuperuser();
+    return (await harness.client.query<T>(text, params)).rows;
+  };
+  /** Each current position by code: its title and job title key. */
+  const positions = async () =>
+    Object.fromEntries(
+      (
+        await look<{ code: string; title: string; job_title_key: string }>(
+          "SELECT code, title, job_title_key FROM app.positions WHERE valid_to IS NULL AND archived_at IS NULL ORDER BY code",
+        )
+      ).map((row) => [row.code, [row.title, row.job_title_key]]),
+    );
+  const lead = {
+    titleKey: "payroll-lead",
+    titleName: "Fictional Payroll Lead",
+    gradeCode: "G7",
+    gradeName: "Fictional Lead",
+  };
+  const associate = {
+    titleKey: "payroll-associate",
+    titleName: "Fictional Payroll Associate",
+    gradeCode: "G5",
+    gradeName: "Fictional Associate",
+  };
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db = await harness.asOwner();
+    owner = await seedIdentity(db, { userId: "jt-owner", teamId: "jt-a" });
+    orgAdmin = await seedIdentity(db, {
+      userId: "jt-org-admin",
+      teamId: "jt-b",
+      role: "admin",
+    });
+    await harness.client.exec(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','jt-org-admin','admin','{organisation}');`,
+    );
+    const level = await createOrgLevel(owner, {
+      name: "Fictional Company",
+      depth: 0,
+    });
+    const jt = await createOrgUnit(owner, {
+      name: "Fictional Payroll",
+      code: "JT",
+      levelId: level.id,
+    });
+    const { versionId } = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: JOB_ARCHITECTURE_KEY,
+      body: architecture,
+    });
+    await publishConfigVersion(owner, versionId, { type: "job-architecture" });
+    for (const [code, jobTitleKey] of [
+      ["P-JT-SAME", "payroll-lead"],
+      ["P-JT-CHANGE", "payroll-associate"],
+      ["P-JT-KEEP", "payroll-associate"],
+      ["P-JT-REFUSE", "payroll-associate"],
+    ])
+      await createPosition(owner, {
+        title: "Fictional Payroll Officer",
+        code,
+        orgUnitId: jt.id,
+        jobTitleKey,
+      });
+  });
+  afterAll(async () => harness?.close());
+
+  it("matches a job title by name or key, checks the grade, refuses the rest with a reason, and stores the key on apply", async () => {
+    const file = await workbook({
+      Positions: [
+        TITLED,
+        [
+          "P-JT-NAME",
+          "Fictional Planner",
+          "JT",
+          null,
+          "fictional PAYROLL lead",
+          null,
+        ],
+        [
+          "P-JT-KEY",
+          "Fictional Planner",
+          "JT",
+          null,
+          "payroll-associate",
+          "g5",
+        ],
+        [
+          "P-JT-UNKNOWN",
+          "Fictional Planner",
+          "JT",
+          null,
+          "Fictional Astronaut",
+          null,
+        ],
+        [
+          "P-JT-AMBIG",
+          "Fictional Planner",
+          "JT",
+          null,
+          "Fictional Coordinator",
+          null,
+        ],
+        ["P-JT-GRADE", "Fictional Planner", "JT", null, "payroll-lead", "G5"],
+        ["P-JT-NOTITLE", "Fictional Planner", "JT", null, null, "G7"],
+        [
+          "P-JT-REFUSE",
+          "Fictional Renamed",
+          "JT",
+          null,
+          "Fictional Astronaut",
+          null,
+        ],
+        [
+          "P-JT-SAME",
+          "Fictional Payroll Officer",
+          "JT",
+          null,
+          "Fictional Payroll Lead",
+          "G7",
+        ],
+        [
+          "P-JT-CHANGE",
+          "Fictional Payroll Officer",
+          "JT",
+          null,
+          "PAYROLL-LEAD",
+          null,
+        ],
+        ["P-JT-KEEP", "Fictional Payroll Officer", "JT", null, null, null],
+        [
+          "P-JT-COORD",
+          "Fictional Planner",
+          "JT",
+          null,
+          "coordinator-people",
+          "G7",
+        ],
+      ],
+    });
+    const before = await positions();
+    const dry = await dryRun(file, owner);
+    expect(dry.status).toBe(200);
+    expect(await positions()).toEqual(before);
+    const counts = {
+      create: 3,
+      update: 1,
+      unchanged: 2,
+      reject: 5,
+      needsOwner: 0,
+    };
+    expect(dry.body.data.sheets.positions).toEqual(counts);
+    const rejected = [
+      {
+        sheet: "Positions",
+        row: 4,
+        reason:
+          'Position P-JT-UNKNOWN: unknown job title "Fictional Astronaut".',
+      },
+      {
+        sheet: "Positions",
+        row: 5,
+        reason:
+          'Position P-JT-AMBIG: job title "Fictional Coordinator" matches more than one job title; use its key.',
+      },
+      {
+        sheet: "Positions",
+        row: 6,
+        reason:
+          'Position P-JT-GRADE: grade "G5" does not agree with grade G7 of job title Fictional Payroll Lead.',
+      },
+      {
+        sheet: "Positions",
+        row: 7,
+        reason: "Position P-JT-NOTITLE: Grade needs a Job title.",
+      },
+      {
+        sheet: "Positions",
+        row: 8,
+        reason:
+          'Position P-JT-REFUSE: unknown job title "Fictional Astronaut".',
+      },
+    ];
+    expect(dry.body.data.rejected).toEqual(rejected);
+    // The grade comes from the title, whether the Grade cell is blank or agrees.
+    const jobTitles = [
+      { row: 2, code: "P-JT-NAME", ...lead },
+      { row: 3, code: "P-JT-KEY", ...associate },
+      { row: 9, code: "P-JT-SAME", ...lead },
+      { row: 10, code: "P-JT-CHANGE", ...lead },
+      {
+        row: 12,
+        code: "P-JT-COORD",
+        titleKey: "coordinator-people",
+        titleName: "Fictional Coordinator",
+        gradeCode: "G7",
+        gradeName: "Fictional Lead",
+      },
+    ];
+    expect(dry.body.data.jobTitles).toEqual(jobTitles);
+    expect(dry.body.data.ignored).toEqual([]);
+    expect(dry.body.data.flagged).toEqual([]);
+
+    const applied = await apply(file, owner);
+    expect(applied.status).toBe(200);
+    expect(applied.body.data.sheets.positions).toEqual(counts);
+    expect(applied.body.data.rejected).toEqual(rejected);
+    expect(applied.body.data.jobTitles).toEqual(jobTitles);
+    const after = await positions();
+    expect(after).toEqual({
+      ...before,
+      "P-JT-NAME": ["Fictional Planner", "payroll-lead"],
+      "P-JT-KEY": ["Fictional Planner", "payroll-associate"],
+      "P-JT-CHANGE": ["Fictional Payroll Officer", "payroll-lead"],
+      "P-JT-COORD": ["Fictional Planner", "coordinator-people"],
+    });
+    // Refused rows are not written: the existing one keeps its title and key, the new ones are absent.
+    expect(after["P-JT-REFUSE"]).toEqual([
+      "Fictional Payroll Officer",
+      "payroll-associate",
+    ]);
+    expect(after["P-JT-KEEP"]).toEqual([
+      "Fictional Payroll Officer",
+      "payroll-associate",
+    ]);
+    for (const code of [
+      "P-JT-UNKNOWN",
+      "P-JT-AMBIG",
+      "P-JT-GRADE",
+      "P-JT-NOTITLE",
+    ])
+      expect(after[code], code).toBeUndefined();
+
+    const again = await apply(file, owner);
+    expect(again.body.data.sheets.positions).toEqual({
+      create: 0,
+      update: 0,
+      unchanged: 6,
+      reject: 5,
+      needsOwner: 0,
+    });
+    expect(await positions()).toEqual(after);
+  });
+
+  it("lists every other column as ignored and never reads, stores, logs or returns its cells", async () => {
+    // Fictional figures only; none of them may leave the parser.
+    const figures = ["48250.75", "61237.5", "3100.25", "AED 9,999", "4242.5"];
+    const file = await workbook({
+      Units: [
+        [...UNIT_COLUMNS, "Minimum"],
+        [
+          "JT-SUB",
+          "Fictional Payroll Desk",
+          "Fictional Company",
+          null,
+          3100.25,
+        ],
+      ],
+      Positions: [
+        [
+          ...POSITION_COLUMNS,
+          "Job title",
+          "Salary",
+          " Basic ",
+          "Bracket",
+          777.25,
+          "Grade",
+          "Code",
+          null,
+        ],
+        [
+          "P-JT-PAY",
+          "Fictional Payroll Clerk",
+          "JT",
+          null,
+          "payroll-associate",
+          48250.75,
+          "+4242.5",
+          "AED 9,999",
+          61237.5,
+          "G5",
+          "P-JT-OTHER",
+          null,
+        ],
+      ],
+      Employees: [
+        [...EMPLOYEE_COLUMNS, "Salary"],
+        ["E-JT-1", "Fictional Clerk", null, null, null, null, 61237.5],
+      ],
+    });
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map(
+      (method) => vi.spyOn(console, method).mockImplementation(() => {}),
+    );
+    let dry, applied;
+    try {
+      dry = await dryRun(file, owner);
+      applied = await apply(file, owner);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    expect(dry.status).toBe(200);
+    expect(applied.status).toBe(200);
+    const ignored = [
+      { sheet: "Units", column: "Minimum" },
+      { sheet: "Positions", column: "Salary" },
+      { sheet: "Positions", column: "Basic" },
+      { sheet: "Positions", column: "Bracket" },
+      { sheet: "Positions", column: "Column I" },
+      { sheet: "Positions", column: "Code" },
+      { sheet: "Employees", column: "Salary" },
+    ];
+    expect(dry.body.data.ignored).toEqual(ignored);
+    expect(applied.body.data.ignored).toEqual(ignored);
+    // The formula-like cell under Basic is not flagged: it is never read.
+    expect(dry.body.data.flagged).toEqual([]);
+    expect(dry.body.data.rejected).toEqual([]);
+    expect(dry.body.data.jobTitles).toEqual([
+      { row: 2, code: "P-JT-PAY", ...associate },
+    ]);
+    expect(applied.body.data.sheets).toMatchObject({
+      units: { create: 1 },
+      positions: { create: 1 },
+      employees: { create: 1 },
+    });
+    const stored = JSON.stringify([
+      await look("SELECT * FROM app.positions"),
+      await look("SELECT * FROM app.org_units"),
+      await look("SELECT * FROM app.employees"),
+      await look("SELECT * FROM app.activity"),
+    ]);
+    const logged = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    for (const figure of [...figures, "777.25"])
+      for (const [where, text] of [
+        ["dry run", JSON.stringify(dry.body)],
+        ["apply", JSON.stringify(applied.body)],
+        ["stored rows", stored],
+        ["console", logged],
+      ])
+        expect(text.includes(figure), `${figure} in ${where}`).toBe(false);
+    const audit = await look<{ metadata: Record<string, unknown> }>(
+      "SELECT metadata FROM app.activity WHERE action = 'org-import.applied'",
+    );
+    expect(audit.length).toBeGreaterThan(0);
+    for (const row of audit)
+      expect(Object.keys(row.metadata).sort()).toEqual([
+        "created",
+        "group",
+        "rejected",
+        "sheet",
+        "unchanged",
+        "updated",
+        "workspaceId",
+      ]);
+    expect((await positions())["P-JT-PAY"]).toEqual([
+      "Fictional Payroll Clerk",
+      "payroll-associate",
+    ]);
+  });
+
+  it("lets a company admin with organisation and no Plan & pay grant import job titles, and the grant changes nothing", async () => {
+    expect(
+      await look(
+        "SELECT plan_access FROM app.workspace_admins WHERE user_id = $1",
+        [orgAdmin.userId],
+      ),
+    ).toEqual([{ plan_access: false }]);
+    const file = await workbook({
+      Positions: [
+        TITLED,
+        [
+          "P-JT-ADMIN",
+          "Fictional Planner",
+          "JT",
+          null,
+          "Fictional Payroll Lead",
+          "g7",
+        ],
+      ],
+    });
+    const dry = await dryRun(file, orgAdmin);
+    expect(dry.status).toBe(200);
+    expect(dry.body.data.jobTitles).toEqual([
+      { row: 2, code: "P-JT-ADMIN", ...lead },
+    ]);
+    await look(
+      "UPDATE app.workspace_admins SET plan_access = true WHERE user_id = $1",
+      [orgAdmin.userId],
+    );
+    try {
+      expect(await dryRun(file, orgAdmin)).toEqual(dry);
+    } finally {
+      await look(
+        "UPDATE app.workspace_admins SET plan_access = false WHERE user_id = $1",
+        [orgAdmin.userId],
+      );
+    }
+    const applied = await apply(file, orgAdmin);
+    expect(applied.status).toBe(200);
+    expect(applied.body.data.sheets.positions).toMatchObject({ create: 1 });
+    expect((await positions())["P-JT-ADMIN"]).toEqual([
+      "Fictional Planner",
+      "payroll-lead",
+    ]);
+  });
+
+  it("rejects a title unpublished between the check and apply", async () => {
+    const file = await workbook({
+      Positions: [
+        TITLED,
+        [
+          "P-JT-LATE",
+          "Fictional Planner",
+          "JT",
+          null,
+          "Fictional Payroll Associate",
+          null,
+        ],
+      ],
+    });
+    expect((await dryRun(file, owner)).body.data.jobTitles).toHaveLength(1);
+    const { versionId } = await createConfigDraft(owner, {
+      type: "job-architecture",
+      key: JOB_ARCHITECTURE_KEY,
+      body: {
+        ...architecture,
+        titles: architecture.titles.filter(
+          (title) => title.key !== "payroll-associate",
+        ),
+      },
+    });
+    await publishConfigVersion(owner, versionId, { type: "job-architecture" });
+    const applied = await apply(file, owner);
+    expect(applied.status).toBe(200);
+    expect(applied.body.data.rejected).toEqual([
+      {
+        sheet: "Positions",
+        row: 2,
+        reason:
+          'Position P-JT-LATE: unknown job title "Fictional Payroll Associate".',
+      },
+    ]);
+    expect(applied.body.data.jobTitles).toEqual([]);
+    expect((await positions())["P-JT-LATE"]).toBeUndefined();
   });
 });
 

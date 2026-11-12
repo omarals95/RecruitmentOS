@@ -756,6 +756,8 @@ curl "$RECRUITMENTOS_URL/api/v1/salary-brackets" \
 
 The workbook has up to three sheets, matched by name ignoring case: `Units` (Code, Name, Level, Parent code), `Positions` (Code, Title, Unit code, Manager) and `Employees` (Employee number, Name, Work email, Work phone, Position codes, Primary position). Row 1 names the columns. `Level` is the name of a current level; `Manager` is yes, no, true or false; `Position codes` are separated by commas or semicolons. A blank cell leaves the stored value unchanged. Formulas are never evaluated, and a value starting with `=`, `+`, `-`, `@`, tab or CR is stored as text and listed in `flagged`.
 
+`Positions` may also have `Job title` and `Grade`. `Job title` is the key or the name of a title of the published job architecture, ignoring case, and is stored as the position's `jobTitleKey`; `Grade`, when given, must equal that title's grade code, ignoring case. An unknown title (or none published), a name used by more than one title (use its key), a disagreeing grade and a grade without a title reject the row. A blank `Job title` leaves the stored job title; the import never clears one. `jobTitles` lists each position row whose title matched and that is not rejected, with the title's grade. Every other non-blank header is listed in `ignored`, by its text, or as `Column <letter>` when it is not text; the cells below it are never read, stored or returned, so no salary, bracket or pay figure is imported.
+
 The dry run runs in a read-only transaction and writes nothing:
 
 ```http
@@ -812,12 +814,26 @@ Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
       }
     ],
     "flagged": [{ "sheet": "Employees", "row": 4, "column": "Work phone" }],
+    "jobTitles": [
+      {
+        "row": 2,
+        "code": "FIN-PAY-1",
+        "titleKey": "payroll-lead",
+        "titleName": "Fictional Payroll Lead",
+        "gradeCode": "G7",
+        "gradeName": "Fictional Lead"
+      }
+    ],
+    "ignored": [
+      { "sheet": "Positions", "column": "Salary" },
+      { "sheet": "Positions", "column": "Column H" }
+    ],
     "truncated": false
   }
 }
 ```
 
-`rejected`, `needsOwner` and `flagged` hold at most 500 entries each, and `truncated` is true when one was cut; the counts are always complete. Apply sends the same file with the dry run's `sha256`:
+`rejected`, `needsOwner`, `flagged`, `jobTitles` and `ignored` hold at most 500 entries each, and `truncated` is true when one was cut; the counts are always complete. Apply sends the same file with the dry run's `sha256`:
 
 ```http
 POST /api/v1/org-import/apply?sha256=3b1f0c2e9d8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c
