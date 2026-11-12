@@ -32,7 +32,10 @@ import {
   createSalaryBracketDraft,
   publishSalaryBracketVersion,
 } from "../src/lib/pay-brackets";
+import type { RoleBody } from "../src/domain/config";
+import { RECRUITER_ROLE } from "../src/domain/config-defaults";
 import { referenceFields } from "../src/domain/records";
+import { assignMemberRole } from "../src/lib/member-roles";
 import { createTestDb, enforceTestRls, seedIdentity } from "./helpers/db";
 import { mcpHarness, type Result } from "./helpers/mcp";
 import { stubLocalAuthReadiness } from "./helpers/readiness";
@@ -110,7 +113,7 @@ describe("MCP pipeline tools over real migrations and RLS", () => {
   const outsider = session("pipeline-outsider", "owner", OTHER_TEAM);
   const ids = {} as Record<string, string>;
   const foreign = {} as Record<string, string>;
-  const { query, count, apiToken, listNames, call, data, toolError } =
+  const { asOwner, query, count, apiToken, listNames, call, data, toolError } =
     mcpHarness(() => fixture, TEAM);
   let serial = 0;
   const key = () => `pipeline-${randomUUID()}`;
@@ -1443,5 +1446,52 @@ describe("MCP pipeline tools over real migrations and RLS", () => {
       ),
     );
     expect(named.label).toContain("Pipeline Fictional");
+  });
+
+  // R2b-08 (job 091): a fictional configured role that hides the offer amount.
+  it("leaves a hidden offer amount out of list_offers, inside the untrusted-data wrapper", async () => {
+    const member = await asOwner(() =>
+      seedIdentity(fixture.db, {
+        userId: "pipeline-redacted",
+        teamId: TEAM,
+        role: "recruiter",
+      }),
+    );
+    const role = await createConfigDraft(owner, {
+      type: "role",
+      key: "pipeline-redacted",
+      body: {
+        ...structuredClone(RECRUITER_ROLE.body),
+        name: "Fictional redacted recruiter",
+        fields: { offer: { amount: "hidden" } },
+      } as RoleBody,
+    });
+    await publishConfigVersion(owner, role.versionId);
+    await assignMemberRole(
+      owner,
+      { userId: member.userId, roleObjectId: role.objectId },
+      new Headers(),
+    );
+    const applicationId = await make.application();
+    await createRecord(owner, "offers", {
+      applicationId,
+      data: { title: "Fictional redacted offer", amount: "27500" },
+    });
+    const listed = async (userId: string) => {
+      const result = await call(
+        await token(roleScopes("recruiter"), userId),
+        "list_offers",
+        { applicationId },
+      );
+      wrapped(result);
+      return data<Record<string, unknown>[]>(result);
+    };
+    const hidden = await listed(member.userId);
+    expect(hidden).toHaveLength(1);
+    expect(hidden[0].title).toBe("Fictional redacted offer");
+    expect(Object.hasOwn(hidden[0], "amount")).toBe(false);
+    expect(JSON.stringify(hidden)).not.toContain("27500");
+    const shown = await listed(owner.userId);
+    expect(shown[0].amount).toBe("27500");
   });
 });

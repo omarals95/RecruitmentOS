@@ -14,7 +14,10 @@ vi.mock("@/lib/api-tokens", () => ({ authenticateApiToken: vi.fn() }));
 import { POST as exportRoute } from "../src/app/api/v1/[resource]/export/route";
 import { schema, type AppDb } from "../src/db";
 import { activity } from "../src/db/schema";
-import { JOB_ARCHITECTURE_KEY } from "../src/domain/config";
+import { JOB_ARCHITECTURE_KEY, type RoleBody } from "../src/domain/config";
+import { RECRUITER_ROLE } from "../src/domain/config-defaults";
+import { safeCsvCell } from "../src/domain/export";
+import { RESOURCE_CONFIG } from "../src/domain/records";
 import { authenticateApiToken } from "../src/lib/api-tokens";
 import { getVerifiedSession } from "../src/lib/auth-session";
 import {
@@ -22,6 +25,7 @@ import {
   publishConfigVersion,
 } from "../src/lib/config-store";
 import { withTeam } from "../src/lib/db-team";
+import { assignMemberRole } from "../src/lib/member-roles";
 import {
   createSalaryBracketDraft,
   publishSalaryBracketVersion,
@@ -41,6 +45,11 @@ import {
   seedApiToken,
   seedIdentity,
 } from "./helpers/db";
+import {
+  customField,
+  insertKindSchema,
+  kindBody,
+} from "./helpers/kind-schemas";
 
 const ORIGIN = "http://localhost:3000";
 const errorOf = (error: unknown) =>
@@ -448,6 +457,158 @@ describe("server-side record export over real migrations and RLS", () => {
     for (const figure of figures) expect(text).not.toContain(figure);
     const audit = JSON.stringify(await exportRows(owner.teamId));
     expect(audit).not.toMatch(/bracket/i);
+  });
+});
+
+// R2b-08 (job 091): a published fictional candidate kind schema with custom fields, and a fictional
+// configured role that hides one system field and one custom field, on a database of its own.
+describe("exports of a published kind schema", () => {
+  let fixture: Awaited<ReturnType<typeof createTestDb>>;
+  let owner: Principal;
+  let member: Principal;
+  const first = customField("Fictional first note", "short-text");
+  const second = customField("Fictional second note", "short-text");
+  const hidden = customField("Fictional hidden note", "short-text");
+  const unlisted = customField("Fictional unlisted note", "short-text");
+  const archived = customField("Fictional archived note", "short-text", {
+    archived: true,
+  });
+  const listed = [first, second, hidden, unlisted].map((field) => field.key);
+  const signIn = (p: Principal) =>
+    vi.mocked(getVerifiedSession).mockResolvedValue({
+      user: { id: p.userId, twoFactorEnabled: true },
+      session: { activeOrganizationId: p.teamId },
+    } as never);
+  async function exported(p: Principal) {
+    signIn(p);
+    const response = await exportRoute(
+      new Request(`${ORIGIN}/api/v1/candidates/export`, {
+        method: "POST",
+        headers: { origin: ORIGIN },
+      }),
+      { params: Promise.resolve({ resource: "candidates" }) },
+    );
+    expect(response.status).toBe(200);
+    const lines = new TextDecoder("utf-8", { ignoreBOM: true })
+      .decode(await response.arrayBuffer())
+      .split("\r\n");
+    return { header: lines[7], rows: lines.slice(8) };
+  }
+
+  beforeAll(async () => {
+    vi.stubEnv("BETTER_AUTH_URL", ORIGIN);
+    fixture = await createTestDb();
+    pools.data.mockResolvedValue(fixture.db);
+    pools.identity.mockResolvedValue(fixture.db);
+    owner = await seedIdentity(fixture.db, {
+      userId: "schema-export-owner",
+      teamId: "schema-export-team",
+    });
+    member = await seedIdentity(fixture.db, {
+      userId: "schema-export-member",
+      teamId: owner.teamId,
+      role: "recruiter",
+    });
+    await enforceTestRls(fixture.db);
+    await fixture.client.exec("RESET ROLE");
+    try {
+      // Every screen lists the custom fields but the archived one; view puts second before first.
+      await insertKindSchema(
+        fixture.client,
+        owner.userId,
+        kindBody("candidate", [first, second, hidden, unlisted, archived], {
+          create: listed,
+          edit: listed,
+          view: [second.key, first.key, hidden.key],
+        }),
+      );
+    } finally {
+      await fixture.client.exec("SET ROLE recruitment_test_runtime");
+    }
+    const role = await createConfigDraft(owner, {
+      type: "role",
+      key: "schema-export-role",
+      body: {
+        ...structuredClone(RECRUITER_ROLE.body),
+        name: "Fictional export redacted recruiter",
+        fields: {
+          candidate: {
+            employer: "hidden",
+            [hidden.key]: "hidden",
+            customValues: "edit",
+          },
+        },
+      } as RoleBody,
+    });
+    await publishConfigVersion(owner, role.versionId);
+    await assignMemberRole(
+      owner,
+      { userId: member.userId, roleObjectId: role.objectId },
+      new Headers(),
+    );
+    await createRecord(owner, "candidates", {
+      data: {
+        name: "Fictional Schema Export Person",
+        employer: "Fictional Hidden Employer",
+        customValues: {
+          [first.key]: "=Fictional formula",
+          [second.key]: "Fictional second value",
+          [hidden.key]: "Fictional hidden value",
+          [unlisted.key]: "Fictional unlisted value",
+        },
+      },
+    });
+  });
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    await fixture?.close();
+  });
+
+  it("heads custom columns by label in view-screen order and leaves hidden fields out", async () => {
+    const system = (left: string[]) =>
+      RESOURCE_CONFIG.candidates.fields
+        .filter((field) => !left.includes(field.key))
+        .map((field) => field.label);
+    const header = (labels: string[]) =>
+      ["Record ID", ...labels, "Created at", "Updated at"]
+        .map(safeCsvCell)
+        .join(",");
+    const ownerFile = await exported(owner);
+    expect(ownerFile.header).toBe(
+      header([
+        ...system([]),
+        "Fictional second note",
+        "Fictional first note",
+        "Fictional hidden note",
+        "Fictional unlisted note",
+      ]),
+    );
+    expect(ownerFile.rows).toHaveLength(1);
+    expect(ownerFile.rows[0]).toContain(
+      '"Fictional second value","\'=Fictional formula","Fictional hidden value","Fictional unlisted value"',
+    );
+    expect(ownerFile.rows[0]).toContain('"Fictional Hidden Employer"');
+
+    const memberFile = await exported(member);
+    expect(memberFile.header).toBe(
+      header([
+        ...system(["employer"]),
+        "Fictional second note",
+        "Fictional first note",
+        "Fictional unlisted note",
+      ]),
+    );
+    expect(memberFile.rows[0]).toContain(
+      '"Fictional second value","\'=Fictional formula","Fictional unlisted value"',
+    );
+    for (const text of [
+      "Fictional hidden",
+      "Fictional Hidden Employer",
+      "Fictional archived note",
+    ])
+      expect([memberFile.header, ...memberFile.rows].join("\n")).not.toContain(
+        text,
+      );
   });
 });
 

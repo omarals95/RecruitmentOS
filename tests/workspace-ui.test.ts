@@ -940,3 +940,83 @@ describe("screen-driven record payloads", () => {
     ).not.toHaveProperty("customValues");
   });
 });
+
+// R2b-08 (job 091): the editor never sends a field the caller's role hides or makes read-only.
+describe("field-rule record payloads", () => {
+  const candidate = {
+    id: "00000000-0000-4000-8000-000000000994",
+    kind: "candidate",
+    data: { name: "Fictional Candidate" },
+    version: 2,
+  } as RecordDto;
+  it("leaves hidden and read-only candidate fields out of a create and an edit", () => {
+    const values = {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      phone: "+971 50 000 0004",
+      employer: "Fictional Employer",
+    };
+    const rules = {
+      name: "edit",
+      email: "hidden",
+      phone: "read",
+      employer: "edit",
+    } as const;
+    for (const record of [undefined, candidate]) {
+      const payload = recordMutation(
+        "candidates",
+        values,
+        {},
+        record,
+        undefined,
+        rules,
+      );
+      expect(payload.data).not.toHaveProperty("email");
+      expect(payload.data).not.toHaveProperty("phone");
+      expect(payload.data).toMatchObject({
+        name: "Fictional Candidate",
+        employer: "Fictional Employer",
+      });
+      // Without rules the payload is exactly today's.
+      expect(recordMutation("candidates", values, {}, record)).toEqual(
+        recordMutation("candidates", values, {}, record, undefined, undefined),
+      );
+      expect(
+        recordMutation("candidates", values, {}, record).data,
+      ).toMatchObject({
+        email: "candidate@example.test",
+        phone: "+971 50 000 0004",
+      });
+    }
+  });
+  it("leaves a hidden or read-only custom id out of a task's custom values", () => {
+    const hidden = "00000000-0000-4000-8000-000000000995";
+    const readOnly = "00000000-0000-4000-8000-000000000996";
+    const sent = "00000000-0000-4000-8000-000000000997";
+    const task = {
+      id: "00000000-0000-4000-8000-000000000998",
+      kind: "task",
+      data: { title: "Fictional task" },
+      version: 1,
+    } as RecordDto;
+    const values = {
+      title: "Fictional task",
+      customValues: { [hidden]: "Kept", [readOnly]: 2, [sent]: "Sent" },
+    };
+    const rules = { [hidden]: "hidden", [readOnly]: "read" } as const;
+    for (const record of [undefined, task])
+      expect(
+        recordMutation("tasks", values, {}, record, undefined, rules).data
+          .customValues,
+      ).toEqual({ [sent]: "Sent" });
+    expect(recordMutation("tasks", values, {}, task).data.customValues).toEqual(
+      values.customValues,
+    );
+    // A hidden customValues key sends no custom values at all.
+    expect(
+      recordMutation("tasks", values, {}, task, undefined, {
+        customValues: "hidden",
+      }).data,
+    ).not.toHaveProperty("customValues");
+  });
+});
