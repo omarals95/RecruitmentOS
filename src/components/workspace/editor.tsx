@@ -19,7 +19,8 @@ import {
 import { Dialog } from "@/components/ui/dialog";
 import { JobTitlePicker } from "@/components/settings/job-title-picker";
 import { UnitPicker } from "@/components/settings/unit-picker";
-import type { ActionResource } from "@/domain/config";
+import type { ActionResource, KindSchemaBody } from "@/domain/config";
+import { mandatoryKeys, screenFor, shownGroups } from "@/domain/screens";
 import type { MeAccess } from "@/lib/authz";
 import {
   ClientError,
@@ -41,6 +42,7 @@ import {
 } from "./helpers";
 import {
   assigneeInput,
+  kindSchemaBodyOf,
   recordMutation,
   customValueDefaults,
   vacancyTitleInput,
@@ -51,6 +53,16 @@ import { useTeamMembers, type TeamMember } from "./team-members";
 type Values = Record<string, unknown>;
 /** A vacancy's org unit as the editor shows it: its id and "Name (CODE)". */
 type ChosenUnit = { id: string; label: string } | null;
+/** Candidate keys the editor shows only after Show source and experience details. */
+const ADVANCED_KEYS = [
+  "experienceWording",
+  "educationDates",
+  "latestRoleDates",
+  "roleStatus",
+  "educationStatus",
+  "experienceBasis",
+  "sourceNotes",
+];
 /** Most assignees a task takes (recordDataSchemas.task). */
 const ASSIGNEE_LIMIT = 10;
 /** The linked record type of a task whose linked record the caller cannot see. */
@@ -64,6 +76,12 @@ const REFERENCE_LABELS: Record<ReferenceField, string> = {
   jobRoleId: "Job role",
   parentRecordId: "Parent record",
 };
+// Empty as the server's mandatory rule counts it; false is a value.
+const isEmptyValue = (value: unknown) =>
+  value === undefined ||
+  value === null ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
 function defaults(kind: RecordKind): Values {
   const input: Values = {};
   for (const field of RESOURCE_CONFIG[kindToResource[kind]].fields) {
@@ -96,6 +114,8 @@ interface RecordEditorProps {
   references?: Partial<Record<ReferenceField, string>>;
   onClose: () => void;
   onSaved: (record: RecordDto) => void;
+  /** The kind schema to render from; a configurable kind defaults to its compiled default. */
+  schema?: KindSchemaBody;
 }
 export function RecordEditor({
   resource,
@@ -104,8 +124,28 @@ export function RecordEditor({
   references = {},
   onClose,
   onSaved,
+  schema,
 }: RecordEditorProps) {
   const config = RESOURCE_CONFIG[resource];
+  // A configurable kind renders the create or edit screen of its kind schema for a record with no
+  // type (R2b-07): its groups, its field order, no hidden field, and its mandatory fields marked.
+  const body = kindSchemaBodyOf(config.kind, schema);
+  const screen = body && screenFor(body, null, record ? "edit" : "create");
+  const groups: { label?: string; fields: FieldConfig[] }[] =
+    body && screen
+      ? shownGroups(screen).map((group) => ({
+          label: group.label,
+          fields: group.fields.flatMap(({ key }) => {
+            const field = body.fields.find((field) => field.key === key);
+            return field?.system ? [field] : [];
+          }),
+        }))
+      : [{ fields: config.fields }];
+  const shown = new Set(
+    groups.flatMap((group) => group.fields.map((field) => field.key)),
+  );
+  const mandatory =
+    body && screen ? new Set(mandatoryKeys(body, screen)) : null;
   const { team } = useWorkspace();
   const [values, setValues] = useState<Values>(() => ({
     ...defaults(config.kind),
@@ -209,6 +249,10 @@ export function RecordEditor({
     values.email,
     values.phone,
   );
+  // On edit a mandatory field is marked only when its stored value is filled: the server lets an
+  // older record keep a newly mandatory field empty (architecture §1.5 item 5).
+  const requiredOn = (key: string) =>
+    !!mandatory?.has(key) && (!record || !isEmptyValue(dataOf(record)[key]));
   const update = (key: string, value: unknown) =>
     setValues((old) => ({ ...old, [key]: value }));
   const submit = async (event: React.FormEvent) => {
@@ -228,7 +272,7 @@ export function RecordEditor({
             ),
           }
         : values;
-    const mutation = recordMutation(resource, submitted, refs, record);
+    const mutation = recordMutation(resource, submitted, refs, record, schema);
     const input: Values = {
       ...mutation,
       // Sent only when they changed, so a save that leaves them alone never touches them.
@@ -450,41 +494,51 @@ export function RecordEditor({
                   />
                 </div>
               )}
-              {config.fields
-                .filter(
-                  (field) =>
-                    !field.readOnly &&
-                    field.key !== "legacyAuthorLabel" &&
-                    field.key !== "customValues" &&
-                    field.key !== "assigneeIds" &&
-                    (advanced ||
-                      ![
-                        "experienceWording",
-                        "educationDates",
-                        "latestRoleDates",
-                        "roleStatus",
-                        "educationStatus",
-                        "experienceBasis",
-                        "sourceNotes",
-                      ].includes(field.key)),
-                )
-                .map((field) => (
-                  <Fragment key={field.key}>
-                    <FieldInput
-                      field={field}
-                      value={values[field.key]}
-                      error={fieldErrors[field.key]}
-                      onChange={(value) => update(field.key, value)}
-                    />
-                    {resource === "candidates" && field.key === "phone" && (
-                      <DuplicateWarning
-                        lookup={duplicates}
-                        excludeId={record?.id}
+              {groups.flatMap((group, index) => {
+                const inputs = group.fields
+                  .filter(
+                    (field) =>
+                      !field.readOnly &&
+                      field.key !== "legacyAuthorLabel" &&
+                      field.key !== "customValues" &&
+                      field.key !== "assigneeIds" &&
+                      (advanced || !ADVANCED_KEYS.includes(field.key)),
+                  )
+                  .map((field) => (
+                    <Fragment key={field.key}>
+                      <FieldInput
+                        field={
+                          mandatory
+                            ? { ...field, required: requiredOn(field.key) }
+                            : field
+                        }
+                        value={values[field.key]}
+                        error={fieldErrors[field.key]}
+                        onChange={(value) => update(field.key, value)}
                       />
-                    )}
-                  </Fragment>
-                ))}
+                      {resource === "candidates" && field.key === "phone" && (
+                        <DuplicateWarning
+                          lookup={duplicates}
+                          excludeId={record?.id}
+                        />
+                      )}
+                    </Fragment>
+                  ));
+                // An unlabelled group's inputs sit in the form grid itself, as before screens.
+                return group.label && inputs.length
+                  ? [
+                      <fieldset
+                        key={`group-${index}`}
+                        className="editor-fieldset full-width"
+                      >
+                        <legend>{group.label}</legend>
+                        <div className="form-grid">{inputs}</div>
+                      </fieldset>,
+                    ]
+                  : inputs;
+              })}
               {resource === "tasks" &&
+                shown.has("customValues") &&
                 fields.data?.data.map((custom) => {
                   const field = custom.data;
                   const customValues = (values.customValues as Values) || {};
@@ -520,7 +574,7 @@ export function RecordEditor({
                   );
                 })}
             </div>
-            {assigneesShown && (
+            {assigneesShown && shown.has("assigneeIds") && (
               <AssigneePicker
                 members={members.members}
                 error={members.error}
@@ -529,21 +583,24 @@ export function RecordEditor({
                 fieldError={fieldErrors.assigneeIds}
               />
             )}
-            {resource === "vacancies" && request && titleRule !== "hidden" && (
-              <JobTitlePicker
-                request={request}
-                access={access.data?.data}
-                value={titleKey}
-                onChange={(key) => {
-                  setTitleKey(key);
-                  setTitleError("");
-                }}
-                allowNone={!savedTitle}
-                readOnly={titleRule === "read"}
-                disabled={pending}
-                error={titleError}
-              />
-            )}
+            {resource === "vacancies" &&
+              request &&
+              titleRule !== "hidden" &&
+              shown.has("jobTitleKey") && (
+                <JobTitlePicker
+                  request={request}
+                  access={access.data?.data}
+                  value={titleKey}
+                  onChange={(key) => {
+                    setTitleKey(key);
+                    setTitleError("");
+                  }}
+                  allowNone={!savedTitle}
+                  readOnly={titleRule === "read"}
+                  disabled={pending}
+                  error={titleError}
+                />
+              )}
             {resource === "vacancies" && request && (
               <fieldset
                 className="stack"

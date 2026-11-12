@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -39,10 +40,13 @@ import {
   CANDIDATE_STATUSES,
   REVIEW_STATUSES,
   safeExternalUrl,
+  type FieldConfig,
   type RecordDto,
   type ResourceName,
   type ReferenceField,
 } from "@/domain/records";
+import type { KindSchemaBody } from "@/domain/config";
+import { screenFor, shownGroups } from "@/domain/screens";
 import { CvUpload } from "@/components/cv-upload";
 import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
@@ -89,6 +93,7 @@ import {
   requestJson,
   humanError,
 } from "./client";
+import { kindSchemaBodyOf } from "./mutation";
 import { moveRecord, saveFollowup, updateRecord } from "./optimistic";
 import { useTeamMembers, type TeamMember } from "./team-members";
 import { startSpeedTimer, useReadyTiming } from "./speed-log";
@@ -2124,6 +2129,7 @@ export function RecordDetail({
   initialTab = "details",
   focusChecklistId,
   members,
+  schema,
 }: {
   record: RecordDto;
   onClose: () => void;
@@ -2140,6 +2146,8 @@ export function RecordDetail({
   focusChecklistId?: string;
   /** Tasks only: the team's members when the screen has them; otherwise the profile loads them. */
   members?: TeamMember[] | null;
+  /** The kind schema to render from; a configurable kind defaults to its compiled default. */
+  schema?: KindSchemaBody;
 }) {
   const { team, role } = useWorkspace();
   const loaded = useTeamMembers(
@@ -2154,6 +2162,70 @@ export function RecordDetail({
   const canWrite = role !== "viewer";
   const resource = kindToResource[record.kind];
   const data = dataOf(record);
+  // A configurable kind shows the view screen of its kind schema for a record with no type (R2b-07):
+  // its groups and field order, without hidden fields.
+  const body = kindSchemaBodyOf(record.kind, schema);
+  const groups: { label?: string; fields: FieldConfig[] }[] = body
+    ? shownGroups(screenFor(body, null, "view")).map((group) => ({
+        label: group.label,
+        fields: group.fields.flatMap(({ key }) => {
+          const field = body.fields.find((field) => field.key === key);
+          return field?.system ? [field] : [];
+        }),
+      }))
+    : [{ fields: RESOURCE_CONFIG[resource].fields }];
+  const shown = new Map(
+    groups.flatMap((group) =>
+      group.fields.map((field): [string, string] => [field.key, field.label]),
+    ),
+  );
+  const sourceKeys = ["rawSource", "evidence", "sourceReviews"].filter((key) =>
+    shown.has(key),
+  );
+  // An unlabelled first group shares the facts with the references, as before screens.
+  const first = groups[0]?.label ? undefined : groups[0];
+  const rest = first ? groups.slice(1) : groups;
+  const facts = (fields: FieldConfig[]) =>
+    fields
+      .filter(
+        (field) =>
+          !field.readOnly &&
+          field.key !== "legacyAuthorLabel" &&
+          field.key !== "customValues" &&
+          // Assignees show above by name, never as ids.
+          field.key !== "assigneeIds",
+      )
+      .map((field) => (
+        <div
+          key={field.key}
+          className={
+            field.type === "textarea" || field.type === "json"
+              ? "full-width"
+              : ""
+          }
+        >
+          <dt>{field.label}</dt>
+          <dd
+            className={
+              field.type === "json" ? "pre-wrap code-input" : "pre-wrap"
+            }
+          >
+            {field.type === "tags" ? (
+              <div className="tag-list">
+                {((data[field.key] as string[]) || []).map((tag) => (
+                  <span className="tag" key={tag}>
+                    {tag}
+                  </span>
+                ))}
+                {!((data[field.key] as string[]) || []).length &&
+                  "Not recorded"}
+              </div>
+            ) : (
+              formatField(field, data)
+            )}
+          </dd>
+        </div>
+      ));
   // The write schema allows only http(s), but a stored value is rechecked before it becomes a link.
   const meetingUrl = safeExternalUrl(data.meetingUrl);
   const archive = () => {
@@ -2436,7 +2508,7 @@ export function RecordDetail({
                 </button>
               )}
             </div>
-            {record.kind === "task" && (
+            {record.kind === "task" && shown.has("assigneeIds") && (
               <TaskAssignment
                 record={record}
                 members={members === undefined ? loaded.members : members}
@@ -2478,66 +2550,25 @@ export function RecordDetail({
                     </dd>
                   </div>
                 ))}
-              {RESOURCE_CONFIG[resource].fields
-                .filter(
-                  (field) =>
-                    !field.readOnly &&
-                    field.key !== "legacyAuthorLabel" &&
-                    field.key !== "customValues" &&
-                    // Assignees show above by name, never as ids.
-                    field.key !== "assigneeIds",
-                )
-                .map((field) => (
-                  <div
-                    key={field.key}
-                    className={
-                      field.type === "textarea" || field.type === "json"
-                        ? "full-width"
-                        : ""
-                    }
-                  >
-                    <dt>{field.label}</dt>
-                    <dd
-                      className={
-                        field.type === "json"
-                          ? "pre-wrap code-input"
-                          : "pre-wrap"
-                      }
-                    >
-                      {field.type === "tags" ? (
-                        <div className="tag-list">
-                          {((data[field.key] as string[]) || []).map((tag) => (
-                            <span className="tag" key={tag}>
-                              {tag}
-                            </span>
-                          ))}
-                          {!((data[field.key] as string[]) || []).length &&
-                            "Not recorded"}
-                        </div>
-                      ) : (
-                        formatField(field, data)
-                      )}
-                    </dd>
-                  </div>
-                ))}
+              {first && facts(first.fields)}
             </div>
-            {record.kind === "task" && (
+            {rest.map((group, index) => (
+              <Fragment key={index}>
+                {group.label && <h3>{group.label}</h3>}
+                <div className="detail-facts">{facts(group.fields)}</div>
+              </Fragment>
+            ))}
+            {record.kind === "task" && shown.has("customValues") && (
               <TaskCustomDetails
                 values={data.customValues as Record<string, unknown>}
               />
             )}
-            {record.kind === "candidate" && (
+            {record.kind === "candidate" && sourceKeys.length > 0 && (
               <details className="source-details">
                 <summary>Original source information & evidence</summary>
-                {["rawSource", "evidence", "sourceReviews"].map((key) => (
+                {sourceKeys.map((key) => (
                   <div key={key}>
-                    <h3>
-                      {
-                        RESOURCE_CONFIG.candidates.fields.find(
-                          (field) => field.key === key,
-                        )?.label
-                      }
-                    </h3>
+                    <h3>{shown.get(key)}</h3>
                     <pre>{display(data[key])}</pre>
                   </div>
                 ))}

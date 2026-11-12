@@ -1,24 +1,64 @@
 import {
+  CONFIGURABLE_KINDS,
+  type ConfigurableKind,
+  type KindSchemaBody,
+} from "@/domain/config";
+import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
+import {
   RESOURCE_CONFIG,
   referencesByKind,
+  type FieldConfig,
+  type RecordKind,
   type ResourceName,
   type RecordDto,
   type ReferenceField,
 } from "@/domain/records";
+import { screenFor, shownKeys, type Screen } from "@/domain/screens";
+
+/**
+ * The kind schema body a configurable kind's editor and profile render from: the given one, else
+ * the compiled default. Other kinds have none and render from RESOURCE_CONFIG.
+ */
+export function kindSchemaBodyOf(
+  kind: RecordKind,
+  schema?: KindSchemaBody,
+): KindSchemaBody | undefined {
+  return (CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)
+    ? (schema ?? DEFAULT_KIND_SCHEMAS[kind as ConfigurableKind].body)
+    : undefined;
+}
+/** The system fields of the body that a screen shows, in body order, as the editor takes them. */
+export function shownSystemFields(
+  body: KindSchemaBody,
+  screen: Screen,
+): FieldConfig[] {
+  const shown = new Set(shownKeys(screen));
+  return body.fields.flatMap((field) =>
+    field.system && shown.has(field.key) ? [field] : [],
+  );
+}
 
 /**
  * Validate separately, then send only user-editable properties. Zod defaults must not add
- * importer-owned source fields. A task's assigneeIds is left out: assigneeInput adds it.
+ * importer-owned source fields. A task's assigneeIds is left out: assigneeInput adds it. A
+ * configurable kind sends only the system fields its create or edit screen shows, and a task's
+ * custom values leave out the kind schema's custom fields that screen does not show (R2b-07).
  */
 export function recordMutation(
   resource: ResourceName,
   values: Record<string, unknown>,
   refs: Partial<Record<ReferenceField, string>>,
   record?: RecordDto,
+  schema?: KindSchemaBody,
 ) {
   const config = RESOURCE_CONFIG[resource];
+  const body = kindSchemaBodyOf(config.kind, schema);
+  const screen = body && screenFor(body, null, record ? "edit" : "create");
+  const shown = new Set(screen ? shownKeys(screen) : []);
   const data: Record<string, unknown> = {};
-  for (const field of config.fields) {
+  for (const field of body && screen
+    ? shownSystemFields(body, screen)
+    : config.fields) {
     if (
       field.readOnly ||
       field.key === "legacyAuthorLabel" ||
@@ -26,6 +66,14 @@ export function recordMutation(
     )
       continue;
     let value = values[field.key];
+    if (field.key === "customValues" && body && value)
+      value = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).filter(
+          ([key]) =>
+            shown.has(key) ||
+            !body.fields.some((custom) => !custom.system && custom.key === key),
+        ),
+      );
     if (field.type === "tags" && typeof value === "string")
       value = value
         .split(",")
