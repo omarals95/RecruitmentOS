@@ -47,6 +47,7 @@ export const dataRoleHelpers = [
   "tenant_context.published_bracket_version()",
   "tenant_context.job_title_usage(text)",
   "tenant_context.erase_employee(uuid,text,text)",
+  "tenant_context.anonymise_user(text,text,text)",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",
   "tenant_context.scope_is_all()",

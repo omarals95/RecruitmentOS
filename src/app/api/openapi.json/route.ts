@@ -1419,6 +1419,44 @@ export function GET() {
       { sessionOnly: true, params: [userPath] },
     ),
   };
+  // Anonymisation (ADM-10): company owners only, session only, recent sign-in, no MCP tool.
+  const anonymisationShape =
+    "{data:{anonymisationId, alreadyAnonymised, anonymisedAt, removed:{memberships, sessions, apiTokens, twoStep, configuredRoles, recordAssignments, companyAuthority, invitations, activityRedacted}}}";
+  paths["/api/v1/admin/users/{user}/anonymise"] = {
+    post: operation(
+      [],
+      {
+        summary: "Permanently anonymise a person's account",
+        description: `Session only, for data-protection requests: a signed-in company owner. Company admins, the people area included, team owners and admins without company authority, recruiters and viewers get 403 anonymisation_forbidden ("Only a company owner, signed in, can anonymise a user account."), before the body is checked; Bearer tokens, including MCP OAuth tokens, get 403 session_required. There is no MCP tool. ${freshSessionRule} Your own account returns 400 cannot_change_self. Send {confirmName} with the person's name exactly as shown (1 to 300 characters, compared after trimming spaces, case-sensitive), at most 1 KiB; a different name returns 409 anonymisation_confirmation_mismatch and changes nothing, and an unknown key or other body returns 400 invalid_input, as do any query key and a user longer than 128 characters. A person in no team of the company, an unknown id included, returns 404 user_not_found. A person also in a team of another company returns 409 member_of_other_company; the last owner of a team of the company, archived or not, returns 409 last_team_owner; the last company owner returns 409 last_company_owner. In one transaction it removes the person's team memberships in the company, every session, password credential, API token and connected AI app (MCP OAuth grant, with its codes and tokens), two-step secret and backup codes, trusted device and pending two-step challenge, their configured roles and record assignments in the company's teams, their company authority, and invitations to their email in the company's teams. The account itself is kept, because records and history refer to it: its name becomes "Former user" and the first 8 hex characters of the anonymisation id, its email anonymised-<anonymisationId>@invalid, and it is no longer verified, so the old email and password no longer sign in. Every activity row about the person (company authority, two-step reset, deactivation and other account changes, configured roles, home units and record assignments), in every team of the company, is redacted to its type, time and actor. Records, candidates, comments, uploads, employees, configuration and the activity the person performed are kept; that activity now shows the placeholder name. It records a tombstone with only the person's id, company, owner, time and source, and one user.anonymised activity row (kind user-anonymisation) with ids and counts only, never the old name or email. A retry for an anonymised person, by the same or a new Idempotency-Key, returns 200 with alreadyAnonymised true and the same anonymisationId, anonymisedAt and counts, writing nothing. Returns ${anonymisationShape}; no name or email.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["confirmName"],
+            additionalProperties: false,
+            properties: {
+              confirmName: { type: "string", minLength: 1, maxLength: 300 },
+            },
+          },
+          { confirmName: "Fictional Dana Sample" },
+        ),
+      },
+      { "200": { description: anonymisationShape } },
+      {
+        sessionOnly: true,
+        params: [
+          userPath,
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            schema: { type: "string", pattern: "^[A-Za-z0-9._:-]{1,128}$" },
+            description:
+              "Reuse the same key after an uncertain result; the answer is the earlier anonymisation with alreadyAnonymised true. The same key for another person returns 409 idempotency_mismatch and an invalid key 400 invalid_idempotency_key. Keys are retained for 7 days; the typed name is never stored.",
+          },
+        ],
+      },
+    ),
+  };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.
   const roleWriteRule =
     "Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners and admins without company authority included, gets 403 config_forbidden.";

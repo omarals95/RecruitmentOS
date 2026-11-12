@@ -1,6 +1,6 @@
 # Candidate and employee erasure runbook
 
-How a team owner handles a request to permanently erase a candidate's data (P1-21, owner decision DEC-08), and how a company owner handles one for an employee of the company directory ([Erase an employee](#erase-an-employee), R2a-15). It describes what RecruitmentOS does and does not remove. It makes no claim that following it meets any law or regulation; the owner decides that.
+How a team owner handles a request to permanently erase a candidate's data (P1-21, owner decision DEC-08), how a company owner handles one for an employee of the company directory ([Erase an employee](#erase-an-employee), R2a-15), and how a company owner anonymises a person's user account ([Anonymise a user account](#anonymise-a-user-account), ADM-10). It describes what RecruitmentOS does and does not remove. It makes no claim that following it meets any law or regulation; the owner decides that.
 
 ## When to use it
 
@@ -179,3 +179,84 @@ Keep a log outside the app, with no personal data, one line per erasure:
 | ------------- | ----------- | ----------- | ---------- |
 
 It is the list to rerun after a database restore and the evidence that each request was handled. After a restore, rerun each line through **Admin portal > Directory**, taking the name to type from the restored directory, never from the log.
+
+## Anonymise a user account
+
+How a company owner permanently anonymises one person's account in the company (ADM-10, IAM-003, owner decisions D1, D20 and D29). It removes the person's access and personal details from the account, not the team data they worked on. The steps mirror employee erasure; the differences are noted.
+
+### When to use it
+
+- Use it only for data-protection requests, for example a former member asking for their account to be deleted. For a person who is leaving or on leave, use **Deactivate** on the same Security tab instead: it keeps everything and can be undone. Anonymisation cannot be undone.
+- Only a company owner can anonymise, and only while signed in to the app with a recent sign-in. Company admins (the People area included), team owners and admins without company authority, recruiters, viewers, API tokens, OAuth grants and the MCP endpoint cannot. There is no script and no bulk action.
+- You cannot anonymise your own account, the last owner of any team of the company (archived teams included) or the last company owner. Make someone else that team's owner, or a company owner, first.
+- A person who is also in a team of another company cannot be anonymised from here: the account is shared, and one company never changes another's access.
+
+### Before anonymising
+
+1. **Verify the requester** outside the app, through a channel you already trust. The app does not verify identity for you.
+2. **Find the person** in **Admin portal > Users**, by name or email. Note their user id from the address of their page (`/app/admin/users/<user id>`).
+3. **Check for a legal hold.** None is implemented in the app, so the owner decides whether any reason requires keeping the data, and records that decision outside the app.
+4. **Check the directory.** Anonymisation does not touch the company directory. If the person has an employee entry and the request covers it, erase it separately ([Erase an employee](#erase-an-employee)).
+5. **Search free text the app does not edit.** Names or emails typed into records, comments, task text or vacancy notes stay. Search the workspace for the name and email and edit those mentions by hand.
+
+### Anonymise in the app
+
+1. Sign in as a company owner and open **Admin portal > Users**, then the person's name.
+2. Open the **Security** tab. Under **Anonymise account**, choose **Anonymise account**.
+3. Read what is removed, kept and not covered. **Cancel** has focus first.
+4. Type the person's name exactly as shown (case matters; spaces at either end are ignored). **Anonymise account** stays disabled until it matches.
+5. Choose **Anonymise account**. If your sign-in is older than 15 minutes, **Confirm it's you** opens over the dialog: enter your password and two-step code, and the same request is sent once more with the name you typed. A refusal, such as the last owner of a team, shows its reason in the dialog, which stays open.
+6. The page shows "<name>'s account was anonymised. They no longer appear in Users." with **Back to Users**.
+7. Record the anonymisation in the owner's request log (below). The anonymisation id is in the response of `POST /api/v1/admin/users/{user}/anonymise`.
+
+A second anonymisation of the same person is safe: it returns the earlier anonymisation (`alreadyAnonymised: true`, the same id, time and counts) and writes nothing.
+
+### Verify
+
+1. **Admin portal > Users** no longer lists the person, and their page answers "This person is not in any team of your company." Signing in with the old email and password fails.
+2. Activity, for members with company authority, shows "Anonymised a user account" by the anonymising owner. The earlier entries about the person (company authority, two-step reset, deactivation and other account changes, configured roles, home units and record assignments) read "Details removed by user anonymisation" in every team of the company. Entries the person made themselves keep their text and show the placeholder name.
+3. Optionally, the owner runs this read-only SQL in psql as the migration owner (the owner of schema `tenant_context`, whose owner-only policies let it read these rows) over a direct connection. It prints counts and ids only:
+
+   ```sql
+   -- psql: replace both values; the results never show personal data.
+   \set workspace '<workspace id>'
+   \set person '<user id>'
+   SELECT
+     (SELECT count(*) FROM auth.member WHERE user_id = :'person') AS memberships,
+     (SELECT count(*) FROM auth.session WHERE user_id = :'person') AS sessions,
+     (SELECT count(*) FROM auth.account WHERE user_id = :'person') AS credentials,
+     (SELECT count(*) FROM auth.api_tokens WHERE user_id = :'person') AS api_tokens_and_grants,
+     (SELECT count(*) FROM auth.two_factor WHERE user_id = :'person') AS two_step,
+     (SELECT count(*) FROM auth.verification WHERE value = :'person') AS devices_and_challenges,
+     (SELECT count(*) FROM app.member_roles WHERE user_id = :'person') AS configured_roles,
+     (SELECT count(*) FROM app.record_assignments WHERE user_id = :'person') AS record_assignments,
+     (SELECT count(*) FROM app.workspace_admins WHERE workspace_id = :'workspace' AND user_id = :'person') AS company_authority,
+     (SELECT count(*) FROM auth."user" WHERE id = :'person' AND email LIKE 'anonymised-%@invalid' AND NOT email_verified) AS placeholder_accounts;
+   SELECT x.id AS anonymisation_id, x.anonymised_at, x.anonymised_by, x.erasure_source,
+     (SELECT count(*) FROM app.activity a WHERE a.user_anonymisation_id = x.id) AS activity_rows
+   FROM app.user_anonymisations x WHERE x.workspace_id = :'workspace' AND x.user_id = :'person';
+   ```
+
+   Every count in the first result is 0 except `placeholder_accounts`, which is 1. The second result has exactly one row; `activity_rows` is the redacted rows plus the one `user.anonymised` row.
+
+### What remains and why
+
+- **The account row** in `auth."user"`. Its name becomes "Former user" and the first 8 characters of the anonymisation id, its email `anonymised-<anonymisation id>@invalid` (a reserved domain that never receives mail), with no picture, and email verification and two-step sign-in off. Records, uploads, activity, configuration and teams refer to the account by id, so the row is kept and renamed rather than deleted.
+- **The tombstone** in `app.user_anonymisations`: the anonymisation id, company, user id, anonymising owner, time and source. It is the audit record and makes a retry return the earlier anonymisation. No name or email.
+- **Redacted activity rows**: the type, time and actor of each event about the person, with a fixed summary, empty details and a pointer to the tombstone. A redacted row that also named other people (a home-unit change for several members) loses their ids too, as with employee erasure.
+- **The `user.anonymised` row** with ids and counts only (memberships, sessions, API tokens, two-step, configured roles, record assignments, company authority, invitations and redacted activity rows).
+- **Team data the person created or acted on**: records, candidates, comments, files, saved views, follow-up notes and the activity they performed. These belong to the team (D1); their actor now reads as the placeholder name.
+- **The deactivation row** in `app.workspace_users`, when the person was deactivated. It holds ids only.
+- **The company directory entry**, if any. Erase it separately.
+- **Sign-in rate-limit rows**, keyed by a one-way hash of the old email, which expire on their own.
+- **Neon backups and point-in-time history** until their retention window passes. After any restore to a point before an anonymisation, anonymise each person in the owner's request log again: open `/app/admin/users/<user id>?tab=security` as a company owner and type the name shown there.
+- **Copies outside the app**, such as exports, email threads and spreadsheets.
+
+### The owner's request log
+
+Keep a log outside the app, with no personal data, one line per anonymisation:
+
+| Date received | Date anonymised | User id | Anonymisation id |
+| ------------- | --------------- | ------- | ---------------- |
+
+It is the list to rerun after a database restore and the evidence that each request was handled. After a restore, take the name to type from the restored user page, never from the log.

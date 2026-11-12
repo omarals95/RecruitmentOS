@@ -77,7 +77,7 @@ function baselineRows(pool: PoolName, kind: QueryKind): unknown[] {
     return [{ role: pool, sessionRole: pool, database: "neondb" }];
   if (kind === "marker") return [{ marker }];
   if (kind === "member") return [{ member: false }];
-  if (kind === "storage") return [{ version: 28 }];
+  if (kind === "storage") return [{ version: 29 }];
   return [{ unsafe: false }];
 }
 mocks.rows = (pool, query) => {

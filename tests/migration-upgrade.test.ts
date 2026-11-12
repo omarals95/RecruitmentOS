@@ -23,6 +23,7 @@ import {
 } from "../src/db";
 import { withDeadlinesAndSnapshot } from "../src/db/deadlines";
 import { eraseCandidate } from "../src/lib/candidate-erasure";
+import { eraseEmployee } from "../src/lib/employee-erasure";
 import { listCandidateCvs } from "../src/lib/cvs";
 import {
   kindToResource,
@@ -79,14 +80,19 @@ const stateColumns =
   "team_id, user_id, candidate_id, shortlisted, status, note, version, import_meta, updated_at";
 const migrationFiles = async (dir: string) =>
   (await readdir(dir)).filter((f) => /^\d{4}.*\.sql$/.test(f)).sort();
-// A row as the earlier schema wrote it: the activity column 0036 adds and the two team archive
-// columns 0044 adds to app.workspace_teams (the only table with archived_by) are left out, so an
-// upgrade from before them compares the columns its fixture rows had.
-const earlierColumns = (row: unknown) => {
-  const { employee_erasure_id: _added, ...kept } = row as Record<
+// An activity row as the schema before 0051 wrote it: the tombstone column 0051 adds is left out.
+const withoutAnonymisation = (row: unknown) => {
+  const { user_anonymisation_id: _anonymisation, ...kept } = row as Record<
     string,
     unknown
   >;
+  return kept;
+};
+// A row as the earlier schema wrote it: the activity columns 0036 and 0051 add and the two team
+// archive columns 0044 adds to app.workspace_teams (the only table with archived_by) are left out, so
+// an upgrade from before them compares the columns its fixture rows had.
+const earlierColumns = (row: unknown) => {
+  const { employee_erasure_id: _added, ...kept } = withoutAnonymisation(row);
   if (!Object.hasOwn(kept, "archived_by")) return kept;
   const { archived_at: _archivedAt, archived_by: _archivedBy, ...team } = kept;
   return team;
@@ -333,7 +339,7 @@ describe("populated fictional baseline upgrade from 0006", () => {
     ).toEqual([{ put_tickets_issued: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
     expect(
       (await listCandidateCvs(ownerA, ids.candidate)).map((cv) => cv.id),
     ).toEqual([ids.cv]);
@@ -493,7 +499,7 @@ describe("upgrade from 0020 to candidate erasure", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
     expect(
       (
         await pg.query<{ name: string }>(
@@ -623,7 +629,7 @@ describe("upgrade from 0027 to the company workspace", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("changes nothing when the migrations run again", async () => {
@@ -742,7 +748,7 @@ describe("upgrade from 0028 to the signed context that derives the workspace", (
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("installs an upgraded member's context with the derived workspace and company authority", async () => {
@@ -849,7 +855,7 @@ describe("upgrade from 0029 to the configuration store", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds the three configuration tables empty, under FORCE RLS", async () => {
@@ -978,7 +984,7 @@ describe("upgrade from 0030 to the explicit scope ceilings", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("accepts the owner's eleven scopes and rejects plans:read for the recruiter and viewer", async () => {
@@ -1064,7 +1070,7 @@ describe("upgrade from 0031 to configuration versions through install", () => {
     expect(await overloads()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("returns the published object in versions and its body in documents", async () => {
@@ -1185,7 +1191,7 @@ describe("upgrade from 0032 to the organisation hierarchy", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds the three organisation tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1362,7 +1368,7 @@ describe("upgrade from 0033 to positions and employees", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds the three directory tables empty, under ENABLE and FORCE RLS", async () => {
@@ -1554,7 +1560,7 @@ describe("upgrade from 0034 to configured member roles", () => {
     expect(await rows()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds app.member_roles empty, under ENABLE and FORCE RLS, and the context column", async () => {
@@ -1716,7 +1722,7 @@ describe("upgrade from 0035 to employee erasure", () => {
     ).toEqual([null]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds app.employee_erasures empty, under ENABLE and FORCE RLS", async () => {
@@ -1878,7 +1884,7 @@ describe("upgrade from 0036 to record scope", () => {
       ]).toEqual([null, null, null]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds app.record_assignments empty, under ENABLE and FORCE RLS, and the two context columns", async () => {
@@ -2040,6 +2046,7 @@ describe("upgrade from 0037 to record scope in row-level security", () => {
     expect({
       ...kept,
       "app.records": kept["app.records"].map(withoutPins),
+      "app.activity": kept["app.activity"].map(withoutAnonymisation),
     }).toEqual(keptBefore);
     expect(cached.map(({ role_version_id: _version, ...row }) => row)).toEqual(
       cachedBefore,
@@ -2056,7 +2063,7 @@ describe("upgrade from 0037 to record scope in row-level security", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds one restrictive policy for all commands on each of the five tables and keeps the permissive ones", async () => {
@@ -2233,7 +2240,7 @@ describe("upgrade from 0038 to the candidate scope index", () => {
       records: after.records.map(withoutPins),
       marker: before.marker,
     }).toEqual(before);
-    expect(after.marker).toEqual([{ version: 28 }]);
+    expect(after.marker).toEqual([{ version: 29 }]);
     expect(after.policies).toHaveLength(5);
     expect(after.helpers).toHaveLength(5);
   });
@@ -2247,7 +2254,7 @@ describe("upgrade from 0038 to the candidate scope index", () => {
 });
 
 // A populated fictional baseline written by the 0039 schema with fixed ids and times, upgraded
-// through every later migration: no row is rewritten, both pins arrive null, the marker goes to 28, a
+// through every later migration: no row is rewritten, both pins arrive null, the marker goes to 29, a
 // second run of 0040 changes nothing, and every REST list and get body is byte for byte the golden
 // file main's code wrote from the same baseline before any later migration existed.
 describe("upgrade from 0039 to record pins", () => {
@@ -2528,13 +2535,14 @@ describe("upgrade from 0039 to record pins", () => {
     expect({
       ...after,
       "app.records": after["app.records"].map(withoutPins),
+      "app.activity": after["app.activity"].map(withoutAnonymisation),
     }).toEqual(before);
     for (const row of after["app.records"])
       expect([row.schema_version_id, row.type_id]).toEqual([null, null]);
     await pg.exec("SET SESSION AUTHORIZATION postgres");
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
     expect(
       (
         await pg.query(
@@ -2561,11 +2569,11 @@ describe("upgrade from 0039 to record pins", () => {
       ),
     );
     expect(await rows()).toEqual(settled);
-    // Run alone, 0040 sets its own marker again; 0041 to 0050 have moved it on since.
+    // Run alone, 0040 sets its own marker again; 0041 to 0051 have moved it on since.
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
     ).toEqual([{ version: 18 }]);
-    await pg.exec("UPDATE db_boundary.storage_schema SET version = 28");
+    await pg.exec("UPDATE db_boundary.storage_schema SET version = 29");
   });
 
   it("answers every REST list and get byte for byte as before the upgrade", async () => {
@@ -2588,7 +2596,7 @@ describe("upgrade from 0039 to record pins", () => {
 
 // A company admin written by the 0041 schema with every earlier area, upgraded through 0042: the row
 // stays valid and unchanged, the company owner's session then grants people through
-// set_workspace_authority with one audited change, and the marker goes to 28.
+// set_workspace_authority with one audited change, and the marker goes to 29.
 describe("upgrade from 0041 to the people area", () => {
   const pg = new PGlite();
   const company = "00000000-0000-4000-a000-000000000001";
@@ -2623,12 +2631,12 @@ describe("upgrade from 0041 to the people area", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps the existing company admin row and sets storage schema 26", async () => {
+  it("keeps the existing company admin row and sets storage schema 29", async () => {
     expect((await admins()).rows).toEqual(before);
     expect(before).toHaveLength(2);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("grants people to the existing admin, audited once, and refuses it twice", async () => {
@@ -2697,7 +2705,7 @@ describe("upgrade from 0041 to the people area", () => {
 
 // A company owner and a company admin with people and Plan & pay access, both without two-step,
 // written by the 0042 schema and upgraded through 0043: no row is removed or rewritten, the marker
-// goes to 28, and a later grant of a level to either of them is refused with RQ017, writing nothing.
+// goes to 29, and a later grant of a level to either of them is refused with RQ017, writing nothing.
 describe("upgrade from 0042 to two-step sign-in for company authority", () => {
   const pg = new PGlite();
   const company = "00000000-0000-4000-a000-000000000001";
@@ -2753,7 +2761,7 @@ describe("upgrade from 0042 to two-step sign-in for company authority", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps both holders without two-step in every column and sets storage schema 26", async () => {
+  it("keeps both holders without two-step in every column and sets storage schema 29", async () => {
     expect(await rows()).toEqual(before);
     expect(before.admins).toEqual([
       expect.objectContaining({
@@ -2776,7 +2784,7 @@ describe("upgrade from 0042 to two-step sign-in for company authority", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("refuses a later grant to either of them with RQ017 and writes nothing", async () => {
@@ -2797,7 +2805,7 @@ describe("upgrade from 0042 to two-step sign-in for company authority", () => {
 // Two fictional teams and an activity row written by the 0043 schema, upgraded through 0044: every
 // team reads as not archived, the workspace team list returns archived false, install returns
 // teamArchived false with the scopes it stored before, no row is rewritten and the marker goes from
-// 21 to 28 (0045 to 0050 move it on from 22).
+// 21 to 29 (0045 to 0051 move it on from 22).
 describe("upgrade from 0043 to team archive", () => {
   const pg = new PGlite();
   const owner = principal(
@@ -2846,7 +2854,7 @@ describe("upgrade from 0043 to team archive", () => {
   });
   afterAll(async () => pg.close());
 
-  it("reads every existing team as not archived, rewrites no row and moves the marker from 21 to 28", async () => {
+  it("reads every existing team as not archived, rewrites no row and moves the marker from 21 to 29", async () => {
     expect(marker).toEqual([{ version: 21 }]);
     expect(await rows()).toEqual(before);
     expect(before.teams).toHaveLength(2);
@@ -2866,7 +2874,7 @@ describe("upgrade from 0043 to team archive", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("returns archived false from the workspace team list and teamArchived false from install", async () => {
@@ -2889,7 +2897,7 @@ describe("upgrade from 0043 to team archive", () => {
 
 // A position, and a published company configuration object, written by the 0044 schema, upgraded
 // through 0045: the position keeps every column and gains a null job title key, no configuration row
-// is rewritten, and the marker goes from 22 to 28 (0046 to 0050 move it on from 23).
+// is rewritten, and the marker goes from 22 to 29 (0046 to 0051 move it on from 23).
 describe("upgrade from 0044 to the job architecture", () => {
   const pg = new PGlite();
   const company = "00000000-0000-4000-a000-000000000001";
@@ -2934,7 +2942,7 @@ describe("upgrade from 0044 to the job architecture", () => {
   });
   afterAll(async () => pg.close());
 
-  it("gives every existing position a null job title key, rewrites no row and moves the marker from 22 to 28", async () => {
+  it("gives every existing position a null job title key, rewrites no row and moves the marker from 22 to 29", async () => {
     expect(marker).toEqual([{ version: 22 }]);
     const after = await rows();
     expect(before.positions).toHaveLength(1);
@@ -2950,7 +2958,7 @@ describe("upgrade from 0044 to the job architecture", () => {
     expect(after.activity).toEqual(before.activity);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("takes the job-architecture type and refuses a job title key that is not a configuration key", async () => {
@@ -2970,7 +2978,7 @@ describe("upgrade from 0044 to the job architecture", () => {
 });
 
 // A company written by the 0045 schema, upgraded through 0046: no row changes, the marker goes from
-// 23 to 28 (0047 to 0050 move it on from 24), the new helper is owner-run and closed to PUBLIC, and
+// 23 to 29 (0047 to 0051 move it on from 24), the new helper is owner-run and closed to PUBLIC, and
 // the company owner's session then reads one person through it, with the company authority change the
 // owner made to them before the upgrade among their events.
 describe("upgrade from 0045 to the workspace person helper", () => {
@@ -3039,14 +3047,14 @@ describe("upgrade from 0045 to the workspace person helper", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every company admin, member and activity row and moves the marker from 23 to 28", async () => {
+  it("keeps every company admin, member and activity row and moves the marker from 23 to 29", async () => {
     expect(marker).toEqual([{ version: 23 }]);
     expect(await rows()).toEqual(before);
     expect(before.admins).toHaveLength(2);
     expect(before.activity).toHaveLength(1);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds the helper owner-run, SECURITY DEFINER, STABLE, with a fixed search_path and no PUBLIC EXECUTE", async () => {
@@ -3106,7 +3114,7 @@ describe("upgrade from 0045 to the workspace person helper", () => {
 });
 
 // A company written by the 0046 schema, upgraded through 0047: no row changes, the marker goes from
-// 24 to 28 (0048 to 0050 move it on from 25), nobody is deactivated, install returns the same access to every
+// 24 to 29 (0048 to 0051 move it on from 25), nobody is deactivated, install returns the same access to every
 // member as before, the people helpers read everyone as active, and the two new helpers are owner-run
 // and closed to PUBLIC.
 describe("upgrade from 0046 to user deactivation", () => {
@@ -3166,7 +3174,7 @@ describe("upgrade from 0046 to user deactivation", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every row, deactivates nobody and moves the marker from 24 to 28", async () => {
+  it("keeps every row, deactivates nobody and moves the marker from 24 to 29", async () => {
     expect(marker).toEqual([{ version: 24 }]);
     expect(await rows()).toEqual(before);
     expect(before.admins).toHaveLength(1);
@@ -3177,7 +3185,7 @@ describe("upgrade from 0046 to user deactivation", () => {
     ).toEqual([{ n: 0 }]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("installs the same access for every member and reads everyone as active", async () => {
@@ -3237,7 +3245,7 @@ describe("upgrade from 0046 to user deactivation", () => {
 
 // Records written by the 0047 schema, upgraded through 0048: every record keeps every column value and
 // gains a null pay_bracket_version_id, the two bracket tables arrive empty under FORCE RLS, the three
-// helpers are owner-run and closed to PUBLIC, and the marker goes from 25 to 28 (0049 and 0050 move it on
+// helpers are owner-run and closed to PUBLIC, and the marker goes from 25 to 29 (0049 to 0051 move it on
 // from 26).
 describe("upgrade from 0047 to salary brackets", () => {
   const pg = new PGlite();
@@ -3268,7 +3276,7 @@ describe("upgrade from 0047 to salary brackets", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every record column value, pins nothing and moves the marker from 25 to 28", async () => {
+  it("keeps every record column value, pins nothing and moves the marker from 25 to 29", async () => {
     expect(marker).toEqual([{ version: 25 }]);
     expect(before).toHaveLength(4);
     const after = await records();
@@ -3287,7 +3295,7 @@ describe("upgrade from 0047 to salary brackets", () => {
     ]);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds both bracket tables empty under ENABLE and FORCE RLS", async () => {
@@ -3343,8 +3351,8 @@ describe("upgrade from 0047 to salary brackets", () => {
 // A team with a ready Blob CV written by the 0048 schema, upgraded through 0049: every record, upload
 // and ledger row keeps every value, app.record_files arrives empty under ENABLE and FORCE RLS with
 // the restrictive record-scope policy, the two widened helpers keep their signature, owner, SECURITY
-// DEFINER and search_path with no PUBLIC EXECUTE, and the marker goes from 26 to 28 (0050 moves it on
-// from 27).
+// DEFINER and search_path with no PUBLIC EXECUTE, and the marker goes from 26 to 29 (0050 and 0051
+// move it on from 27).
 describe("upgrade from 0048 to record files", () => {
   const pg = new PGlite();
   const team = "files-upgrade-team";
@@ -3380,14 +3388,14 @@ describe("upgrade from 0048 to record files", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every record, upload and ledger row and moves the marker from 26 to 28", async () => {
+  it("keeps every record, upload and ledger row and moves the marker from 26 to 29", async () => {
     expect(marker).toEqual([{ version: 26 }]);
     expect(before.uploads).toHaveLength(1);
     expect(before.stores).toMatchObject([{ used_files: 1, reserved_files: 0 }]);
     expect(await state()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds app.record_files empty under ENABLE and FORCE RLS with the team, owner and record-scope policies", async () => {
@@ -3465,7 +3473,7 @@ describe("upgrade from 0048 to record files", () => {
 // Positions and vacancies with and without a job title written by the 0049 schema, upgraded through
 // 0050: every position and record keeps every column value, the new helper is owner-run, SECURITY
 // DEFINER with a fixed search_path and no PUBLIC EXECUTE, refuses a call without a context, and the
-// marker goes from 27 to 28.
+// marker goes from 27 to 29 (0051 moves it on from 28).
 describe("upgrade from 0049 to job title usage", () => {
   const pg = new PGlite();
   const company = "00000000-0000-4000-a000-000000000001";
@@ -3500,14 +3508,14 @@ describe("upgrade from 0049 to job title usage", () => {
   });
   afterAll(async () => pg.close());
 
-  it("keeps every position and record column value and moves the marker from 27 to 28", async () => {
+  it("keeps every position and record column value and moves the marker from 27 to 29", async () => {
     expect(marker).toEqual([{ version: 27 }]);
     expect(before.positions).toHaveLength(2);
     expect(before.records).toHaveLength(2);
     expect(await state()).toEqual(before);
     expect(
       (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
-    ).toEqual([{ version: 28 }]);
+    ).toEqual([{ version: 29 }]);
   });
 
   it("adds the helper owner-run, SECURITY DEFINER, STABLE, with a fixed search_path and no PUBLIC EXECUTE", async () => {
@@ -3536,5 +3544,162 @@ describe("upgrade from 0049 to job title usage", () => {
       pg.query("SELECT * FROM tenant_context.job_title_usage('payroll-lead')"),
     ).rejects.toMatchObject({ code: "42501" });
     expect(await state()).toEqual(before);
+  });
+});
+
+// A company owner, a member, a candidate, an employee and activity naming each, written by the 0050
+// schema, upgraded through 0051: no row is rewritten, every activity row has a null
+// user_anonymisation_id, the marker goes from 28 to 29, the new helper is owner-run and closed to
+// PUBLIC, and employee and candidate erasure still redact their rows.
+describe("upgrade from 0050 to user anonymisation", () => {
+  const pg = new PGlite();
+  const team = "anonymise-upgrade-team";
+  const owner = principal("anonymise-upgrade-owner", team, "owner");
+  const member = "anonymise-upgrade-member";
+  const candidate = randomUUID();
+  const employee = randomUUID();
+  const rows = async () => ({
+    users: (
+      await pg.query(
+        'SELECT id, name, email, email_verified, two_factor_enabled, image FROM auth."user" ORDER BY id',
+      )
+    ).rows,
+    members: (
+      await pg.query(
+        "SELECT id, organization_id, user_id, role FROM auth.member ORDER BY id",
+      )
+    ).rows,
+    admins: (
+      await pg.query(
+        "SELECT * FROM app.workspace_admins ORDER BY workspace_id, user_id",
+      )
+    ).rows,
+    activity: (
+      await pg.query<Record<string, unknown>>(
+        "SELECT * FROM app.activity ORDER BY id",
+      )
+    ).rows,
+  });
+  let before: Awaited<ReturnType<typeof rows>>;
+  let marker: unknown[];
+  beforeAll(async () => {
+    await applyMigrations(pg, "0050_job_title_usage.sql");
+    await pg.exec(`INSERT INTO auth."user"(id,name,email,email_verified,initial_admin,two_factor_enabled) VALUES
+        ('${owner.userId}','Fictional Upgrade Owner','${owner.userId}@example.test',true,true,true);
+      INSERT INTO auth.organization(id,name,slug,created_by) VALUES ('${team}','Fictional Upgrade Team','${team}','${owner.userId}');
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES ('${team}-mo','${team}','${owner.userId}','owner');
+      INSERT INTO auth."user"(id,name,email,email_verified,initial_admin,two_factor_enabled) VALUES
+        ('${member}','Fictional Upgrade Member','${member}@example.test',true,false,false);
+      INSERT INTO auth.member(id,organization_id,user_id,role) VALUES ('${team}-mm','${team}','${member}','recruiter');
+      INSERT INTO app.records(id,team_id,kind,data,created_by) VALUES
+        ('${candidate}','${team}','candidate','{"name":"Fictional Upgrade Candidate"}','${owner.userId}');
+      INSERT INTO app.employees(id,workspace_id,display_name,employee_number) VALUES
+        ('${employee}','00000000-0000-4000-a000-000000000001','Fictional Upgrade Employee','AU-1');
+      INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,action,kind,summary,metadata) VALUES
+        ('${team}',NULL,'${owner.userId}','session','workspace_authority.changed','workspace-authority','Changed a member''s company authority','{"targetUserId":"${member}"}'),
+        ('${team}','${candidate}','${owner.userId}','session','created','candidate','Created candidate','{}'),
+        ('${team}',NULL,'${owner.userId}','session','directory.employee_updated','directory','Updated an employee','{"employeeId":"${employee}"}');`);
+    await installTenantContextKey(pg);
+    before = await rows();
+    marker = (await pg.query("SELECT version FROM db_boundary.storage_schema"))
+      .rows;
+    await applyMigrations(pg);
+    setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
+  });
+  afterAll(async () => pg.close());
+
+  it("keeps every row, gives every activity row a null tombstone and moves the marker from 28 to 29", async () => {
+    expect(marker).toEqual([{ version: 28 }]);
+    expect(before.activity).toHaveLength(3);
+    expect(before.admins).toHaveLength(1);
+    const after = await rows();
+    expect({
+      ...after,
+      activity: after.activity.map(withoutAnonymisation),
+    }).toEqual(before);
+    expect(after.activity.map((row) => row.user_anonymisation_id)).toEqual([
+      null,
+      null,
+      null,
+    ]);
+    expect(
+      (
+        await pg.query(
+          "SELECT data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'activity' AND column_name = 'user_anonymisation_id'",
+        )
+      ).rows,
+    ).toEqual([
+      { data_type: "uuid", is_nullable: "YES", column_default: null },
+    ]);
+    expect(
+      (
+        await pg.query(
+          "SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced, (SELECT count(*)::int FROM app.user_anonymisations) AS n FROM pg_class WHERE oid = 'app.user_anonymisations'::regclass",
+        )
+      ).rows,
+    ).toEqual([{ enabled: true, forced: true, n: 0 }]);
+    expect(
+      (await pg.query("SELECT version FROM db_boundary.storage_schema")).rows,
+    ).toEqual([{ version: 29 }]);
+  });
+
+  it("adds the helper owner-run, SECURITY DEFINER, with a fixed search_path and no PUBLIC EXECUTE", async () => {
+    expect(
+      (
+        await pg.query(
+          `SELECT p.proowner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'tenant_context') AS owned,
+             p.prosecdef AS definer, p.proconfig AS config,
+             has_function_privilege('public', p.oid, 'EXECUTE') AS public
+           FROM pg_proc p WHERE p.oid = 'tenant_context.anonymise_user(text,text,text)'::regprocedure`,
+        )
+      ).rows,
+    ).toEqual([
+      {
+        owned: true,
+        definer: true,
+        config: ["search_path=pg_catalog, pg_temp"],
+        public: false,
+      },
+    ]);
+  });
+
+  it("still redacts through employee and candidate erasure, leaving the new column null", async () => {
+    const employeeResult = await eraseEmployee(owner, employee, {
+      confirmName: "Fictional Upgrade Employee",
+    });
+    expect(employeeResult.removed.activityRedacted).toBe(1);
+    const lines: unknown[] = [];
+    const logged = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args) => lines.push(args));
+    const candidateResult = await eraseCandidate(owner, candidate, {
+      confirmName: "Fictional Upgrade Candidate",
+    }).finally(() => logged.mockRestore());
+    expect(lines).toEqual([]);
+    expect(candidateResult.removed).toMatchObject({ activityRedacted: 1 });
+    expect(
+      (
+        await pg.query(
+          "SELECT action, summary, metadata, erasure_id IS NOT NULL AS candidate, employee_erasure_id IS NOT NULL AS employee, user_anonymisation_id FROM app.activity WHERE action IN ('created', 'directory.employee_updated') ORDER BY action",
+        )
+      ).rows,
+    ).toEqual([
+      {
+        action: "created",
+        summary: "Details removed by candidate erasure",
+        metadata: {},
+        candidate: true,
+        employee: false,
+        user_anonymisation_id: null,
+      },
+      {
+        action: "directory.employee_updated",
+        summary: "Details removed by employee erasure",
+        metadata: {},
+        candidate: false,
+        employee: true,
+        user_anonymisation_id: null,
+      },
+    ]);
   });
 });

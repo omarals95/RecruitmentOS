@@ -154,8 +154,15 @@ import {
   resetTeam,
   resetTwoStep,
   runAccountAction,
+  anonymiseAction,
+  ANONYMISE_OWNER_ONLY,
   type WorkspacePerson,
 } from "../src/components/settings/user-detail";
+import {
+  UserAnonymisationDialogView,
+  UserAnonymisedPanel,
+  sendAnonymisation,
+} from "../src/components/settings/user-anonymisation";
 import {
   USER_DETAIL_TABS,
   userDetailTab,
@@ -4203,11 +4210,11 @@ describe("user detail", () => {
       "Deactivate",
       "Sign out everywhere",
       "Clear sign-in lockout",
+      "Anonymise account",
     ]);
     for (const name of [
       "Suspend",
       "Restore",
-      "Anonymise",
       "Groups",
       "Effective access",
       "Bulk invite",
@@ -4261,10 +4268,10 @@ describe("user detail", () => {
       '<div class="row"><button type="button" class="button">Reactivate</button><button type="button" class="button secondary">Sign out everywhere</button>',
     );
     expect(deactivated).not.toContain(">Deactivate<");
-    // Busy disables every action, Reset included.
+    // Busy disables every action, Reset and Anonymise account included.
     const busy = panel(view({ tab: "security", canReset: true, busy: true }));
-    expect(busy.match(/<button [^>]*disabled=""/g)).toHaveLength(4);
-    expect(busy.match(/<button /g)).toHaveLength(4);
+    expect(busy.match(/<button [^>]*disabled=""/g)).toHaveLength(5);
+    expect(busy.match(/<button /g)).toHaveLength(5);
   });
 
   it("offers a company admin the actions on a member only, and says why for a company owner or admin", () => {
@@ -4473,6 +4480,280 @@ describe("user detail", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // ADM-10 (job 085): Anonymise account.
+  const ANONYMISE_SECTION =
+    '<section class="panel stack"><h3>Anonymise account</h3><p>Permanently replaces this person&#x27;s name and email with a placeholder and removes their access to every team of your company. This cannot be undone.</p><div class="row"><button type="button" class="button danger">Anonymise account</button></div></section>';
+  const ANONYMISE_SENTENCE =
+    '<section class="panel stack"><h3>Anonymise account</h3><p class="muted">Only a company owner can anonymise an account.</p></section>';
+  type AnonymiseViewProps = Parameters<typeof UserAnonymisationDialogView>[0];
+  const anonymiseDialog = (overrides: Partial<AnonymiseViewProps> = {}) =>
+    renderToStaticMarkup(
+      <UserAnonymisationDialogView
+        name="Fictional Subject"
+        typed=""
+        busy={false}
+        error=""
+        ids={{ description: "what", input: "typed", name: "hint" }}
+        onTyped={() => {}}
+        onCancel={() => {}}
+        onConfirm={() => {}}
+        {...overrides}
+      />,
+    );
+
+  it("offers Anonymise account to a company owner on anyone else's page, the sentence to a people admin, and nothing on the caller's own page", () => {
+    for (const person of [
+      {},
+      member,
+      { companyLevel: "owner" as const },
+      { status: "deactivated" as const },
+    ]) {
+      const markup = panel(view({ tab: "security" }, person));
+      expect(markup).toContain(ANONYMISE_SECTION);
+      expect(markup).not.toContain(ANONYMISE_SENTENCE);
+      // Below the account actions.
+      expect(markup.indexOf("<h3>Anonymise account</h3>")).toBeGreaterThan(
+        markup.indexOf("Sign out everywhere"),
+      );
+    }
+    expect(panel(view({ tab: "security", busy: true }, member))).toContain(
+      '<button type="button" class="button danger" disabled="">Anonymise account</button>',
+    );
+    for (const person of [{}, member, { companyLevel: "owner" as const }]) {
+      const markup = panel(
+        view({ tab: "security", companyOwner: false }, person),
+      );
+      expect(markup).toContain(ANONYMISE_SENTENCE);
+      expect(markup).not.toContain(">Anonymise account</button>");
+    }
+    for (const companyOwner of [true, false]) {
+      const markup = panel(
+        view({ tab: "security", companyOwner }, { userId: workspace.user.id }),
+      );
+      expect(markup).not.toContain("Anonymise account");
+      expect(markup).not.toContain(ANONYMISE_OWNER_ONLY);
+    }
+    // Only on the Security tab.
+    for (const [key] of FIVE.filter(([key]) => key !== "security"))
+      expect(panel(view({ tab: key })), key).not.toContain("Anonymise");
+    expect(anonymiseAction(subject, subject.userId, true)).toBe("none");
+    expect(anonymiseAction(subject, "fictional-other", true)).toBe("allowed");
+    expect(anonymiseAction(subject, "fictional-other", false)).toBe(
+      "owner-only",
+    );
+    expect(ANONYMISE_OWNER_ONLY).toBe(
+      "Only a company owner can anonymise an account.",
+    );
+  });
+
+  it("confirms in an alert dialog, with Cancel first and Anonymise account disabled until the trimmed name matches exactly", () => {
+    const empty = anonymiseDialog();
+    expect(empty).toContain('role="alertdialog"');
+    expect(empty).toContain('aria-describedby="what"');
+    expect(empty).toMatch(/<h2 id="[^"]+">Anonymise Fictional Subject\?<\/h2>/);
+    for (const text of [
+      "<strong>Removed:</strong> their team memberships, sign-in (password, sessions and devices), API tokens and connected AI apps, two-step sign-in, configured roles, record assignments, company authority, pending invitations to their email, and the details of activity entries about them.",
+      "<strong>Kept:</strong> records, candidates, comments and files they created; activity they performed, shown under the placeholder name; and a record of who anonymised the account and when.",
+      "<strong>Not covered:</strong> copies outside the app, their directory entry (erase it separately under Directory), and names or emails typed into records.",
+      '<label for="typed">Type the person&#x27;s name to confirm</label>',
+      '<small id="hint" class="muted">Name: <strong>Fictional Subject</strong></small>',
+    ])
+      expect(empty).toContain(text);
+    expect(empty).toMatch(
+      /<button type="button" class="button secondary" autofocus="">Cancel<\/button><button type="button" class="button danger" disabled="">Anonymise account<\/button>/,
+    );
+    for (const typed of [
+      "Fictional",
+      "fictional subject",
+      "FICTIONAL SUBJECT",
+      "   ",
+    ])
+      expect(anonymiseDialog({ typed }), typed).toContain(
+        '<button type="button" class="button danger" disabled="">Anonymise account</button>',
+      );
+    expect(anonymiseDialog({ typed: "  Fictional Subject " })).toContain(
+      '<button type="button" class="button danger">Anonymise account</button>',
+    );
+    const busy = anonymiseDialog({ typed: "Fictional Subject", busy: true });
+    expect(busy).toContain(
+      '<button type="button" class="button danger" disabled="">Anonymising…</button>',
+    );
+    expect(busy).toMatch(/<input id="typed"[^>]*disabled=""/);
+    expect(busy).toContain(
+      '<button type="button" class="button secondary" autofocus="" disabled="">Cancel</button>',
+    );
+  });
+
+  it("shows an API refusal's own message inside the dialog, keeping the typed name", () => {
+    const markup = anonymiseDialog({
+      typed: "Fictional Subject",
+      error:
+        "This person is the last owner of a team. Make someone else that team's owner first.",
+    });
+    expect(markup).toContain(
+      '<p class="notice error" role="alert">This person is the last owner of a team. Make someone else that team&#x27;s owner first.</p>',
+    );
+    expect(markup).toMatch(/<input id="typed"[^>]*value="Fictional Subject"/);
+    expect(markup).toContain(
+      '<button type="button" class="button danger">Anonymise account</button>',
+    );
+  });
+
+  it("sends the trimmed name with one key to the page's team, retries once with the same key after Confirm it's you and sends nothing more after a cancel", async () => {
+    const sent: {
+      method: string;
+      path: string;
+      team: string | null;
+      key: string | null;
+      type: string | null;
+      body: unknown;
+    }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    const stale = () =>
+      json(403, {
+        error: {
+          code: "SESSION_NOT_FRESH",
+          message: "This change needs a recent sign-in.",
+        },
+      });
+    const result = {
+      anonymisationId: "00000000-0000-4000-8000-000000000085",
+      alreadyAnonymised: false,
+      anonymisedAt: "2026-11-11T09:00:00.000Z",
+      removed: {
+        memberships: 2,
+        sessions: 1,
+        apiTokens: 0,
+        twoStep: 1,
+        configuredRoles: 0,
+        recordAssignments: 0,
+        companyAuthority: 0,
+        invitations: 0,
+        activityRedacted: 3,
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        const headers = new Headers(init.headers);
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          team: headers.get("X-Team-Id"),
+          key: headers.get("Idempotency-Key"),
+          type: headers.get("Content-Type"),
+          body: JSON.parse(String(init.body)),
+        });
+        return answers.shift() ?? json(200, { data: result });
+      }),
+    );
+    try {
+      const ask = vi.fn(async () => true);
+      const fresh = <T,>(work: () => Promise<T>) =>
+        retryWithFreshSession(work, ask);
+      const post = {
+        method: "POST",
+        path: "/api/v1/admin/users/fictional-subject/anonymise",
+        team: "fictional-team",
+        key: "fictional-dialog-key",
+        type: "application/json",
+        body: { confirmName: "Fictional Subject" },
+      };
+      const send = () =>
+        sendAnonymisation(
+          "fictional-team",
+          "fictional-subject",
+          "  Fictional Subject ",
+          "fictional-dialog-key",
+          fresh,
+        );
+      // Fresh: one request.
+      await expect(send()).resolves.toEqual({ data: result });
+      expect(sent).toEqual([post]);
+      expect(ask).not.toHaveBeenCalled();
+      // Stale: Confirm it's you opens once and the same request, same key and name, runs again.
+      sent.length = 0;
+      answers.push(stale());
+      await expect(send()).resolves.toEqual({ data: result });
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(sent).toEqual([post, post]);
+      // Cancelled re-authentication: nothing more is sent.
+      sent.length = 0;
+      answers.push(stale());
+      ask.mockResolvedValueOnce(false);
+      await expect(send()).resolves.toBe(REAUTH_CANCELLED);
+      expect(sent).toEqual([post]);
+      // A refusal reaches the dialog with the API's own message.
+      sent.length = 0;
+      answers.push(
+        json(409, {
+          error: {
+            code: "last_team_owner",
+            message:
+              "This person is the last owner of a team. Make someone else that team's owner first.",
+          },
+        }),
+      );
+      await expect(send()).rejects.toMatchObject({
+        status: 409,
+        code: "last_team_owner",
+        message:
+          "This person is the last owner of a team. Make someone else that team's owner first.",
+      });
+      expect(sent).toEqual([post]);
+      // A person whose id needs encoding.
+      sent.length = 0;
+      await sendAnonymisation(
+        "fictional-team",
+        "fictional/odd id",
+        "Fictional Subject",
+        "fictional-dialog-key",
+        fresh,
+      );
+      expect(sent[0].path).toBe(
+        "/api/v1/admin/users/fictional%2Fodd%20id/anonymise",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("ends on the success panel, focused, with Back to Users", () => {
+    expect(
+      renderToStaticMarkup(<UserAnonymisedPanel name="Fictional Subject" />),
+    ).toBe(
+      '<section class="panel stack"><p tabindex="-1" class="notice success" role="status">Fictional Subject&#x27;s account was anonymised. They no longer appear in Users.</p><p><a href="/app/admin/users">Back to Users</a></p></section>',
+    );
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/user-anonymisation.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    // The panel takes focus, and the dialog keeps one key for as long as it is open.
+    expect(source).toContain("useEffect(() => status.current?.focus(), []);");
+    expect(source).toContain(
+      "const [key] = useState(() => crypto.randomUUID());",
+    );
+    const detail = readFileSync(
+      new URL("../src/components/settings/user-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    // The detail area shows only the panel, and the person is not loaded again.
+    expect(detail).toContain(
+      "if (anonymised !== null) return <UserAnonymisedPanel name={anonymised} />;",
+    );
+    expect(detail).toMatch(
+      /onAnonymised=\{\(\) => \{\s+setAnonymising\(false\);\s+setAnonymised\(person\.name\);\s+\}\}/,
+    );
   });
 
   it("shows the loading, no-access, not found and error states plainly", () => {
