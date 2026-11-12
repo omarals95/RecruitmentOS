@@ -13,7 +13,7 @@ import {
 import { z } from "zod";
 import { bulkIntakeBatches, bulkIntakeItems, uploads } from "@/db/schema";
 import type { TeamTx } from "@/db";
-import { accessContext } from "@/lib/authz";
+import { accessContext, checkFieldWrite } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import type { Principal } from "@/lib/principal";
@@ -34,6 +34,7 @@ import {
   BULK_INTAKE_RECOVERY_HOURS,
   CANDIDATE_DUPLICATE_LIMIT,
   recordDataSchemas,
+  sentFieldsSchema,
   uuidSchema,
 } from "@/domain/records";
 
@@ -58,7 +59,8 @@ export const bulkItemSchema = z
         sizeBytes: z.number().int().min(1).max(MAX_CV_BYTES),
       })
       .strict(),
-    data: bulkCandidateData,
+    // Only the details sent, which the field rules check; createBulkItem applies the defaults.
+    data: sentFieldsSchema(bulkCandidateData),
     factsReviewed: z.boolean().optional(),
     duplicatesReviewed: z.boolean().optional(),
     acknowledgedDuplicateIds: z
@@ -188,6 +190,8 @@ export async function createBulkItem(
   await purgeExpired(p, batchId);
   return withTeam(p, async (tx, access) => {
     const ctx = accessContext(p, access);
+    // The details sent, never reviewStatus, which the server sets.
+    checkFieldWrite(ctx, "candidate", Object.keys(input.data));
     await lockTeam(tx, p);
     const now = new Date();
     await tx

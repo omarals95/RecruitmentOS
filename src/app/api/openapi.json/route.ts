@@ -97,7 +97,7 @@ const errors = {
   "400": errorResponse("Invalid fields, references, query or JSON."),
   "401": errorResponse("Missing, invalid, expired or revoked credentials."),
   "403": errorResponse(
-    'Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required. Any write to the data or task boards of an archived team gets team_archived ("This team is archived. You can still read everything, but nothing can be changed until a team owner restores it."). Every session, API token and connected AI app of a person deactivated in the company gets account_deactivated ("Your account has been deactivated. Ask a company owner or admin to reactivate it.").',
+    'Scope, role, verification, origin or team access denied. A session of an owner or admin without two-step sign-in gets two_step_setup_required. Any write to the data or task boards of an archived team gets team_archived ("This team is archived. You can still read everything, but nothing can be changed until a team owner restores it."). Every session, API token and connected AI app of a person deactivated in the company gets account_deactivated ("Your account has been deactivated. Ask a company owner or admin to reactivate it."). A write naming a field the caller\'s role hides or makes read-only (a data key, a custom field id in data.customValues, legacyId or importMeta) gets field_forbidden ("Your role cannot change <key>.", with the key or custom field id as sent) and stores nothing; a write that leaves such a field out keeps its stored value.',
   ),
   "404": errorResponse("Record, resource or CV not found in this team."),
   "409": errorResponse(
@@ -123,7 +123,11 @@ const recordDto = {
   properties: {
     id: { type: "string", format: "uuid" },
     kind: { type: "string" },
-    data: { type: "object" },
+    data: {
+      type: "object",
+      description:
+        "The record's fields. Fields and custom values the caller's role hides are left out.",
+    },
     version: { type: "integer", minimum: 1 },
     label: { type: "string" },
     candidateLabel: {
@@ -262,7 +266,7 @@ export function GET() {
         [`${scope}:read`],
         {
           summary: `List ${resource}`,
-          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions.${resource === "candidates" ? " skills and certifications take a JSON array of up to 100 values and match candidates holding all of them, ignoring case and surrounding spaces." : ""}${candidateCommentRead}`,
+          description: `Requires ${scope}:read. Page size is capped at 100. Search supports words, quoted phrases and exclusions, and never matches a field the caller's role hides. Filtering or sorting by a field the caller's role hides returns 400 invalid_query; without sort, a hidden default sort field gives way to createdAt.${resource === "candidates" ? " skills and certifications take a JSON array of up to 100 values and match candidates holding all of them, ignoring case and surrounding spaces." : ""}${candidateCommentRead}`,
         },
         {
           "200": {
@@ -403,7 +407,7 @@ export function GET() {
           [`${scope}:read`],
           {
             summary: `Export ${resource} as CSV`,
-            description: `Requires ${scope}:read. Send no body. The query takes the list filters plus sort and direction; page and pageSize are refused because an export covers every matching record. Rows and their count come from one snapshot. Columns for fields the caller's role hides are left out and the rest keep their order. 400 invalid_query for an unsupported, repeated or page filter; 400 export_too_large when more than 100,000 records match; 404 for a resource that cannot be exported. Each export writes one activity row (kind export) with the list, row count and applied filter keys, never filter values; the exporter's private shortlisted filter, and on candidates the personal status filter, still apply but are left out of that row; if that row cannot be written, no file is sent.`,
+            description: `Requires ${scope}:read. Send no body. The query takes the list filters plus sort and direction; page and pageSize are refused because an export covers every matching record. Rows and their count come from one snapshot. Columns follow the kind schema in force: its fields in the order of its default view screen, then its other fields, each headed by its label; archived custom fields are left out. Columns for fields the caller's role hides are left out and the rest keep their order. 400 invalid_query for an unsupported, repeated or page filter, and for a filter or sort on a field the caller's role hides; 400 export_too_large when more than 100,000 records match; 404 for a resource that cannot be exported. Each export writes one activity row (kind export) with the list, row count and applied filter keys, never filter values; the exporter's private shortlisted filter, and on candidates the personal status filter, still apply but are left out of that row; if that row cannot be written, no file is sent.`,
           },
           {
             "200": {

@@ -190,11 +190,12 @@ export function RecordEditor({
   const assigneesChanged =
     assigneeInput(savedAssignees, assignees).assigneeIds !== undefined;
   const members = useTeamMembers(teamId, resource === "tasks");
-  const access = useApi<{ data: MeAccess }>(
-    resource === "tasks" || (resource === "vacancies" && request)
-      ? "/api/v1/me/access"
-      : null,
-  );
+  const access = useApi<{ data: MeAccess }>("/api/v1/me/access");
+  // The role's field rules for the kind: a hidden or read-only field gets no input and is never
+  // sent. While they load or if they fail, the editor sends as before and shows any refusal.
+  const rules = access.data?.data.fields[config.kind];
+  const editable = (key: string) =>
+    rules?.[key] !== "hidden" && rules?.[key] !== "read";
   // Vacancies only: the job title as saved and as chosen. The role's field rule hides the picker
   // or shows the title as text; once saved, a title can be changed but not cleared.
   const [savedTitle] = useState(() =>
@@ -272,7 +273,14 @@ export function RecordEditor({
             ),
           }
         : values;
-    const mutation = recordMutation(resource, submitted, refs, record, schema);
+    const mutation = recordMutation(
+      resource,
+      submitted,
+      refs,
+      record,
+      schema,
+      rules,
+    );
     const input: Values = {
       ...mutation,
       // Sent only when they changed, so a save that leaves them alone never touches them.
@@ -499,6 +507,7 @@ export function RecordEditor({
                   .filter(
                     (field) =>
                       !field.readOnly &&
+                      editable(field.key) &&
                       field.key !== "legacyAuthorLabel" &&
                       field.key !== "customValues" &&
                       field.key !== "assigneeIds" &&
@@ -539,40 +548,43 @@ export function RecordEditor({
               })}
               {resource === "tasks" &&
                 shown.has("customValues") &&
-                fields.data?.data.map((custom) => {
-                  const field = custom.data;
-                  const customValues = (values.customValues as Values) || {};
-                  const type =
-                    field.type === "Checkbox"
-                      ? "checkbox"
-                      : field.type === "Number"
-                        ? "number"
-                        : field.type === "Date"
-                          ? "date"
-                          : field.type === "Dropdown"
-                            ? "select"
-                            : "text";
-                  return (
-                    <FieldInput
-                      key={custom.id}
-                      field={{
-                        key: custom.id,
-                        label: field.name,
-                        type,
-                        required: field.required,
-                        options: field.options,
-                      }}
-                      value={customValues[custom.id]}
-                      error={fieldErrors[`customValues.${custom.id}`]}
-                      onChange={(value) =>
-                        update("customValues", {
-                          ...customValues,
-                          [custom.id]: value,
-                        })
-                      }
-                    />
-                  );
-                })}
+                editable("customValues") &&
+                fields.data?.data
+                  .filter((custom) => editable(custom.id))
+                  .map((custom) => {
+                    const field = custom.data;
+                    const customValues = (values.customValues as Values) || {};
+                    const type =
+                      field.type === "Checkbox"
+                        ? "checkbox"
+                        : field.type === "Number"
+                          ? "number"
+                          : field.type === "Date"
+                            ? "date"
+                            : field.type === "Dropdown"
+                              ? "select"
+                              : "text";
+                    return (
+                      <FieldInput
+                        key={custom.id}
+                        field={{
+                          key: custom.id,
+                          label: field.name,
+                          type,
+                          required: field.required,
+                          options: field.options,
+                        }}
+                        value={customValues[custom.id]}
+                        error={fieldErrors[`customValues.${custom.id}`]}
+                        onChange={(value) =>
+                          update("customValues", {
+                            ...customValues,
+                            [custom.id]: value,
+                          })
+                        }
+                      />
+                    );
+                  })}
             </div>
             {assigneesShown && shown.has("assigneeIds") && (
               <AssigneePicker

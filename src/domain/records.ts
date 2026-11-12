@@ -165,11 +165,13 @@ export const createRecordSchemas = Object.fromEntries(
       .strict(),
   ]),
 ) as unknown as Record<RecordKind, z.ZodType>;
-function partialDataSchema(data: z.ZodObject) {
-  // Zod 4 applies defaults inside optional fields. Retain only submitted keys so
-  // a partial save cannot reset an existing stage, field type or factual value.
+/**
+ * The object schema's checks, defaults and transforms, returning only the keys the value sent, so a
+ * default never stands for a field the caller named.
+ */
+export function sentFieldsSchema(data: z.ZodObject) {
   return z.record(z.string(), z.unknown()).transform((value, context) => {
-    const result = data.partial().safeParse(value);
+    const result = data.safeParse(value);
     if (!result.success) {
       for (const issue of result.error.issues)
         context.addIssue({
@@ -184,6 +186,11 @@ function partialDataSchema(data: z.ZodObject) {
       Object.keys(value).map((key) => [key, parsed[key]]),
     );
   });
+}
+function partialDataSchema(data: z.ZodObject) {
+  // Zod 4 applies defaults inside optional fields. Retain only submitted keys so
+  // a partial save cannot reset an existing stage, field type or factual value.
+  return sentFieldsSchema(data.partial());
 }
 export const updateRecordSchemas = Object.fromEntries(
   Object.entries(recordDataSchemas).map(([kind, data]) => [

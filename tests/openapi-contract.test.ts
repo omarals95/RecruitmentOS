@@ -627,6 +627,38 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents field_forbidden, redacted data and refused hidden filters and sorts (R2b-08)", () => {
+    for (const [path, method] of [
+      ["/api/v1/candidates", "post"],
+      ["/api/v1/offers/{id}", "patch"],
+    ])
+      expect(
+        document.paths[path][method].responses["403"].description,
+        `${method} ${path}`,
+      ).toContain(
+        'field_forbidden ("Your role cannot change <key>.", with the key or custom field id as sent)',
+      );
+    expect(document.components.schemas.RecordDto.properties?.data).toEqual({
+      type: "object",
+      description:
+        "The record's fields. Fields and custom values the caller's role hides are left out.",
+    });
+    for (const resource of EXPORT_RESOURCES) {
+      expect(
+        JSON.stringify(document.paths[`/api/v1/${resource}`].get),
+        resource,
+      ).toContain(
+        "Filtering or sorting by a field the caller's role hides returns 400 invalid_query",
+      );
+      expect(
+        JSON.stringify(document.paths[`/api/v1/${resource}/export`].post),
+        resource,
+      ).toContain(
+        "400 invalid_query for an unsupported, repeated or page filter, and for a filter or sort on a field the caller's role hides",
+      );
+    }
+  });
+
   it("documents candidate erasure as session-only, owner-only and typed", () => {
     const erasure = document.paths["/api/v1/candidates/{id}/erasure"].post;
     expect(erasure["x-session-only"]).toBe(true);

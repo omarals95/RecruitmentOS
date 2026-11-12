@@ -23,6 +23,7 @@ export async function POST(req: Request, ctx: Context) {
       result.resource,
       result.rows,
       result.hidden,
+      result.schema,
     );
     const chunks = csvChunks(
       headers,

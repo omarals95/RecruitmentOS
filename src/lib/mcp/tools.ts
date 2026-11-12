@@ -15,6 +15,7 @@ import {
   accessContext,
   decide,
   hiddenKeys,
+  readOnlyKeys,
   type AccessContext,
   type AccessRequest,
 } from "@/lib/authz";
@@ -115,10 +116,12 @@ interface ToolDefinition<S extends z.ZodType> {
   access: (AccessRequest | AccessRequest[])[];
   effect: Effect;
   input: S;
+  /** `args` are the arguments as sent, before the input schema added its defaults. */
   run: (
     p: Principal,
     input: z.output<S>,
     ctx: AccessContext,
+    args: unknown,
   ) => Promise<CallToolResult>;
 }
 type McpTool = ToolDefinition<z.ZodType>;
@@ -312,12 +315,32 @@ function changeInput(
       "Send at least one field to change.",
     );
 }
+/**
+ * The parsed fields the call's arguments name. A field's default is the service's to apply, so it is
+ * never a field the caller named for the field rules (R2b-08).
+ */
+function sent(input: Data, args: unknown): Data {
+  const named = args && typeof args === "object" ? (args as Data) : {};
+  return Object.fromEntries(
+    Object.entries(input).filter(([key]) => Object.hasOwn(named, key)),
+  );
+}
 const creates =
   (resource: ResourceName) =>
-  async (p: Principal, { idempotencyKey: key, ...input }: Data) =>
+  async (
+    p: Principal,
+    { idempotencyKey: key, ...input }: Data,
+    _ctx: AccessContext,
+    args: unknown,
+  ) =>
     success(
       written(
-        await createRecord(p, resource, writeInput(input), key as string),
+        await createRecord(
+          p,
+          resource,
+          writeInput(sent(input, args)),
+          key as string,
+        ),
       ),
     );
 const changes =
@@ -725,9 +748,14 @@ export const TOOLS: McpTool[] = [
         ...candidateInput,
       })
       .strict(),
-    run: async (p, input, ctx) => {
+    run: async (p, input, ctx, args) => {
       const { idempotencyKey: key, ...data } = input;
-      const row = await createRecord(p, "candidates", { data }, key);
+      const row = await createRecord(
+        p,
+        "candidates",
+        { data: sent(data, args) },
+        key,
+      );
       return success({
         id: row.id,
         ...fields(ctx, row, ["name"]),
@@ -977,7 +1005,7 @@ export const TOOLS: McpTool[] = [
           (value.newCandidate === undefined),
         "Provide exactly one of candidateId or newCandidate.",
       ),
-    run: async (p, input, ctx) => {
+    run: async (p, input, ctx, args) => {
       const bytes = decodedFile(input.contentBase64);
       requireBlobUpload();
       const file = checkedFile(
@@ -992,7 +1020,9 @@ export const TOOLS: McpTool[] = [
           await createRecord(
             p,
             "candidates",
-            { data: input.newCandidate },
+            {
+              data: sent(input.newCandidate, (args as Data).newCandidate),
+            },
             input.idempotencyKey,
           )
         ).id;
@@ -1121,7 +1151,7 @@ export const TOOLS: McpTool[] = [
           (value.sizeBytes === undefined),
         "Provide exactly one of contentBase64 or sizeBytes.",
       ),
-    run: async (p, input) => {
+    run: async (p, input, _ctx, args) => {
       const bytes =
         input.contentBase64 === undefined
           ? undefined
@@ -1141,7 +1171,7 @@ export const TOOLS: McpTool[] = [
             mimeType: input.mimeType ?? "",
             sizeBytes: bytes?.length ?? input.sizeBytes,
           },
-          data: input.candidate,
+          data: sent(input.candidate, (args as Data).candidate),
           factsReviewed: input.factsReviewed,
           duplicatesReviewed: input.duplicatesReviewed,
           acknowledgedDuplicateIds: input.acknowledgedDuplicateIds,
@@ -1484,10 +1514,10 @@ export const TOOLS: McpTool[] = [
         appliedDate: bulkApplicationsSchema.shape.appliedDate.optional(),
       })
       .strict(),
-    run: async (p, input) => {
+    run: async (p, input, _ctx, args) => {
       const { idempotencyKey: key, ...rest } = input;
       // A stored replay holds the full records too; both are reduced to IDs.
-      const result = await bulkApplications(p, rest, key);
+      const result = await bulkApplications(p, sent(rest, args), key);
       return success({
         created: result.created,
         skipped: result.skipped,
@@ -1911,10 +1941,19 @@ export const TOOLS: McpTool[] = [
       const current = await getRecord(p, "tasks", rest.id as string);
       if (current.version !== rest.version)
         throw new ApiError(409, "version_conflict", REREAD);
+      // Only the stored values the role lets the caller change: the service keeps the others.
+      const locked = new Set([
+        ...hiddenKeys(ctx, "task"),
+        ...readOnlyKeys(ctx, "task"),
+      ]);
       return changes("tasks")(p, {
         ...rest,
         customValues: {
-          ...((current.data as Data).customValues as Data),
+          ...Object.fromEntries(
+            Object.entries(
+              ((current.data as Data).customValues ?? {}) as Data,
+            ).filter(([key]) => !locked.has(key)),
+          ),
           ...(customValues as Data),
         },
       });
@@ -2436,7 +2475,7 @@ export async function callTool(
           )
           .join("; "),
       );
-    return await definition.run(p, parsed.data, ctx);
+    return await definition.run(p, parsed.data, ctx, args);
   } catch (error) {
     // An assistant cannot review a draft, so it is told to reread rather than to refresh.
     if (error instanceof ApiError && error.code === "version_conflict")

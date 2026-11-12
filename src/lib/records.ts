@@ -28,8 +28,10 @@ import {
   accessContext,
   anyRecordScopeRule,
   authorize,
+  checkFieldWrite,
   decide,
   hiddenKeys,
+  readOnlyKeys,
   recordScopeRule,
   redact,
   scopeFilter,
@@ -667,27 +669,55 @@ function validateRelations(kind: RecordKind, data: Data) {
 /**
  * The custom values an update merges in place of the sent map: the sent map plus the stored value
  * of each custom field of the kind schema that the edit screen for the record's type does not show
- * and the map leaves out, so a value the editor never showed is never lost (R2b-07). Sent values,
- * null and "" included, and a task's team task-field keys are taken as sent.
+ * and the map leaves out, so a value the editor never showed is never lost (R2b-07), and of each
+ * custom id in `locked` (the ones the role hides or makes read-only) the map leaves out. Sent values,
+ * null and "" included, and a task's other team task-field keys are taken as sent.
  */
 function keptCustomValues(
   schema: KindSchema,
   existing: Pick<DbRecord, "data" | "typeId">,
   sent: Data,
+  locked: ReadonlySet<string>,
 ): Data {
   const shown = new Set(
     shownKeys(screenFor(schema.body, existing.typeId, "edit")),
   );
   const stored = (existing.data.customValues ?? {}) as Data;
-  const kept = schema.body.fields.flatMap((field) =>
-    !field.system &&
-    !shown.has(field.key) &&
-    !Object.hasOwn(sent, field.key) &&
-    Object.hasOwn(stored, field.key)
-      ? [[field.key, stored[field.key]]]
-      : [],
-  );
+  const kept = [
+    ...schema.body.fields.flatMap((field) =>
+      !field.system &&
+      !shown.has(field.key) &&
+      !Object.hasOwn(sent, field.key) &&
+      Object.hasOwn(stored, field.key)
+        ? [[field.key, stored[field.key]]]
+        : [],
+    ),
+    // A custom field the role hides or makes read-only, a team task field included (R2b-08).
+    ...Object.keys(stored).flatMap((key) =>
+      locked.has(key) && !Object.hasOwn(sent, key) ? [[key, stored[key]]] : [],
+    ),
+  ];
   return kept.length ? { ...sent, ...Object.fromEntries(kept) } : sent;
+}
+/**
+ * The field keys a write names (R2b-08): the keys of data, the custom field ids of
+ * data.customValues and legacyId and importMeta when sent. Schema defaults are never named.
+ */
+function sentKeys(raw: unknown): string[] {
+  const input = raw as {
+    data?: Data;
+    legacyId?: unknown;
+    importMeta?: unknown;
+  };
+  const data = input.data ?? {};
+  const custom = data.customValues;
+  return [
+    ...Object.keys(data),
+    ...(custom && typeof custom === "object" ? Object.keys(custom) : []),
+    ...(["legacyId", "importMeta"] as const).filter(
+      (key) => input[key] !== undefined,
+    ),
+  ];
 }
 // Empty for a mandatory rule (architecture 1.5 item 5); false is a value.
 const isEmpty = (value: unknown) =>
@@ -1315,7 +1345,26 @@ export async function findCandidateDuplicates(p: Principal, input: unknown) {
     const ctx = accessContext(p, access);
     authorize(ctx, { resource: "candidates", action: "view" });
     const query = parse(candidateDuplicateQuerySchema, input);
-    return matchCandidateContacts(tx, ctx, query);
+    // A hidden contact field is neither matched on nor returned.
+    const hidden = hiddenKeys(ctx, "candidate");
+    for (const key of ["email", "phone"] as const)
+      if (query[key] && hidden.has(key))
+        throw new ApiError(
+          400,
+          "invalid_query",
+          `Your role cannot see ${key}, so you cannot filter by it.`,
+        );
+    const result = await matchCandidateContacts(tx, ctx, query);
+    return {
+      ...result,
+      data: result.data.map(({ id, matches, ...contact }) => ({
+        id,
+        ...(Object.fromEntries(
+          Object.entries(contact).filter(([key]) => !hidden.has(key)),
+        ) as Partial<typeof contact>),
+        matches: matches.filter((key) => !hidden.has(key)),
+      })),
+    };
   });
 }
 
@@ -1351,8 +1400,14 @@ export async function candidateSuggestions(
       ranked as(select l.field, l.label, row_number() over(partition by l.field order by t.holders desc, lower(l.label), l.label collate "C") as position from labels l join totals t on t.field=l.field and t.value=l.value)
       select field, label from ranked where position<=${CANDIDATE_SUGGESTION_LIMIT} order by field, position`,
     );
+    // A field the caller may not see suggests nothing.
+    const hidden = hiddenKeys(ctx, "candidate");
     const values = (field: string) =>
-      result.rows.filter((row) => row.field === field).map((row) => row.label);
+      hidden.has(field)
+        ? []
+        : result.rows
+            .filter((row) => row.field === field)
+            .map((row) => row.label);
     return {
       skills: values("skills"),
       certifications: values("certifications"),
@@ -1473,6 +1528,47 @@ export const PRIVATE_EXPORT_FILTER_KEYS: Readonly<
 > = { all: ["shortlisted"], candidates: ["shortlisted", "status"] };
 /** Most rows one export may hold; a larger match is refused, never cut short. */
 export const EXPORT_LIMIT = 100000;
+/**
+ * The fields each list filter reads, so a filter on a field the caller may not see is refused
+ * (R2b-08). status on candidates is the caller's private follow-up state and reads no field.
+ */
+const FILTER_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  ...Object.fromEntries(
+    [
+      "status",
+      "stage",
+      "department",
+      "residenceEmirate",
+      "owner",
+      "priority",
+      "type",
+      "category",
+      "reviewStatus",
+      "degreeLevel",
+      "employmentType",
+      "workMode",
+      "area",
+      "skills",
+      "certifications",
+    ].map((key) => [key, [key]]),
+  ),
+  needsReview: ["reviewStatus"],
+  folderCategory: ["folderCategories"],
+  categories: ["folderCategories"],
+  education: ["degreeName", "major", "university"],
+  minYearsExperience: ["yearsExperience"],
+  maxYearsExperience: ["yearsExperience"],
+  startFrom: ["startAt"],
+  startTo: ["startAt"],
+  legacyId: ["legacyId"],
+};
+/** The default sort of each kind when the query names none. */
+const defaultSort = (kind: RecordKind) =>
+  kind === "candidate"
+    ? "name"
+    : ["bucket", "task-field"].includes(kind)
+      ? "position"
+      : "createdAt";
 
 /** Validates a list or export query and builds its filter and order, so both share one filter SQL. */
 function recordQuery(
@@ -1490,6 +1586,23 @@ function recordQuery(
         "invalid_query",
         `Unsupported or repeated filter: ${key}.`,
       );
+  // A filter or sort that reads a field the caller may not see is refused before any other check.
+  const hidden = hiddenKeys(ctx, kind);
+  for (const [key, value] of query.entries()) {
+    const field = Object.hasOwn(FILTER_FIELDS, key)
+      ? FILTER_FIELDS[key].find((name) => hidden.has(name))
+      : undefined;
+    if (
+      field &&
+      !(kind === "candidate" && key === "status") &&
+      !["", "[]"].includes(value.trim())
+    )
+      throw new ApiError(
+        400,
+        "invalid_query",
+        `Your role cannot see ${field}, so you cannot filter by it.`,
+      );
+  }
   const search = parse(z.string().trim().max(500), query.get("search") ?? "");
   const order = parse(z.enum(["asc", "desc"]), query.get("direction") || "asc");
   const sort = parse(
@@ -1501,13 +1614,16 @@ function recordQuery(
       "yearsExperience",
       "position",
     ]),
+    // Without a sort, a default key the caller may not see gives way to createdAt.
     query.get("sort") ||
-      (kind === "candidate"
-        ? "name"
-        : ["bucket", "task-field"].includes(kind)
-          ? "position"
-          : "createdAt"),
+      (hidden.has(defaultSort(kind)) ? "createdAt" : defaultSort(kind)),
   );
+  if (hidden.has(sort))
+    throw new ApiError(
+      400,
+      "invalid_query",
+      `Your role cannot see ${sort}, so you cannot sort by it.`,
+    );
   const where: SQL[] = scopeFilter(ctx, kind, { once: true });
   if (query.has("includeArchived"))
     parse(z.enum(["true", "false"]), query.get("includeArchived"));
@@ -1753,14 +1869,13 @@ function recordQuery(
   // jsonpath extracts scalar values only. JSON property names are never searchable candidate facts.
   // Top-level keys in omitFromSearch and the keys the caller may not see are removed first, so words
   // neither match nor exclude on them; a hidden custom field id removes its customValues entry.
-  const hidden = [...hiddenKeys(ctx, kind)];
-  const hiddenCustom = hidden.filter(
+  const hiddenCustom = [...hidden].filter(
     (key) => uuidSchema.safeParse(key).success,
   );
   const omitted = [
     ...new Set([
       ...(options.omitFromSearch ?? []),
-      ...hidden.filter((key) => !hiddenCustom.includes(key)),
+      ...[...hidden].filter((key) => !hiddenCustom.includes(key)),
     ]),
   ];
   let searched: SQL = omitted.length
@@ -1901,7 +2016,8 @@ export async function listInside(
  * so the file and its Rows count agree; its recheck catches rows added between the two statements.
  * The audit names applied filter keys, never values, and leaves out PRIVATE_EXPORT_FILTER_KEYS.
  * Rows are redacted, and `hidden` names the keys of the kind the caller may not see, so the file
- * leaves out their columns.
+ * leaves out their columns; `schema` is the kind schema body in force, whose fields the columns
+ * follow.
  */
 export async function exportRecords(
   p: Principal,
@@ -1912,6 +2028,7 @@ export async function exportRecords(
   rows: RecordDto[];
   total: number;
   hidden: Set<string>;
+  schema: KindSchemaBody;
 }> {
   if (!(EXPORT_RESOURCES as readonly string[]).includes(resource))
     throw new ApiError(404, "not_found", "Unknown resource.");
@@ -1979,6 +2096,8 @@ export async function exportRecords(
       rows: rows.map((row) => redact(ctx, dto(row.record))),
       total,
       hidden: hiddenKeys(ctx, kind),
+      // Every export resource is a configurable kind.
+      schema: kindSchemaOf(ctx, kind)!.body,
     };
   });
 }
@@ -2172,6 +2291,11 @@ async function createOnce(
     const ctx = accessContext(p, access);
     authorize(ctx, { resource, action: "create" });
     const input = parse(createRecordSchemas[kind], raw) as WriteInput;
+    // A field the role hides or makes read-only is refused before any statement; with an
+    // Idempotency-Key only when the create runs, so a retry of a create made under an earlier role
+    // still answers with its record.
+    const checkFields = () => checkFieldWrite(ctx, kind, sentKeys(raw));
+    if (!idempotencyKey) checkFields();
     const imported = importedInput(
       ctx,
       resource,
@@ -2216,15 +2340,17 @@ async function createOnce(
       `create:${resource}`,
       idempotencyKey,
       input,
-      async () =>
-        redact(
+      async () => {
+        if (idempotencyKey) checkFields();
+        return redact(
           ctx,
           (
             await decorate(tx, ctx, [
               await createInside(tx, ctx, kind, input, imported, {}, members),
             ])
           )[0],
-        ),
+        );
+      },
       current,
       // A linked record's label is never kept: erasure may scrub it (a task title naming an erased
       // candidate) with no erased id beside it in the cached response, so a replay of a linked
@@ -2279,6 +2405,7 @@ async function updateOnce(
     ) as Partial<WriteInput> & {
       version: number;
     };
+    checkFieldWrite(ctx, kind, sentKeys(raw));
     if (patch.moveToBucketId && !(kind === "bucket" && patch.archived === true))
       throw new ApiError(
         400,
@@ -2299,7 +2426,14 @@ async function updateOnce(
       ...existing.data,
       ...patch.data,
       ...(schema && sent
-        ? { customValues: keptCustomValues(schema, existing, sent) }
+        ? {
+            customValues: keptCustomValues(
+              schema,
+              existing,
+              sent,
+              new Set([...hiddenKeys(ctx, kind), ...readOnlyKeys(ctx, kind)]),
+            ),
+          }
         : {}),
     }) as Data;
     const input = { ...patch, data };
@@ -2507,6 +2641,14 @@ export async function bulkApplications(
     authorize(ctx, { resource: "applications", action: "create" });
     authorize(ctx, { resource: "candidates", action: "view" });
     const input = parse(bulkApplicationsSchema, raw);
+    // Only the application fields sent: a defaulted stage or date is the server's.
+    checkFieldWrite(
+      ctx,
+      "application",
+      ["stage", "owner", "source", "appliedDate"].filter((key) =>
+        Object.hasOwn(raw as Data, key),
+      ),
+    );
     const candidateIds = [...new Set(input.candidateIds)];
     await lockTeam(tx, p);
     // Expired keys re-run: existing active pairs are reported, never duplicated.

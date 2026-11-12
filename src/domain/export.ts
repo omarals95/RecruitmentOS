@@ -1,4 +1,6 @@
+import type { KindSchemaBody } from "./config";
 import { RESOURCE_CONFIG, type RecordDto, type ResourceName } from "./records";
+import { screenFor, shownKeys } from "./screens";
 
 /** Pure export helpers shared by the export endpoint and the workspace; no browser or server APIs. */
 export const EXPORT_RESOURCES = [
@@ -181,32 +183,56 @@ export function* csvChunks(
 /**
  * Record ID, every field of the resource the caller may see in its order (`hidden` names the keys
  * left out), then the creation and update times. A task's assignees are not stored in its data and
- * are never exported.
+ * are never exported. With a kind schema `body`, the fields are the body's: first in the order of
+ * its default view screen, then the rest in body order, each headed by its label; a custom field's
+ * cell is its custom value, and archived custom fields, and every custom field when customValues is
+ * hidden, are left out.
  */
 export function exportTable(
   resource: ResourceName,
   records: RecordDto[],
   hidden: ReadonlySet<string> = new Set(),
+  body?: KindSchemaBody,
 ) {
-  const fields = RESOURCE_CONFIG[resource].fields.filter(
+  const fields: { key: string; label: string; system: boolean }[] = body
+    ? viewOrder(body).filter(
+        (field) =>
+          field.system || (!field.archived && !hidden.has("customValues")),
+      )
+    : RESOURCE_CONFIG[resource].fields.map((field) => ({
+        ...field,
+        system: true,
+      }));
+  const columns = fields.filter(
     (field) => !hidden.has(field.key) && field.key !== "assigneeIds",
   );
   return {
     headers: [
       "Record ID",
-      ...fields.map((field) => field.label),
+      ...columns.map((field) => field.label),
       "Created at",
       "Updated at",
     ],
-    rows: records.map((record) => [
-      record.id,
-      ...fields.map(
-        (field) => (record.data as Record<string, unknown>)[field.key],
-      ),
-      record.createdAt,
-      record.updatedAt,
-    ]),
+    rows: records.map((record) => {
+      const data = record.data as Record<string, unknown>;
+      const custom = (data.customValues ?? {}) as Record<string, unknown>;
+      return [
+        record.id,
+        ...columns.map((field) =>
+          field.system ? data[field.key] : custom[field.key],
+        ),
+        record.createdAt,
+        record.updatedAt,
+      ];
+    }),
   };
+}
+/** The body's fields, the default view screen's shown keys first in screen order, then body order. */
+function viewOrder(body: KindSchemaBody) {
+  const shown = shownKeys(screenFor(body, null, "view"));
+  const rank = (key: string) =>
+    shown.includes(key) ? shown.indexOf(key) : shown.length;
+  return [...body.fields].sort((a, b) => rank(a.key) - rank(b.key));
 }
 export const DATA_PROTECTION_NOTICE =
   "This file contains personal data from RecruitmentOS. Store and share it only as your team's data-protection rules allow.";
