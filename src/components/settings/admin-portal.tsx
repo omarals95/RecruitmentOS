@@ -21,6 +21,7 @@ import {
 } from "./admin-tabs";
 import { CompanyAuthorityTab } from "./company-authority-tab";
 import { DirectoryTab } from "./directory-tab";
+import { FieldsTab } from "./fields-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
 import { TeamsTab } from "./teams-tab";
@@ -189,6 +190,8 @@ export function AdminPortalView({
               <OrganisationTab access={access} />
             ) : current.key === "directory" ? (
               <DirectoryTab access={access} />
+            ) : current.key === "fields" ? (
+              <FieldsTab access={access} />
             ) : (
               <TokensPanel text={current.description} />
             )}

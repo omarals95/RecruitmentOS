@@ -60,6 +60,8 @@ vi.mock("next/navigation", () => ({
 
 import type { AppDb } from "@/db";
 import { user } from "@/db/auth-schema";
+import { CONFIGURABLE_KINDS, type ConfigurableKind } from "@/domain/config";
+import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import {
   AdminPortal,
   AdminPortalView,
@@ -79,8 +81,16 @@ import {
   authenticateApiToken,
   authenticateOAuthAccessToken,
 } from "@/lib/api-tokens";
+import { requireVerifiedIdentity } from "@/lib/auth-policy";
+import { getVerifiedSession } from "@/lib/auth-session";
 import { withTeam } from "@/lib/db-team";
 import type { Principal } from "@/lib/principal";
+import {
+  GET as listFields,
+  POST as createField,
+} from "@/app/api/v1/admin/fields/route";
+import { PUT as editDraft } from "@/app/api/v1/admin/fields/drafts/[versionId]/route";
+import { POST as publishDraft } from "@/app/api/v1/admin/fields/drafts/[versionId]/publish/route";
 import { createSplitRoleDb, seedIdentity } from "./helpers/db";
 
 // Fictional data only: one company workspace with two fictional teams.
@@ -249,7 +259,10 @@ describe("admin pages check access on the server (TST-002)", () => {
   const callers: Record<string, Caller> = {};
   /** The keys each signed-in caller may open; null is the Admin home. */
   const allowed: Record<string, (AdminTabKey | null)[]> = {};
+  /** Each signed-in caller with a team, for the API routes. */
+  const principals: Record<string, Principal> = {};
   const signIn = (name: string, p: Principal | { userId: string }) => {
+    if ("teamId" in p) principals[name] = p;
     request.sessions.set(name, {
       userId: p.userId,
       teamId: "teamId" in p ? p.teamId : null,
@@ -363,7 +376,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     allowed["team admin"] = teamPages;
     allowed.recruiter = [];
     allowed.viewer = [];
-    allowed["company admin"] = [null, "teams", "history"];
+    allowed["company admin"] = [null, "teams", "fields", "history"];
     allowed["company admin with organisation"] = [
       null,
       "teams",
@@ -380,6 +393,7 @@ describe("admin pages check access on the server (TST-002)", () => {
       "company-authority",
       "roles",
       "organisation",
+      "fields",
       "history",
     ];
     allowed["no team"] = [];
@@ -503,6 +517,187 @@ describe("admin pages check access on the server (TST-002)", () => {
       ).toBe(outcome);
     expect(authenticateApiToken).not.toHaveBeenCalled();
     expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // R2b-09 (job 094): Fields is a company owner page, and a page of the company admin with fields.
+  it("opens Fields for company owners and the company admin with fields only (R2b-09)", async () => {
+    for (const [name, outcome] of [
+      ["company admin", "allowed"],
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["company admin with organisation", "refused"],
+      ["company admin with people", "refused"],
+      ["company admin with no area", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(await open(callers[name], "[tab]/page.tsx", "fields"), name).toBe(
+        outcome,
+      );
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // R2b-09 (job 094): the Fields page's four routes answer each caller as the spec's matrix says.
+  describe("Fields routes (R2b-09)", () => {
+    const ORIGIN = "http://localhost:3000";
+    const UNKNOWN = "00000000-0000-4000-8000-0000000000f9";
+    type Answer = {
+      status: number;
+      body: { data?: unknown; error?: { code: string } };
+    };
+    /** One request through a route handler as a signed-in caller, a Bearer token or nobody. */
+    async function call(
+      name: string,
+      handler: (request: Request, ctx: never) => Promise<Response>,
+      path: string,
+      init: { method?: string; body?: unknown; versionId?: string } = {},
+    ): Promise<Answer> {
+      const p = principals[name];
+      vi.mocked(getVerifiedSession).mockImplementation(async () =>
+        p
+          ? ({
+              user: { id: p.userId, twoFactorEnabled: true },
+              session: {
+                activeOrganizationId: p.teamId,
+                createdAt: new Date(),
+              },
+            } as never)
+          : (requireVerifiedIdentity(null) as never),
+      );
+      const response = await handler(
+        new Request(`${ORIGIN}${path}`, {
+          method: init.method ?? "GET",
+          headers: {
+            origin: ORIGIN,
+            ...(p ? { "x-team-id": p.teamId } : {}),
+            ...(name === "bearer"
+              ? { authorization: "Bearer fictional-fields-token" }
+              : {}),
+            ...(init.body === undefined
+              ? {}
+              : { "content-type": "application/json" }),
+          },
+          body: init.body === undefined ? undefined : JSON.stringify(init.body),
+        }),
+        {
+          params: Promise.resolve({ versionId: init.versionId ?? UNKNOWN }),
+        } as never,
+      );
+      return { status: response.status, body: await response.json() };
+    }
+    const body = (kind: ConfigurableKind) => DEFAULT_KIND_SCHEMAS[kind].body;
+    const routes = (versionId: string, kind: ConfigurableKind) => [
+      () => call(nameOf.current, listFields as never, "/api/v1/admin/fields"),
+      () =>
+        call(nameOf.current, createField as never, "/api/v1/admin/fields", {
+          method: "POST",
+          body: { kind, body: body(kind) },
+        }),
+      () =>
+        call(
+          nameOf.current,
+          editDraft as never,
+          `/api/v1/admin/fields/drafts/${versionId}`,
+          { method: "PUT", body: { body: body(kind) }, versionId },
+        ),
+      () =>
+        call(
+          nameOf.current,
+          publishDraft as never,
+          `/api/v1/admin/fields/drafts/${versionId}/publish`,
+          { method: "POST", versionId },
+        ),
+    ];
+    const nameOf = { current: "" };
+
+    it("answers 401 without credentials, 403 session_required to a token, 403 config_forbidden without company authority or fields, and 2xx to a company owner and the company admin with fields", async () => {
+      // Each allowed caller's own draft: the owner's candidate and the admin's checklist.
+      nameOf.current = "company owner and team owner";
+      const ownerDraft = await routes(UNKNOWN, "candidate")[1]();
+      nameOf.current = "company admin";
+      const adminDraft = await routes(UNKNOWN, "checklist")[1]();
+      for (const draft of [ownerDraft, adminDraft])
+        expect(draft.status).toBe(201);
+      const ownerVersion = (ownerDraft.body.data as { versionId: string })
+        .versionId;
+      const adminVersion = (adminDraft.body.data as { versionId: string })
+        .versionId;
+      for (const [name, status, code] of [
+        ["anonymous", 401, "UNAUTHENTICATED"],
+        ["bearer", 403, "session_required"],
+        ["team owner", 403, "config_forbidden"],
+        ["team admin", 403, "config_forbidden"],
+        ["company admin with no area", 403, "config_forbidden"],
+        ["company admin with organisation", 403, "config_forbidden"],
+        ["company admin with people", 403, "config_forbidden"],
+      ] as const) {
+        nameOf.current = name;
+        for (const [index, route] of routes(ownerVersion, "task").entries()) {
+          const answer = await route();
+          expect(answer.status, `${name} route ${index}`).toBe(status);
+          expect(answer.body.error?.code, `${name} route ${index}`).toBe(code);
+        }
+      }
+      expect(authenticateApiToken).not.toHaveBeenCalled();
+      for (const [name, versionId, kind] of [
+        ["company owner and team owner", ownerVersion, "candidate"],
+        ["company admin", adminVersion, "checklist"],
+      ] as const) {
+        nameOf.current = name;
+        const [list, , edit, publish] = routes(versionId, kind);
+        const listed = await list();
+        expect(listed.status, name).toBe(200);
+        const kinds = listed.body.data as {
+          kind: string;
+          current: { number: number | null };
+          draft: { versionId: string } | null;
+        }[];
+        expect(kinds.map((item) => item.kind)).toEqual([...CONFIGURABLE_KINDS]);
+        expect(kinds.find((item) => item.kind === kind)).toMatchObject({
+          current: { number: null },
+          draft: { versionId },
+        });
+        expect((await edit()).status, name).toBe(200);
+        expect((await publish()).body, name).toEqual({
+          data: { versionId, number: 1 },
+        });
+      }
+      nameOf.current = "company admin";
+      const after = (await routes(UNKNOWN, "candidate")[0]()).body.data as {
+        kind: string;
+        current: { number: number | null };
+      }[];
+      expect(after.map((item) => [item.kind, item.current.number])).toEqual(
+        CONFIGURABLE_KINDS.map((kind) => [
+          kind,
+          kind === "candidate" || kind === "checklist" ? 1 : null,
+        ]),
+      );
+    });
+
+    it("refuses a kind that is not configurable and a body of another kind with invalid_input", async () => {
+      nameOf.current = "company owner and team owner";
+      for (const input of [
+        { kind: "comment", body: body("candidate") },
+        { kind: "offer", body: body("interview") },
+      ]) {
+        const answer = await call(
+          nameOf.current,
+          createField as never,
+          "/api/v1/admin/fields",
+          { method: "POST", body: input },
+        );
+        expect(answer.status, input.kind).toBe(400);
+        expect(answer.body.error?.code, input.kind).toBe("invalid_input");
+      }
+    });
   });
 
   // ADM-08 (job 076): the user detail page is a sub-page of Users and opens for exactly its callers,

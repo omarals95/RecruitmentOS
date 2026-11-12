@@ -28,8 +28,9 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
  * any of them and company authority never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
  * other team by name only, never its data. Users follows a company owner or a company admin with
- * the people area (D20): everyone in every team by name, email, teams and roles, never team data. A
- * page is added here only when its feature exists.
+ * the people area (D20): everyone in every team by name, email, teams and roles, never team data.
+ * Fields follows a company owner or a company admin with the fields area (D20). A page is added
+ * here only when its feature exists.
  */
 export const ADMIN_TABS = [
   {
@@ -81,6 +82,14 @@ export const ADMIN_TABS = [
       "Create and publish the roles that narrow what members can do.",
   },
   {
+    key: "fields",
+    label: "Fields",
+    level: "fields",
+    group: "Configuration",
+    description:
+      "Add, rename, group, order and archive the fields of every record kind, then publish the changes.",
+  },
+  {
     key: "tokens",
     label: "API tokens",
     level: "team",
@@ -106,6 +115,7 @@ export const ADMIN_TABS = [
     | "owner"
     | "organisation"
     | "directory"
+    | "fields"
     | "company";
   group: AdminGroup;
   description: string;
@@ -162,6 +172,9 @@ export function adminTabs({
       companyLevel === "owner" ||
       (companyLevel === "admin" && adminAreas.includes("organisation")),
     directory: !!actions.directory?.includes("view"),
+    fields:
+      companyLevel === "owner" ||
+      (companyLevel === "admin" && adminAreas.includes("fields")),
     company,
   };
   return ADMIN_TABS.filter((tab) => shown[tab.level]);

@@ -42,7 +42,30 @@ import {
   adminTabs,
   type AdminTabKey,
 } from "../src/components/settings/admin-tabs";
-import { ADMIN_AREAS } from "../src/domain/config";
+import { ADMIN_AREAS, CONFIGURABLE_KINDS } from "../src/domain/config";
+import {
+  FIELD_TYPES,
+  type CustomField,
+  type CustomFieldType,
+} from "../src/domain/field-types";
+import {
+  CUSTOM_TYPE_LABELS,
+  FieldEditor,
+  FieldsPanel,
+  OWNER_MUST_PUBLISH,
+  PublishDialog,
+  WizardStep,
+  canMove,
+  emptyInputs,
+  kindLabels,
+  kindView,
+  moveField,
+  moveToGroup,
+  newWizard,
+  wizardIssues,
+  type WizardState,
+} from "../src/components/settings/fields-tab";
+import { customField, kindBody } from "./helpers/kind-schemas";
 import {
   AccessChangesPanel,
   AdminPortal,
@@ -74,13 +97,14 @@ import {
 } from "../src/components/settings/task-boards-tab";
 import {
   ADMIN_ROLE,
+  DEFAULT_KIND_SCHEMAS,
   HIRING_MANAGER_ROLE,
   INTERVIEWER_ROLE,
   OWNER_ROLE,
   RECRUITER_ROLE,
   VIEWER_ROLE,
 } from "../src/domain/config-defaults";
-import type { ConfigObject } from "../src/lib/config-store";
+import type { ConfigObject, KindSchemaState } from "../src/lib/config-store";
 import type { CompanyAuthorityHolder } from "../src/lib/company-authority";
 import {
   ERASED_NOTICE,
@@ -188,7 +212,6 @@ const TEAM_TABS = ["tokens"];
 // ADM-04 (job 075): the old team pages live only as team detail tabs now.
 const OLD_TEAM_KEYS = ["members", "cv-storage", "speed", "task-boards"];
 const NOT_YET = [
-  "Fields",
   "Screens",
   "Workflows",
   "Boards",
@@ -202,7 +225,6 @@ const UNBUILT = [
   "permissions",
   "permission-helper",
   "sign-in",
-  "fields",
   "screens",
   "workflows",
   "boards",
@@ -285,7 +307,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the eight pages that exist, by group, in order", () => {
+  it("defines exactly the nine pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -303,6 +325,7 @@ describe("admin portal tabs", () => {
       ["directory", "Directory", "People"],
       ["company-authority", "Company authority", "Access"],
       ["roles", "Roles & permissions", "Access"],
+      ["fields", "Fields", "Configuration"],
       ["tokens", "API tokens", "Integrations"],
       ["history", "History", "Monitoring"],
     ]);
@@ -318,6 +341,7 @@ describe("admin portal tabs", () => {
           "owner",
           "organisation",
           "directory",
+          "fields",
           "company",
         ],
         tab.key,
@@ -342,7 +366,8 @@ describe("admin portal tabs", () => {
                 : key === "users" ||
                     key === "company-authority" ||
                     key === "roles" ||
-                    key === "organisation"
+                    key === "organisation" ||
+                    key === "fields"
                   ? companyLevel === "owner"
                   : key === "history"
                     ? companyLevel !== null
@@ -388,6 +413,9 @@ describe("admin portal tabs", () => {
                 (companyLevel === "admin" &&
                   adminAreas.includes("organisation")),
               directory: !!actions.directory?.includes("view"),
+              fields:
+                companyLevel === "owner" ||
+                (companyLevel === "admin" && adminAreas.includes("fields")),
               "company-authority": companyLevel === "owner",
               roles: companyLevel === "owner",
               history: companyLevel !== null,
@@ -551,7 +579,7 @@ describe("admin sidebar", () => {
               group !== "Overview" && tabs.some((item) => item.group === group),
           ),
         ]);
-        for (const group of ["Configuration", "Look & feel", "Communication"])
+        for (const group of ["Look & feel", "Communication"])
           expect(sidebarGroups(markup), label).not.toContain(group);
         expect(sidebar(markup), label).toContain(">Admin home</a>");
         for (const item of tabs)
@@ -589,13 +617,13 @@ describe("admin sidebar", () => {
         /<p id="([^"]+)">[^<]+<\/p><ul aria-labelledby="([^"]+)">/g,
       ),
     ];
-    expect(groups).toHaveLength(5);
+    expect(groups).toHaveLength(6);
     for (const group of groups) expect(group[2]).toBe(group[1]);
   });
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all seven tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all eight tab links and nothing that does not exist yet", () => {
     const markup = render("tokens", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
       "users",
@@ -603,6 +631,7 @@ describe("admin portal", () => {
       "organisation",
       "company-authority",
       "roles",
+      "fields",
       "tokens",
       "history",
     ]);
@@ -692,6 +721,7 @@ describe("admin portal", () => {
       "organisation",
       "company-authority",
       "roles",
+      "fields",
       "history",
     ]);
     expect(owner).toContain("<h2>Configuration history</h2>");
@@ -5094,5 +5124,391 @@ describe("invite to teams", () => {
     );
     expect(list).toContain('<td data-label="Name">Invited</td>');
     expect(list.match(/<a /g)).toHaveLength(1);
+  });
+});
+
+// R2b-09 (job 094): the Fields page, its list, editor, wizard and publish summary.
+describe("fields page", () => {
+  const owner = access("recruiter", "owner");
+  const fieldsAdmin = access("viewer", "admin", { adminAreas: ["fields"] });
+  // A fictional record of the kind the page configures; its values never reach the page.
+  const record = {
+    name: "Fictional Fields Record Person",
+    email: "fields.record.person@example.test",
+    employer: "Fictional Fields Record Employer",
+  };
+  const twin = customField("Email", "short-text");
+  const notice = customField("Fictional notice period", "number", {
+    min: 0,
+    max: 90,
+  });
+  const archived = customField("Fictional old note", "long-text", {
+    archived: true,
+  });
+  /** Every kind with its built-in default, and a candidate draft adding three custom fields. */
+  const kinds = (draft = kindBody("candidate", [twin, notice, archived])) =>
+    CONFIGURABLE_KINDS.map((kind): KindSchemaState => ({
+      kind,
+      current: {
+        versionId: DEFAULT_KIND_SCHEMAS[kind].versionId,
+        number: null,
+        body: DEFAULT_KIND_SCHEMAS[kind].body,
+      },
+      draft:
+        kind === "candidate"
+          ? {
+              versionId: "00000000-0000-4000-8000-0000000009a1",
+              body: draft as unknown as Record<string, unknown>,
+              note: null,
+              createdAt: "2026-11-12T08:00:00.000Z",
+            }
+          : null,
+    }));
+  const panel = (isOwner: boolean, list = kinds()) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <FieldsPanel kinds={list} error="" owner={isOwner} />
+      </WorkspaceProvider>,
+    );
+  const table = (markup: string) =>
+    /<table[\s\S]*<\/table>/.exec(markup)?.[0] ?? "";
+  const views = () => kinds().map(kindView);
+  // Text without React's markers between adjacent text nodes.
+  const plain = (markup: string) => markup.replaceAll("<!-- -->", "");
+  const candidate = () => views()[0];
+
+  it("lists Fields under Configuration, in the home and the sidebar, for company owners and company admins with fields only", () => {
+    for (const [value, shown] of [
+      [owner, true],
+      [access("owner", "owner", directory), true],
+      [fieldsAdmin, true],
+      [access("owner", "admin", { adminAreas: ["fields", "people"] }), true],
+      [access("owner", null, directory), false],
+      [access("admin", null, directory), false],
+      [access("recruiter", "admin"), false],
+      [access("recruiter", "admin", { adminAreas: ["organisation"] }), false],
+      [access("recruiter", "admin", { adminAreas: ["people"] }), false],
+    ] as const) {
+      const home = render(null, value);
+      expect(
+        content(home).includes(
+          '<h2>Configuration</h2><ul class="admin-cards"><li class="panel admin-card"><h3><a href="/app/admin/fields">Fields</a></h3>',
+        ),
+      ).toBe(shown);
+      expect(sidebarGroups(home).includes("Configuration")).toBe(shown);
+      expect(
+        /<p id="[^"]+">Configuration<\/p><ul aria-labelledby="[^"]+"><li><a href="\/app\/admin\/fields">Fields<\/a><\/li><\/ul>/.test(
+          sidebar(home),
+        ),
+      ).toBe(shown);
+      if (shown)
+        expect(sidebar(render("fields", value))).toContain(
+          '<a aria-current="page" href="/app/admin/fields">Fields</a>',
+        );
+      else onlyHeadingAndNoAccess(render("fields", value));
+    }
+  });
+
+  it("reads only the caller's access and the fields, and shows no record value", () => {
+    reads.length = 0;
+    const portal = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortal tab="fields" />
+      </WorkspaceProvider>,
+    );
+    const page = render("fields", owner);
+    expect(page).toContain('<p role="status">Loading fields…</p>');
+    expect([...new Set(reads.map((read) => read.path))].sort()).toEqual([
+      "/api/v1/admin/fields",
+      "/api/v1/me/access",
+    ]);
+    for (const markup of [portal, page, panel(true), panel(false)])
+      for (const value of Object.values(record))
+        expect(markup).not.toContain(value);
+  });
+
+  it("shows every field with its key, type, record kind and group, and warns about a shared name", () => {
+    const markup = panel(true);
+    const rows = table(markup).match(/<tr>/g) ?? [];
+    const fields = views().flatMap((view) => view.body.fields);
+    expect(rows).toHaveLength(fields.length + 1);
+    for (const field of fields)
+      expect(table(markup)).toContain(
+        `<td data-label="Key"><code>${field.key}</code></td>`,
+      );
+    // The custom row: its badges, its type and group, and the duplicate warning beside the system Email.
+    expect(markup.match(/Another candidate field has this name/g)).toHaveLength(
+      2,
+    );
+    expect(table(markup)).toContain(
+      `<td data-label="Key"><code>${notice.key}</code></td><td data-label="Type">Number</td><td data-label="Record kind">Candidate</td><td data-label="Group">No group</td>`,
+    );
+    expect(table(markup)).toContain('<span class="tag">Archived</span>');
+    expect(table(markup)).toContain(
+      '<span class="badge warning">Sensitive</span>',
+    );
+    // Archive only on active custom fields; no type control and no delete anywhere.
+    expect(table(markup).match(/aria-label="Archive /g)).toHaveLength(2);
+    expect(table(markup)).toContain(
+      `aria-label="Archive ${notice.label} (Candidate)"`,
+    );
+    expect(table(markup)).not.toContain(
+      `aria-label="Archive ${archived.label}`,
+    );
+    expect(table(markup)).not.toMatch(/<select|Delete|Remove/);
+    // The first field of a group cannot move up.
+    expect(table(markup)).toMatch(
+      /<button type="button" class="button secondary" disabled="" aria-label="Move up Name \(Candidate\)">Move up<\/button>/,
+    );
+    expect(markup).toContain(
+      '<option value="" selected="">All record kinds</option>',
+    );
+    for (const view of views())
+      expect(markup).toContain(
+        `<option value="${view.state.kind}">${view.body.label}</option>`,
+      );
+  });
+
+  it("shows each draft's state with Publish, and tells a company admin when only an owner may publish it", () => {
+    const owned = panel(true);
+    expect(plain(owned)).toContain(
+      "<strong>Candidates</strong>: Draft in progress. Built-in is in force.",
+    );
+    expect(plain(owned)).toContain(">Publish Candidate changes</button>");
+    expect(owned).not.toContain(OWNER_MUST_PUBLISH);
+    // The default candidate body already marks two fields sensitive; the draft keeps those marks.
+    expect(plain(panel(false))).toContain(
+      ">Publish Candidate changes</button>",
+    );
+    const marked = kindBody("candidate", [
+      { ...notice, sensitive: true } as unknown as CustomField,
+    ]);
+    const admin = panel(false, kinds(marked));
+    expect(admin).toContain(OWNER_MUST_PUBLISH);
+    expect(plain(admin)).not.toContain(">Publish Candidate");
+    expect(panel(true, kinds(marked))).not.toContain(OWNER_MUST_PUBLISH);
+  });
+
+  it("edits a system field without Archive, type change or Sensitive for an admin, and says Always required for name", () => {
+    const view = candidate();
+    const editor = (key: string, isOwner: boolean) =>
+      renderToStaticMarkup(
+        <FieldEditor
+          body={view.body}
+          field={view.body.fields.find((field) => field.key === key)!}
+          labels={kindLabels(views())}
+          owner={isOwner}
+          onClose={() => {}}
+          onSubmit={() => {}}
+        />,
+      );
+    const name = editor("name", false);
+    expect(name).toContain("<p>Always required</p>");
+    expect(name).not.toMatch(
+      />Required<\/label>|Archive|<select|>Sensitive<\/label>/,
+    );
+    expect(plain(name)).toContain("Type: Text.");
+    expect(name).toContain(">Name</span>");
+    expect(name).toContain(">Help text</span>");
+    expect(name).toContain(">Group</span>");
+    const employer = editor("employer", true);
+    expect(employer).toContain(">Required</label>");
+    expect(employer).toContain(">Sensitive</label>");
+    // The sensitive candidate fields stay sensitive: an owner sees the mark fixed.
+    expect(editor("explicitGender", true)).toMatch(
+      /<input type="checkbox"(?=[^>]*disabled="")(?=[^>]*checked="")[^>]*\/>Sensitive<\/label>/,
+    );
+    expect(editor("explicitGender", false)).toContain(
+      "Sensitive. Only a company owner can change this mark.",
+    );
+    // A custom field edits its validation, never its type or options.
+    const custom = renderToStaticMarkup(
+      <FieldEditor
+        body={view.body}
+        field={view.body.fields.find((field) => field.key === notice.key)!}
+        labels={kindLabels(views())}
+        owner={false}
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    expect(custom).toContain(">Minimum</span>");
+    expect(custom).toContain('value="90"');
+    expect(custom).toContain(">Required</label>");
+    expect(custom).not.toContain(">Sensitive</label>");
+    expect(custom).not.toContain(">Type</span>");
+    // Typing a name another field has shows the warning.
+    expect(
+      renderToStaticMarkup(
+        <FieldEditor
+          body={view.body}
+          field={view.body.fields.find((field) => field.key === twin.key)!}
+          labels={kindLabels(views())}
+          owner
+          onClose={() => {}}
+          onSubmit={() => {}}
+        />,
+      ),
+    ).toContain("Another candidate field has this name");
+  });
+
+  it("offers exactly the engine's types and each type's own validation attributes in the wizard", () => {
+    const step = (state: Partial<WizardState>, isOwner = true) =>
+      renderToStaticMarkup(
+        <WizardStep
+          state={{ ...newWizard("candidate"), ...state }}
+          body={candidate().body}
+          labels={kindLabels(views())}
+          owner={isOwner}
+          onChange={() => {}}
+        />,
+      );
+    const types = step({ step: 2 });
+    expect(plain(types)).toContain(
+      '<p class="muted">Step 2 of 5</p><h3 tabindex="-1">2. Type</h3>',
+    );
+    expect(
+      [...types.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]),
+    ).toEqual([...FIELD_TYPES]);
+    for (const type of FIELD_TYPES)
+      expect(types).toContain(`>${CUSTOM_TYPE_LABELS[type]}</option>`);
+    expect(
+      [...step({ step: 1 }).matchAll(/<option value="([^"]+)"/g)].map(
+        (match) => match[1],
+      ),
+    ).toEqual([...CONFIGURABLE_KINDS]);
+    const attributes = (type: CustomFieldType) =>
+      [
+        ...step({ step: 4, type, inputs: emptyInputs(type) }).matchAll(
+          /<span>([^<]+)<\/span>|<legend>([^<]+)<\/legend>|\/>([^<]+)<\/label>/g,
+        ),
+      ].map((match) => match[1] ?? match[2] ?? match[3]);
+    expect(attributes("short-text")).toEqual([
+      "Required",
+      "Minimum length",
+      "Maximum length",
+      "Pattern",
+      "Default",
+      "Sensitive",
+    ]);
+    expect(attributes("money")).toEqual([
+      "Required",
+      "Currency",
+      "Minimum amount",
+      "Maximum amount",
+      "Default",
+      "Sensitive",
+    ]);
+    expect(attributes("lookup")).toEqual([
+      "Required",
+      "Record kind to look up",
+      "Sensitive",
+    ]);
+    expect(attributes("dropdown")).toEqual([
+      "Required",
+      "Options",
+      "Default",
+      "Sensitive",
+    ]);
+    expect(attributes("multi-select")).toEqual([
+      "Required",
+      "Options",
+      "Fewest choices",
+      "Most choices",
+      "Default",
+      "Sensitive",
+    ]);
+    for (const type of ["person", "org-unit", "file"] as const)
+      expect(attributes(type), type).toEqual(["Required", "Sensitive"]);
+    for (const type of FIELD_TYPES)
+      expect(attributes(type).includes("Default"), type).toBe(
+        !["person", "org-unit", "file", "lookup"].includes(type),
+      );
+    expect(emptyInputs("money").currency).toBe("AED");
+    expect(
+      step({ step: 4, type: "money", inputs: emptyInputs("money") }),
+    ).toContain('value="AED"');
+    expect(step({ step: 4 }, false)).not.toContain(">Sensitive</label>");
+    // The default create, edit and view screens are ticked.
+    expect(step({ step: 5 }).match(/checked=""/g)).toHaveLength(3);
+    expect(step({ step: 3, label: "email" })).toContain(
+      "Another candidate field has this name",
+    );
+  });
+
+  it("refuses a pattern the engine refuses and a maximum below the minimum on the validation step", () => {
+    const at = (inputs: Partial<WizardState["inputs"]>) =>
+      wizardIssues({
+        ...newWizard("candidate"),
+        step: 4,
+        label: "Fictional code",
+        inputs: { ...newWizard("candidate").inputs, ...inputs },
+      });
+    expect(at({ pattern: "(a+)+" })).toEqual([
+      "Pattern: A repeated group may not hold a quantifier or an alternation.",
+    ]);
+    expect(at({ min: "9", max: "2" })).toEqual([
+      "Maximum length: The maximum may not be below the minimum.",
+    ]);
+    expect(at({ min: "2", max: "9", pattern: "[A-Z]+" })).toEqual([]);
+    expect(
+      wizardIssues({ ...newWizard("candidate"), step: 3, label: "  " })[0],
+    ).toMatch(/^Name: /);
+  });
+
+  it("shows the publish summary with each field's label and key before any request", () => {
+    const fetched = vi.spyOn(globalThis, "fetch");
+    const summary = (list: KindSchemaState[]) =>
+      renderToStaticMarkup(
+        <PublishDialog
+          view={kindView(list[0])}
+          onCancel={() => {}}
+          onPublish={() => {}}
+        />,
+      );
+    const markup = summary(kinds());
+    expect(markup).toContain(">Publish Candidate changes?</h2>");
+    expect(markup).toContain("<h3>Added</h3>");
+    for (const field of [twin, notice, archived])
+      expect(plain(markup)).toContain(
+        `<li>${field.label} <code>${field.key}</code></li>`,
+      );
+    expect(markup).toContain("<h3>Archived</h3>");
+    expect(markup).not.toContain("No changes from the published version.");
+    expect(markup.indexOf(">Cancel</button>")).toBeLessThan(
+      markup.indexOf(">Publish</button>"),
+    );
+    expect(
+      summary(kinds(structuredClone(DEFAULT_KIND_SCHEMAS.candidate.body))),
+    ).toContain("<p>No changes from the published version.</p>");
+    expect(fetched).not.toHaveBeenCalled();
+    fetched.mockRestore();
+  });
+
+  it("moves a field's entries by group and order on every screen that lists it", () => {
+    const body = kindBody("task", [notice]);
+    expect(canMove(body, "title", -1)).toBe(false);
+    expect(canMove(body, notice.key, 1)).toBe(false);
+    const up = moveField(body, notice.key, -1);
+    for (const screen of up.screens)
+      expect(
+        screen.groups[0].fields.slice(-2).map((entry) => entry.key),
+      ).toEqual([notice.key, "customValues"]);
+    const grouped = moveToGroup(body, "title", "Fictional group");
+    for (const screen of grouped.screens)
+      expect(screen.groups.map((group) => group.label)).toEqual([
+        undefined,
+        "Fictional group",
+      ]);
+    // Back to no group: the emptied group is removed and the entry keeps its flags.
+    const flagged = structuredClone(grouped);
+    flagged.screens[0].groups[1].fields[0].mandatory = true;
+    const back = moveToGroup(flagged, "title", undefined);
+    expect(back.screens[0].groups).toHaveLength(1);
+    expect(back.screens[0].groups[0].fields.at(-1)).toEqual({
+      key: "title",
+      mandatory: true,
+    });
+    expect(body).toEqual(kindBody("task", [notice]));
   });
 });
