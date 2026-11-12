@@ -76,9 +76,7 @@ async function call(
           : JSON.stringify(body),
   });
   const segments = url.pathname.split("/").slice(4);
-  const params = (value: Record<string, string>) => ({
-    params: Promise.resolve(value),
-  });
+  const params = <T>(value: T) => ({ params: Promise.resolve(value) });
   let response: Response;
   if (segments[0] === "users")
     response =

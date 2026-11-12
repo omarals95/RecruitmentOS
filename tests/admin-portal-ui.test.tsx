@@ -168,6 +168,36 @@ import {
   userDetailTab,
 } from "../src/components/settings/user-detail-tabs";
 import { tabKeys } from "../src/components/ui/tab-keys";
+import {
+  COMPUTED_READ_ONLY,
+  GROUPS_HELP,
+  GroupsPanel,
+  createBody,
+  type GroupList,
+} from "../src/components/settings/groups-tab";
+import {
+  ARCHIVED_GROUP,
+  AUDIT_SCOPE,
+  GRANTING_ADMIN,
+  GRANTING_OWNER,
+  GROUP_NOT_FOUND,
+  GroupDetailRefusal,
+  GroupDetailView,
+  NO_ADD_DRAFT,
+  addTarget,
+  canChange,
+  groupAuditLabel,
+  groupChoices,
+  sendGroupChange,
+  type GroupData,
+} from "../src/components/settings/group-detail";
+import {
+  GROUP_DETAIL_TABS,
+  groupDetailTab,
+} from "../src/components/settings/group-detail-tabs";
+import { UserGroupsPanel } from "../src/components/settings/user-detail";
+import { usersPath } from "../src/components/settings/users-tab";
+import { plainError } from "../src/components/settings/roles-tab";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -198,7 +228,6 @@ const NOT_YET = [
 ];
 // Pages of architecture §14.1 that are not built, or deferred by D29: no link, card or entry.
 const UNBUILT = [
-  "groups",
   "permissions",
   "permission-helper",
   "sign-in",
@@ -285,7 +314,7 @@ const subsets = <T,>(list: readonly T[]): T[][] =>
   );
 
 describe("admin portal tabs", () => {
-  it("defines exactly the eight pages that exist, by group, in order", () => {
+  it("defines exactly the nine pages that exist, by group, in order", () => {
     expect(ADMIN_GROUPS).toEqual([
       "Overview",
       "People",
@@ -298,6 +327,7 @@ describe("admin portal tabs", () => {
     ]);
     expect(ADMIN_TABS.map((tab) => [tab.key, tab.label, tab.group])).toEqual([
       ["users", "Users", "People"],
+      ["groups", "Groups", "People"],
       ["teams", "Teams", "People"],
       ["organisation", "Organisation", "People"],
       ["directory", "Directory", "People"],
@@ -340,6 +370,7 @@ describe("admin portal tabs", () => {
               : key === "teams"
                 ? team || companyLevel !== null
                 : key === "users" ||
+                    key === "groups" ||
                     key === "company-authority" ||
                     key === "roles" ||
                     key === "organisation"
@@ -379,6 +410,9 @@ describe("admin portal tabs", () => {
             const team = teamRole === "owner" || teamRole === "admin";
             const shown: Record<AdminTabKey, boolean> = {
               users:
+                companyLevel === "owner" ||
+                (companyLevel === "admin" && adminAreas.includes("people")),
+              groups:
                 companyLevel === "owner" ||
                 (companyLevel === "admin" && adminAreas.includes("people")),
               teams: team || companyLevel !== null,
@@ -595,10 +629,11 @@ describe("admin sidebar", () => {
 });
 
 describe("admin portal", () => {
-  it("shows a company owner who is a team owner all seven tab links and nothing that does not exist yet", () => {
+  it("shows a company owner who is a team owner all eight tab links and nothing that does not exist yet", () => {
     const markup = render("tokens", access("owner", "owner"));
     expect(tabLinks(markup)).toEqual([
       "users",
+      "groups",
       "teams",
       "organisation",
       "company-authority",
@@ -688,6 +723,7 @@ describe("admin portal", () => {
     const owner = render("history", access("recruiter", "owner"));
     expect(tabLinks(owner)).toEqual([
       "users",
+      "groups",
       "teams",
       "organisation",
       "company-authority",
@@ -3736,15 +3772,16 @@ describe("user detail", () => {
           .replaceAll("&amp;", "&")
           .trim(),
     );
-  const FIVE = [
+  const SIX = [
     ["profile", "Profile"],
     ["teams", "Teams & roles"],
+    ["groups", "Groups"],
     ["authority", "Company authority"],
     ["security", "Security"],
     ["activity", "Activity"],
   ] as const;
 
-  it("shows the shell, the person's name and a tablist with exactly the five tabs in order", () => {
+  it("shows the shell, the person's name and a tablist with exactly the six tabs in order", () => {
     const markup = view();
     expect(markup).toContain("<h1>Admin portal</h1>");
     expect(sidebar(markup)).toContain(
@@ -3756,9 +3793,9 @@ describe("user detail", () => {
     );
     const found = tabs(markup);
     expect(found.map(([, label]) => label)).toEqual(
-      FIVE.map(([, label]) => label),
+      SIX.map(([, label]) => label),
     );
-    FIVE.forEach(([key, label], index) =>
+    SIX.forEach(([key, label], index) =>
       expect(found[index][0]).toBe(
         `<button type="button" role="tab" id="user-tab-${key}" aria-controls="user-panel-${key}" tabindex="${index ? -1 : 0}" aria-selected="${!index}">${label.replace("&", "&amp;")}</button>`,
       ),
@@ -3767,12 +3804,12 @@ describe("user detail", () => {
       '<div role="tabpanel" id="user-panel-profile" aria-labelledby="user-tab-profile" tabindex="0" class="stack">',
     );
     expect(USER_DETAIL_TABS.map((tab) => [tab.key, tab.label])).toEqual(
-      FIVE.map((tab) => [...tab]),
+      SIX.map((tab) => [...tab]),
     );
   });
 
   it("opens the tab of ?tab=, and Profile for a missing or unknown key", () => {
-    for (const [key] of FIVE) {
+    for (const [key] of SIX) {
       expect(userDetailTab(key)).toBe(key);
       const markup = view({ tab: key });
       const selected = tabs(markup).filter(([tag]) =>
@@ -3788,7 +3825,7 @@ describe("user detail", () => {
     for (const value of [
       undefined,
       "",
-      "groups",
+      "effective-access",
       "access",
       "SECURITY",
       ["security"],
@@ -3804,7 +3841,7 @@ describe("user detail", () => {
     expect(source).toMatch(
       /role="tablist"\s+aria-label="User details"\s+onKeyDown=\{tabKeys\}/,
     );
-    // Five tab buttons, as the tablist renders them.
+    // Six tab buttons, as the tablist renders them.
     const clicked: string[] = [];
     const doc = { activeElement: null as unknown };
     const buttons = USER_DETAIL_TABS.map((tab) => ({
@@ -3829,7 +3866,7 @@ describe("user detail", () => {
         return prevented.mock.calls.length;
       };
       expect(press("ArrowRight", 0)).toBe(1);
-      expect(press("ArrowRight", 4)).toBe(1);
+      expect(press("ArrowRight", 5)).toBe(1);
       expect(press("ArrowLeft", 0)).toBe(1);
       expect(press("ArrowLeft", 3)).toBe(1);
       expect(press("Home", 3)).toBe(1);
@@ -3839,11 +3876,11 @@ describe("user detail", () => {
         "teams",
         "profile",
         "activity",
-        "authority",
+        "groups",
         "profile",
         "activity",
       ]);
-      expect(doc.activeElement).toBe(buttons[4]);
+      expect(doc.activeElement).toBe(buttons[5]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -4196,7 +4233,7 @@ describe("user detail", () => {
   });
 
   it("shows no control of a later item on any tab", () => {
-    const names = FIVE.flatMap(([key]) =>
+    const names = SIX.flatMap(([key]) =>
       controls(
         view(
           { tab: key, canReset: true, companyOwner: true },
@@ -4225,7 +4262,8 @@ describe("user detail", () => {
         names.some((item) => item.includes(name)),
         name,
       ).toBe(false);
-    for (const later of ["Groups", "Effective access"])
+    // ADM-12 (job 095): the Groups tab is built; Effective access is not.
+    for (const later of ["Effective access", "Where used", "Approval"])
       expect(content(view()), later).not.toContain(later);
   });
 
@@ -4536,7 +4574,7 @@ describe("user detail", () => {
       expect(markup).not.toContain(ANONYMISE_OWNER_ONLY);
     }
     // Only on the Security tab.
-    for (const [key] of FIVE.filter(([key]) => key !== "security"))
+    for (const [key] of SIX.filter(([key]) => key !== "security"))
       expect(panel(view({ tab: key })), key).not.toContain("Anonymise");
     expect(anonymiseAction(subject, subject.userId, true)).toBe("none");
     expect(anonymiseAction(subject, "fictional-other", true)).toBe("allowed");
@@ -5094,5 +5132,936 @@ describe("invite to teams", () => {
     );
     expect(list).toContain('<td data-label="Name">Invited</td>');
     expect(list.match(/<a /g)).toHaveLength(1);
+  });
+});
+
+// ADM-12 (job 095): the Groups page, the group detail page, the Users group filter and the user
+// Groups tab.
+describe("groups page", () => {
+  const ids = {
+    leadership: "00000000-0000-4000-a000-000000000a01",
+    interviewers: "00000000-0000-4000-a000-000000000a02",
+    panel: "00000000-0000-4000-a000-000000000a03",
+    old: "00000000-0000-4000-a000-000000000a04",
+    other: "00000000-0000-4000-a000-000000000a05",
+  };
+  const list: GroupList = {
+    data: [
+      {
+        id: ids.interviewers,
+        name: "Fictional Interviewers",
+        description: "Fictional interview panel",
+        status: "active",
+        grants: false,
+        directPeople: 2,
+        people: 5,
+        childGroups: [{ id: ids.panel, name: "Fictional Panel" }],
+        parentGroups: [{ id: ids.leadership, name: "Fictional Leadership" }],
+      },
+      {
+        id: ids.leadership,
+        name: "Fictional Leadership",
+        description: null,
+        status: "active",
+        grants: true,
+        directPeople: 1,
+        people: 1,
+        childGroups: [],
+        parentGroups: [],
+      },
+      {
+        id: ids.old,
+        name: "Fictional Old List",
+        description: null,
+        status: "archived",
+        grants: false,
+        directPeople: 0,
+        people: 0,
+        childGroups: [],
+        parentGroups: [],
+      },
+    ],
+    computed: [
+      { key: "company-owners", name: "Company owners", people: 1 },
+      { key: "all-members", name: "All members", people: 12 },
+      {
+        key: "team-owners:fictional-team",
+        name: "Owners of Fictional Team",
+        people: 2,
+      },
+    ],
+  };
+  const listPanel = (props: Partial<Parameters<typeof GroupsPanel>[0]> = {}) =>
+    renderToStaticMarkup(
+      <GroupsPanel
+        list={list}
+        error=""
+        draft={{ name: "", description: "" }}
+        {...props}
+      />,
+    );
+  const person = (name: string) => ({
+    userId: `fictional-${name.toLowerCase()}`,
+    name: `Fictional ${name}`,
+    email: `${name.toLowerCase()}@example.test`,
+  });
+  const group: GroupData = {
+    id: ids.interviewers,
+    name: "Fictional Interviewers",
+    description: "Fictional interview panel",
+    status: "active",
+    grants: false,
+    people: 5,
+    members: {
+      people: [person("Amal"), person("Basil")],
+      groups: [
+        {
+          id: ids.panel,
+          name: "Fictional Panel",
+          status: "active",
+          people: [person("Celia")],
+          groups: [
+            {
+              id: ids.other,
+              name: "Fictional Deep Panel",
+              status: "archived",
+              people: [person("Dana"), person("Amal")],
+              groups: [],
+            },
+          ],
+        },
+      ],
+    },
+    memberOf: [
+      {
+        id: ids.leadership,
+        name: "Fictional Leadership",
+        status: "active",
+        via: null,
+      },
+      {
+        id: ids.old,
+        name: "Fictional Old List",
+        status: "archived",
+        via: "Fictional Leadership",
+      },
+    ],
+    audit: [
+      {
+        occurredAt: "2026-11-06T10:00:00.000Z",
+        action: "group.member_added",
+        actorName: "Fictional Company Owner",
+        target: { kind: "person", name: "Fictional Amal" },
+      },
+      {
+        occurredAt: "2026-11-05T10:00:00.000Z",
+        action: "group.child_added",
+        actorName: "Fictional Company Owner",
+        target: { kind: "group", name: "Fictional Panel" },
+      },
+      {
+        occurredAt: "2026-11-04T10:00:00.000Z",
+        action: "group.child_added",
+        actorName: null,
+        target: { kind: "parent", name: "Fictional Leadership" },
+      },
+      {
+        occurredAt: "2026-11-03T10:00:00.000Z",
+        action: "group.member_removed",
+        actorName: "Fictional Company Owner",
+        target: { kind: "person", name: null },
+      },
+      {
+        occurredAt: "2026-11-02T10:00:00.000Z",
+        action: "group.renamed",
+        actorName: "Fictional Company Owner",
+        target: null,
+      },
+      {
+        occurredAt: "2026-11-01T10:00:00.000Z",
+        action: "group.created",
+        actorName: "Fictional Company Owner",
+        target: null,
+      },
+    ],
+  };
+  const detail = (
+    props: Partial<Parameters<typeof GroupDetailView>[0]> = {},
+    changes: Partial<GroupData> = {},
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortalView
+          tab="groups"
+          access={access("owner", "owner")}
+          denied={false}
+          error=""
+          detail={
+            <GroupDetailView
+              group={{ ...group, ...changes }}
+              tab="members"
+              companyOwner
+              rename={{ name: group.name, description: group.description! }}
+              personChoices={{
+                rows: [
+                  {
+                    userId: "fictional-amal",
+                    label: "Fictional Amal · amal@example.test",
+                  },
+                  {
+                    userId: "fictional-eve",
+                    label: "Fictional Eve · eve@example.test",
+                  },
+                ],
+                nextCursor: "fictional-cursor",
+                error: "",
+              }}
+              groupChoices={[{ id: ids.old, name: "Fictional Leadership" }]}
+              {...props}
+            />
+          }
+        />
+      </WorkspaceProvider>,
+    );
+  const tabpanel = (markup: string) =>
+    markup.slice(markup.indexOf('<div role="tabpanel"'));
+  const controlsOf = (markup: string) =>
+    [...content(markup).matchAll(/<(button|input|select)\b[^>]*>/g)].map(
+      (match) => match[0],
+    );
+  const rowsOf = (markup: string) =>
+    [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((match) => match[1]);
+
+  it("adds Groups after Users for company owners and company admins with people", () => {
+    expect(ADMIN_TABS.find((tab) => tab.key === "groups")).toEqual({
+      key: "groups",
+      label: "Groups",
+      level: "people",
+      group: "People",
+      description:
+        "Group people from any team, nest groups, and see who is in each group.",
+    });
+    for (const [value, shown] of [
+      [access("recruiter", "owner"), true],
+      [access("viewer", "admin", { adminAreas: ["people"] }), true],
+      [access("viewer", "admin", { adminAreas: ["organisation"] }), false],
+      [access("owner", null), false],
+    ] as const) {
+      const keys = adminTabs(value).map((tab) => tab.key);
+      expect(keys.includes("groups")).toBe(shown);
+      if (shown) expect(keys.slice(0, 2)).toEqual(["users", "groups"]);
+      const markup = render(null, value);
+      expect(sidebar(markup).includes('href="/app/admin/groups"')).toBe(shown);
+      expect(content(markup).includes(">Groups</a></h3>")).toBe(shown);
+    }
+    const page = render("groups", access("recruiter", "owner"));
+    expect(page).toContain('aria-current="page" href="/app/admin/groups"');
+    expect(page).toContain('<p role="status">Loading groups…</p>');
+    expect(page).toContain(GROUPS_HELP);
+  });
+
+  it("lists the groups with their members, nesting and status, the help text and Create group", () => {
+    const markup = listPanel();
+    expect(markup).toContain("<h2>Groups</h2>");
+    expect(markup).toContain(
+      "<p><strong>Groups decide who; teams hold the data.</strong></p>",
+    );
+    expect(
+      [...markup.matchAll(/<th>([^<]+)<\/th>/g)].map((th) => th[1]).slice(0, 5),
+    ).toEqual(["Name", "Description", "Members", "Member of", "Status"]);
+    const [, interviewers, leadership, old] = rowsOf(markup);
+    for (const row of [interviewers, leadership, old])
+      for (const label of [
+        "Name",
+        "Description",
+        "Members",
+        "Member of",
+        "Status",
+      ])
+        expect(row).toContain(`data-label="${label}"`);
+    expect(interviewers).toContain(
+      `<td data-label="Name"><a href="/app/admin/groups/${ids.interviewers}">Fictional Interviewers</a></td>`,
+    );
+    expect(interviewers).toContain(
+      '<td data-label="Description">Fictional interview panel</td>',
+    );
+    expect(interviewers).toContain(
+      '<div>5 people · 2 direct</div><div class="muted">Includes: Fictional Panel</div>',
+    );
+    expect(interviewers).toContain(
+      '<td data-label="Member of">Fictional Leadership</td>',
+    );
+    expect(interviewers).toContain('<td data-label="Status">Active</td>');
+    expect(leadership).toContain("<div>1 person · 1 direct</div>");
+    expect(leadership).toContain('<td data-label="Member of">None</td>');
+    expect(old).toContain('<td data-label="Status">Archived</td>');
+    expect(markup).toContain(
+      '<div class="records-panel"><div class="table-wrap"><table class="data-table compact"><caption class="sr-only">Company groups, by name</caption>',
+    );
+    // Create group: name and an optional description.
+    expect(markup).toContain("<h2>Create group</h2>");
+    expect(markup).toMatch(
+      /<span>Name<\/span><input required="" maxLength="120" value=""\/>/,
+    );
+    expect(markup).toContain("<span>Description (optional)</span>");
+    expect(markup).toContain(
+      '<button type="submit" class="button">Create group</button>',
+    );
+    expect(createBody({ name: "Fictional Crew", description: "  " })).toEqual({
+      name: "Fictional Crew",
+    });
+    expect(
+      createBody({ name: "Fictional Crew", description: "Fictional notes" }),
+    ).toEqual({ name: "Fictional Crew", description: "Fictional notes" });
+    // A duplicate name shows the API's own message, never its code.
+    const duplicate = listPanel({
+      createError: plainError(
+        new ClientError(
+          409,
+          "group_name_exists",
+          "Another current group already uses this name.",
+        ),
+      ),
+      draft: { name: "Fictional Interviewers", description: "" },
+    });
+    expect(duplicate).toContain(
+      '<div tabindex="-1" class="notice error" role="alert">Another current group already uses this name.</div>',
+    );
+    expect(duplicate).toContain('value="Fictional Interviewers"');
+    expect(duplicate).not.toContain("group_name_exists");
+  });
+
+  it("lists the computed groups read only with the reason, with no control or link in their rows", () => {
+    const markup = listPanel();
+    const section = markup.slice(markup.indexOf("<h2>Computed groups</h2>"));
+    expect(section).toContain(`<p class="muted">${COMPUTED_READ_ONLY}</p>`);
+    expect(COMPUTED_READ_ONLY).toBe(
+      "Computed groups are worked out from company authority and team membership, so they cannot be changed here.",
+    );
+    const rows = rowsOf(section).slice(1);
+    expect(rows).toEqual([
+      '<td data-label="Name">Company owners</td><td data-label="People">1 person</td>',
+      '<td data-label="Name">All members</td><td data-label="People">12 people</td>',
+      '<td data-label="Name">Owners of Fictional Team</td><td data-label="People">2 people</td>',
+    ]);
+    for (const row of rows)
+      expect(row).not.toMatch(/<(button|input|select|a)\b/);
+    expect(section).not.toMatch(/<(button|input|select|a|form)\b/);
+  });
+
+  it("shows the empty, loading, error and refused states", () => {
+    expect(listPanel({ list: { data: [], computed: [] } })).toContain(
+      '<p class="muted">There are no groups yet.</p>',
+    );
+    expect(listPanel({ list: null })).toContain(
+      '<p role="status">Loading groups…</p>',
+    );
+    expect(
+      listPanel({ list: null, error: "The request could not be completed." }),
+    ).toContain(
+      '<p class="notice error" role="alert">Could not load the groups. The request could not be completed.</p>',
+    );
+    const refused = listPanel({ list: null, denied: true });
+    expect(refused).toContain(`<p>${NO_ACCESS}</p>`);
+    expect(refused).not.toMatch(/<table|<form|Create group/);
+  });
+
+  it("shows the detail page with the three tabs in order, ?tab= with Members as the fallback, and keyboard movement", () => {
+    const markup = detail();
+    expect(sidebar(markup)).toContain(
+      '<a aria-current="page" href="/app/admin/groups">Groups</a>',
+    );
+    expect(content(markup)).toContain(
+      '<p><a href="/app/admin/groups">Back to Groups</a></p><h2>Fictional Interviewers</h2><p class="muted">Fictional interview panel</p>',
+    );
+    expect(markup).toContain(
+      '<div class="tabs" role="tablist" aria-label="Group details">',
+    );
+    const found = [
+      ...markup.matchAll(/<button [^>]*role="tab"[^>]*>([^<]+)<\/button>/g),
+    ];
+    expect(found.map((match) => match[1])).toEqual([
+      "Members",
+      "Member of",
+      "Audit",
+    ]);
+    GROUP_DETAIL_TABS.forEach((tab, index) =>
+      expect(found[index][0]).toBe(
+        `<button type="button" role="tab" id="group-tab-${tab.key}" aria-controls="group-panel-${tab.key}" tabindex="${index ? -1 : 0}" aria-selected="${!index}">${tab.label}</button>`,
+      ),
+    );
+    for (const tab of GROUP_DETAIL_TABS) {
+      expect(groupDetailTab(tab.key)).toBe(tab.key);
+      expect(detail({ tab: tab.key })).toContain(
+        `<div role="tabpanel" id="group-panel-${tab.key}" aria-labelledby="group-tab-${tab.key}" tabindex="0" class="stack">`,
+      );
+    }
+    for (const value of [undefined, "", "where-used", "approval", ["audit"]])
+      expect(groupDetailTab(value), String(value)).toBe("members");
+    const source = readFileSync(
+      new URL("../src/components/settings/group-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /role="tablist"\s+aria-label="Group details"\s+onKeyDown=\{tabKeys\}/,
+    );
+    // Three tab buttons, as the tablist renders them: arrows wrap, Home and End jump.
+    const clicked: string[] = [];
+    const doc = { activeElement: null as unknown };
+    const buttons = GROUP_DETAIL_TABS.map((tab) => ({
+      focus() {
+        doc.activeElement = this;
+      },
+      click() {
+        clicked.push(tab.key);
+      },
+    }));
+    vi.stubGlobal("document", doc);
+    try {
+      const press = (key: string, from: number) => {
+        doc.activeElement = buttons[from];
+        tabKeys({
+          key,
+          currentTarget: { querySelectorAll: () => buttons },
+          preventDefault: () => {},
+        } as unknown as Parameters<typeof tabKeys>[0]);
+      };
+      press("ArrowRight", 0);
+      press("ArrowRight", 2);
+      press("ArrowLeft", 0);
+      press("Home", 2);
+      press("End", 0);
+      expect(clicked).toEqual([
+        "member-of",
+        "members",
+        "audit",
+        "members",
+        "audit",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows Members as a nested tree, inherited people through their nested group without Remove, and the Add form", () => {
+    const panel = tabpanel(detail());
+    expect(panel).toContain(
+      '<p class="muted">2 direct people · 1 nested group · 5 people in total</p>',
+    );
+    expect(panel).toContain(
+      '<li class="group-tree-row"><a href="/app/admin/users/fictional-amal">Fictional Amal</a><span class="muted">amal@example.test</span><button type="button" class="button secondary" aria-label="Remove Fictional Amal">Remove</button></li>',
+    );
+    expect(panel).toContain(
+      `<div class="group-tree-row"><a href="/app/admin/groups/${ids.panel}">Fictional Panel</a><span class="muted">Group</span><button type="button" class="button secondary" aria-label="Remove Fictional Panel">Remove</button></div><details open=""><summary>Members of Fictional Panel</summary><ul class="group-tree"><li class="group-tree-row"><a href="/app/admin/users/fictional-celia">Fictional Celia</a><span class="muted">celia@example.test</span><span class="muted">Through Fictional Panel</span></li>`,
+    );
+    expect(panel).toContain(
+      `<a href="/app/admin/groups/${ids.other}">Fictional Deep Panel</a><span class="muted">Group · Archived</span><span class="muted">Through Fictional Panel</span>`,
+    );
+    expect(panel).toContain(
+      '<a href="/app/admin/users/fictional-dana">Fictional Dana</a><span class="muted">dana@example.test</span><span class="muted">Through Fictional Panel</span>',
+    );
+    // Remove only on the two direct people and the direct group.
+    expect(panel.match(/>Remove</g)).toHaveLength(3);
+    expect(panel).toContain(
+      "People and groups shown through a nested group are removed in that nested group.",
+    );
+    // The Add form: a person or a group, the active people not already direct, Show more people.
+    expect(panel).toContain('<form class="stack" aria-label="Add a member">');
+    expect(panel).toContain(
+      '<input type="radio" name="group-add-kind" checked="" value="person"/>Person',
+    );
+    expect(panel).toContain(
+      '<option value="fictional-eve">Fictional Eve · eve@example.test</option>',
+    );
+    expect(panel).not.toContain('<option value="fictional-amal"');
+    expect(panel).toContain(
+      '<button type="button" class="button secondary">Show more people</button>',
+    );
+    const groupKind = tabpanel(
+      detail({
+        add: { ...NO_ADD_DRAFT, kind: "group", childGroupId: ids.old },
+      }),
+    );
+    expect(groupKind).toContain(
+      `<option value="${ids.old}" selected="">Fictional Leadership</option>`,
+    );
+    expect(groupKind).not.toContain("Show more people");
+    // Group choices: current groups other than this one and its direct children.
+    expect(
+      groupChoices(group, {
+        data: [
+          ...list.data,
+          { ...list.data[0], id: ids.panel, name: "Fictional Panel" },
+        ],
+        computed: [],
+      }),
+    ).toEqual([{ id: ids.leadership, name: "Fictional Leadership" }]);
+    expect(addTarget(NO_ADD_DRAFT)).toBeNull();
+    expect(addTarget({ ...NO_ADD_DRAFT, userId: "fictional-eve" })).toEqual({
+      userId: "fictional-eve",
+    });
+    expect(
+      addTarget({
+        kind: "group",
+        userId: "fictional-eve",
+        childGroupId: ids.old,
+      }),
+    ).toEqual({ childGroupId: ids.old });
+    // The empty tree.
+    expect(
+      tabpanel(detail({}, { members: { people: [], groups: [] }, people: 0 })),
+    ).toContain(
+      '<p class="muted">0 direct people · 0 nested groups · 0 people in total</p><p class="muted">No members yet. Add people, or add a group.</p>',
+    );
+  });
+
+  it("shows Member of with Directly and Through, and the empty sentence", () => {
+    const panel = tabpanel(detail({ tab: "member-of" }));
+    const [, direct, through] = rowsOf(panel);
+    expect(direct).toBe(
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.leadership}">Fictional Leadership</a></td><td data-label="How">Directly</td><td data-label="Status">Active</td>`,
+    );
+    expect(through).toBe(
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.old}">Fictional Old List</a></td><td data-label="How">Through Fictional Leadership</td><td data-label="Status">Archived</td>`,
+    );
+    expect(tabpanel(detail({ tab: "member-of" }, { memberOf: [] }))).toContain(
+      '<p class="muted">Not in any other group.</p>',
+    );
+  });
+
+  it("shows Audit in plain words with names, newest first, its current-team scope and the 50-row note", () => {
+    const panel = tabpanel(detail({ tab: "audit" }));
+    expect(panel).toContain(`<p class="muted">${AUDIT_SCOPE}</p>`);
+    expect(AUDIT_SCOPE).toBe(
+      "Changes made from your current team, newest first. Changes made from another team are shown in that team.",
+    );
+    expect(
+      [...panel.matchAll(/<th>([^<]+)<\/th>/g)].map((th) => th[1]),
+    ).toEqual(["When", "Who", "Change"]);
+    expect(
+      rowsOf(panel)
+        .slice(1)
+        .map((row) =>
+          [...row.matchAll(/<td data-label="(Who|Change)">([^<]*)<\/td>/g)].map(
+            (cell) => cell[2],
+          ),
+        ),
+    ).toEqual([
+      ["Fictional Company Owner", "Added Fictional Amal"],
+      ["Fictional Company Owner", "Added group Fictional Panel"],
+      ["Not recorded", "Added to Fictional Leadership"],
+      ["Fictional Company Owner", "Removed Not recorded"],
+      ["Fictional Company Owner", "Renamed or changed the description"],
+      ["Fictional Company Owner", "Created the group"],
+    ]);
+    expect(panel).toContain(
+      `<td data-label="When">${formatDate("2026-11-06T10:00:00.000Z", true)}</td>`,
+    );
+    for (const [action, kind, label] of [
+      ["group.archived", null, "Archived the group"],
+      ["group.child_removed", "group", "Removed group Fictional Panel"],
+      ["group.child_removed", "parent", "Removed from Fictional Panel"],
+    ] as const)
+      expect(
+        groupAuditLabel({
+          occurredAt: "2026-11-01T10:00:00.000Z",
+          action,
+          actorName: null,
+          target: kind ? { kind, name: "Fictional Panel" } : null,
+        }),
+      ).toBe(label);
+    expect(panel).not.toContain("Showing the latest 50 changes.");
+    const fifty = tabpanel(
+      detail(
+        { tab: "audit" },
+        { audit: Array.from({ length: 50 }, () => group.audit[0]) },
+      ),
+    );
+    expect(fifty).toContain(
+      '<p class="muted">Showing the latest 50 changes.</p>',
+    );
+    expect(tabpanel(detail({ tab: "audit" }, { audit: [] }))).toContain(
+      '<p class="muted">No changes recorded from your current team.</p>',
+    );
+  });
+
+  it("shows the cycle and depth refusals of Add in plain words, never their codes, keeping the choice", async () => {
+    const answers = [
+      [
+        "group_cycle",
+        "A group cannot contain itself or a group that contains it.",
+      ],
+      [
+        "group_depth",
+        "Groups nest at most 3 levels: a group, its groups and their groups.",
+      ],
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const [code, message] = answers.shift()!;
+        return new Response(JSON.stringify({ error: { code, message } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    try {
+      for (const message of [
+        "A group cannot contain itself or a group that contains it.",
+        "Groups nest at most 3 levels: a group, its groups and their groups.",
+      ]) {
+        const add = {
+          ...NO_ADD_DRAFT,
+          kind: "group" as const,
+          childGroupId: ids.old,
+        };
+        const error = await sendGroupChange(
+          "fictional-team",
+          group.id,
+          { kind: "add", member: addTarget(add)! },
+          (work) => retryWithFreshSession(work, async () => true),
+        ).then(
+          () => "",
+          (e) => plainError(e),
+        );
+        expect(error).toBe(message);
+        const markup = detail({ error, add });
+        expect(markup).toContain(
+          `<div tabindex="-1" class="notice error" role="alert">${message}</div>`,
+        );
+        expect(markup).toContain(
+          `<option value="${ids.old}" selected="">Fictional Leadership</option>`,
+        );
+        for (const code of ["group_cycle", "group_depth"])
+          expect(markup).not.toContain(code);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens Confirm it's you on a stale add to a granting group, keeps the choice, retries once, and sends nothing more after a cancel", async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    const stale = () =>
+      json(403, {
+        error: {
+          code: "SESSION_NOT_FRESH",
+          message: "This change needs a recent sign-in.",
+        },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return answers.shift() ?? json(201, { data: { added: true } });
+      }),
+    );
+    try {
+      const add = { ...NO_ADD_DRAFT, userId: "fictional-eve" };
+      const before = structuredClone(add);
+      const ask = vi.fn(async () => true);
+      const fresh = <T,>(work: () => Promise<T>) =>
+        retryWithFreshSession(work, ask);
+      const post = {
+        method: "POST",
+        path: `/api/v1/admin/groups/${ids.leadership}/members`,
+        body: { userId: "fictional-eve" },
+      };
+      answers.push(stale());
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.leadership,
+          { kind: "add", member: addTarget(add)! },
+          fresh,
+        ),
+      ).resolves.toBe(true);
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(sent).toEqual([post, post]);
+      // Cancelled: one request only, and the form keeps the chosen person.
+      sent.length = 0;
+      answers.push(stale());
+      ask.mockResolvedValueOnce(false);
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.leadership,
+          { kind: "add", member: addTarget(add)! },
+          fresh,
+        ),
+      ).resolves.toBe(false);
+      expect(sent).toEqual([post]);
+      expect(add).toEqual(before);
+      const granting = { ...group, id: ids.leadership, grants: true };
+      expect(tabpanel(detail({ add }, granting))).toContain(
+        '<option value="fictional-eve" selected="">Fictional Eve · eve@example.test</option>',
+      );
+      // Rename, archive and remove are sent the same way, each retried once after a refusal.
+      for (const [change, request] of [
+        [
+          {
+            kind: "rename",
+            draft: { name: "Fictional Renamed", description: "" },
+          },
+          {
+            method: "PATCH",
+            path: `/api/v1/admin/groups/${ids.leadership}`,
+            body: { name: "Fictional Renamed", description: "" },
+          },
+        ],
+        [
+          { kind: "archive" },
+          {
+            method: "PATCH",
+            path: `/api/v1/admin/groups/${ids.leadership}`,
+            body: { archived: true },
+          },
+        ],
+        [
+          { kind: "remove", member: { childGroupId: ids.panel } },
+          {
+            method: "DELETE",
+            path: `/api/v1/admin/groups/${ids.leadership}/members`,
+            body: { childGroupId: ids.panel },
+          },
+        ],
+      ] as const) {
+        sent.length = 0;
+        answers.push(stale(), json(200, { data: {} }));
+        await expect(
+          sendGroupChange("fictional-team", ids.leadership, change, fresh),
+        ).resolves.toBe(true);
+        expect(sent).toEqual([request, request]);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows a granting group's controls with the recent sign-in sentence to an owner, and only the owner-only sentence to an admin; an archived group to no one", () => {
+    const granting = { grants: true };
+    const owner = detail({}, granting);
+    expect(content(owner)).toContain(`<p class="muted">${GRANTING_OWNER}</p>`);
+    expect(GRANTING_OWNER).toBe(
+      "Changes to this group need a recent sign-in, because it or a group it is in grants access.",
+    );
+    for (const control of [">Rename<", ">Archive group<", ">Remove<", ">Add<"])
+      expect(owner, control).toContain(control);
+    const admin = detail({ companyOwner: false }, granting);
+    expect(content(admin)).toContain(`<p class="muted">${GRANTING_ADMIN}</p>`);
+    expect(GRANTING_ADMIN).toBe(
+      "Only a company owner can change this group, because it or a group it is in grants access.",
+    );
+    for (const markup of [admin, detail({}, { status: "archived" })]) {
+      for (const control of [
+        ">Rename<",
+        ">Archive group<",
+        ">Remove<",
+        ">Add<",
+        "Show more people",
+      ])
+        expect(markup, control).not.toContain(control);
+      // Only the tab buttons are controls.
+      expect(
+        controlsOf(markup).filter((tag) => !tag.includes('role="tab"')),
+      ).toEqual([]);
+    }
+    const archived = detail({}, { status: "archived" });
+    expect(content(archived)).toContain(`<p>${ARCHIVED_GROUP}</p>`);
+    expect(ARCHIVED_GROUP).toBe(
+      "This group is archived. It keeps its members and cannot be changed.",
+    );
+    expect(content(archived)).not.toContain(GRANTING_OWNER);
+    // A plain group shows neither granting sentence, and an admin may change it.
+    const plain = detail({ companyOwner: false });
+    expect(plain).not.toContain(GRANTING_ADMIN);
+    expect(plain).not.toContain(GRANTING_OWNER);
+    expect(plain).toContain(">Rename<");
+    expect(canChange({ status: "active", grants: true }, false)).toBe(false);
+    expect(canChange({ status: "active", grants: true }, true)).toBe(true);
+    expect(canChange({ status: "archived", grants: false }, true)).toBe(false);
+    // Rename is an inline form, prefilled; Archive asks first (see GroupDetail).
+    expect(content(owner)).toContain(
+      '<form class="stack" aria-label="Rename group">',
+    );
+    expect(content(owner)).toContain('value="Fictional Interviewers"');
+    expect(content(owner)).toContain('value="Fictional interview panel"');
+  });
+
+  it("shows the loading, no-access, not found and error states", () => {
+    const refusal = (status: number | null, error = "") =>
+      renderToStaticMarkup(
+        <GroupDetailRefusal status={status} error={error} />,
+      );
+    expect(refusal(403)).toContain(`<p>${NO_ACCESS}</p>`);
+    expect(refusal(404)).toContain(`<p>${GROUP_NOT_FOUND}</p>`);
+    expect(GROUP_NOT_FOUND).toBe("Group not found.");
+    expect(refusal(500, "The request could not be completed.")).toContain(
+      '<p class="notice error" role="alert">Could not load this group. The request could not be completed.</p>',
+    );
+  });
+
+  it("never shows an approval setting, Where used, managers, role grants or Export on either page", () => {
+    const pages = [
+      listPanel(),
+      ...GROUP_DETAIL_TABS.flatMap((tab) => [
+        detail({ tab: tab.key }),
+        detail({ tab: tab.key }, { grants: true }),
+        detail({ tab: tab.key, companyOwner: false }, { grants: true }),
+      ]),
+    ];
+    for (const markup of pages)
+      for (const text of [
+        "Approval",
+        "approval",
+        "Where used",
+        "Export",
+        "Managers",
+        "Role grant",
+        "Paste a list",
+      ])
+        expect(markup, text).not.toContain(text);
+  });
+
+  it("filters Users by group, labelling archived groups, and sends group=<id>", () => {
+    const users = renderToStaticMarkup(
+      <UsersPanel
+        rows={[]}
+        error=""
+        filtered={false}
+        hasMore={false}
+        filters={{ ...NO_USER_FILTERS, group: ids.leadership }}
+        teams={[]}
+        roles={[]}
+        groups={list.data}
+      />,
+    );
+    expect(users).toContain("<span>Group</span><select>");
+    for (const option of [
+      '<option value="">Any group</option>',
+      `<option value="${ids.interviewers}">Fictional Interviewers</option>`,
+      `<option value="${ids.leadership}" selected="">Fictional Leadership</option>`,
+      `<option value="${ids.old}">Fictional Old List (archived)</option>`,
+    ])
+      expect(users).toContain(option);
+    expect(usersPath({ ...NO_USER_FILTERS, group: ids.leadership })).toBe(
+      `/api/v1/admin/users?group=${ids.leadership}`,
+    );
+    expect(
+      usersPath({ ...NO_USER_FILTERS, status: "active", group: ids.old }),
+    ).toBe(`/api/v1/admin/users?status=active&group=${ids.old}`);
+    expect(usersPath(NO_USER_FILTERS)).toBe("/api/v1/admin/users");
+    const failed = renderToStaticMarkup(
+      <UsersPanel
+        rows={[]}
+        error=""
+        filtered={false}
+        hasMore={false}
+        filters={NO_USER_FILTERS}
+        teams={[]}
+        roles={[]}
+        groups={null}
+        groupsError="The request could not be completed."
+      />,
+    );
+    expect(failed).toContain(
+      '<p class="notice error" role="alert">Could not load the filter choices. The request could not be completed.</p>',
+    );
+    expect(failed).not.toContain(ids.leadership);
+  });
+
+  it("lists the person's groups on the user Groups tab, Direct and Through, and the empty sentence", () => {
+    const markup = renderToStaticMarkup(
+      <UserGroupsPanel
+        error=""
+        groups={[
+          {
+            id: ids.interviewers,
+            name: "Fictional Interviewers",
+            status: "active",
+            direct: true,
+            through: [],
+          },
+          {
+            id: ids.leadership,
+            name: "Fictional Leadership",
+            status: "active",
+            direct: false,
+            through: ["Fictional Interviewers"],
+          },
+          {
+            id: ids.old,
+            name: "Fictional Old List",
+            status: "archived",
+            direct: true,
+            through: ["Fictional Interviewers", "Fictional Panel"],
+          },
+        ]}
+      />,
+    );
+    expect(
+      [...markup.matchAll(/<th>([^<]+)<\/th>/g)].map((th) => th[1]),
+    ).toEqual(["Group", "How", "Status"]);
+    expect(rowsOf(markup).slice(1)).toEqual([
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.interviewers}">Fictional Interviewers</a></td><td data-label="How">Direct</td><td data-label="Status">Active</td>`,
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.leadership}">Fictional Leadership</a></td><td data-label="How">Through Fictional Interviewers</td><td data-label="Status">Active</td>`,
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.old}">Fictional Old List</a></td><td data-label="How">Direct and Through Fictional Interviewers, Fictional Panel</td><td data-label="Status">Archived</td>`,
+    ]);
+    expect(
+      renderToStaticMarkup(<UserGroupsPanel error="" groups={[]} />),
+    ).toContain('<p class="muted">This person is not in any group.</p>');
+    expect(
+      renderToStaticMarkup(<UserGroupsPanel error="" groups={null} />),
+    ).toContain('<p role="status">Loading groups…</p>');
+  });
+
+  it("reads the person's groups only when the user Groups tab opens", () => {
+    const view = (tab: "profile" | "groups") =>
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>
+          <UserDetailView
+            person={{
+              userId: "fictional-subject",
+              name: "Fictional Subject",
+              email: "subject@example.test",
+              status: "active",
+              lastSignInAt: null,
+              twoStep: true,
+              signedInDevices: 0,
+              teams: [],
+              companyLevel: null,
+              companyAreas: null,
+              planAccess: null,
+              authoritySuspended: null,
+              authoritySince: null,
+              events: [],
+            }}
+            tab={tab}
+            callerId={workspace.user.id}
+            companyOwner
+            canReset={false}
+          />
+        </WorkspaceProvider>,
+      );
+    const path = "/api/v1/admin/users/fictional-subject/groups";
+    reads.length = 0;
+    view("profile");
+    expect(reads.map((read) => read.path)).not.toContain(path);
+    const markup = view("groups");
+    expect(reads.map((read) => read.path)).toContain(path);
+    expect(markup).toContain(
+      '<div role="tabpanel" id="user-panel-groups" aria-labelledby="user-tab-groups" tabindex="0" class="stack"><section class="panel stack"><h3>Groups</h3>',
+    );
   });
 });

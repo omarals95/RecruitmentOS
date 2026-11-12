@@ -4140,3 +4140,32 @@ progress::-moz-progress-bar {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Company groups (ADM-12): the Members tree as nested lists, each nested group a native disclosure;
+   theme variables only, so dark follows, and long names and emails wrap at 360 px. */
+.group-tree {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.group-tree .group-tree {
+  margin: 8px 0 0 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+.group-tree-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.group-tree details {
+  margin: 4px 0 0 6px;
+}
+.group-tree summary {
+  font-size: 12px;
+}

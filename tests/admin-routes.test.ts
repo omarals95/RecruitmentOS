@@ -71,6 +71,8 @@ import {
   isAdminTab,
   type AdminTabKey,
 } from "@/components/settings/admin-tabs";
+import { GroupDetailPortal } from "@/components/settings/group-detail";
+import { groupDetailTab } from "@/components/settings/group-detail-tabs";
 import { TeamDetailPortal } from "@/components/settings/team-detail";
 import { UserDetailPortal } from "@/components/settings/user-detail";
 import { userDetailTab } from "@/components/settings/user-detail-tabs";
@@ -87,6 +89,8 @@ import { createSplitRoleDb, seedIdentity } from "./helpers/db";
 const COMPANY = "00000000-0000-4000-a000-000000000001";
 const DETAIL = "teams/[team]/page.tsx";
 const USER_DETAIL = "users/[user]/page.tsx";
+const GROUP_DETAIL = "groups/[group]/page.tsx";
+const FICTIONAL_GROUP = "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d";
 const ADMIN_DIR = join(process.cwd(), "src/app/app/admin");
 const KEYS = ADMIN_TABS.map((tab) => tab.key);
 // The four old team pages redirect to team detail tabs (tests/admin-redirects.test.ts).
@@ -136,7 +140,8 @@ type Page = (props: {
 /**
  * Calls the page file's default export as Next would, for one caller and one key; the team detail
  * page gets `team` (team A unless named) as its params, the user detail page `user` (the recruiter
- * unless named), and `tab`, when named, as `?tab=`.
+ * unless named), the group detail page `group` (a fictional id unless named), and `tab`, when
+ * named, as `?tab=`.
  */
 async function open(
   caller: Caller,
@@ -145,6 +150,7 @@ async function open(
   team = "route-team-a",
   tab?: string,
   user = "route-recruiter",
+  group = FICTIONAL_GROUP,
 ): Promise<Outcome> {
   request.headers = new Headers(
     caller.kind === "bearer"
@@ -167,7 +173,9 @@ async function open(
           ? { team }
           : page === USER_DETAIL
             ? { user }
-            : {};
+            : page === GROUP_DETAIL
+              ? { group }
+              : {};
     const search: Record<string, string> = tab === undefined ? {} : { tab };
     element = await render({
       params: Promise.resolve(params),
@@ -211,6 +219,19 @@ async function open(
     });
     expect(markup).toContain("<h1>Admin portal</h1>");
     expect(markup).toContain('<p role="status">Loading this person…</p>');
+    expect(markup).not.toContain(NO_ACCESS);
+    return "allowed";
+  }
+  if (result.type === GroupDetailPortal) {
+    // The group in the URL and the caller's company level; the group loads in the browser.
+    expect(result.props).toEqual({
+      groupId: group,
+      companyLevel: expect.stringMatching(/^(owner|admin)$/),
+      // An unknown key opens Members.
+      tab: groupDetailTab(tab),
+    });
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(markup).toContain('<p role="status">Loading this group…</p>');
     expect(markup).not.toContain(NO_ACCESS);
     return "allowed";
   }
@@ -370,12 +391,19 @@ describe("admin pages check access on the server (TST-002)", () => {
       "organisation",
       "history",
     ];
-    allowed["company admin with people"] = [null, "users", "teams", "history"];
+    allowed["company admin with people"] = [
+      null,
+      "users",
+      "groups",
+      "teams",
+      "history",
+    ];
     allowed["company admin with no area"] = [null, "teams", "history"];
     allowed["company owner and team owner"] = [null, ...KEYS];
     allowed["company owner as recruiter"] = [
       null,
       "users",
+      "groups",
       "teams",
       "company-authority",
       "roles",
@@ -548,6 +576,61 @@ describe("admin pages check access on the server (TST-002)", () => {
               undefined,
               tab,
               user,
+            ),
+            label,
+          ).toBe(outcome);
+          expect(withTeam, label).toHaveBeenCalledTimes(
+            outcome === "sign-in" || name === "no team" ? 0 : 1,
+          );
+        }
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // ADM-12 (job 095): Groups and its detail page open for exactly the callers of Users, on every tab,
+  // through one access check in the active team, whatever the group in the URL is.
+  it("opens Groups and group detail for company owners and the company admin with people only, on every tab (ADM-12)", async () => {
+    const callersAndOutcomes = [
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["company admin with people", "allowed"],
+      ["company admin with no area", "refused"],
+      ["company admin", "refused"],
+      ["company admin with organisation", "refused"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const;
+    for (const [name, outcome] of callersAndOutcomes)
+      expect(await open(callers[name], "[tab]/page.tsx", "groups"), name).toBe(
+        outcome,
+      );
+    for (const tab of [
+      undefined,
+      "members",
+      "member-of",
+      "audit",
+      "where-used",
+      "approval",
+    ])
+      for (const [name, outcome] of callersAndOutcomes)
+        for (const group of [FICTIONAL_GROUP, "not-a-uuid"]) {
+          vi.mocked(withTeam).mockClear();
+          const label = `${name} on ${group} ?tab=${tab ?? ""}`;
+          expect(
+            await open(
+              callers[name],
+              GROUP_DETAIL,
+              "groups",
+              undefined,
+              tab,
+              undefined,
+              group,
             ),
             label,
           ).toBe(outcome);

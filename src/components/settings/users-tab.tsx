@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent, type Ref } from "react";
 import type { AdminTeamRow } from "@/lib/admin-teams";
 import type { WorkspacePeople, WorkspacePersonRow } from "@/lib/admin-users";
+import type { GroupList, GroupListRow } from "@/lib/groups";
 import {
   ClientError,
   humanError,
@@ -27,12 +28,15 @@ export type UserFilters = {
   status: "" | "active" | "invited" | "deactivated";
   level: "" | "owner" | "admin" | "none";
   role: string;
+  /** A company group's id. */
+  group: string;
 };
 export const NO_USER_FILTERS: UserFilters = {
   team: "",
   status: "",
   level: "",
   role: "",
+  group: "",
 };
 export const teamRoles: Record<string, string> = {
   owner: "Owner",
@@ -49,7 +53,7 @@ export const levels: Record<string, string> = {
   owner: "Company owner",
   admin: "Company admin",
 };
-const usersPath = (filters: UserFilters, cursor?: string) => {
+export const usersPath = (filters: UserFilters, cursor?: string) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters))
     if (value) params.set(key, value);
@@ -72,6 +76,7 @@ export function UsersTab() {
   const teams = useApi<{ data: AdminTeamRow[] }>(
     teamId ? "/api/v1/teams" : null,
   );
+  const groups = useApi<GroupList>(teamId ? "/api/v1/admin/groups" : null);
   const [draft, setDraft] = useState<UserFilters>(NO_USER_FILTERS);
   const [applied, setApplied] = useState({ filters: NO_USER_FILTERS, run: 0 });
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -161,6 +166,8 @@ export function UsersTab() {
         filters={draft}
         teams={teams.data?.data ?? null}
         teamsError={teams.error}
+        groups={groups.data?.data ?? null}
+        groupsError={groups.error}
         roles={roles}
         countRef={countRef}
         onFilters={(change) => setDraft((value) => ({ ...value, ...change }))}
@@ -202,6 +209,8 @@ export function UsersPanel({
   filters,
   teams,
   teamsError = "",
+  groups = null,
+  groupsError = "",
   roles,
   countRef,
   onFilters = () => {},
@@ -221,6 +230,9 @@ export function UsersPanel({
   filters: UserFilters;
   teams: Pick<AdminTeamRow, "name" | "slug">[] | null;
   teamsError?: string;
+  /** Every company group, archived ones included, for the group filter. */
+  groups?: Pick<GroupListRow, "id" | "name" | "status">[] | null;
+  groupsError?: string;
   roles: WorkspacePeople["roles"];
   countRef?: Ref<HTMLParagraphElement>;
   onFilters?: (change: Partial<UserFilters>) => void;
@@ -308,10 +320,26 @@ export function UsersPanel({
               ))}
             </select>
           </label>
+          <label className="field">
+            <span>Group</span>
+            <select
+              value={filters.group}
+              onChange={(event) => onFilters({ group: event.target.value })}
+            >
+              <option value="">Any group</option>
+              {(groupsError ? [] : (groups ?? [])).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.status === "archived"
+                    ? `${item.name} (archived)`
+                    : item.name}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        {teamsError && (
+        {(teamsError || groupsError) && (
           <p className="notice error" role="alert">
-            Could not load the filter choices. {teamsError}
+            Could not load the filter choices. {teamsError || groupsError}
           </p>
         )}
         <div className="row">
