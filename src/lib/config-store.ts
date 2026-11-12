@@ -2,6 +2,7 @@ import { DrizzleQueryError, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { TeamTx } from "@/db";
 import {
+  CONFIGURABLE_KINDS,
   CONFIG_TYPES,
   CONFIG_TYPE_AREAS,
   JOB_ARCHITECTURE_KEY,
@@ -15,10 +16,14 @@ import {
   type TaskBoardBody,
 } from "@/domain/config";
 import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
+import {
+  kindSchemaDraftIssues,
+  sensitiveMarksDiffer,
+} from "@/domain/kind-schema-changes";
 import { accessContext } from "@/lib/authz";
 import type { ConfigDocument } from "@/lib/config-cache";
 import { withTeam } from "@/lib/db-team";
-import { ApiError } from "@/lib/errors";
+import { ApiError, issueList } from "@/lib/errors";
 import { teamArchived } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { checkTaskBoardReferences } from "@/lib/records";
@@ -54,6 +59,17 @@ export type ConfigObject = {
   archivedAt: string | null;
   current: ConfigVersion | null;
   draft: ConfigVersion | null;
+};
+/** A configurable kind's schema in force, null-numbered for the built-in default, and its draft. */
+export type KindSchemaState = {
+  kind: ConfigurableKind;
+  current: { versionId: string; number: number | null; body: KindSchemaBody };
+  draft: {
+    versionId: string;
+    body: Record<string, unknown>;
+    note: string | null;
+    createdAt: string;
+  } | null;
 };
 export type ConfigHistoryRow = {
   occurredAt: string;
@@ -169,7 +185,10 @@ async function inStore<T>(
 type VersionTarget = {
   versionId: string;
   type: ConfigType;
+  key: string;
   state: ConfigVersion["state"];
+  /** A kind schema version's stored body, which its checks read; null for every other type. */
+  body: unknown;
 };
 
 /** The version and its object as visible to this context; a type, when given, must be the object's. */
@@ -179,7 +198,7 @@ async function findVersion(
   type?: ConfigType,
 ): Promise<VersionTarget> {
   const { rows } = await tx.execute<VersionTarget>(
-    sql`select v.id as "versionId", o.type, v.state from app.config_versions v join app.config_objects o on o.id = v.object_id where v.id = ${z.uuid().parse(versionId)}::uuid`,
+    sql`select v.id as "versionId", o.type, o.key, v.state, case when o.type = 'kind-schema' then v.body end as body from app.config_versions v join app.config_objects o on o.id = v.object_id where v.id = ${z.uuid().parse(versionId)}::uuid`,
   );
   if (!rows[0] || (type !== undefined && rows[0].type !== type))
     throw notFound();
@@ -187,22 +206,71 @@ async function findVersion(
 }
 
 /**
- * A task board's buckets, vacancy, linked record and task field must be active records of the
- * caller's team in their scope, checked at save in the same transaction as the write.
+ * The type's strict body. A kind schema's refusals carry their reasons, up to 8 as `path: message`
+ * as readBody gives them, so a refused screen rule reaches the user; other types keep the plain
+ * invalid_input of errorResponse.
+ */
+function parseBody(type: ConfigType, body: unknown) {
+  if (type !== "kind-schema") return configBodySchemas[type].parse(body);
+  const parsed = kindSchemaBodySchema.safeParse(body);
+  if (!parsed.success)
+    throw new ApiError(400, "invalid_input", issueList(parsed.error.issues));
+  return parsed.data;
+}
+
+/**
+ * A kind schema's key is its kind, and its body keeps the rules of kindSchemaDraftIssues against
+ * the version in force (kindSchemaFor). Only a company owner changes a sensitive mark: against
+ * `marks`, the draft a save replaces, else the version in force.
+ */
+function checkKindSchema(
+  access: TenantAccess,
+  key: string,
+  body: KindSchemaBody,
+  marks?: KindSchemaBody,
+) {
+  if (body.kind !== key)
+    throw new ApiError(
+      400,
+      "invalid_input",
+      `kind: a kind schema's kind is its key, ${key}.`,
+    );
+  const inForce = kindSchemaFor(access, body.kind).body;
+  const issues = kindSchemaDraftIssues(inForce, body);
+  if (issues.length)
+    throw new ApiError(400, "invalid_input", issues.slice(0, 8).join("; "));
+  if (
+    sensitiveMarksDiffer(marks ?? inForce, body) &&
+    access.companyLevel !== "owner"
+  )
+    throw new ApiError(
+      403,
+      "config_forbidden",
+      "Only a company owner can mark a field sensitive or remove the mark.",
+    );
+}
+
+/**
+ * Checks at save and publish, in the same transaction as the write: a task board's buckets,
+ * vacancy, linked record and task field must be active records of the caller's team in their
+ * scope, and a kind schema keeps checkKindSchema.
  */
 async function checkBody(
   tx: TeamTx,
   p: Principal,
   access: TenantAccess,
-  type: ConfigType,
+  target: { type: ConfigType; key: string },
   body: unknown,
+  marks?: KindSchemaBody,
 ) {
-  if (type === "task-board")
+  if (target.type === "task-board")
     await checkTaskBoardReferences(
       tx,
       accessContext(p, access),
       body as TaskBoardBody,
     );
+  if (target.type === "kind-schema")
+    checkKindSchema(access, target.key, body as KindSchemaBody, marks);
 }
 
 const audit = (tx: TeamTx, versionId: string, action: string) =>
@@ -234,8 +302,8 @@ export async function createConfigDraft(
         "invalid_input",
         `The job architecture key is always ${JOB_ARCHITECTURE_KEY}.`,
       );
-    const parsed = configBodySchemas[type].parse(body);
-    await checkBody(tx, p, access, type, parsed);
+    const parsed = parseBody(type, body);
+    await checkBody(tx, p, access, { type, key }, parsed);
     const teamId = type === "task-board" ? p.teamId : null;
     let [object] = (
       await tx.execute<{ id: string; archived: boolean }>(
@@ -277,8 +345,20 @@ export async function updateConfigDraft(
     const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
     if (target.state !== "draft") throw stateConflict();
-    const parsed = configBodySchemas[target.type].parse(body);
-    await checkBody(tx, p, access, target.type, parsed);
+    const parsed = parseBody(target.type, body);
+    // A kind schema's sensitive marks compare with the draft replaced, when it is a kind schema.
+    const replaced =
+      target.type === "kind-schema"
+        ? kindSchemaBodySchema.safeParse(target.body)
+        : null;
+    await checkBody(
+      tx,
+      p,
+      access,
+      target,
+      parsed,
+      replaced?.success ? replaced.data : undefined,
+    );
     await tx.execute(
       sql`update app.config_versions set body = ${JSON.stringify(parsed)}::jsonb, note = coalesce(${note ?? null}::text, note) where id = ${target.versionId}::uuid`,
     );
@@ -287,7 +367,8 @@ export async function updateConfigDraft(
 
 /**
  * Publishes the object's draft through the owner-run helper, which audits it; returns its number.
- * With options.type, a version of another type is not found.
+ * A kind schema draft is parsed and checked again against the version in force first. With
+ * options.type, a version of another type is not found.
  */
 export async function publishConfigVersion(
   p: Principal,
@@ -297,6 +378,14 @@ export async function publishConfigVersion(
   return inStore(p, async (tx, access) => {
     const target = await findVersion(tx, versionId, options.type);
     requireWrite(p, access, target.type);
+    if (target.type === "kind-schema" && target.state === "draft")
+      await checkBody(
+        tx,
+        p,
+        access,
+        target,
+        parseBody(target.type, target.body),
+      );
     const { rows } = await tx.execute<{ number: number }>(
       sql`select tenant_context.publish_config_version(${target.versionId}::uuid) as number`,
     );
@@ -453,6 +542,39 @@ export function kindSchemaFor(
     number: current.number,
     body: parsed.data,
   };
+}
+
+/**
+ * Every configurable kind in CONFIGURABLE_KINDS order with its schema in force (kindSchemaFor, no
+ * statement) and its draft, in one statement. Write access to kind schemas is required.
+ */
+export async function listKindSchemas(
+  p: Principal,
+): Promise<KindSchemaState[]> {
+  return inStore(p, async (tx, access) => {
+    requireWrite(p, access, "kind-schema");
+    const { rows } = await tx.execute<{
+      key: string;
+      draft: NonNullable<KindSchemaState["draft"]>;
+    }>(
+      sql`select o.key, jsonb_build_object('versionId', v.id, 'body', v.body, 'note', v.note, 'createdAt', v.created_at) as draft from app.config_objects o join app.config_versions v on v.id = o.draft_version_id and v.object_id = o.id where o.workspace_id = ${access.workspaceId}::uuid and o.team_id is null and o.type = 'kind-schema' and o.archived_at is null`,
+    );
+    return CONFIGURABLE_KINDS.map((kind) => {
+      const current = kindSchemaFor(access, kind);
+      return {
+        kind,
+        current: {
+          versionId: current.versionId,
+          number:
+            current.versionId === DEFAULT_KIND_SCHEMAS[kind].versionId
+              ? null
+              : current.number,
+          body: current.body,
+        },
+        draft: rows.find((row) => row.key === kind)?.draft ?? null,
+      };
+    });
+  });
 }
 
 /** Company owners and admins only: config events of every team in the workspace, newest first. */
