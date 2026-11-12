@@ -1306,7 +1306,7 @@ export function GET() {
       [],
       {
         summary: "List the people of every team for the Admin portal",
-        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active, or deactivated when the person is deactivated in the company) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active, invited or deactivated), level (owner, admin or none) and role (a configured role key; invited rows never match it); an unknown slug or key returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active, or deactivated when the person is deactivated in the company) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active, invited or deactivated), level (owner, admin or none), role (a configured role key; invited rows never match it) and group (a company group id: only the group's effective members, direct or through a nested group; invited rows never match it); an unknown slug, key or group, or another company's group, returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
       },
       { "200": { description: peopleShape } },
       {
@@ -1335,6 +1335,11 @@ export function GET() {
             name: "role",
             in: "query",
             schema: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,62}$" },
+          },
+          {
+            name: "group",
+            in: "query",
+            schema: { type: "string", format: "uuid" },
           },
           {
             name: "cursor",
@@ -1459,6 +1464,157 @@ export function GET() {
           },
         ],
       },
+    ),
+  };
+  // Company groups (ADM-12): session only, no MCP tool and no API token.
+  const groupReadRule =
+    "Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Viewing never needs a recent sign-in. Nothing is audited.";
+  const groupWriteRule =
+    "Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 group_forbidden.";
+  const grantingGroupRule = `A group that grants something (it, or a group it is nested in, is an approval group: tenant_context.group_grants) is changed only by a company owner: a company admin gets 403 group_owner_required. For it, a company owner ${freshSessionRule.charAt(0).toLowerCase()}${freshSessionRule.slice(1)} A group that grants nothing needs neither. The database refusal stays the real control. Each change writes one group activity row, with ids only, to your team.`;
+  const groupPath = {
+    name: "group",
+    in: "path",
+    required: true,
+    schema: { type: "string", format: "uuid" },
+  };
+  const groupShape =
+    "{data:{id, name, description, approval, archivedAt, createdAt}}";
+  const groupListShape =
+    '{data:[{id, name, description, status:"active"|"archived", grants, directPeople, people, childGroups:[{id, name}], parentGroups:[{id, name}]}], computed:[{key, name, people}]}';
+  paths["/api/v1/admin/groups"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the company groups for the Admin portal",
+        description: `${groupReadRule} Lists every group of the company, current and archived, ordered by name: status, grants (it, or a group it is in, grants something), directPeople (direct person members), people (effective members, direct or through nested groups), and its direct child and parent groups by id and name. computed lists the computed groups, read-only and never stored: Company owners, Company admins, All members, and Owners of and Admins of each team of the company by team name, with their people counts; key is company-owners, company-admins, all-members, team-owners:<team id> or team-admins:<team id>. It never returns a person's id, name or email, a record or any team data. It takes no query parameters: any query key returns 400 invalid_input. Returns ${groupListShape}.`,
+      },
+      { "200": { description: groupListShape } },
+      { sessionOnly: true },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Create a company group",
+        description: `${groupWriteRule} Send {name, description?}: name 1 to 120 characters, description up to 500 (empty is none), at most 4 KiB; any other key, an approval flag included, or any query key returns 400 invalid_input. A new group grants nothing, so no recent sign-in is needed. Another current group with the same name, ignoring case, returns 409 group_name_exists. Writes one group.created activity row, with ids only, to your team. Returns ${groupShape} with 201.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["name"],
+            additionalProperties: false,
+            properties: {
+              name: { type: "string", minLength: 1, maxLength: 120 },
+              description: { type: "string", maxLength: 500 },
+            },
+          },
+          {
+            name: "Fictional Interviewers",
+            description: "Fictional interview panel",
+          },
+        ),
+      },
+      { "201": { description: groupShape } },
+      { sessionOnly: true },
+    ),
+  };
+  const groupDetailShape =
+    '{data:{id, name, description, status, grants, people, members:{people:[{userId, name, email}], groups:[{id, name, status, people:[...], groups:[...]}]}, memberOf:[{id, name, status, via}], audit:[{occurredAt, action, actorName, target:{kind:"person"|"group"|"parent", name}|null}]}}';
+  paths["/api/v1/admin/groups/{group}"] = {
+    get: operation(
+      [],
+      {
+        summary: "Read one company group",
+        description: `${groupReadRule} Reads one group of the company; an unknown id or another company's group returns 404 not_found. members is the tree of direct people (user id, name, email) and direct child groups, each with its own people and child groups, down to the 3-level limit; people is the effective member count. memberOf lists every group that contains it, at any depth, direct ones first; via is null when direct, else the name of the group in between. audit lists, newest first and at most 50, the group activity rows written from your current team about this group or about it being added to or removed from another group, with the actor's name and the person or group the change names by name (null when it cannot be resolved); changes made from another team are shown in that team. It never returns an activity id, a raw user id outside the userId of a member entry, a record or any team data. group must be a uuid and it takes no query parameters: anything else returns 400 invalid_input. Returns ${groupDetailShape}.`,
+      },
+      { "200": { description: groupDetailShape } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+    patch: operation(
+      [],
+      {
+        summary: "Rename or archive a company group",
+        description: `${groupWriteRule} Send exactly one of {name, description?} to rename (references are by id, so members, parents and effective membership are unchanged; a description left out stays, an empty one clears it) or {archived:true} to archive for good (members and the groups it is in are kept; it cannot be restored), at most 4 KiB; anything else, both together or any query key returns 400 invalid_input. ${grantingGroupRule} An unknown or another company's group returns 404 not_found, an archived group 409 group_archived, and a name another current group uses, ignoring case, 409 group_name_exists. Returns ${groupShape}.`,
+        requestBody: jsonBody(
+          {
+            oneOf: [
+              {
+                type: "object",
+                required: ["name"],
+                additionalProperties: false,
+                properties: {
+                  name: { type: "string", minLength: 1, maxLength: 120 },
+                  description: { type: "string", maxLength: 500 },
+                },
+              },
+              {
+                type: "object",
+                required: ["archived"],
+                additionalProperties: false,
+                properties: { archived: { const: true } },
+              },
+            ],
+          },
+          { name: "Fictional Panel", description: "Fictional renamed panel" },
+        ),
+      },
+      { "200": { description: groupShape } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+  };
+  const groupMemberBody = jsonBody(
+    {
+      oneOf: [
+        {
+          type: "object",
+          required: ["userId"],
+          additionalProperties: false,
+          properties: {
+            userId: { type: "string", minLength: 1, maxLength: 128 },
+          },
+        },
+        {
+          type: "object",
+          required: ["childGroupId"],
+          additionalProperties: false,
+          properties: { childGroupId: { type: "string", format: "uuid" } },
+        },
+      ],
+    },
+    { childGroupId: exampleIds.parent },
+  );
+  paths["/api/v1/admin/groups/{group}/members"] = {
+    post: operation(
+      [],
+      {
+        summary: "Add a person or a group to a company group",
+        description: `${groupWriteRule} Send exactly one of {userId} (a person in a team of the company) or {childGroupId} (another group of the company), at most 1 KiB; anything else or any query key returns 400 invalid_input. ${grantingGroupRule} Groups nest at most 3 levels: a group, its groups and their groups; a deeper chain returns 409 group_depth ("Groups nest at most 3 levels: a group, its groups and their groups."), and a group that would contain itself or a group that contains it 409 group_cycle ("A group cannot contain itself or a group that contains it."). A direct member already there returns 409 group_member_exists; an unknown or another company's group 404 not_found; a person in no team of the company 404 user_not_found. Returns {data:{added:true}} with 201.`,
+        requestBody: groupMemberBody,
+      },
+      { "201": { description: "{data:{added:true}}." } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+    delete: operation(
+      [],
+      {
+        summary: "Remove a person or a group from a company group",
+        description: `${groupWriteRule} Send exactly one of {userId} or {childGroupId}, a direct member of the group, at most 1 KiB; anything else or any query key returns 400 invalid_input. ${grantingGroupRule} Someone in it only through a nested group is removed in that group. A person or group that is not a direct member, or an unknown or another company's group, returns 404 not_found. Returns {data:{removed:true}}.`,
+        requestBody: groupMemberBody,
+      },
+      { "200": { description: "{data:{removed:true}}." } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+  };
+  const userGroupsShape =
+    '{data:[{id, name, status:"active"|"archived", direct, through:[<group name>]}]}';
+  paths["/api/v1/admin/users/{user}/groups"] = {
+    get: operation(
+      [],
+      {
+        summary: "List the company groups a person is in",
+        description: `${groupReadRule} Lists, by name, every company group the person is in, directly or through a nested group: direct is true when the person is a direct member, and through names the person's direct groups nested below it (empty when direct only). Computed groups are not listed. A person in no group of the company, an unknown id included, gets an empty list. user is 1 to 128 characters and it takes no query parameters: anything else returns 400 invalid_input. Returns ${userGroupsShape}.`,
+      },
+      { "200": { description: userGroupsShape } },
+      { sessionOnly: true, params: [userPath] },
     ),
   };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.

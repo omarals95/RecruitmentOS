@@ -21,6 +21,7 @@ import {
 } from "./admin-tabs";
 import { CompanyAuthorityTab } from "./company-authority-tab";
 import { DirectoryTab } from "./directory-tab";
+import { GroupsTab } from "./groups-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
 import { TeamsTab } from "./teams-tab";
@@ -174,6 +175,8 @@ export function AdminPortalView({
               <AdminHome tabs={tabs} />
             ) : current.key === "users" ? (
               <UsersTab />
+            ) : current.key === "groups" ? (
+              <GroupsTab />
             ) : current.key === "teams" ? (
               <TeamsTab />
             ) : current.key === "history" ? (

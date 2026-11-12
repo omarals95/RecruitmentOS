@@ -26,6 +26,8 @@ export type WorkspacePeopleQuery = {
   status?: "active" | "invited" | "deactivated";
   level?: "owner" | "admin" | "none";
   role?: string;
+  /** A company group's id: only its effective members, direct or through nesting. */
+  group?: string;
   /** The sort and row key of the last row shown, from nextCursor. */
   cursor?: [string, string];
 };
@@ -126,28 +128,60 @@ export async function withPeopleArea<T>(
  * Signed-in company owners and company admins with the people area: one page of everyone in every
  * team of the workspace and every pending invitation, through the owner-run helper, which returns
  * names, emails, teams and roles only, never team data (TST-005). The configured role choices come
- * from the same transaction.
+ * from the same transaction. With a group, the group's effective members are read under RLS in the
+ * same transaction and the helper's pages are walked, keeping the rows of those members, until a
+ * full page and one more are found or the helper has no more rows; invitations never match.
  */
 export async function listWorkspacePeople(
   p: Principal,
   query: WorkspacePeopleQuery,
 ): Promise<WorkspacePeople> {
   return withPeopleArea(p, async (tx, access) => {
-    const [after, afterKey] = query.cursor ?? [null, null];
-    const { rows } = await tx.execute<{
-      userId: string | null;
-      name: string | null;
-      email: string;
-      teams: WorkspacePersonRow["teams"];
-      companyLevel: WorkspacePersonRow["companyLevel"];
-      status: WorkspacePersonRow["status"];
-      lastSignInAt: Date | string | null;
-      twoStep: boolean;
-      sortKey: string;
-      rowKey: string;
-    }>(
-      sql`select user_id as "userId", name, email, teams, company_level as "companyLevel", status, last_sign_in as "lastSignInAt", two_step as "twoStep", sort_key as "sortKey", row_key as "rowKey" from tenant_context.workspace_people(${query.team ?? null}::text, ${query.status ?? null}::text, ${query.level ?? null}::text, ${query.role ?? null}::text, ${after}::text, ${afterKey}::text)`,
-    );
+    const helperPage = async ([after, afterKey]: [
+      string | null,
+      string | null,
+    ]) =>
+      (
+        await tx.execute<{
+          userId: string | null;
+          name: string | null;
+          email: string;
+          teams: WorkspacePersonRow["teams"];
+          companyLevel: WorkspacePersonRow["companyLevel"];
+          status: WorkspacePersonRow["status"];
+          lastSignInAt: Date | string | null;
+          twoStep: boolean;
+          sortKey: string;
+          rowKey: string;
+        }>(
+          sql`select user_id as "userId", name, email, teams, company_level as "companyLevel", status, last_sign_in as "lastSignInAt", two_step as "twoStep", sort_key as "sortKey", row_key as "rowKey" from tenant_context.workspace_people(${query.team ?? null}::text, ${query.status ?? null}::text, ${query.level ?? null}::text, ${query.role ?? null}::text, ${after}::text, ${afterKey}::text)`,
+        )
+      ).rows;
+    let rows: Awaited<ReturnType<typeof helperPage>>;
+    if (query.group === undefined)
+      rows = await helperPage(query.cursor ?? [null, null]);
+    else {
+      // RLS hides another workspace's group, so an unknown or foreign id has no members.
+      const members = new Set(
+        (
+          await tx.execute<{ user_id: string }>(
+            sql`select user_id from app.group_effective_members where group_id = ${query.group}::uuid and workspace_id = ${access.workspaceId}::uuid`,
+          )
+        ).rows.map((row) => row.user_id),
+      );
+      rows = [];
+      let cursor: [string | null, string | null] = query.cursor ?? [null, null];
+      while (members.size && rows.length <= PAGE_SIZE) {
+        // The helper answers at most PAGE_SIZE + 1 rows; fewer means it has no more.
+        const batch = await helperPage(cursor);
+        rows.push(
+          ...batch.filter((row) => row.userId && members.has(row.userId)),
+        );
+        const last = batch.at(-1);
+        if (batch.length <= PAGE_SIZE || !last) break;
+        cursor = [last.sortKey, last.rowKey];
+      }
+    }
     const roles = (
       await tx.execute<{ key: string; name: string }>(
         sql`select o.key, v.body->>'name' as name from app.config_objects o join app.config_versions v on v.id = o.current_version_id where o.workspace_id = ${access.workspaceId}::uuid and o.type = 'role' and o.archived_at is null order by name, o.key`,

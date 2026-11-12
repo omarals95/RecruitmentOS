@@ -5,6 +5,7 @@
 export const USER_DETAIL_TABS = [
   { key: "profile", label: "Profile" },
   { key: "teams", label: "Teams & roles" },
+  { key: "groups", label: "Groups" },
   { key: "authority", label: "Company authority" },
   { key: "security", label: "Security" },
   { key: "activity", label: "Activity" },

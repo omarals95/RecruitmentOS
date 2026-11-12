@@ -232,10 +232,14 @@ describe("company groups under the split runtime roles", () => {
     pools.identity.mockImplementation(harness.identityDb);
     const db: AppDb = await harness.asOwner();
     // The first seeded user is the initial administrator; their first team makes them company owner.
-    owner = await seedIdentity(db, {
-      userId: "grp-owner",
-      teamId: "grp-team-a",
-    });
+    // Signed in just now: changes to a group that grants something need a recent sign-in (ADM-12).
+    owner = {
+      ...(await seedIdentity(db, {
+        userId: "grp-owner",
+        teamId: "grp-team-a",
+      })),
+      sessionCreatedAt: new Date(),
+    };
     owner2 = await seedIdentity(db, {
       userId: "grp-owner-2",
       teamId: "grp-team-b",
@@ -700,6 +704,44 @@ describe("company groups under the split runtime roles", () => {
       // A group may sit in two parents within the limit.
       await addGroupMember(owner, top.id, { childGroupId: c.id });
       await expectEffective();
+    });
+
+    // ADM-12 (job 095): references are by id, so a rename changes nothing that refers to the group.
+    it("keeps every member, parent link and effective row when the middle group B of A over B over C is renamed", async () => {
+      await addGroupMember(owner, a.id, { userId: loadUsers[1].userId });
+      await addGroupMember(owner, b.id, { userId: loadUsers[2].userId });
+      const links = () =>
+        look(
+          "SELECT * FROM app.group_members WHERE group_id = ANY($1) OR child_group_id = ANY($1) ORDER BY group_id, user_id, child_group_id",
+          [[a.id, b.id, c.id]],
+        );
+      const effective = () =>
+        look(
+          "SELECT * FROM app.group_effective_members ORDER BY group_id, user_id",
+        );
+      const [linksBefore, effectiveBefore] = [await links(), await effective()];
+      expect(
+        linksBefore.filter(
+          (row) => row.group_id === a.id && row.child_group_id === b.id,
+        ),
+      ).toHaveLength(1);
+      for (const group of [a, b, c])
+        expect(
+          linksBefore.some(
+            (row) => row.group_id === group.id && row.user_id !== null,
+          ),
+          group.name,
+        ).toBe(true);
+      const renamed = await renameGroup(owner, b.id, {
+        name: "Fictional Nest Middle",
+        description: "Fictional renamed middle group",
+      });
+      expect(renamed).toMatchObject({
+        id: b.id,
+        name: "Fictional Nest Middle",
+      });
+      expect(await links()).toEqual(linksBefore);
+      expect(await effective()).toEqual(effectiveBefore);
     });
   });
 

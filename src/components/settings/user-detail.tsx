@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type Ref } from "react";
 import type { AdminTeamRow } from "@/lib/admin-teams";
 import type { WorkspacePerson, WorkspacePersonEvent } from "@/lib/admin-users";
 import type { MeAccess } from "@/lib/authz";
+import type { UserGroupRow } from "@/lib/groups";
 import {
   ClientError,
   humanError,
@@ -31,6 +32,7 @@ import {
   useFreshSession,
   type ReauthCancelled,
 } from "./fresh-session-dialog";
+import { groupStatuses } from "./groups-tab";
 import { teamRequests } from "./team-members";
 import {
   UserAnonymisationDialog,
@@ -434,7 +436,7 @@ export function eventLabel(event: WorkspacePersonEvent) {
 }
 
 /**
- * The loaded person: name, the five tabs and the open tab's panel. Read only but for Reset and the
+ * The loaded person: name, the six tabs and the open tab's panel. Read only but for Reset and the
  * Security tab's account actions and Anonymise account.
  */
 export function UserDetailView({
@@ -504,6 +506,8 @@ export function UserDetailView({
           <ProfileTab person={person} />
         ) : current === "teams" ? (
           <TeamsTab person={person} />
+        ) : current === "groups" ? (
+          <UserGroupsTab userId={person.userId} />
         ) : current === "authority" ? (
           <AuthorityTab person={person} companyOwner={companyOwner} />
         ) : current === "security" ? (
@@ -600,6 +604,83 @@ function TeamsTab({ person }: { person: WorkspacePerson }) {
           </table>
         </div>
       </div>
+    </section>
+  );
+}
+
+/** GET /api/v1/admin/users/<id>/groups, read when the tab opens. */
+function UserGroupsTab({ userId }: { userId: string }) {
+  const { team } = useWorkspace();
+  const result = useApi<{ data: UserGroupRow[] }>(
+    team ? `/api/v1/admin/users/${encodeURIComponent(userId)}/groups` : null,
+  );
+  return (
+    <UserGroupsPanel groups={result.data?.data ?? null} error={result.error} />
+  );
+}
+
+/** The company groups the person is in, directly or through nesting; computed groups are not listed. */
+export function UserGroupsPanel({
+  groups,
+  error,
+}: {
+  /** Null while they load or after they failed. */
+  groups: UserGroupRow[] | null;
+  error: string;
+}) {
+  return (
+    <section className="panel stack">
+      <h3>Groups</h3>
+      <p className="muted">
+        The company groups this person is in, directly or through a group nested
+        in it.
+      </p>
+      {error ? (
+        <p className="notice error" role="alert">
+          Could not load the groups. {error}
+        </p>
+      ) : !groups ? (
+        <p role="status">Loading groups…</p>
+      ) : !groups.length ? (
+        <p className="muted">This person is not in any group.</p>
+      ) : (
+        <div className="records-panel">
+          <div className="table-wrap">
+            <table className="data-table compact">
+              <caption className="sr-only">Groups, by name</caption>
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th>How</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map((item) => (
+                  <tr key={item.id}>
+                    <td data-label="Group">
+                      <Link
+                        href={`/app/admin/groups/${encodeURIComponent(item.id)}`}
+                      >
+                        {item.name}
+                      </Link>
+                    </td>
+                    <td data-label="How">
+                      {[
+                        ...(item.direct ? ["Direct"] : []),
+                        ...(item.through.length
+                          ? [`Through ${item.through.join(", ")}`]
+                          : []),
+                      ].join(" and ")}
+                    </td>
+                    <td data-label="Status">{groupStatuses[item.status]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

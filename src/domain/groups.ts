@@ -9,6 +9,11 @@ export const groupInput = z
   .object({ name: configLabel, description: description.optional() })
   .strict();
 export const groupApproval = z.object({ approval: z.boolean() }).strict();
+/** One change per request: a rename (with an optional description) or an archive. */
+export const groupPatch = z.union([
+  groupInput,
+  z.object({ archived: z.literal(true) }).strict(),
+]);
 /** One direct member: a person of a team of the workspace, or a child group. */
 export const groupMember = z.union([
   z.object({ userId: z.string().min(1).max(128) }).strict(),

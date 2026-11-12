@@ -27,9 +27,9 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
  * a company admin with the organisation area, and Directory the role's directory view action, so a team role never yields
  * any of them and company authority never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
- * other team by name only, never its data. Users follows a company owner or a company admin with
- * the people area (D20): everyone in every team by name, email, teams and roles, never team data. A
- * page is added here only when its feature exists.
+ * other team by name only, never its data. Users and Groups follow a company owner or a company
+ * admin with the people area (D20): everyone in every team by name, email, teams and roles, and the
+ * company groups that hold them, never team data. A page is added here only when its feature exists.
  */
 export const ADMIN_TABS = [
   {
@@ -39,6 +39,14 @@ export const ADMIN_TABS = [
     group: "People",
     description:
       "See everyone in every team of the company, with their teams, roles, company level, last sign-in and two-step sign-in.",
+  },
+  {
+    key: "groups",
+    label: "Groups",
+    level: "people",
+    group: "People",
+    description:
+      "Group people from any team, nest groups, and see who is in each group.",
   },
   {
     key: "teams",

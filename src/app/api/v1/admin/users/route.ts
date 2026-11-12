@@ -31,6 +31,7 @@ const peopleQuery = z
     status: z.enum(["active", "invited", "deactivated"]).optional(),
     level: z.enum(["owner", "admin", "none"]).optional(),
     role: configKey.optional(),
+    group: z.uuid().optional(),
     cursor: cursor.optional(),
   })
   .strict();
