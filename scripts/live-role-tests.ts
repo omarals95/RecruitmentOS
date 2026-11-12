@@ -89,6 +89,10 @@
  *   reaches its name check (RQ003, rolled back); the data role cannot select, insert or update
  *   app.user_anonymisations, nor set app.activity.user_anonymisation_id, even under the company
  *   owner's session.
+ *   Company groups (0052): the team B owner made a company admin with the people area cannot add a
+ *   member to an approval group by direct SQL (42501), while the company owner's session can (rolled
+ *   back); the data role cannot insert, update or delete app.group_effective_members, even under
+ *   the company owner's session, which reads the fixture's effective row.
  * - On the data role it proves the app's per-transaction deadlines from src/db/deadlines.ts: the
  *   shared statement sets them, a statement timeout cancels with 57014, a transaction timeout ends
  *   its session, and the next transaction on the same pooled backend reads its earlier values.
@@ -146,7 +150,10 @@
  *   and briefly adds one more API token holding every scope for the team A owner, removing each in
  *   its check. In the first anonymisation check it briefly makes the team B owner a company admin
  *   with the people area and adds one more API token holding every scope for the team A owner,
- *   removing both in that check; nothing of an anonymisation commits.
+ *   removing both in that check; nothing of an anonymisation commits. In each group check it writes
+ *   one approval group named by the run prefix with the team A owner as its member (the trigger
+ *   writes their effective row), removing the group, which cascades the rest, in that check; the
+ *   first also briefly makes the team B owner a company admin with the people area.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -724,6 +731,18 @@ function fixtureTables(f: Fixtures, variant: Variant) {
     ],
     ["app.org_units", "code LIKE $1", [f.pattern]],
     ["app.org_levels", "name LIKE $1", [f.pattern]],
+    // Fixture groups by name (0052); member, manager and effective rows cascade from them.
+    [
+      "app.group_effective_members",
+      "group_id IN (SELECT g.id FROM app.groups g WHERE g.name LIKE $1)",
+      [f.pattern],
+    ],
+    [
+      "app.group_members",
+      "group_id IN (SELECT g.id FROM app.groups g WHERE g.name LIKE $1)",
+      [f.pattern],
+    ],
+    ["app.groups", "name LIKE $1", [f.pattern]],
     ["app.workspaces", "name LIKE $1", [f.pattern]],
     ["tenant_context.contexts", ...team],
     ["storage_ledger.blob_read_leases", ...store],
@@ -850,6 +869,7 @@ async function cleanup(owner: Db, f: Fixtures, variant: Variant) {
           "app.positions",
           "app.org_units",
           "app.org_levels",
+          "app.groups",
           "app.workspaces",
           "tenant_context.contexts",
           "storage_ledger.blob_read_leases",
@@ -6140,6 +6160,154 @@ async function runChecks(run: Run) {
         )) === 0,
       ])
     );
+  });
+
+  // Company groups (0052): one owner-written approval group named by the run prefix, holding the
+  // team A owner as a member, removed with its member and effective rows at the end of each check.
+  // The owner's own SQL has no context, so it writes no group activity row.
+  const withApprovalGroup = async <T>(work: (group: string) => Promise<T>) => {
+    const group = (
+      await owner.query(
+        "INSERT INTO app.groups(workspace_id,name,approval) VALUES($1::uuid,$2,true) RETURNING id::text AS id",
+        [COMPANY_WORKSPACE, `${f.prefix}-group-approval`],
+      )
+    ).rows[0].id as string;
+    try {
+      await owner.query(
+        "INSERT INTO app.group_members(group_id,workspace_id,user_id) VALUES($1::uuid,$2::uuid,$3)",
+        [group, COMPANY_WORKSPACE, f.users.a1],
+      );
+      return await work(group);
+    } finally {
+      await owner
+        .query("DELETE FROM app.groups WHERE id = $1::uuid", [group])
+        .catch(() => {});
+    }
+  };
+  const groupsGone = async () =>
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.groups WHERE name LIKE $1",
+      [f.pattern],
+    )) === 0 &&
+    (await count(
+      owner,
+      "SELECT count(*)::int AS n FROM app.activity WHERE team_id LIKE $1 AND kind = 'group'",
+      [f.pattern],
+    )) === 0;
+  const memberSql =
+    "INSERT INTO app.group_members(group_id,workspace_id,user_id) VALUES($1::uuid,$2::uuid,$3)";
+
+  // The team B owner, made a company admin with the people area for this check, cannot add a member
+  // to an approval group by direct SQL (42501 from app.guard_group_write); the company owner can
+  // (rolled back).
+  await check("groups-admin-approval-insert-denied", async (probe) => {
+    probe.at("setup");
+    const granted = await owner.query(
+      "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{people}')",
+      [COMPANY_WORKSPACE, f.users.b1],
+    );
+    let pass: boolean;
+    try {
+      pass = await withApprovalGroup(async (group) => {
+        const insertAs = (principal: Principal) =>
+          transaction(data, async () => {
+            const { access } = await installAs(data, signer, principal);
+            return {
+              access,
+              outcome: await attempt(data, memberSql, [
+                group,
+                COMPANY_WORKSPACE,
+                f.users.a2,
+              ]),
+            };
+          });
+        probe.at("outcome");
+        const admin = await insertAs(p.ownerB);
+        probe.at("positive-control");
+        const control = await insertAs(p.ownerA);
+        probe.at("end-state");
+        const members = await count(
+          owner,
+          "SELECT count(*)::int AS n FROM app.group_members WHERE group_id = $1::uuid",
+          [group],
+        );
+        return probe.all(
+          [
+            "setup",
+            granted.rowCount === 1 &&
+              admin.access.companyLevel === "admin" &&
+              admin.access.companyAreas.join(",") === "people" &&
+              control.access.companyLevel === "owner",
+          ],
+          failsWith(admin.outcome, "42501"),
+          outcomeIs(
+            control.outcome.ok && control.outcome.count === 1,
+            control.outcome,
+            "positive-control",
+          ),
+          ["end-state", members === 1],
+        );
+      });
+    } finally {
+      await owner.query(
+        "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await groupsGone()) &&
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.b1],
+          )) === 0,
+      ])
+    );
+  });
+
+  // No runtime role writes effective membership, even under the company owner's session: the
+  // insert, update and delete are not granted, while the same context reads the fixture's row.
+  await check("groups-effective-insert-denied", async (probe) => {
+    probe.at("setup");
+    const pass = await withApprovalGroup((group) =>
+      transaction(data, async () => {
+        probe.at("install");
+        await installAs(data, signer, p.ownerA);
+        probe.at("outcome");
+        const inserted = await attempt(
+          data,
+          "INSERT INTO app.group_effective_members(workspace_id,group_id,user_id) VALUES($1::uuid,$2::uuid,$3)",
+          [COMPANY_WORKSPACE, group, f.users.a2],
+        );
+        const updated = await attempt(
+          data,
+          "UPDATE app.group_effective_members SET user_id = user_id WHERE group_id = $1::uuid",
+          [group],
+        );
+        const deleted = await attempt(
+          data,
+          "DELETE FROM app.group_effective_members WHERE group_id = $1::uuid",
+          [group],
+        );
+        probe.at("positive-control");
+        const visible = await count(
+          data,
+          "SELECT count(*)::int AS n FROM app.group_effective_members WHERE group_id = $1::uuid AND user_id = $2",
+          [group, f.users.a1],
+        );
+        return probe.all(denial(inserted), denial(updated), denial(deleted), [
+          "positive-control",
+          visible === 1,
+        ]);
+      }),
+    );
+    probe.at("end-state");
+    return pass && probe.all(["end-state", await groupsGone()]);
   });
 }
 

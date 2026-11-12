@@ -211,10 +211,12 @@ How a company owner permanently anonymises one person's account in the company (
 
 A second anonymisation of the same person is safe: it returns the earlier anonymisation (`alreadyAnonymised: true`, the same id, time and counts) and writes nothing.
 
+**Company groups (ADM-11).** The person's group memberships (`app.group_members`) and group manager rows (`app.group_managers`) in the company are removed, and with them their effective membership of every group above; the group activity entries about them (added to or removed from a group, made or removed as a manager) are redacted with the rest. The groups and their other members stay. These removals are not counted separately: they show in the redacted activity count.
+
 ### Verify
 
 1. **Admin portal > Users** no longer lists the person, and their page answers "This person is not in any team of your company." Signing in with the old email and password fails.
-2. Activity, for members with company authority, shows "Anonymised a user account" by the anonymising owner. The earlier entries about the person (company authority, two-step reset, deactivation and other account changes, configured roles, home units and record assignments) read "Details removed by user anonymisation" in every team of the company. Entries the person made themselves keep their text and show the placeholder name.
+2. Activity, for members with company authority, shows "Anonymised a user account" by the anonymising owner. The earlier entries about the person (company authority, two-step reset, deactivation and other account changes, configured roles, home units, record assignments and group memberships) read "Details removed by user anonymisation" in every team of the company. Entries the person made themselves keep their text and show the placeholder name.
 3. Optionally, the owner runs this read-only SQL in psql as the migration owner (the owner of schema `tenant_context`, whose owner-only policies let it read these rows) over a direct connection. It prints counts and ids only:
 
    ```sql
@@ -231,6 +233,8 @@ A second anonymisation of the same person is safe: it returns the earlier anonym
      (SELECT count(*) FROM app.member_roles WHERE user_id = :'person') AS configured_roles,
      (SELECT count(*) FROM app.record_assignments WHERE user_id = :'person') AS record_assignments,
      (SELECT count(*) FROM app.workspace_admins WHERE workspace_id = :'workspace' AND user_id = :'person') AS company_authority,
+     (SELECT count(*) FROM app.group_members WHERE user_id = :'person') AS group_memberships,
+     (SELECT count(*) FROM app.group_managers WHERE user_id = :'person') AS group_managers,
      (SELECT count(*) FROM auth."user" WHERE id = :'person' AND email LIKE 'anonymised-%@invalid' AND NOT email_verified) AS placeholder_accounts;
    SELECT x.id AS anonymisation_id, x.anonymised_at, x.anonymised_by, x.erasure_source,
      (SELECT count(*) FROM app.activity a WHERE a.user_anonymisation_id = x.id) AS activity_rows

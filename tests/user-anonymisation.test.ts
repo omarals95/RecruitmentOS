@@ -25,6 +25,7 @@ import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import { addGroupMember, createGroup } from "@/lib/groups";
 import { createRecord } from "@/lib/records";
 import { setUserActive } from "@/lib/user-account";
 import {
@@ -1244,6 +1245,111 @@ describe("user account anonymisation under the split runtime roles", () => {
       expect(data.map((row) => row.email)).not.toContain(
         emailOf(subject.userId),
       );
+    });
+  });
+
+  describe("group rows (ADM-11)", () => {
+    const grouped = "anon-grouped";
+    const peer = "anon-group-peer";
+    const groupRows = async () => ({
+      members: await superuser(
+        "SELECT * FROM app.group_members ORDER BY group_id, user_id, child_group_id",
+      ),
+      managers: await superuser(
+        "SELECT * FROM app.group_managers ORDER BY group_id, user_id",
+      ),
+      effective: await superuser(
+        "SELECT * FROM app.group_effective_members ORDER BY group_id, user_id",
+      ),
+    });
+    let before: Awaited<ReturnType<typeof groupRows>>;
+    let result: Awaited<ReturnType<typeof anonymiseUser>>;
+
+    beforeAll(async () => {
+      for (const id of [grouped, peer])
+        await seedIdentity(await harness.asOwner(), {
+          userId: id,
+          teamId: "anon-team-a",
+          role: "viewer",
+        });
+      await superuser(
+        `UPDATE auth."user" SET name = 'Fictional ' || initcap(replace(id, '-', ' ')) WHERE id IN ($1, $2)`,
+        [grouped, peer],
+      );
+      // Both are direct members of an outer group and of a group nested in it, and managers of the
+      // outer one, all through the company owner's context.
+      const outer = await createGroup(owner, {
+        name: "Fictional Anonymisation Outer",
+      });
+      const inner = await createGroup(owner, {
+        name: "Fictional Anonymisation Inner",
+      });
+      await addGroupMember(owner, outer.id, { childGroupId: inner.id });
+      for (const userId of [grouped, peer]) {
+        await addGroupMember(owner, outer.id, { userId });
+        await addGroupMember(owner, inner.id, { userId });
+      }
+      await withTeam(owner, (tx) =>
+        tx.execute(
+          sql`insert into app.group_managers (group_id, workspace_id, user_id) values (${outer.id}::uuid, ${COMPANY}::uuid, ${grouped}), (${outer.id}::uuid, ${COMPANY}::uuid, ${peer})`,
+        ),
+      );
+      before = await groupRows();
+      result = await anonymiseUser(owner, grouped, {
+        confirmName: nameOf(grouped),
+      });
+    });
+
+    it("removes the person's member, manager and effective rows and nobody else's", async () => {
+      const of = (rows: Row[]) => rows.filter((row) => row.user_id === grouped);
+      const others = (rows: Row[]) =>
+        rows.filter((row) => row.user_id !== grouped);
+      const after = await groupRows();
+      expect(of(before.members)).toHaveLength(2);
+      expect(of(before.managers)).toHaveLength(1);
+      expect(of(before.effective)).toHaveLength(2);
+      for (const table of ["members", "managers", "effective"] as const) {
+        expect(of(after[table]), table).toEqual([]);
+        expect(others(after[table]), table).toEqual(others(before[table]));
+      }
+    });
+
+    it("redacts the group rows about the person and keeps the nine counts", async () => {
+      expect(Object.keys(result.removed)).toEqual(COUNTS);
+      const rows = (await activity()).filter(
+        (row) => row.kind === "group" && row.action !== "group.created",
+      );
+      const removed = rows.filter((row) =>
+        ["group.member_removed", "group.manager_removed"].includes(row.action),
+      );
+      expect(removed.map((row) => row.action).sort()).toEqual([
+        "group.manager_removed",
+        "group.member_removed",
+        "group.member_removed",
+      ]);
+      // The removals and the earlier additions naming the person: redacted to type, time and actor.
+      const redacted = rows.filter(
+        (row) => row.user_anonymisation_id === result.anonymisationId,
+      );
+      expect(redacted).toHaveLength(6);
+      for (const row of redacted)
+        expect(row).toMatchObject({
+          actor_id: owner.userId,
+          summary: REDACTED,
+          metadata: {},
+        });
+      expect(result.removed.activityRedacted).toBe(6);
+      // The peer's rows keep their ids.
+      expect(
+        rows
+          .filter((row) => row.metadata.targetUserId === peer)
+          .map((row) => row.action)
+          .sort(),
+      ).toEqual([
+        "group.manager_added",
+        "group.member_added",
+        "group.member_added",
+      ]);
     });
   });
 });

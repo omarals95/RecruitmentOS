@@ -155,6 +155,8 @@ const orgTables = ["org_levels", "org_units", "org_unit_closure"];
 const directoryTables = ["positions", "employees", "employee_positions"];
 /** Salary brackets under Plan & pay access; no runtime delete (0048). */
 const bracketTables = ["salary_bracket_versions", "salary_brackets"];
+/** Company groups under the people area; effective rows only from the owner's trigger (0052). */
+const groupTables = ["groups", "group_members", "group_managers"];
 const deletable = [
   "candidate_states",
   "notification_reads",
@@ -211,6 +213,14 @@ const expectedData = {
         ["INSERT", "SELECT", "UPDATE"],
       ]),
     ),
+    // Company groups: written under the people area and the guard, effective rows read only (0052).
+    ...Object.fromEntries(
+      groupTables.map((table) => [
+        `app.${table}`,
+        ["DELETE", "INSERT", "SELECT", "UPDATE"],
+      ]),
+    ),
+    "app.group_effective_members": ["SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -447,6 +457,8 @@ describe("split runtime role template", () => {
         "tenant_context.publish_bracket_version(uuid)",
         "tenant_context.published_bracket_version()",
         "tenant_context.job_title_usage(text)",
+        "tenant_context.group_grants(uuid)",
+        "tenant_context.computed_group_members(text)",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
           kind === "data",
@@ -879,6 +891,72 @@ describe("split runtime role template", () => {
       });
     expect(await closure()).toEqual([
       { ancestor_id: unit, descendant_id: unit, depth: 0 },
+    ]);
+  });
+
+  it("denies both roles every write of app.group_effective_members; only the owner's trigger writes it (0052)", async () => {
+    // The same fictional company owner as the cases above; seeding is idempotent.
+    const owner = await seedIdentity(await harness.asOwner(), {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    const asCompanyOwner = <T>(work: (tx: TeamTx) => Promise<T>) =>
+      harness.dataDb().then((db) =>
+        withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+          await installTenantContext(tx, owner, snapshot);
+          return work(tx);
+        }),
+      );
+    const group = await asCompanyOwner(async (tx) => {
+      const { rows } = await tx.execute<{ id: string }>(
+        sql`insert into app.groups(workspace_id, name) select workspace_id, 'Fictional grants group' from app.workspace_teams where team_id = ${owner.teamId} returning id`,
+      );
+      await tx.execute(
+        sql`insert into app.group_members(group_id, workspace_id, user_id) select ${rows[0].id}::uuid, workspace_id, ${owner.userId} from app.workspace_teams where team_id = ${owner.teamId}`,
+      );
+      return rows[0].id;
+    });
+    const effective = async () => {
+      await harness.asSuperuser();
+      return (
+        await harness.client.query(
+          "SELECT group_id, user_id FROM app.group_effective_members",
+        )
+      ).rows;
+    };
+    expect(await effective()).toEqual([
+      { group_id: group, user_id: owner.userId },
+    ]);
+    const writes = [
+      `INSERT INTO app.group_effective_members(workspace_id, group_id, user_id) SELECT workspace_id, id, 'grants-config-owner' FROM app.groups WHERE id = '${group}'`,
+      `UPDATE app.group_effective_members SET user_id = user_id WHERE group_id = '${group}'`,
+      `DELETE FROM app.group_effective_members WHERE group_id = '${group}'`,
+      "TRUNCATE app.group_effective_members",
+    ];
+    for (const statement of writes)
+      await expect(
+        asCompanyOwner((tx) => tx.execute(sql.raw(statement))),
+        statement,
+      ).rejects.toMatchObject({
+        cause: {
+          code: "42501",
+          message: expect.stringMatching(/permission denied/),
+        },
+      });
+    await harness.identityDb();
+    await expectDenied([
+      ...writes,
+      ...[
+        "groups",
+        "group_members",
+        "group_managers",
+        "group_effective_members",
+      ].map((table) => `SELECT * FROM app.${table}`),
+      "SELECT tenant_context.group_grants(gen_random_uuid())",
+      "SELECT * FROM tenant_context.computed_group_members('all-members')",
+    ]);
+    expect(await effective()).toEqual([
+      { group_id: group, user_id: owner.userId },
     ]);
   });
 

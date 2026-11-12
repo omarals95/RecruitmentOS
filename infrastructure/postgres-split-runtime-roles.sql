@@ -128,6 +128,11 @@ GRANT SELECT, INSERT, UPDATE ON TABLE app.salary_brackets TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE ON TABLE app.record_files TO recruitmentos_data;
 -- Read only: assignments are written only through tenant_context.add_assignment and remove_assignment.
 GRANT SELECT ON TABLE app.record_assignments TO recruitmentos_data;
+-- Company groups under the people area and app.guard_group_write; effective rows read only (0052).
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.groups TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.group_members TO recruitmentos_data;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.group_managers TO recruitmentos_data;
+GRANT SELECT ON TABLE app.group_effective_members TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;
@@ -170,6 +175,9 @@ GRANT EXECUTE ON FUNCTION tenant_context.publish_bracket_version(uuid) TO recrui
 GRANT EXECUTE ON FUNCTION tenant_context.published_bracket_version() TO recruitmentos_data;
 -- Counts only, for company owners and company admins with organisation (0050).
 GRANT EXECUTE ON FUNCTION tenant_context.job_title_usage(text) TO recruitmentos_data;
+-- Company groups: the approval check and the computed groups, ids only (0052).
+GRANT EXECUTE ON FUNCTION tenant_context.group_grants(uuid) TO recruitmentos_data;
+GRANT EXECUTE ON FUNCTION tenant_context.computed_group_members(text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.remove_assignment(uuid, text, text) TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.scope_is_all() TO recruitmentos_data;
