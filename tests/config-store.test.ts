@@ -1666,7 +1666,7 @@ describe("versioned configuration store under the split runtime roles", () => {
 
     it("lets only a company owner mark a field sensitive or remove the mark, at save and at publish", async () => {
       const secret = customField("Fictional offer secret", "short-text");
-      const marked = { ...secret, sensitive: true } as CustomField;
+      const marked = { ...secret, sensitive: true } as unknown as CustomField;
       const forbidden =
         "Only a company owner can mark a field sensitive or remove the mark.";
       await refusedWith(
@@ -1694,7 +1694,7 @@ describe("versioned configuration store under the split runtime roles", () => {
       const second = {
         ...customField("Fictional second secret", "number"),
         sensitive: true,
-      } as CustomField;
+      } as unknown as CustomField;
       const draftBody = kindBody("offer", [marked, second]);
       const pending = await run(save(owner, "offer", draftBody));
       await refusedWith(
