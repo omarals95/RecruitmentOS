@@ -74,6 +74,7 @@ export const objectTypes: Record<string, string> = {
   template: "Template",
   "task-board": "Task board",
   "job-architecture": "Job architecture",
+  branding: "Branding",
 };
 const accessActions: Record<string, string> = {
   "role.assigned": "Role assigned",

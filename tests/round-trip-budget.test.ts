@@ -13,6 +13,8 @@ import {
 import { withTeam } from "@/lib/db-team";
 import { assignMemberRole } from "@/lib/member-roles";
 import { roleScopes } from "@/lib/permissions";
+import { brandingPalette } from "@/domain/branding";
+import { BRANDING_KEY } from "@/domain/config";
 import { HIRING_MANAGER_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
 import { bootstrapTeam, createRecord, listRecords } from "@/lib/records";
 import type { Principal } from "@/lib/principal";
@@ -255,6 +257,7 @@ describe("database round trips per request", () => {
   // Configuration versions and bodies come back in the install statement (R2a-05, 0032).
   describe("with a published company configuration object", () => {
     let versionId: string;
+    let brandingVersionId: string;
     let moveTo = 0;
     let stage: "Interview" | "Screening" = "Interview";
 
@@ -319,6 +322,31 @@ describe("database round trips per request", () => {
         body: { label: "Fictional budget workflow" },
       }));
       await publishConfigVersion(owner, versionId);
+      // A published company branding reaches install with the other documents (ADM-36).
+      ({ versionId: brandingVersionId } = await createConfigDraft(owner, {
+        type: "branding",
+        key: BRANDING_KEY,
+        body: {
+          accent: "#0f766e",
+          palette: brandingPalette("#0f766e"),
+          light: {
+            primary: "#0f766e",
+            primaryHover: "#115e59",
+            primarySoft: "#e6f4f1",
+            primaryText: "#0f766e",
+            focus: "#0f766e",
+          },
+          dark: {
+            primary: "#5eead4",
+            primaryHover: "#99f6e4",
+            primarySoft: "#123c38",
+            primaryText: "#5eead4",
+            focus: "#5eead4",
+          },
+          signInMessage: "Fictional budget welcome",
+        },
+      }));
+      await publishConfigVersion(owner, brandingVersionId);
       task = (
         await listRecords(owner, "tasks", new URLSearchParams())
       ).data.find((row) => row.id === task.id)!;
@@ -338,6 +366,7 @@ describe("database round trips per request", () => {
         Promise.resolve(state),
       );
       expect(Object.values(access.versions)).toContain(versionId);
+      expect(Object.values(access.versions)).toContain(brandingVersionId);
       expect(access.documents[versionId].body).toEqual({
         label: "Fictional budget workflow",
       });

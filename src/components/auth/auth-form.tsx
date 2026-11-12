@@ -53,6 +53,7 @@ export function AuthForm({
   invitationId,
   next,
   initialError,
+  signInMessage,
 }: {
   mode: Mode;
   options: AuthOptions;
@@ -60,6 +61,8 @@ export function AuthForm({
   invitationId?: string;
   next?: string;
   initialError?: string;
+  /** The company's published sign-in message: plain text, rendered escaped. */
+  signInMessage?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -215,6 +218,7 @@ export function AuthForm({
           <h1>{title}</h1>
           <p>{description}</p>
         </header>
+        {mode === "sign-in" && signInMessage && <p>{signInMessage}</p>}
         {!options.configured && (
           <div className="auth-notice" role="status">
             <strong>Setup required</strong>

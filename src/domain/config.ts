@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SCOPES, roleScopes, type Role } from "../lib/permissions";
+import { brandingBodySchema } from "./branding";
 import {
   CONFIGURABLE_KINDS,
   configHelpText,
@@ -36,6 +37,7 @@ export const CONFIG_TYPES = [
   "template",
   "task-board",
   "job-architecture",
+  "branding",
 ] as const;
 export type ConfigType = (typeof CONFIG_TYPES)[number];
 
@@ -51,10 +53,13 @@ export const CONFIG_TYPE_AREAS = {
   template: "templates",
   "task-board": "task-board",
   "job-architecture": "organisation",
+  branding: "branding",
 } as const satisfies Record<ConfigType, string>;
 
 /** The one job architecture object of a company is always this key (ADM-24). */
 export const JOB_ARCHITECTURE_KEY = "company";
+/** The one branding object of a company is always this key (ADM-36). */
+export const BRANDING_KEY = "company";
 
 // The minimal envelope for every type until its own build item replaces it. Strict objects refuse
 // unknown keys, so a body cannot carry record ids or record values.
@@ -342,7 +347,10 @@ export type RecordScope = (typeof RECORD_SCOPES)[number];
 export const DIRECTORY_RULES = ["basic", "full"] as const;
 export type DirectoryRule = (typeof DIRECTORY_RULES)[number];
 
-/** Company areas a company owner may grant to a company admin (drizzle/0028, people drizzle/0042). */
+/**
+ * Company areas a company owner may grant to a company admin (drizzle/0028, people drizzle/0042,
+ * branding drizzle/0053).
+ */
 export const GRANTABLE_ADMIN_AREAS = [
   "fields",
   "workflows",
@@ -350,6 +358,7 @@ export const GRANTABLE_ADMIN_AREAS = [
   "organisation",
   "templates",
   "people",
+  "branding",
 ] as const;
 /** Company areas only a company owner holds, whatever companyAreas says. */
 export const OWNER_ADMIN_AREAS = ["roles", "ai", "plan", "home-units"] as const;
@@ -658,8 +667,8 @@ export const jobArchitectureBodySchema = jobArchitectureShape.superRefine(
 );
 export type JobArchitectureBody = z.output<typeof jobArchitectureBodySchema>;
 
-// Kind schema, role, task-board and job architecture drafts carry real bodies; every other type keeps
-// the envelope until its own item.
+// Kind schema, role, task-board, job architecture and branding drafts carry real bodies; every other
+// type keeps the envelope until its own item.
 export const configBodySchemas = {
   "kind-schema": kindSchemaBodySchema,
   workflow: envelope,
@@ -668,5 +677,6 @@ export const configBodySchemas = {
   template: envelope,
   "task-board": taskBoardBodySchema,
   "job-architecture": jobArchitectureBodySchema,
+  branding: brandingBodySchema,
 } satisfies Record<ConfigType, z.ZodType>;
 export type ConfigBody = z.infer<(typeof configBodySchemas)[ConfigType]>;

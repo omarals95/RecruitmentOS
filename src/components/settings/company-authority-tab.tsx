@@ -48,6 +48,7 @@ export const areaLabels: Record<GrantableArea, string> = {
   organisation: "Organisation",
   templates: "Templates",
   people: "People",
+  branding: "Branding",
 };
 const areaHints: Partial<Record<GrantableArea, string>> = {
   people:

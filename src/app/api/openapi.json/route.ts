@@ -1899,6 +1899,7 @@ export function GET() {
     "organisation",
     "templates",
     "people",
+    "branding",
   ];
   paths["/api/v1/company-authority"] = {
     get: operation(
