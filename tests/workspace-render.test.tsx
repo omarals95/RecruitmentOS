@@ -73,6 +73,7 @@ import {
   BULK_INTAKE_MAX_FILES,
   BULK_INTAKE_RECOVERY_HOURS,
   type RecordDto,
+  type ResourceName,
 } from "../src/domain/records";
 import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
 import {
@@ -1620,5 +1621,164 @@ describe("vacancy job title picker", () => {
     });
     const body = recordMutation("vacancies", { ...vacancy.data }, {}, vacancy);
     expect(body.data).not.toHaveProperty("jobTitleKey");
+  });
+});
+
+// R2b-07 (job 090): with the default kind schemas, the editor and the profile render exactly as
+// before screens. The golden file was written by main's code before the change.
+describe("default screens", () => {
+  const golden = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/default-screens-dom.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, { create: string; edit: string; view: string }>;
+  const fictional: Record<string, Record<string, unknown>> = {
+    candidates: {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      phone: "+971 50 000 0001",
+      university: "Fictional University",
+      employer: "Fictional Employer",
+      jobTitle: "Fictional Analyst",
+      yearsExperience: 4,
+      skills: ["Excel", "SQL"],
+      languages: ["English"],
+      reviewStatus: "Needs review",
+      sourceNotes: "Fictional note",
+      rawSource: { folder: "Fictional" },
+      evidence: {},
+      sourceReviews: [],
+    },
+    "job-roles": {
+      title: "Fictional Engineer",
+      department: "Fictional Department",
+      description: "Fictional description",
+      skills: ["TypeScript"],
+    },
+    vacancies: {
+      title: "Fictional Engineer",
+      requisitionId: "REQ-1",
+      openings: 2,
+      status: "Open",
+      targetDate: "2026-12-01",
+      jobTitleKey: "fictional-engineer",
+    },
+    applications: {
+      stage: "Screening",
+      source: "Fictional referral",
+      appliedDate: "2026-11-01",
+    },
+    tasks: {
+      title: "Fictional task",
+      priority: "High",
+      assigneeIds: ["fictional-member-alex"],
+      dueDate: "2026-11-20",
+      customValues: {},
+    },
+    interviews: {
+      title: "Fictional interview",
+      startAt: "2026-11-15T06:30:00.000Z",
+      minutes: 45,
+      status: "Scheduled",
+      meetingUrl: "https://example.test/meet",
+    },
+    offers: {
+      title: "Fictional offer",
+      amount: "12000",
+      currency: "AED",
+      payPeriod: "Monthly",
+      status: "Draft",
+    },
+    onboarding: { startDate: "2026-12-01", status: "Planned" },
+    checklist: {
+      title: "Fictional checklist item",
+      category: "Document",
+      status: "Pending",
+    },
+  };
+  const kinds: Record<string, string> = {
+    candidates: "candidate",
+    "job-roles": "job-role",
+    vacancies: "vacancy",
+    applications: "application",
+    tasks: "task",
+    interviews: "interview",
+    offers: "offer",
+    onboarding: "onboarding",
+    checklist: "checklist",
+  };
+  const recordOf = (resource: string, index: number) =>
+    ({
+      id: `00000000-0000-4000-8000-00000000090${index}`,
+      kind: kinds[resource],
+      data: fictional[resource],
+      version: 3,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+    }) as RecordDto;
+  const markup = (resource: string, index: number) => {
+    const record = recordOf(resource, index);
+    const wrap = (node: ReactNode) =>
+      renderToStaticMarkup(
+        <WorkspaceProvider value={workspace}>{node}</WorkspaceProvider>,
+      );
+    return {
+      create: wrap(
+        <RecordEditor
+          resource={resource as ResourceName}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      ),
+      edit: wrap(
+        <RecordEditor
+          resource={resource as ResourceName}
+          record={record}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      ),
+      view: wrap(
+        <RecordDetail
+          record={record}
+          inline
+          onClose={() => {}}
+          onEdit={() => {}}
+          onRefresh={() => {}}
+          onCreate={() => {}}
+          onUpdated={() => {}}
+        />,
+      ),
+    };
+  };
+
+  it("renders every configurable kind's create, edit and view exactly as before screens", () => {
+    const resources = Object.keys(fictional);
+    expect(Object.keys(golden)).toEqual(resources);
+    // A new interview starts now, so the clock is fixed.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-12T08:00:00.000Z"));
+    try {
+      resources.forEach((resource, index) => {
+        const now = markup(resource, index);
+        expect(now.create, `${resource} create`).toBe(golden[resource].create);
+        expect(now.edit, `${resource} edit`).toBe(golden[resource].edit);
+        expect(now.view, `${resource} view`).toBe(golden[resource].view);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
