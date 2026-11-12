@@ -19,3 +19,13 @@ export class ApiError extends Error {
     this.correlationId = correlationId;
   }
 }
+
+/** Up to 8 schema issues as `path: message`, the message of a 400 invalid_input that names reasons. */
+export function issueList(
+  issues: readonly { path: readonly PropertyKey[]; message: string }[],
+): string {
+  return issues
+    .slice(0, 8)
+    .map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`)
+    .join("; ");
+}

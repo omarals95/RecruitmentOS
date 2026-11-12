@@ -5,13 +5,19 @@ import { z } from "zod";
 import { setDbForTests, type AppDb, type TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
 import {
+  CONFIGURABLE_KINDS,
   configBodySchemas,
   configHelpText,
   configLabel,
   configOptionValue,
   CONFIG_TYPES,
+  kindSchemaBodySchema,
   type ConfigType,
+  type ConfigurableKind,
+  type KindSchemaBody,
 } from "@/domain/config";
+import type { CustomField } from "@/domain/field-types";
+import { kindSchemaChanges } from "@/domain/kind-schema-changes";
 import {
   archiveConfigObject,
   CONFIG_CACHE_BYTES,
@@ -21,18 +27,24 @@ import {
   getConfigObject,
   kindSchemaFor,
   listConfigHistory,
+  listKindSchemas,
   publishConfigVersion,
   retireConfigVersion,
   saveConfigLayout,
   updateConfigDraft,
   type ConfigDocumentRow,
 } from "@/lib/config-store";
-import { HIRING_MANAGER_ROLE, RECRUITER_ROLE } from "@/domain/config-defaults";
+import {
+  DEFAULT_KIND_SCHEMAS,
+  HIRING_MANAGER_ROLE,
+  RECRUITER_ROLE,
+} from "@/domain/config-defaults";
 import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
 import { createRecord } from "@/lib/records";
 import { installTenantContext, type TenantAccess } from "@/lib/tenant-context";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
+import { contactBody, customField, kindBody } from "./helpers/kind-schemas";
 
 // Fictional data only: one company workspace with two fictional teams, and a second fictional
 // workspace inserted by the owner for the isolation case (R2a-04, 0030).
@@ -164,7 +176,9 @@ describe("versioned configuration store under the split runtime roles", () => {
         body:
           type === "task-board"
             ? { name: label, columns: [buckets[p.teamId]] }
-            : { label },
+            : type === "kind-schema"
+              ? kindBody(key as ConfigurableKind, [])
+              : { label },
       }),
     );
 
@@ -389,7 +403,7 @@ describe("versioned configuration store under the split runtime roles", () => {
       const big = "x".repeat(524_288);
       const { objectId: sized, versionId: small } = await draft(
         owner,
-        "kind-schema",
+        "workflow",
         "size-probe",
       );
       await refused(
@@ -1084,8 +1098,8 @@ describe("versioned configuration store under the split runtime roles", () => {
       archived = await published(owner, "board", "hint-archived");
       await run(() => archiveConfigObject(owner, archived.objectId));
       draftOnly = await draft(owner, "template", "hint-draft");
-      retired = await published(owner, "kind-schema", "hint-retired");
-      current = await published(owner, "kind-schema", "hint-retired");
+      retired = await published(owner, "template", "hint-retired");
+      current = await published(owner, "template", "hint-retired");
       await run(() => retireConfigVersion(owner, retired.versionId));
       teamBoard = await published(ownerB, "task-board", "hint-board");
       // The other workspace's published object, written by the owner as the migration owner would.
@@ -1291,7 +1305,7 @@ describe("versioned configuration store under the split runtime roles", () => {
           body: { label: "Fictional hint-workflow" },
         });
         expect(
-          currentConfigBody(access, "kind-schema", "hint-retired"),
+          currentConfigBody(access, "template", "hint-retired"),
         ).toMatchObject({ versionId: current.versionId, number: 2 });
         expect(currentConfigBody(access, "board", "hint-archived")).toBeNull();
         expect(currentConfigBody(access, "template", "hint-draft")).toBeNull();
@@ -1307,6 +1321,551 @@ describe("versioned configuration store under the split runtime roles", () => {
         query.mockRestore();
         exec.mockRestore();
       }
+    });
+  });
+
+  // R2b-09 (job 094): kind schemas written through the store as the Fields page writes them.
+  describe("kind schemas through the Fields page (R2b-09)", () => {
+    type Field = KindSchemaBody["fields"][number];
+    const installed = () =>
+      harness
+        .dataDb()
+        .then((db) =>
+          withDeadlinesAndSnapshot(db, (tx, snapshot) =>
+            installTenantContext(tx, owner, snapshot, new ConfigBodyCache()),
+          ),
+        );
+    const inForce = async (kind: ConfigurableKind) =>
+      structuredClone(kindSchemaFor(await installed(), kind).body);
+    const fieldOf = (body: KindSchemaBody, key: string) =>
+      body.fields.find((field) => field.key === key) as Field;
+    /** Every screen of the body without the key's entries. */
+    const unlisted = (body: KindSchemaBody, key: string) => {
+      for (const screen of body.screens)
+        for (const group of screen.groups)
+          group.fields = group.fields.filter((entry) => entry.key !== key);
+    };
+    const save = (p: Principal, kind: ConfigurableKind, body: unknown) => () =>
+      createConfigDraft(p, { type: "kind-schema", key: kind, body });
+    /** Runs the call and expects its refusal, with no config row or config audit row changed. */
+    async function refusedWith(
+      call: () => Promise<unknown>,
+      status: number,
+      code: string,
+      message: string | RegExp,
+    ) {
+      const before = [await snapshot(), await audits()];
+      await expect(run<unknown>(call)).rejects.toMatchObject({
+        status,
+        code,
+        message:
+          typeof message === "string"
+            ? expect.stringContaining(message)
+            : expect.stringMatching(message),
+      });
+      expect([await snapshot(), await audits()]).toEqual(before);
+    }
+    /** The candidate draft a migration owner could write through SQL, never checked by the store. */
+    async function sqlDraft(body: unknown) {
+      await harness.asOwner();
+      const [version] = (
+        await harness.client.query<{ id: string }>(
+          `INSERT INTO app.config_versions(object_id, workspace_id, body) SELECT id, workspace_id, $1::jsonb FROM app.config_objects WHERE workspace_id = '${COMPANY}' AND type = 'kind-schema' AND key = 'candidate' RETURNING id`,
+          [JSON.stringify(body)],
+        )
+      ).rows;
+      await harness.client.query(
+        `UPDATE app.config_objects SET draft_version_id = $1 WHERE workspace_id = '${COMPANY}' AND type = 'kind-schema' AND key = 'candidate'`,
+        [version.id],
+      );
+      return version.id;
+    }
+    async function dropDraft(versionId: string) {
+      await harness.asOwner();
+      await harness.client.query(
+        `UPDATE app.config_objects SET draft_version_id = NULL WHERE draft_version_id = $1`,
+        [versionId],
+      );
+      await harness.client.query(
+        `DELETE FROM app.config_versions WHERE id = $1`,
+        [versionId],
+      );
+    }
+    const notice = customField("Fictional notice note", "short-text", {
+      help: "Fictional notice help",
+      min: 2,
+      max: 40,
+      pattern: "[A-Za-z ]+",
+      default: "Fictional default",
+    });
+
+    it("drafts, renames, regroups, reorders, publishes and archives a custom field as a company admin with fields", async () => {
+      const body = await inForce("candidate");
+      body.fields.push(notice);
+      for (const screen of body.screens)
+        screen.groups[0].fields.push({ key: notice.key });
+      const { versionId } = await run(save(fieldsAdmin, "candidate", body));
+      // Renamed, moved into its own group and the first two fields swapped, on every screen.
+      const edited = structuredClone(body);
+      fieldOf(edited, notice.key).label = "Fictional notice period note";
+      unlisted(edited, notice.key);
+      for (const screen of edited.screens) {
+        const [first, second, ...rest] = screen.groups[0].fields;
+        screen.groups[0].fields = [second, first, ...rest];
+        screen.groups.push({
+          label: "Fictional notice group",
+          fields: [{ key: notice.key }],
+        });
+      }
+      await run(() =>
+        updateConfigDraft(fieldsAdmin, versionId, { body: edited }),
+      );
+      expect(
+        await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+      ).toBe(2);
+      const published = kindSchemaFor(await installed(), "candidate");
+      expect(published).toMatchObject({ versionId, number: 2 });
+      expect(published.body).toEqual(edited);
+      expect(fieldOf(published.body, notice.key)).toEqual({
+        ...notice,
+        label: "Fictional notice period note",
+      });
+      const history = await run(() =>
+        listConfigHistory(owner, { pageSize: 100 }),
+      );
+      for (const [action, versionNumber] of [
+        ["config.draft_created", null],
+        ["config.published", 2],
+      ] as const)
+        expect(history).toContainEqual(
+          expect.objectContaining({
+            action,
+            objectType: "kind-schema",
+            objectKey: "candidate",
+            versionNumber,
+          }),
+        );
+      // Archived in a new draft and published: the definition stays, marked archived.
+      const archived = structuredClone(published.body);
+      Object.assign(fieldOf(archived, notice.key), { archived: true });
+      const next = await run(save(fieldsAdmin, "candidate", archived));
+      expect(
+        await run(() => publishConfigVersion(fieldsAdmin, next.versionId)),
+      ).toBe(3);
+      expect(fieldOf(await inForce("candidate"), notice.key)).toEqual({
+        ...notice,
+        label: "Fictional notice period note",
+        archived: true,
+      });
+      // A draft that drops the custom field's key is refused, naming it.
+      const dropped = await inForce("candidate");
+      dropped.fields = dropped.fields.filter(
+        (field) => field.key !== notice.key,
+      );
+      unlisted(dropped, notice.key);
+      for (const screen of dropped.screens)
+        screen.groups = screen.groups.filter((group) => group.fields.length);
+      await refusedWith(
+        save(fieldsAdmin, "candidate", dropped),
+        400,
+        "invalid_input",
+        `${notice.key}: a field cannot be removed; archive it instead.`,
+      );
+    });
+
+    it("lists the nine kinds with their schema in force and draft in one statement beyond install", async () => {
+      const statements = async (call: () => Promise<unknown>) => {
+        const query = vi.spyOn(harness.client, "query");
+        const exec = vi.spyOn(harness.client, "exec");
+        try {
+          await run(call);
+          return query.mock.calls.length + exec.mock.calls.length;
+        } finally {
+          query.mockRestore();
+          exec.mockRestore();
+        }
+      };
+      await run(() => listKindSchemas(fieldsAdmin));
+      const one = await statements(() =>
+        getConfigObject(fieldsAdmin, "kind-schema", "candidate"),
+      );
+      expect(await statements(() => listKindSchemas(fieldsAdmin))).toBe(one);
+      const pending = await run(
+        save(
+          owner,
+          "task",
+          kindBody("task", [customField("Fictional task note", "number")]),
+        ),
+      );
+      const listed = await run(() => listKindSchemas(fieldsAdmin));
+      expect(listed.map((item) => item.kind)).toEqual([...CONFIGURABLE_KINDS]);
+      expect(listed[0]).toMatchObject({
+        kind: "candidate",
+        current: { number: 3, body: await inForce("candidate") },
+        draft: null,
+      });
+      expect(listed.find((item) => item.kind === "vacancy")).toEqual({
+        kind: "vacancy",
+        current: {
+          versionId: DEFAULT_KIND_SCHEMAS.vacancy.versionId,
+          number: null,
+          body: DEFAULT_KIND_SCHEMAS.vacancy.body,
+        },
+        draft: null,
+      });
+      expect(listed.find((item) => item.kind === "task")?.draft).toMatchObject({
+        versionId: pending.versionId,
+        note: null,
+      });
+      for (const p of [ownerB, adminA, recruiterA, ownerToken])
+        await expect(
+          run(() => listKindSchemas(p)),
+          p.userId,
+        ).rejects.toMatchObject({ status: 403, code: "config_forbidden" });
+      await dropDraft(pending.versionId);
+    });
+
+    it("refuses removing, retyping, loosening or archiving a system field, and accepts relabelling, help, required and regrouping (FLD-033)", async () => {
+      const base = await inForce("candidate");
+      const change = (edit: (body: KindSchemaBody) => void) => {
+        const body = structuredClone(base);
+        edit(body);
+        return body;
+      };
+      const employerRequired = contactBody();
+      Object.assign(fieldOf(employerRequired, "employer"), { required: true });
+      for (const [body, message] of [
+        [
+          change((body) => {
+            body.fields = body.fields.filter(
+              (field) => field.key !== "employer",
+            );
+            unlisted(body, "employer");
+          }),
+          "employer: a field cannot be removed; archive it instead.",
+        ],
+        [
+          change((body) =>
+            Object.assign(fieldOf(body, "employer"), { type: "textarea" }),
+          ),
+          /fields\.\d+\.type: A system field keeps its type\./,
+        ],
+        [
+          change((body) =>
+            Object.assign(fieldOf(body, "name"), { required: false }),
+          ),
+          /fields\.0\.required: A required field stays required\./,
+        ],
+        [
+          change((body) =>
+            Object.assign(fieldOf(body, "employer"), { archived: true }),
+          ),
+          /fields\.\d+: Unrecognized key: "archived"/,
+        ],
+        [
+          employerRequired,
+          /screens\.0\.groups\.1\.fields\.2\.hidden: A create screen shows every required system field\./,
+        ],
+      ] as const)
+        await refusedWith(
+          save(fieldsAdmin, "candidate", body),
+          400,
+          "invalid_input",
+          message,
+        );
+      const accepted = change((body) => {
+        Object.assign(fieldOf(body, "employer"), {
+          label: "Fictional employer label",
+          help: "Fictional employer help",
+          required: true,
+        });
+        unlisted(body, "employer");
+        for (const screen of body.screens)
+          screen.groups.push({
+            label: "Fictional work group",
+            fields: [{ key: "employer" }],
+          });
+      });
+      const { versionId } = await run(save(fieldsAdmin, "candidate", accepted));
+      expect(
+        await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+      ).toBe(4);
+      const now = await inForce("candidate");
+      expect(fieldOf(now, "employer")).toMatchObject({
+        system: true,
+        label: "Fictional employer label",
+        help: "Fictional employer help",
+        type: "text",
+        required: true,
+      });
+      expect(now.screens.map((screen) => screen.groups.at(-1))).toEqual(
+        now.screens.map(() => ({
+          label: "Fictional work group",
+          fields: [{ key: "employer" }],
+        })),
+      );
+    });
+
+    it("checks a draft again at publish, and keeps custom fields off a create screen's mandatory fields at save and publish", async () => {
+      const base = await inForce("candidate");
+      // Written as the owner through SQL: name hidden on the create screen.
+      const broken = structuredClone(base);
+      for (const group of broken.screens.find(
+        (screen) => screen.action === "create",
+      )!.groups)
+        for (const entry of group.fields)
+          if (entry.key === "name") entry.hidden = true;
+      const brokenId = await sqlDraft(broken);
+      await refusedWith(
+        () => publishConfigVersion(owner, brokenId),
+        400,
+        "invalid_input",
+        /screens\.0\.groups\.0\.fields\.\d+\.hidden: A create screen shows every required system field\./,
+      );
+      await dropDraft(brokenId);
+      const start = customField("Fictional start note", "short-text");
+      const withStart = (
+        field: Record<string, unknown>,
+        entry: Record<string, unknown> = {},
+      ) => {
+        const body = structuredClone(base);
+        body.fields.push({ ...start, ...field } as Field);
+        for (const screen of body.screens)
+          screen.groups[0].fields.push({
+            key: start.key,
+            ...(screen.action === "create" ? entry : {}),
+          });
+        return body;
+      };
+      const reason = `${start.key}: custom fields cannot be required on a create screen yet.`;
+      const required = withStart({ required: true });
+      for (const body of [required, withStart({}, { mandatory: true })])
+        await refusedWith(
+          save(fieldsAdmin, "candidate", body),
+          400,
+          "invalid_input",
+          reason,
+        );
+      const requiredId = await sqlDraft(required);
+      await refusedWith(
+        () => publishConfigVersion(owner, requiredId),
+        400,
+        "invalid_input",
+        reason,
+      );
+      await dropDraft(requiredId);
+      // Hidden on create, or archived, it is not mandatory there.
+      for (const body of [
+        withStart({ required: true }, { hidden: true }),
+        withStart({ required: true, archived: true }),
+      ]) {
+        const { versionId } = await run(save(fieldsAdmin, "candidate", body));
+        await dropDraft(versionId);
+      }
+    });
+
+    it("lets only a company owner mark a field sensitive or remove the mark, at save and at publish", async () => {
+      const secret = customField("Fictional offer secret", "short-text");
+      const marked = { ...secret, sensitive: true } as unknown as CustomField;
+      const forbidden =
+        "Only a company owner can mark a field sensitive or remove the mark.";
+      await refusedWith(
+        save(fieldsAdmin, "offer", kindBody("offer", [marked])),
+        403,
+        "config_forbidden",
+        forbidden,
+      );
+      const first = await run(
+        save(owner, "offer", kindBody("offer", [marked])),
+      );
+      expect(
+        await run(() => publishConfigVersion(owner, first.versionId)),
+      ).toBe(1);
+      expect(fieldOf(await inForce("offer"), secret.key)).toMatchObject({
+        sensitive: true,
+      });
+      await refusedWith(
+        save(fieldsAdmin, "offer", kindBody("offer", [secret])),
+        403,
+        "config_forbidden",
+        forbidden,
+      );
+      // The owner drafts a second sensitive field; the admin cannot publish that draft.
+      const second = {
+        ...customField("Fictional second secret", "number"),
+        sensitive: true,
+      } as unknown as CustomField;
+      const draftBody = kindBody("offer", [marked, second]);
+      const pending = await run(save(owner, "offer", draftBody));
+      await refusedWith(
+        () => publishConfigVersion(fieldsAdmin, pending.versionId),
+        403,
+        "config_forbidden",
+        forbidden,
+      );
+      // The admin edits that draft without touching the marks, but cannot unmark in it.
+      const renamed = structuredClone(draftBody);
+      fieldOf(renamed, second.key).label = "Fictional renamed secret";
+      await run(() =>
+        updateConfigDraft(fieldsAdmin, pending.versionId, { body: renamed }),
+      );
+      const unmarked = structuredClone(renamed);
+      Object.assign(fieldOf(unmarked, second.key), { sensitive: false });
+      await refusedWith(
+        () =>
+          updateConfigDraft(fieldsAdmin, pending.versionId, {
+            body: unmarked,
+          }),
+        403,
+        "config_forbidden",
+        forbidden,
+      );
+      expect(
+        await run(() => publishConfigVersion(owner, pending.versionId)),
+      ).toBe(2);
+      expect(fieldOf(await inForce("offer"), second.key)).toMatchObject({
+        label: "Fictional renamed secret",
+        sensitive: true,
+      });
+      // A sensitive candidate field stays sensitive, whoever writes the draft.
+      const gender = await inForce("candidate");
+      Object.assign(fieldOf(gender, "explicitGender"), { sensitive: false });
+      expect(kindSchemaBodySchema.safeParse(gender).success).toBe(false);
+      await refusedWith(
+        save(owner, "candidate", gender),
+        400,
+        "invalid_input",
+        /fields\.\d+\.sensitive: A sensitive field stays sensitive\./,
+      );
+      expect(
+        Object.values(DEFAULT_KIND_SCHEMAS).flatMap(({ key, body }) =>
+          body.fields
+            .filter((field) => field.sensitive)
+            .map((field) => `${key}.${field.key}`),
+        ),
+      ).toEqual([
+        "candidate.nationalServiceStatus",
+        "candidate.explicitGender",
+      ]);
+    });
+
+    // R2b-09 (job 096): the publish re-check reads the body it publishes under a row lock.
+    it("locks a kind schema draft after the write check and never publishes a mark the admin changed", async () => {
+      /** The statements the call's transactions send to the PGlite client, in order. */
+      const statements = async (call: () => Promise<unknown>) => {
+        const texts: string[] = [];
+        const transaction = harness.client.transaction.bind(harness.client);
+        const spy = vi
+          .spyOn(harness.client, "transaction")
+          .mockImplementation((work) =>
+            transaction((tx) =>
+              work(
+                new Proxy(tx, {
+                  get: (target, key) => {
+                    const value = Reflect.get(target, key);
+                    return key === "query" || key === "exec"
+                      ? (text: string, ...rest: unknown[]) => {
+                          texts.push(text);
+                          return value.call(target, text, ...rest);
+                        }
+                      : value;
+                  },
+                }),
+              ),
+            ),
+          );
+        try {
+          await run(call);
+          return texts;
+        } finally {
+          spy.mockRestore();
+        }
+      };
+      const lock =
+        /^select body, state from app\.config_versions where id = .+ for update$/;
+      const first = await run(
+        save(owner, "interview", kindBody("interview", [])),
+      );
+      const texts = await statements(() =>
+        publishConfigVersion(owner, first.versionId),
+      );
+      const found = texts.findIndex((text) =>
+        text.includes("from app.config_versions v join app.config_objects o"),
+      );
+      const locked = texts.findIndex((text) => lock.test(text));
+      const published = texts.findIndex((text) =>
+        text.includes("tenant_context.publish_config_version"),
+      );
+      expect(found).toBeGreaterThanOrEqual(0);
+      expect(locked).toBeGreaterThan(found);
+      expect(published).toBeGreaterThan(locked);
+      expect((await version(first.versionId)).state).toBe("published");
+
+      // The admin publishes the owner's draft while the owner marks a field in it.
+      const note = customField("Fictional race note", "short-text");
+      const pending = await run(
+        save(owner, "interview", kindBody("interview", [note])),
+      );
+      // Neither a team admin nor a company admin without fields locks or publishes it.
+      await harness.asOwner();
+      await harness.client.exec(
+        `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','cfg-recruiter-a','admin','{organisation}')`,
+      );
+      try {
+        for (const p of [adminA, recruiterA]) {
+          const before = [await snapshot(), await audits()];
+          const refusal = await statements(() =>
+            expect(
+              publishConfigVersion(p, pending.versionId),
+            ).rejects.toMatchObject({ status: 403, code: "config_forbidden" }),
+          );
+          expect(
+            refusal.some((text) => lock.test(text)),
+            p.userId,
+          ).toBe(false);
+          expect([await snapshot(), await audits()]).toEqual(before);
+        }
+      } finally {
+        await harness.asOwner();
+        await harness.client.exec(
+          `DELETE FROM app.workspace_admins WHERE user_id = 'cfg-recruiter-a'`,
+        );
+      }
+      await harness.dataDb();
+      const [publish, update] = await Promise.allSettled([
+        publishConfigVersion(fieldsAdmin, pending.versionId),
+        updateConfigDraft(owner, pending.versionId, {
+          body: kindBody("interview", [
+            { ...note, sensitive: true } as unknown as CustomField,
+          ]),
+        }),
+      ]);
+      if (publish.status === "fulfilled") {
+        expect(update).toMatchObject({
+          status: "rejected",
+          reason: { status: 409, code: "config_state_conflict" },
+        });
+      } else {
+        expect(publish.reason).toMatchObject({
+          status: 403,
+          code: "config_forbidden",
+        });
+        expect(update.status).toBe("fulfilled");
+        await dropDraft(pending.versionId);
+      }
+      const marked = await look<{ count: number }>(
+        `SELECT count(*)::int AS count FROM app.config_versions v JOIN app.config_objects o ON o.id = v.object_id WHERE o.workspace_id = '${COMPANY}' AND o.type = 'kind-schema' AND o.key = 'interview' AND v.state <> 'draft' AND v.body::text LIKE '%"sensitive": true%'`,
+      );
+      expect(marked).toEqual([{ count: 0 }]);
+    });
+
+    it("refuses a kind schema whose kind is not its key", async () => {
+      await refusedWith(
+        save(owner, "checklist", kindBody("task", [])),
+        400,
+        "invalid_input",
+        "kind: a kind schema's kind is its key, checklist.",
+      );
     });
   });
 
@@ -1343,6 +1902,16 @@ describe("versioned configuration store under the split runtime roles", () => {
       await harness.client.query(
         `UPDATE app.config_objects SET current_version_id = '${versionId}' WHERE id = '${objectId}'`,
       );
+      // An envelope body published as candidate's next version, as an admin writer could before
+      // R2b-09; it is no kind schema.
+      const envelope = (
+        await harness.client.query<{ id: string; object: string }>(
+          `INSERT INTO app.config_versions(object_id, workspace_id, state, number, body, published_at) SELECT o.id, o.workspace_id, 'published', (SELECT max(number) + 1 FROM app.config_versions WHERE object_id = o.id), '{"label":"Fictional candidate"}'::jsonb, now() FROM app.config_objects o WHERE o.workspace_id = '${COMPANY}' AND o.type = 'kind-schema' AND o.key = 'candidate' RETURNING id, object_id AS object`,
+        )
+      ).rows[0];
+      await harness.client.query(
+        `UPDATE app.config_objects SET current_version_id = '${envelope.id}' WHERE id = '${envelope.object}'`,
+      );
       const access = await harness
         .dataDb()
         .then((db) =>
@@ -1365,7 +1934,7 @@ describe("versioned configuration store under the split runtime roles", () => {
           number: 1,
           body: kindSchemaFor(empty(access), "vacancy").body,
         });
-        // The shared harness published an envelope body for candidate, which is no kind schema.
+        // The envelope body published for candidate above is no kind schema.
         expect(currentConfigBody(access, "kind-schema", "candidate")).not.toBe(
           null,
         );
@@ -1577,10 +2146,14 @@ describe("configuration body schemas", () => {
   });
 
   it("refuses any key beyond the envelope, so no record id or value is stored", () => {
-    // Roles, task boards and the job architecture (job-architecture.test.ts) have their own bodies.
+    // Kind schemas, roles, task boards and the job architecture (job-architecture.test.ts) have
+    // their own bodies.
     for (const type of CONFIG_TYPES.filter(
       (type) =>
-        type !== "role" && type !== "task-board" && type !== "job-architecture",
+        type !== "kind-schema" &&
+        type !== "role" &&
+        type !== "task-board" &&
+        type !== "job-architecture",
     )) {
       expect(configBodySchemas[type].parse({ label: " Fictional " })).toEqual({
         label: "Fictional",
@@ -1592,6 +2165,16 @@ describe("configuration body schemas", () => {
         }).success,
       ).toBe(false);
     }
+    // A kind schema body is strict on every level, with its own fixture body (R2b-09).
+    expect(
+      configBodySchemas["kind-schema"].parse(kindBody("checklist", [])),
+    ).toEqual(kindBody("checklist", []));
+    expect(
+      configBodySchemas["kind-schema"].safeParse({
+        ...kindBody("checklist", []),
+        recordId: "00000000-0000-4000-a000-000000000009",
+      }).success,
+    ).toBe(false);
     // A task-board body is strict too, with its own fixture body (R2a-21).
     const board = {
       name: " Fictional ",
@@ -1620,5 +2203,100 @@ describe("configuration body schemas", () => {
         recordId: "00000000-0000-4000-a000-000000000009",
       }).success,
     ).toBe(false);
+  });
+});
+
+// R2b-09 (job 094): the publish summary, pure.
+describe("kind schema changes", () => {
+  const a = customField("Fictional first note", "short-text");
+  const b = customField("Fictional second note", "number");
+  const c = customField("Fictional third note", "date");
+  const e = customField("Fictional fifth note", "checkbox");
+  const f = customField("Fictional sixth note", "email");
+  const d = customField("Fictional added note", "url");
+  const before = kindBody("task", [a, b, c, e, f]);
+  const fieldOf = (body: KindSchemaBody, key: string) =>
+    body.fields.find((field) => field.key === key)!;
+  const ref = (field: { key: string; label: string }) => ({
+    key: field.key,
+    label: field.label,
+  });
+
+  it("lists each changed field under every category that applies, in body order", () => {
+    const after = structuredClone(before);
+    Object.assign(fieldOf(after, a.key), {
+      label: "Fictional renamed note",
+      help: "Fictional help",
+    });
+    Object.assign(fieldOf(after, b.key), { archived: true });
+    Object.assign(fieldOf(after, e.key), { sensitive: true });
+    Object.assign(fieldOf(after, "dueDate"), { required: true });
+    const edit = after.screens.find((screen) => screen.action === "edit")!;
+    edit.groups[0].fields = edit.groups[0].fields.filter(
+      (entry) => entry.key !== c.key,
+    );
+    edit.groups.push({ label: "Fictional group", fields: [{ key: c.key }] });
+    for (const entry of edit.groups[0].fields)
+      if (entry.key === f.key) entry.mandatory = true;
+    after.fields.push(d);
+    for (const screen of after.screens)
+      screen.groups[0].fields.push({ key: d.key });
+    expect(kindSchemaChanges(before, after)).toEqual({
+      added: [ref(d)],
+      renamed: [{ key: a.key, label: "Fictional renamed note" }],
+      archived: [ref(b)],
+      regrouped: [ref(c)],
+      madeMandatory: [ref(fieldOf(after, "dueDate")), ref(f)],
+      madeSensitive: [ref(e)],
+      other: [{ key: a.key, label: "Fictional renamed note" }],
+    });
+  });
+
+  it("names a changed order, a removed mark, a field made optional and a field taken off a screen as other", () => {
+    const marked = structuredClone(before);
+    Object.assign(fieldOf(marked, e.key), { sensitive: true });
+    for (const entry of marked.screens[0].groups[0].fields)
+      if (entry.key === f.key) entry.mandatory = true;
+    const after = structuredClone(marked);
+    Object.assign(fieldOf(after, e.key), { sensitive: false });
+    for (const entry of after.screens[0].groups[0].fields)
+      if (entry.key === f.key) entry.mandatory = false;
+    const view = after.screens.find((screen) => screen.action === "view")!;
+    view.groups[0].fields = view.groups[0].fields.filter(
+      (entry) => entry.key !== b.key,
+    );
+    const fields = after.screens[1].groups[0].fields;
+    const [x, y] = [
+      fields.findIndex((entry) => entry.key === "title"),
+      fields.findIndex((entry) => entry.key === "context"),
+    ];
+    [fields[x], fields[y]] = [fields[y], fields[x]];
+    expect(kindSchemaChanges(marked, after)).toEqual({
+      added: [],
+      renamed: [],
+      archived: [],
+      regrouped: [],
+      madeMandatory: [],
+      madeSensitive: [],
+      other: [
+        ref(fieldOf(after, "title")),
+        ref(fieldOf(after, "context")),
+        ref(b),
+        ref(e),
+        ref(f),
+      ],
+    });
+  });
+
+  it("gives all-empty lists for identical bodies", () => {
+    expect(kindSchemaChanges(before, structuredClone(before))).toEqual({
+      added: [],
+      renamed: [],
+      archived: [],
+      regrouped: [],
+      madeMandatory: [],
+      madeSensitive: [],
+      other: [],
+    });
   });
 });

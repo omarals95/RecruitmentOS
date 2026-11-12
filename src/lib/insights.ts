@@ -213,11 +213,11 @@ async function grouped(
   );
 }
 
-export async function overview(p: Principal) {
+export async function overview(p: Principal, channel?: "mcp") {
   const now = new Date(),
     today = dubaiToday(now);
   const result = await withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel });
     authorizeInventory(ctx, "home");
     const recentActivity = activityQuery(
       ctx,
@@ -360,9 +360,13 @@ function observedEvents(ctx: AccessContext, end: string) {
     from ${activity} where team_id=${p.teamId} and kind='application' and actor_type<>'import' and created_at<=${end}::timestamptz
     and jsonb_typeof(metadata->'toStage')='string'${inScope ? sql` and ${inScope}` : sql``}`;
 }
-export async function analytics(p: Principal, params: URLSearchParams) {
+export async function analytics(
+  p: Principal,
+  params: URLSearchParams,
+  channel?: "mcp",
+) {
   return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel });
     authorizeInventory(ctx, "analytics");
     validateParams(params, ["from", "to"]);
     const to = params.get("to") || dubaiToday();
@@ -650,10 +654,10 @@ async function activityPage(
 export async function listActivity(
   p: Principal,
   params: URLSearchParams,
-  options: { excludeKinds?: string[] } = {},
+  options: { excludeKinds?: string[]; channel?: "mcp" } = {},
 ) {
   return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel: options.channel });
     authorizeAny(
       ctx,
       RECORD_RESOURCES.map((resource) => ({
@@ -689,12 +693,12 @@ export async function listActivity(
 export async function searchWorkspace(
   p: Principal,
   query: string,
-  options: { omitCandidateFields?: readonly string[] } = {},
+  options: { omitCandidateFields?: readonly string[]; channel?: "mcp" } = {},
 ) {
   if (query.length > 500) invalid("Search is limited to 500 characters.");
   if (!query.trim()) return { groups: [], total: 0, limited: false, data: [] };
   const groups = await withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel: options.channel });
     const groups = [];
     let limited = false;
     for (const resource of [
@@ -840,10 +844,10 @@ function dueSource(ctx: AccessContext, now = new Date()): SQL | null {
       )})),
     due as(select *,kind||':'||id::text||':'||due_value as key from possible where coalesce(day,'')<>'' and day<=${horizon})`;
 }
-export async function notifications(p: Principal) {
+export async function notifications(p: Principal, channel?: "mcp") {
   const today = dubaiToday();
   return withTeam(p, async (tx, access) => {
-    const ctx = accessContext(p, access);
+    const ctx = accessContext(p, access, { channel });
     authorizeAny(ctx, dueRequests);
     const due = dueSource(ctx);
     if (!due)

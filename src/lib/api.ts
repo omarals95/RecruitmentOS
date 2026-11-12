@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApiError } from "./errors";
+import { ApiError, issueList } from "./errors";
 import { requireFreshSession } from "./fresh-session";
 import { requirePrincipal, type Principal } from "./principal";
 import { runWithServerTiming } from "./server-timing";
@@ -70,14 +70,7 @@ export async function readBody<T>(
   }
   const parsed = schema.safeParse(value);
   if (!parsed.success)
-    throw new ApiError(
-      400,
-      "invalid_input",
-      parsed.error.issues
-        .slice(0, 8)
-        .map((i) => `${i.path.join(".") || "input"}: ${i.message}`)
-        .join("; "),
-    );
+    throw new ApiError(400, "invalid_input", issueList(parsed.error.issues));
   return parsed.data;
 }
 /** A client that aborted or reset its connection; nothing is logged for it. */

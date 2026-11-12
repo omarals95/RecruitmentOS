@@ -640,7 +640,10 @@ export const TOOLS: McpTool[] = [
         p,
         "candidates",
         listQuery({ search, ...rest, status: followUpStatus }),
-        { omitFromSearch: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS] },
+        {
+          omitFromSearch: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS],
+          channel: "mcp",
+        },
       );
       return success(
         listed(
@@ -675,7 +678,7 @@ export const TOOLS: McpTool[] = [
     effect: "read",
     input: z.object({ id: z.uuid() }).strict(),
     run: async (p, input, ctx) => {
-      const row = await getRecord(p, "candidates", input.id);
+      const row = await getRecord(p, "candidates", input.id, "mcp");
       const data = row.data as Data;
       let cvs: Data[] | null = null;
       if (ctx.scopes.includes("cvs:read"))
@@ -716,7 +719,7 @@ export const TOOLS: McpTool[] = [
     effect: "read",
     input: candidateDuplicateQuerySchema,
     run: async (p, input, ctx) => {
-      const result = await findCandidateDuplicates(p, input);
+      const result = await findCandidateDuplicates(p, input, "mcp");
       // A match leaves out the contact fields the role hides.
       const hidden = hiddenKeys(ctx, "candidate");
       return success({
@@ -919,7 +922,7 @@ export const TOOLS: McpTool[] = [
       if (input.vacancyId) {
         requireAccess(ctx, INPUT_CHECKS.vacancyCvTexts);
         // A vacancy the caller cannot see is answered as a missing record.
-        await getRecord(p, "vacancies", input.vacancyId);
+        await getRecord(p, "vacancies", input.vacancyId, "mcp");
         const result = await listRecords(
           p,
           "applications",
@@ -928,6 +931,7 @@ export const TOOLS: McpTool[] = [
             page: input.page ?? 1,
             pageSize: 10,
           }),
+          { channel: "mcp" },
         );
         candidateIds = result.data.map((row) => row.candidateId as string);
         pagination = result.pagination;
@@ -1257,6 +1261,7 @@ export const TOOLS: McpTool[] = [
         p,
         "job-roles",
         listQuery({ search, ...rest }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -1331,6 +1336,7 @@ export const TOOLS: McpTool[] = [
         p,
         "vacancies",
         listQuery({ search, ...rest }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -1367,7 +1373,7 @@ export const TOOLS: McpTool[] = [
     run: async (p, input, ctx) =>
       success(
         capRecord(
-          factsOf(ctx, await getRecord(p, "vacancies", input.id)),
+          factsOf(ctx, await getRecord(p, "vacancies", input.id, "mcp")),
           GET_TEXT_LIMIT,
         ),
       ),
@@ -1429,7 +1435,9 @@ export const TOOLS: McpTool[] = [
         "Provide exactly one of candidateId or vacancyId.",
       ),
     run: async (p, input, ctx) => {
-      const result = await listRecords(p, "applications", listQuery(input));
+      const result = await listRecords(p, "applications", listQuery(input), {
+        channel: "mcp",
+      });
       return success(
         listed(
           result.data.map((row) => ({
@@ -1456,7 +1464,7 @@ export const TOOLS: McpTool[] = [
     effect: "read",
     input: z.object({ id: z.uuid() }).strict(),
     run: async (p, input, ctx) => {
-      const row = await getRecord(p, "applications", input.id);
+      const row = await getRecord(p, "applications", input.id, "mcp");
       return success(
         capRecord(
           {
@@ -1605,6 +1613,7 @@ export const TOOLS: McpTool[] = [
         p,
         "interviews",
         listQuery({ ...rest, applicationCandidateId: candidateId }),
+        { channel: "mcp" },
       );
       return success(
         listed(result.data.map((row) => interviewItem(ctx, row))),
@@ -1669,6 +1678,7 @@ export const TOOLS: McpTool[] = [
         p,
         "offers",
         listQuery({ ...rest, applicationCandidateId: candidateId }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -1751,6 +1761,7 @@ export const TOOLS: McpTool[] = [
         p,
         "onboarding",
         listQuery({ ...rest, applicationCandidateId: candidateId }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -1818,7 +1829,9 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input, ctx) => {
-      const result = await listRecords(p, "checklist", listQuery(input));
+      const result = await listRecords(p, "checklist", listQuery(input), {
+        channel: "mcp",
+      });
       return success(
         listed(
           result.data.map((row) => ({
@@ -1892,7 +1905,9 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input, ctx) => {
-      const result = await listRecords(p, "tasks", listQuery(input));
+      const result = await listRecords(p, "tasks", listQuery(input), {
+        channel: "mcp",
+      });
       return success(
         listed(result.data.map((row) => taskItem(ctx, row))),
         result.pagination,
@@ -1941,9 +1956,11 @@ export const TOOLS: McpTool[] = [
       const current = await getRecord(p, "tasks", rest.id as string);
       if (current.version !== rest.version)
         throw new ApiError(409, "version_conflict", REREAD);
-      // Only the stored values the role lets the caller change: the service keeps the others.
+      // Only the stored values the role lets the caller change: the service keeps the others. A
+      // sensitive field the role shows stays in the map, so the update never empties it (R2b-09).
+      const { channel: _mcp, ...plain } = ctx;
       const locked = new Set([
-        ...hiddenKeys(ctx, "task"),
+        ...hiddenKeys(plain, "task"),
         ...readOnlyKeys(ctx, "task"),
       ]);
       return changes("tasks")(p, {
@@ -1981,6 +1998,7 @@ export const TOOLS: McpTool[] = [
           page: input.page,
           pageSize: input.pageSize,
         }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -2066,7 +2084,9 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input, ctx) => {
-      const result = await listRecords(p, "views", listQuery(input));
+      const result = await listRecords(p, "views", listQuery(input), {
+        channel: "mcp",
+      });
       return success(
         listed(
           result.data.map((row) => ({
@@ -2109,6 +2129,7 @@ export const TOOLS: McpTool[] = [
         p,
         "comments",
         listQuery({ ...input, sort: "createdAt", direction: "asc" }),
+        { channel: "mcp" },
       );
       return success(
         listed(
@@ -2180,7 +2201,9 @@ export const TOOLS: McpTool[] = [
     run: async (p, input) => {
       // A record the caller cannot see is answered as a missing record.
       await recordKindOf(p, input.recordId);
-      const result = await listActivity(p, listQuery(input));
+      const result = await listActivity(p, listQuery(input), {
+        channel: "mcp",
+      });
       return success(
         listed(
           result.data.map((row) => ({
@@ -2208,7 +2231,7 @@ export const TOOLS: McpTool[] = [
     effect: "read",
     input: z.object({ page, pageSize }).strict(),
     run: async (p, input) => {
-      const result = await notifications(p);
+      const result = await notifications(p, "mcp");
       const start = (input.page - 1) * input.pageSize;
       return success(
         {
@@ -2264,7 +2287,7 @@ export const TOOLS: McpTool[] = [
     effect: "read",
     input: z.object({}).strict(),
     run: async (p, _input, ctx) => {
-      const result = await overview(p);
+      const result = await overview(p, "mcp");
       const { shortlisted: _personal, ...counts } = result.counts;
       return success({
         counts,
@@ -2298,7 +2321,7 @@ export const TOOLS: McpTool[] = [
       })
       .strict(),
     run: async (p, input) => {
-      const result = await analytics(p, listQuery(input));
+      const result = await analytics(p, listQuery(input), "mcp");
       // Folded so a team with many long group names stays under the result limit.
       const folded = GROUP_LISTS.map((name) => ({
         name,
@@ -2325,6 +2348,7 @@ export const TOOLS: McpTool[] = [
     run: async (p, input) => {
       const result = await searchWorkspace(p, input.query, {
         omitCandidateFields: [...SENSITIVE_CANDIDATE_FIELDS, ...SOURCE_FIELDS],
+        channel: "mcp",
       });
       return success({
         groups: result.groups.map((group) => ({

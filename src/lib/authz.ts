@@ -15,6 +15,7 @@ import {
   ACTION_RESOURCES,
   ACTIONS,
   ADMIN_AREAS,
+  CONFIGURABLE_KINDS,
   GRANTABLE_ADMIN_AREAS,
   PAGE_KEYS,
   READ_ACTIONS,
@@ -25,11 +26,13 @@ import {
   type Action,
   type ActionResource,
   type AdminArea,
+  type ConfigurableKind,
   type PageKey,
   type RecordScope,
   type RoleBody,
 } from "@/domain/config";
 import { builtInRoleFor } from "@/domain/config-defaults";
+import { kindSchemaFor } from "@/lib/config-store";
 import {
   SENSITIVE_CANDIDATE_FIELDS,
   recordDataSchemas,
@@ -782,17 +785,61 @@ function ruleHiddenKeys(role: RoleBody, kind: RecordKind): Set<string> {
 }
 
 /**
+ * The keys of one kind MCP never shows (R2b-09): SENSITIVE_CANDIDATE_FIELDS for a candidate and the
+ * key of every field the kind schema in force marks sensitive, a system key or a custom field id,
+ * with no statement. Empty on any other channel.
+ */
+export function sensitiveKeys(
+  ctx: AccessContext,
+  kind: RecordKind,
+): Set<string> {
+  const sensitive = new Set<string>();
+  if (ctx.channel !== "mcp") return sensitive;
+  if (kind === "candidate")
+    for (const key of SENSITIVE_CANDIDATE_FIELDS) sensitive.add(key);
+  if ((CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)) {
+    // An access state without documents never came from install and holds no published schema.
+    const { fields } = kindSchemaFor(
+      { documents: ctx.access.documents ?? {} },
+      kind as ConfigurableKind,
+    ).body;
+    for (const field of fields) if (field.sensitive) sensitive.add(field.key);
+  }
+  return sensitive;
+}
+
+/**
  * The keys of one kind the caller may not see: data keys, custom field ids and top-level keys whose
- * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus
- * SENSITIVE_CANDIDATE_FIELDS for an MCP candidate. Every output that leaves fields out, redact()
- * included, takes them from here.
+ * rule is hidden or hidden-unless-approver, a non-task customValues hidden by default, plus over MCP
+ * the sensitiveKeys(), with no statement. Every output that leaves fields out, redact() included,
+ * takes them from here.
  */
 export function hiddenKeys(ctx: AccessContext, kind: RecordKind): Set<string> {
   if (!ctx.role) throw forbidden();
   const hidden = ruleHiddenKeys(ctx.role, kind);
-  if (ctx.channel === "mcp" && kind === "candidate")
-    for (const key of SENSITIVE_CANDIDATE_FIELDS) hidden.add(key);
+  for (const key of sensitiveKeys(ctx, kind)) hidden.add(key);
   return hidden;
+}
+
+/**
+ * The 400 for a filter or sort that reads a key hiddenKeys() holds: the sensitive mark's words when
+ * only sensitiveKeys() hides it, the role's words otherwise.
+ */
+export function hiddenFieldRefusal(
+  ctx: AccessContext,
+  kind: RecordKind,
+  key: string,
+  use: "filter" | "sort",
+): ApiError {
+  if (!ctx.role) throw forbidden();
+  return new ApiError(
+    400,
+    "invalid_query",
+    !ruleHiddenKeys(ctx.role, kind).has(key) &&
+      sensitiveKeys(ctx, kind).has(key)
+      ? `${key} is marked sensitive, so you cannot ${use} by it.`
+      : `Your role cannot see ${key}, so you cannot ${use} by it.`,
+  );
 }
 
 /** The keys of one kind the caller's role makes read-only (rule read): data keys, custom field ids and top-level keys. */

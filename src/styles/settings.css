@@ -112,7 +112,14 @@
 .settings-page .admin-card > p {
   margin: 6px 0 0;
 }
+/* Fields: two row actions to a line beside the admin sidebar, one to a line without it. */
+.data-table.fields-table td.fields-actions {
+  min-width: 190px;
+}
 @media (max-width: 1100px) {
+  .data-table.fields-table td.fields-actions {
+    min-width: 0;
+  }
   .admin-shell {
     grid-template-columns: minmax(0, 1fr);
   }
