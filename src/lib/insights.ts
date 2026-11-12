@@ -512,6 +512,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "org-import",
   "user-account",
   "salary-brackets",
+  "user-anonymisation",
 ];
 
 /**
