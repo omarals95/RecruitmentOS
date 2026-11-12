@@ -84,6 +84,8 @@ import {
 import { AuthForm } from "../src/components/auth/auth-form";
 import { versionLabel } from "../src/lib/app-version";
 import { rules } from "./helpers/css";
+import { contactBody } from "./helpers/kind-schemas";
+import type { KindSchemaBody } from "../src/domain/config";
 
 const workspace = {
   user: {
@@ -1780,5 +1782,108 @@ describe("default screens", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// R2b-07 (job 090): a fictional configured candidate screen with a group, a reordered field, a
+// hidden field and a mandatory flag.
+describe("configured screens", () => {
+  const candidate = (email: string) =>
+    ({
+      id: "00000000-0000-4000-8000-000000000990",
+      kind: "candidate",
+      data: {
+        name: "Fictional Candidate",
+        email,
+        phone: "+971 50 000 0002",
+        employer: "Fictional Employer",
+      },
+      version: 2,
+      legacyId: null,
+      createdBy: "fictional-user",
+      privateOwnerId: null,
+      createdAt: "2026-11-08T10:00:00.000Z",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+      archivedAt: null,
+      candidateId: null,
+      vacancyId: null,
+      applicationId: null,
+      onboardingId: null,
+      bucketId: null,
+      jobRoleId: null,
+      parentRecordId: null,
+    }) as RecordDto;
+  const editor = (schema: KindSchemaBody, record?: RecordDto) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordEditor
+          resource="candidates"
+          record={record}
+          schema={schema}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+  const emailLabel = (markup: string) =>
+    /<label for="editor-email">([\s\S]*?)<\/label><input id="editor-email"([^>]*)\/>/.exec(
+      markup,
+    );
+
+  it("renders the editor's groups in order, the labelled one as a fieldset, without hidden fields", () => {
+    for (const record of [undefined, candidate("candidate@example.test")]) {
+      const markup = editor(contactBody(), record);
+      expect(markup).toContain(
+        '<fieldset class="editor-fieldset full-width"><legend>Fictional contact</legend><div class="form-grid">',
+      );
+      const phone = markup.indexOf('id="editor-phone"');
+      const email = markup.indexOf('id="editor-email"');
+      expect(phone).toBeGreaterThan(markup.indexOf("Fictional contact"));
+      expect(phone).toBeLessThan(email);
+      expect(markup.indexOf('id="editor-name"')).toBeLessThan(phone);
+      expect(markup).not.toContain('id="editor-employer"');
+      // Without a flag, email is optional.
+      expect(emailLabel(markup)![1]).toBe("Email");
+      expect(emailLabel(markup)![2]).not.toContain("required");
+    }
+  });
+
+  it("shows the view screen's groups on the profile, without hidden fields", () => {
+    const markup = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <RecordDetail
+          record={candidate("candidate@example.test")}
+          schema={contactBody()}
+          inline
+          onClose={() => {}}
+          onEdit={() => {}}
+          onRefresh={() => {}}
+          onCreate={() => {}}
+          onUpdated={() => {}}
+        />
+      </WorkspaceProvider>,
+    );
+    const heading = markup.indexOf("<h3>Fictional contact</h3>");
+    expect(heading).toBeGreaterThan(markup.indexOf("<dt>Name</dt>"));
+    expect(markup.slice(heading)).toMatch(
+      /^<h3>Fictional contact<\/h3><div class="detail-facts"><div class=""><dt>Phone<\/dt>[\s\S]*?<dt>Email<\/dt>/,
+    );
+    expect(markup).not.toContain("<dt>Employer</dt>");
+    expect(markup).not.toContain("Fictional Employer");
+  });
+
+  it("marks a mandatory field required on create, and on edit only when its stored value is filled", () => {
+    const schema = contactBody({ mandatory: true });
+    for (const markup of [
+      editor(schema),
+      editor(schema, candidate("candidate@example.test")),
+    ]) {
+      const [, label, input] = emailLabel(markup)!;
+      expect(label).toBe('Email<span aria-label="required"> *</span>');
+      expect(input).toContain('required=""');
+    }
+    const [, label, input] = emailLabel(editor(schema, candidate("")))!;
+    expect(label).toBe("Email");
+    expect(input).not.toContain("required");
   });
 });

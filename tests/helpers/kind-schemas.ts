@@ -49,6 +49,33 @@ export const kindBody = (
   return body;
 };
 /**
+ * A fictional candidate body whose create, edit and view screens list every other key in an
+ * unlabelled group, then a "Fictional contact" group with phone before email, the given flags on
+ * email, and employer hidden (R2b-07).
+ */
+export const contactBody = (email: { mandatory?: boolean } = {}) => {
+  const body = structuredClone(
+    DEFAULT_KIND_SCHEMAS.candidate.body,
+  ) as KindSchemaBody;
+  for (const screen of body.screens)
+    screen.groups = [
+      {
+        fields: screen.groups[0].fields.filter(
+          ({ key }) => !["phone", "email", "employer"].includes(key),
+        ),
+      },
+      {
+        label: "Fictional contact",
+        fields: [
+          { key: "phone" },
+          { key: "email", ...email },
+          { key: "employer", hidden: true },
+        ],
+      },
+    ];
+  return kindSchemaBodySchema.parse(body);
+};
+/**
  * Publishes the body as the kind's next current version of the default workspace, or with `draft`
  * leaves it as the object's draft for publishConfigVersion; its version id. The client must already
  * run as a role that bypasses row security, and only the schema owner may insert a published row.
