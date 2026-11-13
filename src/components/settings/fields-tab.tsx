@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useEffect,
   useId,
@@ -25,6 +26,11 @@ import {
   type CustomFieldType,
 } from "@/domain/field-types";
 import {
+  fieldWhereUsed,
+  screenLabel,
+  whereUsedText,
+} from "@/domain/field-where-used";
+import {
   CHANGE_CATEGORIES,
   kindSchemaChanges,
   kindSchemaDraftIssues,
@@ -33,7 +39,7 @@ import {
 } from "@/domain/kind-schema-changes";
 import { SENSITIVE_CANDIDATE_FIELDS } from "@/domain/record-schemas";
 import type { FieldType } from "@/domain/records";
-import { screenFor, screenKey, type Screen } from "@/domain/screens";
+import { screenFor, screenKey } from "@/domain/screens";
 import { systemFieldConfig } from "@/domain/system-fields";
 import {
   requestJson,
@@ -41,12 +47,15 @@ import {
   useWorkspace,
 } from "@/components/workspace/client";
 import { Dialog } from "@/components/ui/dialog";
-import { useConfirm } from "@/components/ui/confirm-dialog";
+import {
+  useConfirm,
+  type ConfirmOptions,
+} from "@/components/ui/confirm-dialog";
 import { actionRow, box, checks, plainError, useFocusAfter } from "./roles-tab";
 
-type Field = KindSchemaBody["fields"][number];
+export type Field = KindSchemaBody["fields"][number];
 type CustomFieldBody = Extract<Field, { system: false }>;
-type Option = { id: string; label: string };
+export type Option = { id: string; label: string; disabled?: boolean };
 /** A kind as the page edits it: its draft when one exists, else the version in force. */
 export type KindView = {
   state: KindSchemaState;
@@ -95,7 +104,7 @@ const SYSTEM_TYPE_LABELS: Record<FieldType, string> = {
   checkbox: "Checkbox",
   json: "Structured data",
 };
-const typeLabel = (field: Field) =>
+export const typeLabel = (field: Field) =>
   field.system
     ? SYSTEM_TYPE_LABELS[field.type]
     : CUSTOM_TYPE_LABELS[field.type];
@@ -108,14 +117,6 @@ const CATEGORY_LABELS: Record<ChangeCategory, string> = {
   madeSensitive: "Made sensitive",
   other: "Other changes",
 };
-const ACTION_LABELS: Record<Screen["action"], string> = {
-  create: "Create",
-  edit: "Edit",
-  view: "View",
-  transition: "Transition",
-};
-const screenLabel = (screen: Screen) =>
-  `${ACTION_LABELS[screen.action]} screen${screen.type ? ` (type ${screen.type})` : ""}`;
 
 type Attribute = "bounds" | "pattern" | "options" | "currency" | "target";
 /**
@@ -279,10 +280,10 @@ export function customDefinition(
   };
 }
 /** JSON drops the undefined attributes, as the request would. */
-const plainJson = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+export const plainJson = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 /** Each issue as `name: message`, naming the input a path starts with when it has one. */
-function issueText(
+export function issueText(
   issues: readonly { path: readonly PropertyKey[]; message: string }[],
   bounds?: [string, string],
 ) {
@@ -460,54 +461,49 @@ export function draftRefusal(
 const unchanged = (before: KindSchemaBody, after: KindSchemaBody) =>
   JSON.stringify(plainJson(before)) === JSON.stringify(plainJson(after));
 
-/** Admin > Fields: every configurable kind's fields, edited through drafts and published by kind. */
-export function FieldsTab({ access }: { access: MeAccess }) {
-  const { team } = useWorkspace();
-  const teamId = team?.id ?? null;
-  const result = useApi<{ data: KindSchemaState[] }>(
-    teamId ? "/api/v1/admin/fields" : null,
-  );
-  const kinds = result.data?.data ?? null;
-  const replace = (next: KindSchemaState) =>
-    result.setData({
-      data: (kinds ?? []).map((item) =>
-        item.kind === next.kind ? next : item,
-      ),
-    });
-  async function save(state: KindSchemaState, body: KindSchemaBody) {
-    if (state.draft) {
-      await requestJson(
-        teamId,
-        `/api/v1/admin/fields/drafts/${state.draft.versionId}`,
-        { method: "PUT", body: JSON.stringify({ body }) },
-      );
-      replace({ ...state, draft: { ...state.draft, body } });
-      result.refresh();
-      return;
-    }
-    const created = await requestJson<{ data: { versionId: string } }>(
+/** The kind's draft with this body: a PUT to its draft, or a POST that creates one; its new state. */
+export async function sendKindDraft(
+  teamId: string | null,
+  state: KindSchemaState,
+  body: KindSchemaBody,
+): Promise<KindSchemaState> {
+  if (state.draft) {
+    await requestJson(
       teamId,
-      "/api/v1/admin/fields",
-      { method: "POST", body: JSON.stringify({ kind: state.kind, body }) },
+      `/api/v1/admin/fields/drafts/${state.draft.versionId}`,
+      { method: "PUT", body: JSON.stringify({ body }) },
     );
-    replace({
-      ...state,
-      draft: {
-        versionId: created.data.versionId,
-        body,
-        note: null,
-        createdAt: new Date().toISOString(),
-      },
-    });
-    result.refresh();
+    return { ...state, draft: { ...state.draft, body } };
   }
-  async function publish(state: KindSchemaState, body: KindSchemaBody) {
-    const published = await requestJson<{ data: { number: number } }>(
-      teamId,
-      `/api/v1/admin/fields/drafts/${state.draft!.versionId}/publish`,
-      { method: "POST" },
-    );
-    replace({
+  const created = await requestJson<{ data: { versionId: string } }>(
+    teamId,
+    "/api/v1/admin/fields",
+    { method: "POST", body: JSON.stringify({ kind: state.kind, body }) },
+  );
+  return {
+    ...state,
+    draft: {
+      versionId: created.data.versionId,
+      body,
+      note: null,
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
+/** Publishes the kind's draft, whose body is `body`; its new state and version number. */
+export async function publishKindDraft(
+  teamId: string | null,
+  state: KindSchemaState,
+  body: KindSchemaBody,
+): Promise<{ state: KindSchemaState; number: number }> {
+  const published = await requestJson<{ data: { number: number } }>(
+    teamId,
+    `/api/v1/admin/fields/drafts/${state.draft!.versionId}/publish`,
+    { method: "POST" },
+  );
+  return {
+    state: {
       ...state,
       current: {
         versionId: state.draft!.versionId,
@@ -515,19 +511,173 @@ export function FieldsTab({ access }: { access: MeAccess }) {
         body,
       },
       draft: null,
+    },
+    number: published.data.number,
+  };
+}
+
+/**
+ * GET /api/v1/admin/fields for the active team, and the draft save and publish of a kind, which the
+ * Fields list and a field's detail page both send.
+ */
+export function useKindSchemas() {
+  const { team } = useWorkspace();
+  const teamId = team?.id ?? null;
+  const result = useApi<{ data: KindSchemaState[] }>(
+    teamId ? "/api/v1/admin/fields" : null,
+  );
+  const kinds = result.data?.data ?? null;
+  const replace = (next: KindSchemaState) => {
+    result.setData({
+      data: (kinds ?? []).map((item) =>
+        item.kind === next.kind ? next : item,
+      ),
     });
     result.refresh();
-    return published.data.number;
+  };
+  async function save(state: KindSchemaState, body: KindSchemaBody) {
+    replace(await sendKindDraft(teamId, state, body));
   }
+  async function publish(state: KindSchemaState, body: KindSchemaBody) {
+    const published = await publishKindDraft(teamId, state, body);
+    replace(published.state);
+    return published.number;
+  }
+  return { kinds, error: result.error, save, publish };
+}
+
+/** Admin > Fields: every configurable kind's fields, edited through drafts and published by kind. */
+export function FieldsTab({ access }: { access: MeAccess }) {
+  const { kinds, error, save, publish } = useKindSchemas();
   return (
     <FieldsPanel
       kinds={kinds}
-      error={result.error}
+      error={error}
       owner={access.companyLevel === "owner"}
       onSave={save}
       onPublish={publish}
     />
   );
+}
+
+/** The archive confirm's first sentence: the field's uses, or nothing. */
+export function whereUsedSentence(body: KindSchemaBody, key: string) {
+  const entries = fieldWhereUsed(body, key);
+  return entries.length
+    ? `Where used: ${entries.map(whereUsedText).join(", ")}.`
+    : "Where used: nothing.";
+}
+/** The archive confirm: where the field is used first, then what archiving keeps. */
+export function archiveConfirm(
+  body: KindSchemaBody,
+  field: Field,
+): ConfirmOptions {
+  return {
+    title: "Archive this field?",
+    message: `${whereUsedSentence(body, field.key)} Archive ${field.label}? It is no longer required, and every value already stored in it is kept. The field stays in this list as Archived; it cannot be deleted.`,
+    confirmLabel: "Archive field",
+  };
+}
+/**
+ * Asks with archiveConfirm, and only once confirmed gives the body with the custom field archived
+ * and kept; null for a system field or a cancel, so nothing is sent.
+ */
+export async function confirmArchive(
+  confirm: (options: ConfirmOptions) => Promise<boolean>,
+  body: KindSchemaBody,
+  field: Field,
+): Promise<KindSchemaBody | null> {
+  if (field.system || !(await confirm(archiveConfirm(body, field))))
+    return null;
+  return withField(body, { ...field, archived: true });
+}
+
+/** The notice after a draft save. */
+export const savedNotice = (body: KindSchemaBody) =>
+  `Saved to the ${body.singular} draft. Publish it to apply the change.`;
+
+type SaveDraft = (
+  state: KindSchemaState,
+  body: KindSchemaBody,
+) => Promise<void>;
+type PublishDraft = (
+  state: KindSchemaState,
+  body: KindSchemaBody,
+) => Promise<number>;
+/**
+ * A page's draft changes, shared by the Fields list and a field's detail page: a save sends the
+ * kind's new body to its draft or refuses it here (draftRefusal), archive asks first
+ * (confirmArchive) and publish publishes the kind's draft.
+ */
+export function useDraftChanges({
+  owner,
+  onSave,
+  onPublish,
+}: {
+  owner: boolean;
+  onSave: SaveDraft;
+  onPublish: PublishDraft;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [refusal, setRefusal] = useState<string[]>([]);
+  const [notice, setNotice] = useState("");
+  const { confirm, dialog } = useConfirm();
+  // Where focus goes when the control that had it is gone: Archive, or Publish with its draft.
+  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
+
+  /** Sends the kind's new body to its draft, or refuses it here; true when saved. */
+  async function save(view: KindView, next: KindSchemaBody) {
+    if (busy) return false;
+    setNotice("");
+    if (unchanged(view.body, next)) return true;
+    const issues = draftRefusal(view, next, owner);
+    setRefusal(issues);
+    if (issues.length) return false;
+    setBusy(true);
+    try {
+      await onSave(view.state, plainJson(next));
+      setNotice(savedNotice(view.body));
+      return true;
+    } catch (e) {
+      setRefusal([plainError(e)]);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function archive(view: KindView, field: Field) {
+    const next = await confirmArchive(confirm, view.body, field);
+    if (next && (await save(view, next))) focusNotice();
+  }
+  /** Publishes the kind's draft; `onDone` closes its dialog in the same render as the notice. */
+  async function publish(view: KindView, onDone: () => void) {
+    if (busy) return;
+    setBusy(true);
+    setRefusal([]);
+    try {
+      const number = await onPublish(view.state, view.body);
+      focusNotice();
+      onDone();
+      setNotice(`Published ${view.body.singular} version ${number}.`);
+    } catch (e) {
+      setRefusal([plainError(e)]);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return {
+    busy,
+    refusal,
+    setRefusal,
+    notice,
+    setNotice,
+    noticeRef,
+    focusNotice,
+    save,
+    archive,
+    publish,
+    dialog,
+  };
 }
 
 type Open =
@@ -546,17 +696,23 @@ export function FieldsPanel({
   error: string;
   /** A company owner: only they see and change the sensitive mark. */
   owner: boolean;
-  onSave?: (state: KindSchemaState, body: KindSchemaBody) => Promise<void>;
-  onPublish?: (state: KindSchemaState, body: KindSchemaBody) => Promise<number>;
+  onSave?: SaveDraft;
+  onPublish?: PublishDraft;
 }) {
   const [filter, setFilter] = useState<ConfigurableKind | typeof ALL>(ALL);
   const [open, setOpen] = useState<Open | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [refusal, setRefusal] = useState<string[]>([]);
-  const [notice, setNotice] = useState("");
-  const { confirm, dialog } = useConfirm();
-  // Where focus goes when the control that had it is gone: Archive, or Publish with its draft.
-  const [noticeRef, focusNotice] = useFocusAfter<HTMLParagraphElement>();
+  const {
+    busy,
+    refusal,
+    setRefusal,
+    notice,
+    setNotice,
+    noticeRef,
+    save,
+    archive,
+    publish,
+    dialog,
+  } = useDraftChanges({ owner, onSave, onPublish });
   const views = (kinds ?? []).map(kindView);
   const shown = views.filter(
     (view) => filter === ALL || view.state.kind === filter,
@@ -568,57 +724,6 @@ export function FieldsPanel({
     setOpen(null);
     setRefusal([]);
   };
-
-  /** Sends the kind's new body to its draft, or refuses it here; true when saved. */
-  async function save(view: KindView, next: KindSchemaBody) {
-    if (busy) return false;
-    setNotice("");
-    if (unchanged(view.body, next)) return true;
-    const issues = draftRefusal(view, next, owner);
-    setRefusal(issues);
-    if (issues.length) return false;
-    setBusy(true);
-    try {
-      await onSave(view.state, plainJson(next));
-      setNotice(
-        `Saved to the ${view.body.singular} draft. Publish it to apply the change.`,
-      );
-      return true;
-    } catch (e) {
-      setRefusal([plainError(e)]);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function archive(view: KindView, field: Field) {
-    if (
-      field.system ||
-      !(await confirm({
-        title: "Archive this field?",
-        message: `Archive ${field.label}? It is no longer required, and every value already stored in it is kept. The field stays in this list as Archived; it cannot be deleted.`,
-        confirmLabel: "Archive field",
-      }))
-    )
-      return;
-    if (await save(view, withField(view.body, { ...field, archived: true })))
-      focusNotice();
-  }
-  async function publish(view: KindView) {
-    if (busy) return;
-    setBusy(true);
-    setRefusal([]);
-    try {
-      const number = await onPublish(view.state, view.body);
-      focusNotice();
-      setOpen(null);
-      setNotice(`Published ${view.body.singular} version ${number}.`);
-    } catch (e) {
-      setRefusal([plainError(e)]);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <section className="panel stack">
@@ -653,45 +758,19 @@ export function FieldsPanel({
             <section className="stack" style={box}>
               <h3>Drafts</h3>
               <ul className="stack" style={{ margin: 0, paddingLeft: 18 }}>
-                {drafts.map((view) => {
-                  const ownerOnly =
-                    !owner &&
-                    sensitiveMarksDiffer(view.state.current.body, view.body);
-                  return (
-                    <li key={view.state.kind}>
-                      <div className="row" style={actionRow}>
-                        <span>
-                          <strong>{view.body.label}</strong>: Draft in progress.{" "}
-                          {view.state.current.number === null
-                            ? "Built-in"
-                            : `Version ${view.state.current.number}`}{" "}
-                          is in force.
-                        </span>
-                        {!ownerOnly && (
-                          <button
-                            type="button"
-                            className="button"
-                            disabled={busy || !!view.draftError}
-                            onClick={() => {
-                              setRefusal([]);
-                              setOpen({ kind: "publish", view });
-                            }}
-                          >
-                            Publish {view.body.singular} changes
-                          </button>
-                        )}
-                      </div>
-                      {ownerOnly && (
-                        <p className="muted">{OWNER_MUST_PUBLISH}</p>
-                      )}
-                      {view.draftError && (
-                        <p className="notice error" role="alert">
-                          {view.draftError}
-                        </p>
-                      )}
-                    </li>
-                  );
-                })}
+                {drafts.map((view) => (
+                  <li key={view.state.kind}>
+                    <DraftState
+                      view={view}
+                      owner={owner}
+                      busy={busy}
+                      onPublish={() => {
+                        setRefusal([]);
+                        setOpen({ kind: "publish", view });
+                      }}
+                    />
+                  </li>
+                ))}
               </ul>
             </section>
           )}
@@ -753,30 +832,10 @@ export function FieldsPanel({
                       <tr key={`${view.state.kind}:${field.key}`}>
                         <td data-label="Name">
                           <div className="stack" style={{ gap: 4 }}>
-                            <span>{field.label}</span>
-                            <span className="tag-list">
-                              <span className="tag">
-                                {field.system ? "System" : "Custom"}
-                              </span>
-                              {archived && (
-                                <span className="tag">Archived</span>
-                              )}
-                              {field.sensitive && (
-                                <span className="badge warning">Sensitive</span>
-                              )}
-                              {field.required && (
-                                <span className="tag">Required</span>
-                              )}
-                              {sharesName(
-                                view.body,
-                                field.key,
-                                field.label,
-                              ) && (
-                                <span className="badge warning">
-                                  {duplicateText(view.body)}
-                                </span>
-                              )}
-                            </span>
+                            <Link href={fieldPath(view.state.kind, field.key)}>
+                              {field.label}
+                            </Link>
+                            <FieldBadges body={view.body} field={field} />
                           </div>
                         </td>
                         <td data-label="Key">
@@ -889,7 +948,7 @@ export function FieldsPanel({
           busy={busy}
           refusal={refusal}
           onCancel={close}
-          onPublish={() => void publish(open.view)}
+          onPublish={() => void publish(open.view, () => setOpen(null))}
         />
       )}
       {dialog}
@@ -897,7 +956,80 @@ export function FieldsPanel({
   );
 }
 
-function Refusal({ issues }: { issues: string[] }) {
+/** A field's detail page. */
+export const fieldPath = (kind: ConfigurableKind, key: string) =>
+  `/app/admin/fields/${kind}/${encodeURIComponent(key)}`;
+
+/** System or Custom, and the Archived, Sensitive, Required and shared-name marks. */
+export function FieldBadges({
+  body,
+  field,
+}: {
+  body: KindSchemaBody;
+  field: Field;
+}) {
+  return (
+    <span className="tag-list">
+      <span className="tag">{field.system ? "System" : "Custom"}</span>
+      {!field.system && field.archived && <span className="tag">Archived</span>}
+      {field.sensitive && <span className="badge warning">Sensitive</span>}
+      {field.required && <span className="tag">Required</span>}
+      {sharesName(body, field.key, field.label) && (
+        <span className="badge warning">{duplicateText(body)}</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A kind's draft: the version in force and Publish or, for an admin's draft that changes a
+ * sensitive mark, the sentence that a company owner must publish it.
+ */
+export function DraftState({
+  view,
+  owner,
+  busy,
+  onPublish,
+}: {
+  view: KindView;
+  owner: boolean;
+  busy: boolean;
+  onPublish: () => void;
+}) {
+  const ownerOnly =
+    !owner && sensitiveMarksDiffer(view.state.current.body, view.body);
+  return (
+    <>
+      <div className="row" style={actionRow}>
+        <span>
+          <strong>{view.body.label}</strong>: Draft in progress.{" "}
+          {view.state.current.number === null
+            ? "Built-in"
+            : `Version ${view.state.current.number}`}{" "}
+          is in force.
+        </span>
+        {!ownerOnly && (
+          <button
+            type="button"
+            className="button"
+            disabled={busy || !!view.draftError}
+            onClick={onPublish}
+          >
+            Publish {view.body.singular} changes
+          </button>
+        )}
+      </div>
+      {ownerOnly && <p className="muted">{OWNER_MUST_PUBLISH}</p>}
+      {view.draftError && (
+        <p className="notice error" role="alert">
+          {view.draftError}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function Refusal({ issues }: { issues: string[] }) {
   return (
     <div className="notice error" role="alert">
       {issues.length === 1 ? (
@@ -1221,7 +1353,8 @@ function NameInput({
 
 /**
  * Edit one field: name, help text, group and Required for every field, the validation attributes
- * of a custom field (never its type or options) and, for a company owner, Sensitive.
+ * of a custom field (never its type or options, which its detail page edits) and, for a company
+ * owner, Sensitive. A default is chosen from the enabled options only.
  */
 export function FieldEditor({
   body,
@@ -1369,7 +1502,9 @@ export function FieldEditor({
               owner={owner}
               options={
                 "options" in field
-                  ? field.options.map((option) => option.label)
+                  ? field.options
+                      .filter((option) => !option.disabled)
+                      .map((option) => option.label)
                   : null
               }
               labels={labels}
