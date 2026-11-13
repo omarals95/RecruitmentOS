@@ -1365,6 +1365,28 @@ describe("OpenAPI contract", () => {
     ).toEqual(["kind", "fieldId"]);
   });
 
+  // R2b-10 (job 102): read-only screen entries and the publish check of required fields.
+  it("documents read-only screen entries in the draft body and the required-field check at publish (R2b-10)", () => {
+    const text = (path: string, method: string) =>
+      JSON.stringify(document.paths[path][method]);
+    for (const [path, method] of [
+      ["/api/v1/admin/fields", "post"],
+      ["/api/v1/admin/fields/drafts/{versionId}", "put"],
+    ] as const)
+      for (const rule of [
+        "fields:[{key, hidden?, mandatory?, readOnly?}]",
+        "A read-only field cannot be hidden or mandatory",
+        "A create screen lets people fill every required system field",
+      ])
+        expect(text(path, method), path).toContain(rule);
+    const publish = text(
+      "/api/v1/admin/fields/drafts/{versionId}/publish",
+      "post",
+    );
+    expect(publish).toContain("Required but not on the create screen");
+    expect(publish).toContain("400 invalid_input with up to 8 reasons");
+  });
+
   it("documents the salary bracket operations as session-only and confidential, with their codes (ADM-25)", () => {
     const text = (path: string, method: string) =>
       JSON.stringify(document.paths[path][method]);
