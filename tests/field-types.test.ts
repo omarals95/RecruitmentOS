@@ -404,6 +404,36 @@ describe("field type engine (R2b-03)", () => {
     expect(refused("dropdown", { default: "opt-1" })).toBe(false);
     expect(refused("multi-select", { default: ["opt-1", "opt-1"] })).toBe(true);
     expect(refused("multi-select", { default: ["opt-1"] })).toBe(false);
+    // ADM-29: an option may be disabled; it is never a default, yet stays a valid value.
+    const disabled = {
+      options: options(3).map((option, index) =>
+        index === 1 ? { ...option, disabled: true } : option,
+      ),
+    };
+    expect(refused("dropdown", disabled)).toBe(false);
+    expect(refused("dropdown", { ...disabled, default: "opt-0" })).toBe(false);
+    for (const [type, value] of [
+      ["dropdown", "opt-1"],
+      ["multi-select", ["opt-0", "opt-1"]],
+    ] as const) {
+      const issues =
+        customFieldSchema.safeParse(
+          definition(type, { ...disabled, default: value }),
+        ).error?.issues ?? [];
+      expect(
+        issues.map(({ path, message }) => [path, message]),
+        type,
+      ).toEqual([[["default"], "The default cannot be a disabled option."]]);
+      expect(
+        fieldValueSchema(parsed(type, disabled)).safeParse(value).success,
+        type,
+      ).toBe(true);
+    }
+    expect(
+      refused("dropdown", {
+        options: [{ id: "opt-x", label: "Fictional", disabled: "yes" }],
+      }),
+    ).toBe(true);
     expect(refused("number", { min: 0, max: 10, default: 11 })).toBe(true);
     expect(refused("money", { default: "12.345" })).toBe(true);
     expect(refused("money", { default: "100.00" })).toBe(false);

@@ -169,8 +169,9 @@ export function sensitiveMarksDiffer(
 /**
  * Why the store refuses this body against the version in force, beyond the body schema: every field
  * in force is kept with the same system flag and type (keys are immutable, FLD-013 and FLD-015), and
- * no custom field is mandatory on a create screen while app forms cannot fill it (R2b-09 assumption
- * 6). Each message starts with the field's key.
+ * every option in force with its id, since stored values hold option ids (FLD-022), and no custom
+ * field is mandatory on a create screen while app forms cannot fill it (R2b-09 assumption 6). Each
+ * message starts with the field's key.
  */
 export function kindSchemaDraftIssues(
   inForce: KindSchemaBody,
@@ -186,6 +187,18 @@ export function kindSchemaDraftIssues(
       );
     else if (now.system !== field.system || now.type !== field.type)
       issues.push(`${field.key}: a field keeps its type.`);
+    else if (
+      !field.system &&
+      !now.system &&
+      "options" in field &&
+      "options" in now &&
+      field.options.some(
+        (option) => !now.options.some((kept) => kept.id === option.id),
+      )
+    )
+      issues.push(
+        `${field.key}: an option cannot be removed; disable it instead.`,
+      );
   }
   const mandatory = new Set(
     body.screens
