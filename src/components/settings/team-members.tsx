@@ -10,6 +10,7 @@ import {
 } from "react";
 import { UserPlus } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { rolesFor, type TeamRole } from "@/lib/auth-policy";
 import type { MemberRoles } from "@/lib/member-roles";
 import {
   ClientError,
@@ -46,7 +47,7 @@ interface TeamDetails {
   members: TeamMember[];
   invitations: TeamInvitation[];
 }
-export type TeamRole = "owner" | "admin" | "recruiter" | "viewer";
+export { rolesFor, type TeamRole };
 export const roleDescriptions: Record<TeamRole, string> = {
   owner: "Full team administration and recruitment access",
   admin: "Manage members, recruitment and imports",
@@ -131,13 +132,6 @@ export function teamRequests(
         { method: "PUT", body: JSON.stringify({ archived }) },
       ),
   };
-}
-
-/** The team roles the caller may give: only an owner gives Owner. */
-export function rolesFor(role: string | null): TeamRole[] {
-  return role === "owner"
-    ? ["owner", "admin", "recruiter", "viewer"]
-    : ["admin", "recruiter", "viewer"];
 }
 
 /** Only an owner resets two-step sign-in, and never their own (they use backup codes or Account settings). */

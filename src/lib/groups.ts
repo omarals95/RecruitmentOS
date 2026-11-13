@@ -140,7 +140,7 @@ const forbidden = () =>
     "group_forbidden",
     "Changing groups needs a company owner, or a company admin with the People area, signed in.",
   );
-const ownerRequired = () =>
+export const ownerRequired = () =>
   new ApiError(
     403,
     "group_owner_required",
@@ -228,6 +228,9 @@ const conflictDetail = z.object({
   count: z.number().int().positive(),
 });
 const NAMED_PEOPLE = 5;
+/** The two-roles sentence (D30) for the people listed, by name, and the team's name. */
+export const roleConflictMessage = (listed: string, team: string) =>
+  `This would give ${listed} two roles in ${team}. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.`;
 
 /**
  * As refusalOf, plus the two-roles refusal (RQ024) as 409 group_role_conflict, naming the people
@@ -266,7 +269,7 @@ async function refusal(
   return new ApiError(
     409,
     "group_role_conflict",
-    `This would give ${listed} two roles in ${team?.name ?? "this team"}. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.`,
+    roleConflictMessage(listed, team?.name ?? "this team"),
   );
 }
 

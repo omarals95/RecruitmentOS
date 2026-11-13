@@ -27,16 +27,16 @@ import type { TenantAccess } from "@/lib/tenant-context";
 // columns, checks and database guards as the org and directory services. Cell values are text facts.
 
 export const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
-const MAX_ROWS = 20_000;
+export const MAX_ROWS = 20_000;
 const MAX_ENTRIES = 2_000;
 const MAX_EXPANDED = 50 * 1024 * 1024;
 /** Each list in a response; the counts are always complete. */
-const LIST_LIMIT = 500;
+export const LIST_LIMIT = 500;
 /** Rows per write statement. */
 const CHUNK = 1_000;
 const DATA_DESCRIPTOR = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
 /** The activity insert policy (tenant_context.allows_event) needs one of these in the context. */
-const AUDIT_SCOPES = [
+export const AUDIT_SCOPES = [
   "candidates:write",
   "recruitment:write",
   "cvs:write",
@@ -143,7 +143,7 @@ const tooLarge = () =>
     "import_too_large",
     "The file is larger than 5 MiB. Split the workbook and import each part.",
   );
-const unreadable = () =>
+export const unreadable = () =>
   new ApiError(
     422,
     "import_unreadable",
@@ -375,9 +375,9 @@ type CellValue = string | number | boolean | Date | null;
 /** Thrown inside a row reader; the row is rejected with this reason. */
 class RowError extends Error {}
 /** The text a formula or CSV injection starts with, as safeCsvCell checks it. */
-const FORMULA_LIKE = /^\s*[=+\-@\t\r]/;
+export const FORMULA_LIKE = /^\s*[=+\-@\t\r]/;
 /** A zero-based column index as its spreadsheet letters: A, B, …, Z, AA, … */
-const columnLetter = (index: number): string =>
+export const columnLetter = (index: number): string =>
   (index >= 26 ? columnLetter(Math.floor(index / 26) - 1) : "") +
   String.fromCharCode(65 + (index % 26));
 
