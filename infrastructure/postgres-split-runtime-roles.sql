@@ -180,6 +180,8 @@ GRANT EXECUTE ON FUNCTION tenant_context.group_grants(uuid) TO recruitmentos_dat
 GRANT EXECUTE ON FUNCTION tenant_context.computed_group_members(text) TO recruitmentos_data;
 -- A count only, for company owners and company admins with fields (0055).
 GRANT EXECUTE ON FUNCTION tenant_context.field_usage(text, uuid) TO recruitmentos_data;
+-- Delegated group managers: whether the session's actor manages a group, that boolean only (0056).
+GRANT EXECUTE ON FUNCTION tenant_context.manages_group(uuid) TO recruitmentos_data;
 -- The public branding token set, read with no tenant context before sign-in (0053).
 GRANT EXECUTE ON FUNCTION tenant_context.public_branding() TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.add_assignment(uuid, text, text) TO recruitmentos_data;

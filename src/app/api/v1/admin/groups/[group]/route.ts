@@ -25,8 +25,9 @@ export async function GET(request: Request, ctx: Context) {
   );
 }
 /**
- * Exactly one of {name, description?} (rename) or {archived: true} (archive). A group that grants
- * something is changed only by a company owner with a recent sign-in.
+ * Exactly one of {name, description?} (rename) or {archived: true, replacements?} (archive, with a
+ * replacement or null for each group that uses it). A group that grants something is changed only
+ * by a company owner with a recent sign-in.
  */
 export async function PATCH(request: Request, ctx: Context) {
   return runApi(
@@ -36,11 +37,12 @@ export async function PATCH(request: Request, ctx: Context) {
       noQuery.parse(Object.fromEntries(new URL(request.url).searchParams));
       const { group } = await ctx.params;
       const id = groupId.parse(group);
-      const body = await readBody(request, groupPatch, 4096);
+      // At most 200 replacements of two ids each.
+      const body = await readBody(request, groupPatch, 32 * 1024);
       return json({
         data:
           "archived" in body
-            ? await archiveGroup(p, id)
+            ? await archiveGroup(p, id, body.replacements)
             : await renameGroup(
                 p,
                 id,

@@ -11,7 +11,11 @@ import {
 } from "@/components/workspace/client";
 import type { MeAccess } from "./admin-portal";
 import { CreateTeam, ensure } from "./create-team";
-import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
+import {
+  SettingsNavigation,
+  useAdminPortalLink,
+  useManagedGroupsLink,
+} from "./settings-navigation";
 import { roleDescriptions, TeamMembers, type TeamRole } from "./team-members";
 
 interface TeamSummary {
@@ -38,6 +42,7 @@ function TeamSettingsContent() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const adminPortal = useAdminPortalLink();
+  const managedGroups = useManagedGroupsLink();
   // The company level decides whether the members list shows the Configured role column.
   const me = useApi<{ data: MeAccess }>(team ? "/api/v1/me/access" : null);
   const load = useCallback(async () => {
@@ -115,7 +120,10 @@ function TeamSettingsContent() {
         </div>
         <Users size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation adminPortal={adminPortal} />
+      <SettingsNavigation
+        adminPortal={adminPortal}
+        managedGroups={managedGroups}
+      />
       {error && (
         <div className="notice error" role="alert">
           {error} Your unsaved fields are retained.
