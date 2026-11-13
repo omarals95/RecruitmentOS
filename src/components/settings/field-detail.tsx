@@ -437,7 +437,11 @@ export function OptionsEditor({
     <div className="stack">
       <ol className="stack field-options">
         {options.map((option, index) => (
-          <li key={option.id} className="row" style={actionRow}>
+          <li
+            key={option.id}
+            className="row"
+            style={{ ...actionRow, alignItems: "end" }}
+          >
             <label className="field">
               <span>Option {index + 1}</span>
               <input
