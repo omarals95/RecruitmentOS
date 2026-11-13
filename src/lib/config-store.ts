@@ -610,6 +610,33 @@ export async function listKindSchemas(
   });
 }
 
+/**
+ * A count only: the records of the kind, in every team of the company, holding a value of one
+ * custom field of the kind schema in force (tenant_context.field_usage). Company owners and admins
+ * with fields, signed in; everyone else is refused before the helper runs, and the helper's own
+ * 42501 is the same refusal. A key that is no custom field in force is not found, found without a
+ * statement. Writes no activity.
+ */
+export async function fieldUsage(
+  p: Principal,
+  kind: ConfigurableKind,
+  fieldId: string,
+): Promise<{ count: number }> {
+  return inStore(p, async (tx, access) => {
+    requireWrite(p, access, "kind-schema");
+    if (
+      !kindSchemaFor(access, kind).body.fields.some(
+        (field) => !field.system && field.key === fieldId,
+      )
+    )
+      throw notFound();
+    const { rows } = await tx.execute<{ count: number }>(
+      sql`select tenant_context.field_usage(${kind}, ${fieldId}::uuid) as count`,
+    );
+    return { count: rows[0].count };
+  });
+}
+
 /** Company owners and admins only: config events of every team in the workspace, newest first. */
 export async function listConfigHistory(
   p: Principal,

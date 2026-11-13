@@ -1635,7 +1635,7 @@ export function GET() {
   const fieldsWriteRule =
     "Session only: a signed-in company owner, or a company admin with the fields area; Bearer tokens, including MCP OAuth tokens, get 403 session_required, and anyone else, team owners and admins without company authority and company admins without fields included, gets 403 config_forbidden.";
   const fieldsBodyRule =
-    "body is the whole kind schema of the kind: {kind, label, singular, fields, screens}, with the kind's system fields {key, system:true, label, help?, type, options?, required, readOnly, sensitive} and custom fields {key (a uuid), system:false, label, help?, type (one of the 18 field types), required, archived?, sensitive?, and the attributes the type takes}, and screens {type?, action, groups:[{label?, fields:[{key, hidden?, mandatory?}]}]}. The strict schema refuses any other key, a system field with another type or options, a loosened required or read-only flag, a sensitive candidate field unmarked, and a broken screen rule (a missing default create, edit or view screen, a required system field left off or hidden on a create screen, an entry both hidden and mandatory or listed twice) with 400 invalid_input naming up to 8 reasons as path: message. Against the kind schema in force, every field is kept with the same system flag and type (a field cannot be removed; archive it instead, and its key never changes), and no custom field is mandatory on a create screen yet; both refuse with 400 invalid_input naming the key. Only a company owner may mark a field sensitive or remove the mark: anyone else gets 403 config_forbidden. Nothing is stored on a refusal.";
+    "body is the whole kind schema of the kind: {kind, label, singular, fields, screens}, with the kind's system fields {key, system:true, label, help?, type, options?, required, readOnly, sensitive} and custom fields {key (a uuid), system:false, label, help?, type (one of the 18 field types), required, archived?, sensitive?, types? (1 to 30 unique record type uuids the field applies to; absent means every record of the kind, and there is never a team key), and the attributes the type takes, a dropdown's or multi-select's options as [{id, label, disabled?}] with unique ids and labels and a default that is no disabled option}, and screens {type?, action, groups:[{label?, fields:[{key, hidden?, mandatory?}]}]}. The strict schema refuses any other key, a system field with another type or options, a loosened required or read-only flag, a sensitive candidate field unmarked, and a broken screen rule (a missing default create, edit or view screen, a required system field left off or hidden on a create screen, an entry both hidden and mandatory or listed twice) with 400 invalid_input naming up to 8 reasons as path: message. Against the kind schema in force, every field is kept with the same system flag and type (a field cannot be removed; archive it instead, and its key never changes), every option of a custom field is kept with its id (an option cannot be removed; disable it instead, and a rename changes only its label, so stored values keep their option id), and no custom field is mandatory on a create screen yet; both refuse with 400 invalid_input naming the key. Only a company owner may mark a field sensitive or remove the mark: anyone else gets 403 config_forbidden. Nothing is stored on a refusal.";
   const fieldsShape =
     "{data:[{kind, current:{versionId, number|null, body}, draft:{versionId, body, note, createdAt}|null}]}";
   const fieldsVersionParameter = { ...idParameter, name: "versionId" };
@@ -1704,10 +1704,38 @@ export function GET() {
       [],
       {
         summary: "Publish a kind schema draft",
-        description: `${fieldsWriteRule} versionId is the draft's version id. The draft is parsed and checked again against the kind schema in force before it is published, so a broken screen rule or a removed field returns 400 invalid_input with the reason and nothing is published; a draft whose sensitive marks differ from the version in force is published only by a company owner (403 config_forbidden otherwise). Publishing makes the draft the version in force with the next number, read at once by saving, validation and exports; older versions stay as they were. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
+        description: `${fieldsWriteRule} versionId is the draft's version id. The draft is parsed and checked again against the kind schema in force before it is published, so a broken screen rule, a removed field or a removed option returns 400 invalid_input with the reason and nothing is published; a draft whose sensitive marks differ from the version in force is published only by a company owner (403 config_forbidden otherwise). Publishing makes the draft the version in force with the next number, read at once by saving, validation and exports; older versions stay as they were. A version of another configuration type returns 404 not_found; a version that is not a draft returns 409 config_state_conflict. Writes one config.published row, listed in GET /api/v1/config-history. Returns {data:{versionId, number}}.`,
       },
       { "200": { description: "{data:{versionId, number}}." } },
       { sessionOnly: true, params: [fieldsVersionParameter] },
+    ),
+  };
+  // Field usage (ADM-29): a count only, shown on the field detail page.
+  paths["/api/v1/admin/fields/usage"] = {
+    get: operation(
+      [],
+      {
+        summary: "Count the records holding a value of a custom field",
+        description: `${fieldsWriteRule} kind is one of the nine configurable kinds and fieldId a uuid; a missing or invalid kind or fieldId, or any other query key, returns 400 invalid_input, with nothing run. A fieldId that is not a custom field of the kind schema in force returns 404 not_found. A count only, across every team of the company, archived records and archived teams included, through the owner-run helper tenant_context.field_usage: the records of the kind whose customValues hold the field with a value other than null, "" and []. It never returns an id, value, option, team, date or per-team breakdown, and a sensitive field is counted the same way. Nothing is audited. Returns {data:{count}}.`,
+      },
+      { "200": { description: "{data:{count}}" } },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "kind",
+            in: "query",
+            required: true,
+            schema: { enum: [...CONFIGURABLE_KINDS] },
+          },
+          {
+            name: "fieldId",
+            in: "query",
+            required: true,
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+      },
     ),
   };
   // Roles & permissions (R2a-12): session only, company owners only, no MCP tool and no API token.

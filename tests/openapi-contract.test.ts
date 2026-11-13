@@ -1262,6 +1262,39 @@ describe("OpenAPI contract", () => {
     expect(text("/api/v1/admin/fields", "get")).toContain(
       "{data:[{kind, current:{versionId, number|null, body}, draft:",
     );
+    // ADM-29: options by id with a disabled flag, a custom field's record types, and the count.
+    expect(
+      text("/api/v1/admin/fields/drafts/{versionId}/publish", "post"),
+    ).toContain("a removed option returns 400 invalid_input");
+    for (const [path, method] of labels.slice(1, 3))
+      for (const rule of [
+        "[{id, label, disabled?}]",
+        "types? (1 to 30 unique record type uuids",
+        "an option cannot be removed; disable it instead",
+      ])
+        expect(text(path, method), path).toContain(rule);
+    const usage = document.paths["/api/v1/admin/fields/usage"].get;
+    expect(usage["x-session-only"]).toBe(true);
+    expect(usage["x-required-scopes"]).toEqual([]);
+    expect(Object.keys(usage.responses)).toEqual(
+      expect.arrayContaining(["200", "400", "401", "403", "404", "500"]),
+    );
+    for (const code of [
+      "session_required",
+      "config_forbidden",
+      "invalid_input",
+      "not_found",
+      "{data:{count}}",
+      "tenant_context.field_usage",
+    ])
+      expect(text("/api/v1/admin/fields/usage", "get")).toContain(code);
+    expect(
+      (
+        usage as unknown as { parameters: { in: string; name: string }[] }
+      ).parameters
+        .filter((parameter) => parameter.in === "query")
+        .map((parameter) => parameter.name),
+    ).toEqual(["kind", "fieldId"]);
   });
 
   it("documents the salary bracket operations as session-only and confidential, with their codes (ADM-25)", () => {
@@ -1418,6 +1451,7 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/admin/fields",
         "PUT /api/v1/admin/fields/drafts/{versionId}",
         "POST /api/v1/admin/fields/drafts/{versionId}/publish",
+        "GET /api/v1/admin/fields/usage",
         "GET /api/v1/roles",
         "POST /api/v1/roles",
         "PUT /api/v1/roles/{id}",
