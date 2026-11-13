@@ -86,9 +86,12 @@ import {
 } from "../scripts/db-role-evidence";
 import { templateGrantMatrix } from "../scripts/runtime-role-template";
 import { installTenantContext } from "../src/lib/tenant-context";
+import { GRANTABLE_ADMIN_AREAS } from "../src/domain/config";
+import type { Principal } from "../src/lib/principal";
 import {
   createSplitRoleDb,
   readRuntimeRoleTemplate,
+  seedApiToken,
   seedIdentity,
   splitRoles,
 } from "./helpers/db";
@@ -1594,6 +1597,162 @@ describe("split runtime role template", () => {
         config: ["search_path=pg_catalog, pg_temp"],
       },
     ]);
+  });
+
+  it("grants nothing new to the data role and admits domain activity only from a company owner (0054)", async () => {
+    const company = "00000000-0000-4000-a000-000000000001";
+    const db = await harness.asOwner();
+    // The same fictional company owner as the cases above; seeding is idempotent.
+    const owner = await seedIdentity(db, {
+      userId: "grants-config-owner",
+      teamId: "grants-config-team",
+    });
+    // A newly created team: its owner holds no company authority.
+    const teamOwner = await seedIdentity(db, {
+      userId: "grants-domain-team-owner",
+      teamId: "grants-domain-team-b",
+    });
+    const admin = await seedIdentity(db, {
+      userId: "grants-domain-admin",
+      teamId: owner.teamId,
+      role: "recruiter",
+    });
+    const token = await seedApiToken(db, owner);
+    await harness.asSuperuser();
+    await harness.client.query(
+      `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ($1,$2,'admin',$3)`,
+      [company, admin.userId, [...GRANTABLE_ADMIN_AREAS]],
+    );
+    // A domain row of team B, written as the owner of the database to be read across teams.
+    const teamBRow = (
+      await harness.client.query<{ id: string }>(
+        `INSERT INTO app.activity(team_id,actor_id,actor_type,action,kind,summary,metadata)
+         VALUES ($1,$2,'session','domain.url_recorded','domain','Fictional team B domain row',$3) RETURNING id`,
+        [
+          teamOwner.teamId,
+          teamOwner.userId,
+          { workspaceId: company, to: "https://recruitment.example.test" },
+        ],
+      )
+    ).rows[0].id;
+    const row = (
+      values: {
+        team?: string;
+        actor?: string;
+        actorType?: string;
+        token?: string;
+        record?: string;
+        action?: string;
+        kind?: string;
+        workspaceId?: string;
+      } = {},
+    ) =>
+      `INSERT INTO app.activity(team_id,record_id,actor_id,actor_type,token_id,action,kind,summary,metadata) VALUES ('${values.team ?? owner.teamId}',${values.record ? `'${values.record}'` : "NULL"},'${values.actor ?? owner.userId}','${values.actorType ?? "session"}',${values.token ? `'${values.token}'` : "NULL"},'${values.action ?? "domain.url_changed"}','${values.kind ?? "domain"}','Fictional domain row','{"workspaceId":"${values.workspaceId ?? company}","from":"https://recruitment.example.test","to":"https://careers.example.test"}')`;
+    const as = (p: Principal | null, statement: string) =>
+      harness.dataDb().then((data) =>
+        withDeadlinesAndSnapshot(data, async (tx, snapshot) => {
+          if (p) await installTenantContext(tx, p, snapshot);
+          return (await tx.execute<{ id: string }>(sql.raw(statement))).rows;
+        }),
+      );
+    const written = async () => {
+      await harness.asSuperuser();
+      return (
+        await harness.client.query(
+          "SELECT count(*)::int AS count FROM app.activity WHERE summary = 'Fictional domain row'",
+        )
+      ).rows[0];
+    };
+
+    await as(owner, row());
+    expect(await written()).toEqual({ count: 1 });
+    const domainIds = "SELECT id FROM app.activity WHERE kind = 'domain'";
+    expect((await as(owner, domainIds)).map((r) => r.id)).toContain(teamBRow);
+
+    const refused: [string, Principal | null, string][] = [
+      [
+        "a company admin with every grantable area",
+        admin,
+        row({ actor: admin.userId }),
+      ],
+      [
+        "a team owner without company authority",
+        teamOwner,
+        row({ team: teamOwner.teamId, actor: teamOwner.userId }),
+      ],
+      ["a token context", token, row({ token: token.tokenId })],
+      ["a token context as a session row", token, row()],
+      ["no context", null, row()],
+      ["another action", owner, row({ action: "domain.url_removed" })],
+      ["a general action", owner, row({ action: "updated" })],
+      [
+        "a record",
+        owner,
+        row({ record: "00000000-0000-4000-a000-0000000000d1" }),
+      ],
+      [
+        "a token id",
+        owner,
+        row({ token: "00000000-0000-4000-a000-0000000000d2" }),
+      ],
+      ["another actor", owner, row({ actor: admin.userId })],
+      ["a token actor type", owner, row({ actorType: "token" })],
+      [
+        "another workspace",
+        owner,
+        row({ workspaceId: "00000000-0000-4000-a000-0000000000d3" }),
+      ],
+      ["a malformed workspace id", owner, row({ workspaceId: "not-a-uuid" })],
+      [
+        "the general branch for a team owner",
+        teamOwner,
+        row({
+          team: teamOwner.teamId,
+          actor: teamOwner.userId,
+          action: "updated",
+        }),
+      ],
+    ];
+    for (const [name, p, statement] of refused)
+      await expect(as(p, statement), name).rejects.toMatchObject({
+        cause: { code: "42501" },
+      });
+    expect(await written()).toEqual({ count: 1 });
+
+    // Without company owner authority, another team's domain row stays unreadable.
+    expect((await as(admin, domainIds)).map((r) => r.id)).not.toContain(
+      teamBRow,
+    );
+    const ownerRow = (await as(owner, domainIds)).find(
+      (r) => r.id !== teamBRow,
+    );
+    expect(ownerRow).toBeDefined();
+    expect((await as(teamOwner, domainIds)).map((r) => r.id)).toEqual([
+      teamBRow,
+    ]);
+    expect(await as(token, domainIds)).not.toContainEqual({ id: teamBRow });
+
+    // No new function, table or grant: the data role's helpers are the reviewed list, unchanged.
+    await harness.dataDb();
+    const { evidence } = await collectRoleEvidence(
+      harness.client,
+      "data",
+      async () => false,
+    );
+    expect([...evidence.execute].sort()).toEqual([...dataRoleHelpers].sort());
+    expect(evidence.tablePrivileges["app.activity"]).toEqual([
+      "INSERT",
+      "SELECT",
+      "UPDATE",
+    ]);
+    await harness.asSuperuser();
+    expect(
+      (
+        await harness.client.query(
+          "SELECT count(*)::int AS count FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app','tenant_context') AND p.proname LIKE '%domain%'",
+        )
+      ).rows,
+    ).toEqual([{ count: 0 }]);
   });
 });
 

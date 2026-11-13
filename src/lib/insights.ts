@@ -518,6 +518,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "salary-brackets",
   "user-anonymisation",
   "group",
+  "domain",
 ];
 
 /**
