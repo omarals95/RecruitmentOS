@@ -39,7 +39,7 @@ import {
   UserAnonymisedPanel,
 } from "./user-anonymisation";
 import { USER_DETAIL_TABS, type UserDetailTab } from "./user-detail-tabs";
-import { levels, statuses, teamRoles } from "./users-tab";
+import { levels, ROLE_CONFLICT, statuses, teamRoles } from "./users-tab";
 
 export type { UserDetailTab, WorkspacePerson };
 
@@ -596,7 +596,11 @@ function TeamsTab({ person }: { person: WorkspacePerson }) {
                       : (teamRoles[item.teamRole] ?? item.teamRole)}
                   </td>
                   <td data-label="Configured role">
-                    {item.configuredRole ?? "Team role only"}
+                    {item.roleConflict
+                      ? ROLE_CONFLICT
+                      : item.configuredRole
+                        ? `${item.configuredRole}${item.roleGroup ? ` (through ${item.roleGroup})` : ""}`
+                        : "Team role only"}
                   </td>
                 </tr>
               ))}

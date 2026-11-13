@@ -6,6 +6,7 @@ export const GROUP_DETAIL_TABS = [
   { key: "members", label: "Members" },
   { key: "member-of", label: "Member of" },
   { key: "managers", label: "Managers" },
+  { key: "roles", label: "Roles" },
   { key: "where-used", label: "Where used" },
   { key: "audit", label: "Audit" },
 ] as const;

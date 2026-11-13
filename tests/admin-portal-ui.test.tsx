@@ -178,10 +178,12 @@ import {
 import {
   MembersTable,
   TeamMembers,
+  groupRoleLine,
   teamRequests,
   type TeamClient,
   type TeamMember,
 } from "../src/components/settings/team-members";
+import type { MemberRoles } from "../src/lib/member-roles";
 import {
   FreshSessionDialog,
   REAUTH_CANCELLED,
@@ -242,13 +244,18 @@ import {
   ArchiveDialogView,
   NO_ADD_DRAFT,
   NO_MANAGERS_GRANTING,
+  NO_ROLES,
   REMOVE_FROM_PARENT,
+  ROLES_HELP,
+  ROLES_OWNER_ONLY,
   WHERE_USED_EMPTY,
   addTarget,
   archiveReplacements,
   canChange,
+  grantTeamChoices,
   groupAuditLabel,
   groupChoices,
+  removeRoleMessage,
   replacementChoices,
   sendGroupChange,
   type GroupData,
@@ -1006,6 +1013,7 @@ describe("recent access changes", () => {
         affectedUserIds: [memberId],
         roleName: "Fictional Hiring Manager",
         actorName: "Fictional Company Owner",
+        groupName: null,
       },
       {
         occurredAt: "2026-11-07T09:00:00.000Z",
@@ -1014,6 +1022,7 @@ describe("recent access changes", () => {
         affectedUserIds: [memberId, otherId],
         roleName: null,
         actorName: null,
+        groupName: null,
       },
       {
         occurredAt: "2026-11-06T09:00:00.000Z",
@@ -1022,6 +1031,7 @@ describe("recent access changes", () => {
         affectedUserIds: [otherId],
         roleName: null,
         actorName: "Fictional Company Owner",
+        groupName: null,
       },
     ],
   };
@@ -1045,6 +1055,53 @@ describe("recent access changes", () => {
       expect(markup, text).toContain(text);
     for (const id of [memberId, otherId]) expect(markup).not.toContain(id);
     expect(markup).not.toContain("Only the latest changes are shown");
+  });
+  // ADM-14 (job 103): a role given to or removed from a group reaches everyone in it in the team.
+  it("labels a group's role rows and says who they reach", () => {
+    const markup = renderToStaticMarkup(
+      <AccessChangesPanel
+        changes={{
+          truncated: false,
+          data: (["group.role_granted", "group.role_removed"] as const).map(
+            (action) => ({
+              occurredAt: "2026-11-09T09:00:00.000Z",
+              kind: "role-assignment" as const,
+              action,
+              affectedUserIds: [],
+              roleName: "Fictional Interviewer",
+              actorName: "Fictional Company Owner",
+              groupName: "Fictional Panel",
+            }),
+          ),
+        }}
+        members={members}
+        error=""
+      />,
+    );
+    const rows = [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+      .slice(1)
+      .map((row) =>
+        [...row[1].matchAll(/<td data-label="([^"]+)">([^<]*)<\/td>/g)]
+          .filter((cell) => cell[1] !== "Time")
+          .map((cell) => cell[2]),
+      );
+    expect(rows).toEqual([
+      [
+        "Role given to a group",
+        "Everyone in Fictional Panel in the team",
+        "Fictional Interviewer",
+        "Fictional Company Owner",
+      ],
+      [
+        "Role removed from a group",
+        "Everyone in Fictional Panel in the team",
+        "Fictional Interviewer",
+        "Fictional Company Owner",
+      ],
+    ]);
+    expect(markup).toContain(
+      "Role assignments, roles given to groups and home-unit changes",
+    );
   });
   it("says when only the latest changes are shown, and shows the empty and loading states", () => {
     expect(
@@ -3057,7 +3114,11 @@ describe("team detail", () => {
       },
     },
   ];
-  const table = (companyOwner: boolean, role = "owner") =>
+  const table = (
+    companyOwner: boolean,
+    role = "owner",
+    roles: Partial<MemberRoles> = {},
+  ) =>
     renderToStaticMarkup(
       <MembersTable
         members={people}
@@ -3074,6 +3135,8 @@ describe("team detail", () => {
                 membership: "viewer",
               },
             ],
+            groupRoles: [],
+            ...roles,
           },
           error: "",
         }}
@@ -3104,6 +3167,77 @@ describe("team detail", () => {
     // Reset two-step sign-in for team owners, never on their own row.
     expect(markup.match(/>Reset two-step sign-in<\/button>/g)).toHaveLength(1);
     expect(table(false, "admin")).not.toContain("Reset two-step sign-in");
+  });
+
+  // ADM-14 (job 103): the roles a member's groups give in the team, under the control.
+  it("names the roles a member's groups give, the role chosen here winning, and two roles that cancel out", () => {
+    const via = (
+      roleObjectId: string,
+      roleName: string,
+      groupName: string,
+    ) => ({
+      userId: "fictional-recruiter",
+      roleObjectId,
+      roleName,
+      groupId: `group-${groupName}`,
+      groupName,
+    });
+    const line = (markup: string) =>
+      /<span class="muted">([^<]*through[^<]*)<\/span>/.exec(markup)?.[1];
+    const one = table(true, "owner", {
+      groupRoles: [
+        via(
+          "fictional-interviewer",
+          "Fictional Interviewer",
+          "Fictional Panel",
+        ),
+        via("fictional-interviewer", "Fictional Interviewer", "Fictional Crew"),
+      ],
+    });
+    expect(line(one)).toBe(
+      "Fictional Interviewer through Fictional Panel, Fictional Crew",
+    );
+    const chosen = table(true, "owner", {
+      assignments: [
+        {
+          userId: "fictional-recruiter",
+          roleObjectId: "fictional-role",
+          roleName: "Fictional reader",
+          available: true,
+        },
+      ],
+      groupRoles: [
+        via(
+          "fictional-interviewer",
+          "Fictional Interviewer",
+          "Fictional Panel",
+        ),
+      ],
+    });
+    expect(line(chosen)).toBe(
+      "Also Fictional Interviewer through Fictional Panel; the role chosen here wins.",
+    );
+    const torn = table(true, "owner", {
+      groupRoles: [
+        via(
+          "fictional-interviewer",
+          "Fictional Interviewer",
+          "Fictional Panel",
+        ),
+        via("fictional-sourcer", "Fictional Sourcer", "Fictional Crew"),
+      ],
+    });
+    expect(line(torn)).toBe(
+      "Two roles through groups (Fictional Interviewer through Fictional Panel; Fictional Sourcer through Fictional Crew), so neither applies. Choose a role here, or change the groups.",
+    );
+    // Nothing for a member no group gives a role, nor for a team owner.
+    expect(line(table(true))).toBeUndefined();
+    expect(
+      groupRoleLine(false, [
+        { ...via("fictional-sourcer", "Fictional Sourcer", "Fictional Crew") },
+      ]),
+    ).toBe("Fictional Sourcer through Fictional Crew");
+    expect(groupRoleLine(true, [])).toBeNull();
   });
 
   it("shows the Configured role column only to a company owner", () => {
@@ -3543,7 +3677,13 @@ describe("users tab", () => {
     name: `Fictional ${name}`,
     email: `${name.toLowerCase()}@example.test`,
     teams: [
-      { team: "Fictional Alpha", teamRole: "recruiter", configuredRole: null },
+      {
+        team: "Fictional Alpha",
+        teamRole: "recruiter",
+        configuredRole: null,
+        roleGroup: null,
+        roleConflict: false,
+      },
     ],
     companyLevel: null,
     status: "active",
@@ -3555,11 +3695,19 @@ describe("users tab", () => {
     person("Owner", {
       companyLevel: "owner",
       teams: [
-        { team: "Fictional Alpha", teamRole: "owner", configuredRole: null },
+        {
+          team: "Fictional Alpha",
+          teamRole: "owner",
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        },
         {
           team: "Fictional Bravo",
           teamRole: "admin",
           configuredRole: "Fictional Sourcer",
+          roleGroup: null,
+          roleConflict: false,
         },
       ],
     }),
@@ -3570,7 +3718,13 @@ describe("users tab", () => {
     }),
     person("Viewer", {
       teams: [
-        { team: "Fictional Alpha", teamRole: "viewer", configuredRole: null },
+        {
+          team: "Fictional Alpha",
+          teamRole: "viewer",
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        },
       ],
     }),
     {
@@ -3582,8 +3736,16 @@ describe("users tab", () => {
           team: "Fictional Alpha",
           teamRole: "recruiter",
           configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
         },
-        { team: "Fictional Bravo", teamRole: null, configuredRole: null },
+        {
+          team: "Fictional Bravo",
+          teamRole: null,
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        },
       ],
       companyLevel: null,
       status: "invited",
@@ -3692,6 +3854,34 @@ describe("users tab", () => {
     expect(admin).toContain('data-label="Last sign-in">Not recorded<');
     expect(admin).toContain('data-label="Two-step">Off<');
     expect(viewer).toContain("<div>Fictional Alpha · Viewer</div>");
+    // ADM-14 (job 103): a role through a group names the group; two that cancel out say so.
+    const grouped = rowsOf(
+      panel({
+        rows: [
+          person("Grouped", {
+            teams: [
+              {
+                team: "Fictional Alpha",
+                teamRole: "recruiter",
+                configuredRole: "Fictional Interviewer",
+                roleGroup: "Fictional Panel",
+                roleConflict: false,
+              },
+              {
+                team: "Fictional Bravo",
+                teamRole: "recruiter",
+                configuredRole: null,
+                roleGroup: null,
+                roleConflict: true,
+              },
+            ],
+          }),
+        ],
+      }),
+    )[0];
+    expect(grouped).toContain(
+      "<div>Fictional Alpha · Recruiter · Fictional Interviewer (through Fictional Panel)</div><div>Fictional Bravo · Recruiter · Two roles through groups; neither applies</div>",
+    );
     expect(viewer).toContain('data-label="Company level">None<');
     expect(invited).toContain('data-label="Name">Invited<');
     expect(invited).toContain('data-label="Email">invitee@example.test<');
@@ -3841,12 +4031,16 @@ describe("user detail", () => {
         slug: "fictional-alpha",
         teamRole: "recruiter",
         configuredRole: "Fictional Sourcer",
+        roleGroup: null,
+        roleConflict: false,
       },
       {
         team: "Fictional Bravo",
         slug: "fictional-bravo",
         teamRole: "viewer",
         configuredRole: null,
+        roleGroup: null,
+        roleConflict: false,
       },
     ],
     companyLevel: "admin",
@@ -4053,6 +4247,41 @@ describe("user detail", () => {
       '<td data-label="Team">Fictional Bravo</td><td data-label="Team role">Viewer</td><td data-label="Configured role">Team role only</td>',
     );
     expect(markup).not.toMatch(/<input|<select|<button|<a |fictional-alpha/);
+  });
+
+  // ADM-14 (job 103): a role in force through a group, and two group roles that cancel out.
+  it("names the group a role comes through, and says when two group roles cancel out", () => {
+    const markup = panel(
+      view(
+        { tab: "teams" },
+        {
+          teams: [
+            {
+              team: "Fictional Alpha",
+              slug: "fictional-alpha",
+              teamRole: "recruiter",
+              configuredRole: "Fictional Interviewer",
+              roleGroup: "Fictional Panel",
+              roleConflict: false,
+            },
+            {
+              team: "Fictional Bravo",
+              slug: "fictional-bravo",
+              teamRole: "viewer",
+              configuredRole: null,
+              roleGroup: null,
+              roleConflict: true,
+            },
+          ],
+        },
+      ),
+    );
+    expect(markup).toContain(
+      '<td data-label="Configured role">Fictional Interviewer (through Fictional Panel)</td>',
+    );
+    expect(markup).toContain(
+      '<td data-label="Configured role">Two roles through groups; neither applies</td>',
+    );
   });
 
   it("shows company authority read only, with the Company authority link only to a company owner", () => {
@@ -5619,7 +5848,7 @@ describe("groups page", () => {
     expect(refused).not.toMatch(/<table|<form|Create group/);
   });
 
-  it("shows the detail page with the five tabs in order, ?tab= with Members as the fallback, and keyboard movement", () => {
+  it("shows the detail page with the six tabs in order, ?tab= with Members as the fallback, and keyboard movement", () => {
     const markup = detail();
     expect(sidebar(markup)).toContain(
       '<a aria-current="page" href="/app/admin/groups">Groups</a>',
@@ -5637,6 +5866,7 @@ describe("groups page", () => {
       "Members",
       "Member of",
       "Managers",
+      "Roles",
       "Where used",
       "Audit",
     ]);
@@ -5660,7 +5890,7 @@ describe("groups page", () => {
     expect(source).toMatch(
       /role="tablist"\s+aria-label="Group details"\s+onKeyDown=\{tabKeys\}/,
     );
-    // Five tab buttons, as the tablist renders them: arrows wrap, Home and End jump.
+    // Six tab buttons, as the tablist renders them: arrows wrap, Home and End jump.
     const clicked: string[] = [];
     const doc = { activeElement: null as unknown };
     const buttons = GROUP_DETAIL_TABS.map((tab) => ({
@@ -5683,13 +5913,13 @@ describe("groups page", () => {
       };
       press("ArrowRight", 0);
       press("ArrowRight", 2);
-      press("ArrowRight", 4);
+      press("ArrowRight", 5);
       press("ArrowLeft", 0);
       press("Home", 4);
       press("End", 0);
       expect(clicked).toEqual([
         "member-of",
-        "where-used",
+        "roles",
         "members",
         "audit",
         "members",
@@ -5967,7 +6197,7 @@ describe("groups page", () => {
     expect(none).toContain("<h2");
     expect(none).toContain(">Archive Fictional Interviewers?</h2>");
     expect(none).toContain(
-      "Fictional Interviewers is in the groups below. Choose what replaces it in each one, or remove it from that group. It keeps its members. An archived group cannot be changed or restored.",
+      "Fictional Interviewers is used below. Choose what replaces it in each place, or remove it. It keeps its members. An archived group cannot be changed or restored.",
     );
     const selects = [
       ...none.matchAll(
@@ -6126,6 +6356,395 @@ describe("groups page", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // ADM-14 (job 103): the Roles tab, Role grants under Where used, the archive choice per grant.
+  const granting: Partial<GroupData> = {
+    grants: true,
+    whereUsed: [
+      {
+        source: "parent-group",
+        group: {
+          id: ids.leadership,
+          name: "Fictional Leadership",
+          status: "active",
+        },
+      },
+      {
+        source: "role-grant",
+        team: { id: "fictional-alpha", name: "Fictional Alpha" },
+        role: { id: "fictional-interviewer", name: "Fictional Interviewer" },
+      },
+    ],
+  };
+  const roleChoices = {
+    teams: [
+      { id: "fictional-alpha", name: "Fictional Alpha" },
+      { id: "fictional-bravo", name: "Fictional Bravo" },
+    ],
+    roles: [
+      {
+        roleObjectId: "fictional-interviewer",
+        name: "Fictional Interviewer",
+        membership: "recruiter" as const,
+      },
+      {
+        roleObjectId: "fictional-sourcer",
+        name: "Fictional Sourcer",
+        membership: "viewer" as const,
+      },
+    ],
+  };
+
+  it("shows the Roles tab to a company owner with the grants, Remove, and the labelled Give a role form", () => {
+    expect(ROLES_HELP).toBe(
+      "Everyone in this group, and in the groups inside it, who is a member of the team holds the role there. A role chosen for a person in the team's Members tab wins. A role never gives more than the person's team role allows.",
+    );
+    const panel = tabOnly(detail({ tab: "roles", roleChoices }, granting));
+    expect(panel).toContain(
+      `<section class="panel stack"><h3>Roles</h3><p class="muted">${ROLES_HELP.replaceAll("'", "&#x27;")}</p>`,
+    );
+    expect(
+      [...panel.matchAll(/<th>([^<]+)<\/th>/g)].map((th) => th[1]),
+    ).toEqual(["Role", "Team"]);
+    expect(rowsOf(panel).slice(1)).toEqual([
+      '<td data-label="Role">Fictional Interviewer</td><td data-label="Team">Fictional Alpha</td><td data-label="Actions"><button type="button" class="button secondary" aria-label="Remove Fictional Interviewer in Fictional Alpha">Remove</button></td>',
+    ]);
+    expect(panel).toContain('<form class="stack" aria-label="Give a role">');
+    const selects = [
+      ...panel.matchAll(
+        /<label class="field"><span>([^<]+)<\/span><select required="">([\s\S]*?)<\/select><\/label>/g,
+      ),
+    ];
+    expect(selects.map((match) => match[1])).toEqual(["Team", "Role"]);
+    // Only teams the group gives no role in yet.
+    expect(selects[0][2]).toBe(
+      '<option value="" selected="">Choose a team</option><option value="fictional-bravo">Fictional Bravo</option>',
+    );
+    expect(selects[1][2]).toBe(
+      '<option value="" selected="">Choose a role</option><option value="fictional-interviewer">Fictional Interviewer (recruiter)</option><option value="fictional-sourcer">Fictional Sourcer (viewer)</option>',
+    );
+    expect(panel).toContain(
+      '<button type="submit" class="button">Give role</button>',
+    );
+    expect(grantTeamChoices(group, roleChoices)).toEqual(roleChoices.teams);
+    expect(
+      removeRoleMessage(
+        "Fictional Interviewers",
+        "Fictional Interviewer",
+        "Fictional Alpha",
+      ),
+    ).toBe(
+      "Fictional Interviewers no longer gives Fictional Interviewer in Fictional Alpha. Its members keep any role chosen for them in that team.",
+    );
+    // Loading, and the empty sentence.
+    const loading = tabOnly(detail({ tab: "roles" }, { whereUsed: [] }));
+    expect(loading).toContain(`<p class="muted">${NO_ROLES}</p>`);
+    expect(NO_ROLES).toBe("This group gives no roles.");
+    expect(loading).toContain(
+      '<option value="" selected="">Loading teams…</option>',
+    );
+    expect(loading).toContain(
+      '<option value="" selected="">Loading roles…</option>',
+    );
+    // Remove asks first, in plain words.
+    const source = readFileSync(
+      new URL("../src/components/settings/group-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /onRemoveRole=\{\(teamId, role, teamName\) =>\s+void change\(\s+\{ kind: "remove-role", teamId \},\s+\{\s+title: `Remove \$\{role\} in \$\{teamName\}\?`,\s+message: removeRoleMessage\(group\.name, role, teamName\),/,
+    );
+  });
+
+  it("keeps the Give a role choices on a refusal and shows it in the focused alert, and reads only for anyone else", () => {
+    const refused = detail(
+      {
+        tab: "roles",
+        roleChoices,
+        grant: {
+          teamId: "fictional-bravo",
+          roleObjectId: "fictional-sourcer",
+        },
+        error: plainError(
+          new ClientError(
+            409,
+            "group_role_conflict",
+            "This would give Fictional Amal two roles in Fictional Bravo. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.",
+          ),
+        ),
+      },
+      granting,
+    );
+    expect(refused).toContain(
+      '<div tabindex="-1" class="notice error" role="alert">This would give Fictional Amal two roles in Fictional Bravo. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team&#x27;s Members tab.</div>',
+    );
+    expect(refused).not.toContain("group_role_conflict");
+    expect(refused).toContain(
+      '<option value="fictional-bravo" selected="">Fictional Bravo</option>',
+    );
+    expect(refused).toContain(
+      '<option value="fictional-sourcer" selected="">Fictional Sourcer (viewer)</option>',
+    );
+    // A company admin, and an archived group: the grants, read only.
+    expect(ROLES_OWNER_ONLY).toBe(
+      "Only a company owner can give a group a role.",
+    );
+    const admin = tabOnly(
+      detail({ tab: "roles", companyOwner: false, roleChoices }, granting),
+    );
+    expect(admin).toContain(`<p class="muted">${ROLES_OWNER_ONLY}</p>`);
+    expect(admin).toContain('<td data-label="Role">Fictional Interviewer</td>');
+    expect(admin).not.toMatch(/<(button|input|select|form)\b/);
+    expect(admin).not.toContain("Actions");
+    const archived = tabOnly(
+      detail(
+        { tab: "roles", roleChoices },
+        { ...granting, status: "archived" },
+      ),
+    );
+    expect(archived).not.toMatch(/<(button|input|select|form)\b/);
+    expect(archived).not.toContain(ROLES_OWNER_ONLY);
+  });
+
+  it("gives and removes a role through the roles route, opening Confirm it's you on SESSION_NOT_FRESH and retrying once", async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return answers.shift() ?? json(200, { data: {} });
+      }),
+    );
+    try {
+      const path = `/api/v1/admin/groups/${ids.interviewers}/roles`;
+      const ask = vi.fn(async () => true);
+      const stale = () =>
+        json(403, {
+          error: {
+            code: "SESSION_NOT_FRESH",
+            message: "This change needs a recent sign-in.",
+          },
+        });
+      answers.push(stale());
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.interviewers,
+          {
+            kind: "grant-role",
+            teamId: "fictional-bravo",
+            roleObjectId: "fictional-sourcer",
+          },
+          (work) => retryWithFreshSession(work, ask),
+        ),
+      ).resolves.toBe(true);
+      const grant = {
+        method: "POST",
+        path,
+        body: { teamId: "fictional-bravo", roleObjectId: "fictional-sourcer" },
+      };
+      expect(sent).toEqual([grant, grant]);
+      expect(ask).toHaveBeenCalledTimes(1);
+      sent.length = 0;
+      answers.push(stale());
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.interviewers,
+          { kind: "remove-role", teamId: "fictional-alpha" },
+          (work) => retryWithFreshSession(work, ask),
+        ),
+      ).resolves.toBe(true);
+      const removal = {
+        method: "DELETE",
+        path,
+        body: { teamId: "fictional-alpha" },
+      };
+      expect(sent).toEqual([removal, removal]);
+      // Cancelling Confirm it's you sends nothing more.
+      sent.length = 0;
+      answers.push(stale());
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.interviewers,
+          { kind: "remove-role", teamId: "fictional-alpha" },
+          (work) => retryWithFreshSession(work, async () => false),
+        ),
+      ).resolves.toBe(false);
+      expect(sent).toEqual([removal]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lists the grants under Role grants in Where used, read only, and asks for a choice per grant in the archive dialog", () => {
+    const panel = tabOnly(detail({ tab: "where-used" }, granting));
+    expect(
+      [...panel.matchAll(/<h4>([^<]+)<\/h4>/g)].map((match) => match[1]),
+    ).toEqual(["Parent groups", "Role grants"]);
+    expect(panel).toContain(
+      '<caption class="sr-only">Role grants that use this group</caption><thead><tr><th>Role</th><th>Team</th></tr></thead><tbody><tr><td data-label="Role">Fictional Interviewer</td><td data-label="Team">Fictional Alpha</td></tr></tbody>',
+    );
+    expect(panel).not.toMatch(/<(button|input|select|form)\b/);
+    const list: GroupList = {
+      data: [
+        {
+          id: ids.leadership,
+          name: "Fictional Leadership",
+          description: null,
+          status: "active",
+          grants: false,
+          directPeople: 1,
+          people: 1,
+          childGroups: [],
+          parentGroups: [],
+        },
+        {
+          id: ids.panel,
+          name: "Fictional Panel",
+          description: null,
+          status: "active",
+          grants: false,
+          directPeople: 1,
+          people: 1,
+          childGroups: [],
+          parentGroups: [],
+        },
+        {
+          id: ids.old,
+          name: "Fictional Old List",
+          description: null,
+          status: "archived",
+          grants: false,
+          directPeople: 0,
+          people: 0,
+          childGroups: [],
+          parentGroups: [],
+        },
+        {
+          id: group.id,
+          name: group.name,
+          description: null,
+          status: "active",
+          grants: true,
+          directPeople: 2,
+          people: 5,
+          childGroups: [],
+          parentGroups: [],
+        },
+      ],
+      computed: [],
+    };
+    const used = { ...group, ...granting };
+    const dialog = (choices: Record<string, string>) =>
+      renderToStaticMarkup(
+        <ArchiveDialogView
+          group={used}
+          list={list}
+          listError=""
+          draft={{ choices, error: "" }}
+          busy={false}
+          onChoose={() => {}}
+          onCancel={() => {}}
+          onConfirm={() => {}}
+        />,
+      );
+    const none = dialog({});
+    const selects = [
+      ...none.matchAll(
+        /<label class="field"><span>([^<]+)<\/span><select required="">([\s\S]*?)<\/select><\/label>/g,
+      ),
+    ];
+    expect(selects.map((match) => match[1])).toEqual([
+      "In Fictional Leadership",
+      "Role grant: Fictional Interviewer in Fictional Alpha",
+    ]);
+    // Every current group but this one.
+    expect(
+      [
+        ...selects[1][2].matchAll(
+          /<option value="([^"]*)"[^>]*>([^<]+)<\/option>/g,
+        ),
+      ].map((match) => [match[1], match[2]]),
+    ).toEqual([
+      ["", "Choose what replaces it"],
+      [REMOVE_FROM_PARENT, "Remove the grant"],
+      [ids.leadership, "Replace with Fictional Leadership"],
+      [ids.panel, "Replace with Fictional Panel"],
+    ]);
+    expect(none).toContain(
+      '<button type="button" class="button danger" disabled="">Archive group</button>',
+    );
+    const choices = {
+      [ids.leadership]: REMOVE_FROM_PARENT,
+      "team:fictional-alpha": ids.panel,
+    };
+    expect(dialog(choices)).toContain(
+      '<button type="button" class="button danger">Archive group</button>',
+    );
+    expect(archiveReplacements(used.whereUsed, choices)).toEqual([
+      { parentGroupId: ids.leadership, replacementGroupId: null },
+      { teamId: "fictional-alpha", replacementGroupId: ids.panel },
+    ]);
+    expect(
+      archiveReplacements(used.whereUsed, {
+        ...choices,
+        "team:fictional-alpha": REMOVE_FROM_PARENT,
+      }),
+    ).toEqual([
+      { parentGroupId: ids.leadership, replacementGroupId: null },
+      { teamId: "fictional-alpha", replacementGroupId: null },
+    ]);
+    expect(
+      archiveReplacements(used.whereUsed, {
+        [ids.leadership]: REMOVE_FROM_PARENT,
+      }),
+    ).toBeNull();
+  });
+
+  it("names the role and team of a grant in the Audit tab", () => {
+    for (const [action, label] of [
+      [
+        "group.role_granted",
+        "Gave the role Fictional Interviewer in Fictional Alpha",
+      ],
+      [
+        "group.role_removed",
+        "Removed the role Fictional Interviewer in Fictional Alpha",
+      ],
+    ] as const)
+      expect(
+        groupAuditLabel({
+          occurredAt: "2026-11-01T10:00:00.000Z",
+          action,
+          actorName: null,
+          target: {
+            kind: "role",
+            role: "Fictional Interviewer",
+            team: "Fictional Alpha",
+          },
+        }),
+      ).toBe(label);
+    expect(
+      groupAuditLabel({
+        occurredAt: "2026-11-01T10:00:00.000Z",
+        action: "group.role_granted",
+        actorName: null,
+        target: { kind: "role", role: null, team: null },
+      }),
+    ).toBe("Gave the role Not recorded in Not recorded");
   });
 
   it("lists the managers on the Managers tab with Add manager and Remove for an editable group that grants nothing", () => {
