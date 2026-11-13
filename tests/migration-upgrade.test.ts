@@ -294,7 +294,8 @@ describe("populated fictional baseline upgrade from 0006", () => {
     await applyMigrations(pg);
     await installTenantContextKey(pg);
     setDbForTests(drizzle(pg, { schema }) as unknown as AppDb);
-  });
+    // Every migration after 0006: about 45 s alone, and more under the full suite.
+  }, 180_000);
   afterAll(async () => pg.close());
 
   it("records every migration file in the ledger", async () => {
