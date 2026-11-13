@@ -153,7 +153,10 @@
  *   removing both in that check; nothing of an anonymisation commits. In each group check it writes
  *   one approval group named by the run prefix with the team A owner as its member (the trigger
  *   writes their effective row), removing the group, which cascades the rest, in that check; the
- *   first also briefly makes the team B owner a company admin with the people area.
+ *   first also briefly makes the team B owner a company admin with the people area. The manager
+ *   check instead writes one plain group named by the run prefix with the team A member as its
+ *   manager and flags it as an approval group half way, removing the group, which cascades the
+ *   manager row, in that check; the member's inserts there are rolled back.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -6306,6 +6309,80 @@ async function runChecks(run: Run) {
         ]);
       }),
     );
+    probe.at("end-state");
+    return pass && probe.all(["end-state", await groupsGone()]);
+  });
+
+  // A delegated manager (0055): the team A member, with neither company owner level nor the people
+  // area (an earlier check leaves them a company admin with fields), is named manager of
+  // a plain owner-written group and adds a user member by direct SQL as the data role (rolled
+  // back); once the owner flags that group as an approval group, the same insert is 42501 from
+  // app.guard_group_write.
+  await check("groups-manager-granting-denied", async (probe) => {
+    probe.at("setup");
+    const group = (
+      await owner.query(
+        "INSERT INTO app.groups(workspace_id,name) VALUES($1::uuid,$2) RETURNING id::text AS id",
+        [COMPANY_WORKSPACE, `${f.prefix}-group-managed`],
+      )
+    ).rows[0].id as string;
+    let pass: boolean;
+    try {
+      const named = await owner.query(
+        "INSERT INTO app.group_managers(group_id,workspace_id,user_id) VALUES($1::uuid,$2::uuid,$3)",
+        [group, COMPANY_WORKSPACE, f.users.a2],
+      );
+      const insertAsManager = () =>
+        transaction(data, async () => {
+          const { access } = await installAs(data, signer, p.memberA);
+          return {
+            access,
+            outcome: await attempt(data, memberSql, [
+              group,
+              COMPANY_WORKSPACE,
+              f.users.a1,
+            ]),
+          };
+        });
+      probe.at("positive-control");
+      const control = await insertAsManager();
+      const flagged = await owner.query(
+        "UPDATE app.groups SET approval = true WHERE id = $1::uuid",
+        [group],
+      );
+      probe.at("outcome");
+      const manager = await insertAsManager();
+      probe.at("end-state");
+      const members = await count(
+        owner,
+        "SELECT count(*)::int AS n FROM app.group_members WHERE group_id = $1::uuid",
+        [group],
+      );
+      // Below the company owner or people bar either way: the manager rules decide.
+      const belowBar = ({ access }: { access: Access }) =>
+        access.companyLevel !== "owner" &&
+        !access.companyAreas.includes("people");
+      pass = probe.all(
+        [
+          "setup",
+          named.rowCount === 1 &&
+            flagged.rowCount === 1 &&
+            belowBar(manager) &&
+            belowBar(control),
+        ],
+        outcomeIs(
+          control.outcome.ok && control.outcome.count === 1,
+          control.outcome,
+          "positive-control",
+        ),
+        failsWith(manager.outcome, "42501"),
+        ["end-state", members === 0],
+      );
+    } finally {
+      await owner
+        .query("DELETE FROM app.groups WHERE id = $1::uuid", [group])
+        .catch(() => {});
+    }
     probe.at("end-state");
     return pass && probe.all(["end-state", await groupsGone()]);
   });

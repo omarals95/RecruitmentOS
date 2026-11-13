@@ -738,7 +738,7 @@ Contents: re-authentication, the Users page, company-level deactivation and anon
 - **Mockup:** `#/groups` (Where used, delete with impact).
 - **Size:** 2 h.
 - **Depends on:** ADM-12.
-- **Migration:** none (`app.group_managers` came with ADM-11; its policy already refuses granting groups).
+- **Migration:** `0055_group_managers.sql` (job 099, marker 33). `app.group_managers` came with ADM-11, but its policies and the guard admitted only a company owner or a company admin with `people`, so a delegated manager without company authority needed the manager policies, `tenant_context.manages_group` and new guard rules in the database; the migration also refuses archived groups (`RQ023`) and allows the child replacement that archive uses.
 - **Acceptance criteria:**
   1. **Where used** lists every current use of a group: parent groups now, and each later item adds its source (configured role grants in ADM-14, approval steps in R2c-04, notification rules in ADM-42).
   2. Archiving a group in use asks for a replacement for each use and applies it in the same transaction; an archived group takes no new members.

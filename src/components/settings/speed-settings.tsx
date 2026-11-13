@@ -3,7 +3,11 @@
 import { Gauge } from "lucide-react";
 import { useApi } from "@/components/workspace/client";
 import { formatNumber } from "@/components/workspace/helpers";
-import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
+import {
+  SettingsNavigation,
+  useAdminPortalLink,
+  useManagedGroupsLink,
+} from "./settings-navigation";
 
 export interface SpeedRow {
   kind: "action" | "route";
@@ -25,6 +29,7 @@ const ms = (value: number | null | undefined) =>
  */
 export function SpeedSettings() {
   const adminPortal = useAdminPortalLink();
+  const managedGroups = useManagedGroupsLink();
   return (
     <div className="stack settings-page">
       <header className="page-heading">
@@ -37,7 +42,10 @@ export function SpeedSettings() {
         </div>
         <Gauge size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation adminPortal={adminPortal} />
+      <SettingsNavigation
+        adminPortal={adminPortal}
+        managedGroups={managedGroups}
+      />
       <p className="notice" role="status">
         Only team owners and admins can view speed timings.
       </p>
