@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -13,6 +14,9 @@ vi.mock("@/db", async (original) => ({
 
 import type { AppDb, TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
+import { RECRUITER_ROLE } from "@/domain/config-defaults";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
+import { withTeam } from "@/lib/db-team";
 import {
   addGroupManager,
   addGroupMember,
@@ -21,14 +25,17 @@ import {
   computedGroupMembers,
   createGroup,
   getGroup,
+  grantGroupRole,
   listManagedGroups,
   removeGroupManager,
   removeGroupMember,
+  removeGroupRole,
   removeManagedMember,
   renameGroup,
   setGroupApproval,
   type Group,
 } from "@/lib/groups";
+import { listRoleAssignmentChanges } from "@/lib/member-roles";
 import { listActivity } from "@/lib/insights";
 import type { Principal } from "@/lib/principal";
 import { installTenantContext } from "@/lib/tenant-context";
@@ -2109,4 +2116,581 @@ describe("company groups under the split runtime roles", () => {
         ).toBe(0);
     });
   });
+});
+
+// Groups as role grantees (ADM-14, 0057): fictional company owner, company admin with people,
+// delegated manager and recruiters of one workspace with two fictional teams.
+describe("groups as role grantees under the split runtime roles", () => {
+  let harness: Harness;
+  let owner: Principal, peopleAdmin: Principal, manager: Principal;
+  let pat: Principal, quinn: Principal, rana: Principal, sami: Principal;
+  let crowd: Principal[];
+  let roleOne: PublishedRole, roleTwo: PublishedRole;
+  type PublishedRole = { objectId: string; versionId: string };
+  type Grant = { group_id: string; team_id: string; role_object_id: string };
+
+  const look = async <T = Record<string, unknown>>(
+    text: string,
+    params: unknown[] = [],
+  ) => {
+    await harness.asSuperuser();
+    return (await harness.client.query<T>(text, params)).rows;
+  };
+  const audits = () =>
+    look<Audit>(
+      "SELECT id, team_id, actor_id, actor_type, token_id, record_id, action, kind, summary, metadata FROM app.activity WHERE kind = 'group' ORDER BY created_at, id",
+    );
+  const grants = () =>
+    look<Grant>(
+      "SELECT group_id, team_id, role_object_id FROM app.group_roles ORDER BY group_id, team_id",
+    );
+  const state = async () => ({
+    groups: await look("SELECT * FROM app.groups ORDER BY id"),
+    members: await look(
+      "SELECT * FROM app.group_members ORDER BY group_id, user_id, child_group_id",
+    ),
+    effective: await look(
+      "SELECT * FROM app.group_effective_members ORDER BY group_id, user_id",
+    ),
+    managers: await look(
+      "SELECT * FROM app.group_managers ORDER BY group_id, user_id",
+    ),
+    grants: await grants(),
+    audits: await audits(),
+  });
+  const asContext = <T>(
+    principal: Principal,
+    work: (tx: TeamTx) => Promise<T>,
+  ) =>
+    harness.dataDb().then((db) =>
+      withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+        await installTenantContext(tx, principal, snapshot);
+        return work(tx);
+      }),
+    );
+  const sqlAs = (principal: Principal, statement: string) =>
+    asContext(principal, async (tx) => {
+      const { rows } = await tx.execute(sql.raw(statement));
+      return rows;
+    });
+  async function refusedApi(
+    call: () => Promise<unknown>,
+    status: number,
+    code: string,
+  ) {
+    const before = await state();
+    const error = await call().then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toMatchObject({ status, code });
+    expect(await state()).toEqual(before);
+    return (error as Error).message;
+  }
+  async function refusedSql(call: () => Promise<unknown>, code: string) {
+    const before = await state();
+    const error = await call().then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toMatchObject({ cause: { code } });
+    expect(await state()).toEqual(before);
+    return (error as { cause: { detail?: string } }).cause;
+  }
+  async function audited(call: () => Promise<unknown>) {
+    const before = new Set((await audits()).map((row) => row.id));
+    await call();
+    return (await audits()).filter((row) => !before.has(row.id));
+  }
+  const create = async (name: string, people: Principal[] = []) => {
+    const group = await createGroup(owner, { name });
+    for (const person of people)
+      await addGroupMember(owner, group.id, { userId: person.userId });
+    return group;
+  };
+  /** The role install gives the member in their team. */
+  const roleOf = async (p: Principal) =>
+    (await withTeam(p, (tx, access) => Promise.resolve(access))).roleVersionId;
+  const insertRole = (group: string, team: string, role: string) =>
+    `INSERT INTO app.group_roles(group_id, workspace_id, team_id, role_object_id) VALUES ('${group}', '${COMPANY}', '${team}', '${role}')`;
+  const conflictSentence = (people: string, team = "Fictional Roles Team A") =>
+    `This would give ${people} two roles in ${team}. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.`;
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db: AppDb = await harness.asOwner();
+    // The first seeded user is the initial administrator and company owner; signed in just now.
+    owner = {
+      ...(await seedIdentity(db, { userId: "gr-owner", teamId: "gr-team-a" })),
+      sessionCreatedAt: new Date(),
+    };
+    peopleAdmin = {
+      ...(await seedIdentity(db, {
+        userId: "gr-people-admin",
+        teamId: "gr-team-a",
+        role: "recruiter",
+      })),
+      sessionCreatedAt: new Date(),
+    };
+    manager = await seedIdentity(db, {
+      userId: "gr-manager",
+      teamId: "gr-team-a",
+      role: "recruiter",
+    });
+    const recruiterA = (userId: string) =>
+      seedIdentity(db, { userId, teamId: "gr-team-a", role: "recruiter" });
+    pat = await recruiterA("gr-pat");
+    quinn = await recruiterA("gr-quinn");
+    rana = await recruiterA("gr-rana");
+    sami = await recruiterA("gr-sami");
+    crowd = [];
+    for (let index = 1; index <= 7; index++)
+      crowd.push(await recruiterA(`gr-crowd-${index}`));
+    await seedIdentity(db, { userId: "gr-owner-b", teamId: "gr-team-b" });
+    await harness.client.exec(`
+      INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas,suspended_at) VALUES
+        ('${COMPANY}','gr-people-admin','admin','{people}',NULL);
+      UPDATE auth.organization SET name = 'Fictional Roles Team A' WHERE id = 'gr-team-a';
+      UPDATE auth."user" SET name = 'Fictional Pat' WHERE id = 'gr-pat';
+      UPDATE auth."user" SET name = 'Fictional Quinn' WHERE id = 'gr-quinn';
+      UPDATE auth."user" SET name = 'Fictional Rana' WHERE id = 'gr-rana';
+      UPDATE auth."user" SET name = 'Fictional Sami' WHERE id = 'gr-sami';
+      UPDATE auth."user" SET name = 'Fictional Crowd ' || right(id, 1) WHERE id LIKE 'gr-crowd-%';
+    `);
+    const publish = async (key: string, name: string) => {
+      await harness.dataDb();
+      const { objectId, versionId } = await createConfigDraft(owner, {
+        type: "role",
+        key,
+        body: { ...structuredClone(RECRUITER_ROLE.body), name },
+      });
+      await harness.dataDb();
+      await publishConfigVersion(owner, versionId);
+      return { objectId, versionId };
+    };
+    roleOne = await publish("gr-role-one", "Fictional Role One");
+    roleTwo = await publish("gr-role-two", "Fictional Role Two");
+  });
+  afterAll(async () => harness?.close());
+
+  it("gives a group a role and removes it, with one ids-only audit row each, Where used, the Audit tab and access changes", async () => {
+    const group = await create("Fictional Grant Panel", [pat]);
+    const granted = await audited(() =>
+      grantGroupRole(owner, group.id, {
+        teamId: "gr-team-a",
+        roleObjectId: roleOne.objectId,
+      }),
+    );
+    expect(granted).toEqual([
+      expect.objectContaining({
+        team_id: owner.teamId,
+        actor_id: owner.userId,
+        actor_type: "session",
+        token_id: null,
+        record_id: null,
+        action: "group.role_granted",
+        kind: "group",
+        summary: "Gave a group a role",
+      }),
+    ]);
+    expect(granted[0].metadata).toEqual({
+      workspaceId: COMPANY,
+      groupId: group.id,
+      teamId: "gr-team-a",
+      roleObjectId: roleOne.objectId,
+      roleVersionId: roleOne.versionId,
+    });
+    expect(await grants()).toContainEqual({
+      group_id: group.id,
+      team_id: "gr-team-a",
+      role_object_id: roleOne.objectId,
+    });
+    expect(await roleOf(pat)).toBe(roleOne.versionId);
+    const detail = await getGroup(owner, group.id);
+    expect(detail.grants).toBe(true);
+    expect(detail.whereUsed).toEqual([
+      {
+        source: "role-grant",
+        team: { id: "gr-team-a", name: "Fictional Roles Team A" },
+        role: { id: roleOne.objectId, name: "Fictional Role One" },
+      },
+    ]);
+    expect(detail.audit[0]).toMatchObject({
+      action: "group.role_granted",
+      target: {
+        kind: "role",
+        role: "Fictional Role One",
+        team: "Fictional Roles Team A",
+      },
+    });
+    // Granting twice in one team is refused.
+    expect(
+      await refusedApi(
+        () =>
+          grantGroupRole(owner, group.id, {
+            teamId: "gr-team-a",
+            roleObjectId: roleTwo.objectId,
+          }),
+        409,
+        "group_role_exists",
+      ),
+    ).toBe("This group already gives a role in this team. Remove it first.");
+    const removed = await audited(() =>
+      removeGroupRole(owner, group.id, { teamId: "gr-team-a" }),
+    );
+    expect(removed).toEqual([
+      expect.objectContaining({
+        action: "group.role_removed",
+        summary: "Removed a role from a group",
+      }),
+    ]);
+    expect(Object.keys(removed[0].metadata).sort()).toEqual([
+      "groupId",
+      "roleObjectId",
+      "roleVersionId",
+      "teamId",
+      "workspaceId",
+    ]);
+    // Back on the team role's template.
+    expect(await roleOf(pat)).toBe(RECRUITER_ROLE.versionId);
+    await refusedApi(
+      () => removeGroupRole(owner, group.id, { teamId: "gr-team-a" }),
+      404,
+      "not_found",
+    );
+    // Both rows are access changes, with the group's and the role's names.
+    await harness.dataDb();
+    const changes = await listRoleAssignmentChanges(owner, { pageSize: 100 });
+    expect(changes.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        action: "group.role_removed",
+        affectedUserId: null,
+        roleName: "Fictional Role One",
+        groupName: "Fictional Grant Panel",
+      }),
+      expect.objectContaining({
+        action: "group.role_granted",
+        affectedUserId: null,
+        roleName: "Fictional Role One",
+        groupName: "Fictional Grant Panel",
+      }),
+    ]);
+    // An unknown team, an archived group and an unpublished role are refused.
+    await refusedApi(
+      () =>
+        grantGroupRole(owner, group.id, {
+          teamId: "gr-team-unknown",
+          roleObjectId: roleOne.objectId,
+        }),
+      404,
+      "not_found",
+    );
+    await refusedApi(
+      () =>
+        grantGroupRole(owner, group.id, {
+          teamId: "gr-team-a",
+          roleObjectId: randomUUID(),
+        }),
+      404,
+      "not_found",
+    );
+  });
+
+  it("makes a group that gives a role, and a group nested in it, company owner only, by the service and by direct SQL", async () => {
+    const child = await create("Fictional Grant Child", [quinn]);
+    const group = await create("Fictional Grant Owner Only", [rana]);
+    await addGroupMember(owner, group.id, { childGroupId: child.id });
+    const spare = await create("Fictional Grant Spare");
+    await grantGroupRole(owner, group.id, {
+      teamId: "gr-team-b",
+      roleObjectId: roleOne.objectId,
+    });
+    for (const id of [group.id, child.id]) {
+      for (const call of [
+        () => addGroupMember(peopleAdmin, id, { userId: sami.userId }),
+        () =>
+          removeGroupMember(peopleAdmin, id, {
+            userId: id === group.id ? rana.userId : quinn.userId,
+          }),
+        () => addGroupMember(peopleAdmin, id, { childGroupId: spare.id }),
+        () => archiveGroup(peopleAdmin, id, []),
+        () =>
+          grantGroupRole(peopleAdmin, id, {
+            teamId: "gr-team-a",
+            roleObjectId: roleOne.objectId,
+          }),
+        () => removeGroupRole(peopleAdmin, id, { teamId: "gr-team-b" }),
+      ])
+        await refusedApi(call, 403, "group_owner_required");
+      for (const statement of [
+        `INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES ('${id}', '${COMPANY}', '${sami.userId}')`,
+        `DELETE FROM app.group_members WHERE group_id = '${id}' AND user_id IS NOT NULL`,
+        `INSERT INTO app.group_members(group_id, workspace_id, child_group_id) VALUES ('${id}', '${COMPANY}', '${spare.id}')`,
+        `UPDATE app.groups SET archived_at = now() WHERE id = '${id}'`,
+        insertRole(id, "gr-team-a", roleOne.objectId),
+        `DELETE FROM app.group_roles WHERE group_id = '${group.id}'`,
+      ])
+        await refusedSql(() => sqlAs(peopleAdmin, statement), "42501");
+    }
+    expect(
+      await getGroup(peopleAdmin, child.id).then((detail) => detail.grants),
+    ).toBe(true);
+    // A company owner can.
+    await addGroupMember(owner, child.id, { userId: sami.userId });
+    await removeGroupMember(owner, child.id, { userId: sami.userId });
+    await removeGroupRole(owner, group.id, { teamId: "gr-team-b" });
+    expect(await getGroup(owner, child.id).then((d) => d.grants)).toBe(false);
+  });
+
+  it("refuses a delegated manager named before the group started giving a role, by the service and by direct SQL", async () => {
+    const group = await create("Fictional Grant Managed", [rana]);
+    await addGroupManager(owner, group.id, { userId: manager.userId });
+    await addManagedMember(manager, group.id, {
+      email: `${sami.userId}@example.test`,
+    });
+    await grantGroupRole(owner, group.id, {
+      teamId: "gr-team-b",
+      roleObjectId: roleOne.objectId,
+    });
+    await refusedApi(
+      () =>
+        addManagedMember(manager, group.id, {
+          email: `${quinn.userId}@example.test`,
+        }),
+      403,
+      "group_owner_required",
+    );
+    await refusedApi(
+      () => removeManagedMember(manager, group.id, { userId: sami.userId }),
+      403,
+      "group_owner_required",
+    );
+    for (const statement of [
+      `INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES ('${group.id}', '${COMPANY}', '${quinn.userId}')`,
+      `DELETE FROM app.group_members WHERE group_id = '${group.id}' AND user_id = '${sami.userId}'`,
+      insertRole(group.id, "gr-team-a", roleOne.objectId),
+    ])
+      await refusedSql(() => sqlAs(manager, statement), "42501");
+    // The company owner, with a recent sign-in, removes the manager.
+    await removeGroupManager(owner, group.id, { userId: manager.userId });
+  });
+
+  it("refuses every change that would give someone two roles in one team, naming the people, by the service and by direct SQL", async () => {
+    // The crowd and Pat hold Role One through First; Second holds them too, without a role yet.
+    const first = await create("Fictional Conflict First", [pat, ...crowd]);
+    const second = await create("Fictional Conflict Second", [...crowd]);
+    await grantGroupRole(owner, first.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleOne.objectId,
+    });
+    // A grant: seven people, five named, then how many more.
+    expect(
+      await refusedApi(
+        () =>
+          grantGroupRole(owner, second.id, {
+            teamId: "gr-team-a",
+            roleObjectId: roleTwo.objectId,
+          }),
+        409,
+        "group_role_conflict",
+      ),
+    ).toBe(
+      conflictSentence(
+        "Fictional Crowd 1, Fictional Crowd 2, Fictional Crowd 3, Fictional Crowd 4, Fictional Crowd 5 and 2 more",
+      ),
+    );
+    const cause = await refusedSql(
+      () => sqlAs(owner, insertRole(second.id, "gr-team-a", roleTwo.objectId)),
+      "RQ024",
+    );
+    expect(JSON.parse(cause.detail!)).toEqual({
+      teamId: "gr-team-a",
+      userIds: crowd.map((p) => p.userId).sort(),
+      count: 7,
+    });
+    // The same role from a second group is not a conflict.
+    await grantGroupRole(owner, second.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleOne.objectId,
+    });
+    await removeGroupRole(owner, second.id, { teamId: "gr-team-a" });
+    for (const person of crowd)
+      await removeGroupMember(owner, second.id, { userId: person.userId });
+    // After the grant: adding Pat, directly or through a child group.
+    await grantGroupRole(owner, second.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleTwo.objectId,
+    });
+    expect(
+      await refusedApi(
+        () => addGroupMember(owner, second.id, { userId: pat.userId }),
+        409,
+        "group_role_conflict",
+      ),
+    ).toBe(conflictSentence("Fictional Pat"));
+    await refusedSql(
+      () =>
+        sqlAs(
+          owner,
+          `INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES ('${second.id}', '${COMPANY}', '${pat.userId}')`,
+        ),
+      "RQ024",
+    );
+    const holder = await create("Fictional Conflict Holder", [pat, quinn]);
+    expect(
+      await refusedApi(
+        () => addGroupMember(owner, second.id, { childGroupId: holder.id }),
+        409,
+        "group_role_conflict",
+      ),
+    ).toBe(conflictSentence("Fictional Pat"));
+    await refusedSql(
+      () =>
+        sqlAs(
+          owner,
+          `INSERT INTO app.group_members(group_id, workspace_id, child_group_id) VALUES ('${second.id}', '${COMPANY}', '${holder.id}')`,
+        ),
+      "RQ024",
+    );
+    // Archiving a child of Second with Holder as its replacement.
+    const leaving = await create("Fictional Conflict Leaving", [rana]);
+    await addGroupMember(owner, second.id, { childGroupId: leaving.id });
+    expect(
+      await refusedApi(
+        () =>
+          archiveGroup(owner, leaving.id, [
+            { parentGroupId: second.id, replacementGroupId: holder.id },
+          ]),
+        409,
+        "group_role_conflict",
+      ),
+    ).toBe(conflictSentence("Fictional Pat"));
+    expect((await groupRow(leaving.id)).archived_at).toBeNull();
+    // With a role chosen for Pat in the team, it is no conflict: that role wins.
+    await harness.asSuperuser();
+    await harness.client.exec(
+      `INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('gr-team-a', '${pat.userId}', '${roleTwo.objectId}')`,
+    );
+    await addGroupMember(owner, second.id, { userId: pat.userId });
+    expect(await roleOf(pat)).toBe(roleTwo.versionId);
+    // Once that role is cleared, the two group roles meet and neither applies.
+    await harness.asSuperuser();
+    await harness.client.exec(
+      `DELETE FROM app.member_roles WHERE user_id = '${pat.userId}'`,
+    );
+    expect(await roleOf(pat)).toBeNull();
+  });
+
+  it("lists the grant under Where used and moves it to the replacement on archive, refusing a bad replacement with nothing changed", async () => {
+    const leaving = await create("Fictional Move Leaving", [sami]);
+    const target = await create("Fictional Move Target", [quinn]);
+    const busy = await create("Fictional Move Busy");
+    const gone = await create("Fictional Move Gone");
+    await archiveGroup(owner, gone.id);
+    await grantGroupRole(owner, leaving.id, {
+      teamId: "gr-team-b",
+      roleObjectId: roleTwo.objectId,
+    });
+    await grantGroupRole(owner, busy.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleOne.objectId,
+    });
+    // The two roles meet in team A for Quinn when Leaving's team A grant moves to Target.
+    const clash = await create("Fictional Move Clash", [quinn]);
+    await grantGroupRole(owner, clash.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleOne.objectId,
+    });
+    await grantGroupRole(owner, leaving.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleTwo.objectId,
+    });
+    expect((await getGroup(owner, leaving.id)).whereUsed).toEqual([
+      {
+        source: "role-grant",
+        team: { id: "gr-team-a", name: "Fictional Roles Team A" },
+        role: { id: roleTwo.objectId, name: "Fictional Role Two" },
+      },
+      {
+        source: "role-grant",
+        team: { id: "gr-team-b", name: "Fictional Test Team" },
+        role: { id: roleTwo.objectId, name: "Fictional Role Two" },
+      },
+    ]);
+    await refusedApi(
+      () => archiveGroup(owner, leaving.id),
+      409,
+      "group_in_use",
+    );
+    await refusedApi(
+      () =>
+        archiveGroup(owner, leaving.id, [
+          { teamId: "gr-team-b", replacementGroupId: target.id },
+        ]),
+      409,
+      "group_uses_changed",
+    );
+    const keep = { teamId: "gr-team-b", replacementGroupId: null };
+    for (const [replacement, code] of [
+      [leaving.id, "group_role_exists"],
+      [gone.id, "group_archived"],
+      [busy.id, "group_role_exists"],
+      [target.id, "group_role_conflict"],
+    ] as const) {
+      const message = await refusedApi(
+        () =>
+          archiveGroup(owner, leaving.id, [
+            keep,
+            { teamId: "gr-team-a", replacementGroupId: replacement },
+          ]),
+        409,
+        code,
+      );
+      if (code === "group_role_conflict")
+        expect(message).toBe(conflictSentence("Fictional Quinn"));
+    }
+    expect((await groupRow(leaving.id)).archived_at).toBeNull();
+    // Without the clash, the grant moves: one removal and one grant row, then the archive.
+    await removeGroupRole(owner, clash.id, { teamId: "gr-team-a" });
+    const moved = await audited(() =>
+      archiveGroup(owner, leaving.id, [
+        keep,
+        { teamId: "gr-team-a", replacementGroupId: target.id },
+      ]),
+    );
+    // One transaction writes them all at the same time, so their order is not asserted.
+    expect(
+      moved.map((row) => `${row.action} ${row.metadata.groupId}`).sort(),
+    ).toEqual(
+      [
+        `group.role_removed ${leaving.id}`,
+        `group.role_removed ${leaving.id}`,
+        `group.role_granted ${target.id}`,
+        `group.archived ${leaving.id}`,
+      ].sort(),
+    );
+    expect((await groupRow(leaving.id)).archived_at).not.toBeNull();
+    expect(
+      (await grants()).filter((row) =>
+        [leaving.id, target.id].includes(row.group_id),
+      ),
+    ).toEqual([
+      {
+        group_id: target.id,
+        team_id: "gr-team-a",
+        role_object_id: roleTwo.objectId,
+      },
+    ]);
+    expect(await roleOf(quinn)).toBe(roleTwo.versionId);
+    expect(await roleOf(sami)).toBe(RECRUITER_ROLE.versionId);
+  });
+  const groupRow = async (id: string) =>
+    (
+      await look<{ archived_at: Date | null }>(
+        "SELECT archived_at FROM app.groups WHERE id = $1",
+        [id],
+      )
+    )[0];
 });

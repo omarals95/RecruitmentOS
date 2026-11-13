@@ -12,6 +12,8 @@ vi.mock("@/lib/auth-session", () => ({ getVerifiedSession: vi.fn() }));
 
 import type { AppDb } from "@/db";
 import { getVerifiedSession } from "@/lib/auth-session";
+import { RECRUITER_ROLE } from "@/domain/config-defaults";
+import { createConfigDraft, publishConfigVersion } from "@/lib/config-store";
 import { createGroup, setGroupApproval, type Group } from "@/lib/groups";
 import type { Principal } from "@/lib/principal";
 import {
@@ -30,6 +32,11 @@ import {
   DELETE as managersDelete,
   POST as managersPost,
 } from "@/app/api/v1/admin/groups/[group]/managers/route";
+import {
+  DELETE as rolesDelete,
+  GET as rolesGet,
+  POST as rolesPost,
+} from "@/app/api/v1/admin/groups/[group]/roles/route";
 import { GET as meGroupsGet } from "@/app/api/v1/me/groups/route";
 import {
   DELETE as meMembersDelete,
@@ -112,6 +119,10 @@ async function call(
       request,
       params({ group: segments[1] }),
     );
+  else if (segments[2] === "roles")
+    response = await (
+      method === "GET" ? rolesGet : method === "POST" ? rolesPost : rolesDelete
+    )(request, params({ group: segments[1] }));
   else
     response = await (method === "POST" ? membersPost : membersDelete)(
       request,
@@ -153,6 +164,9 @@ describe("the Groups page routes under the split runtime roles", () => {
     ),
     effective: await look(
       "SELECT * FROM app.group_effective_members ORDER BY group_id, user_id",
+    ),
+    grants: await look(
+      "SELECT * FROM app.group_roles ORDER BY group_id, team_id",
     ),
     audits: await look(
       "SELECT id FROM app.activity WHERE kind = 'group' ORDER BY id",
@@ -1475,6 +1489,232 @@ describe("the Groups page routes under the split runtime roles", () => {
           { email: email(people[0]) },
         ],
         ["GET", "/api/v1/me/groups?all=true", undefined],
+      ] as const)
+        await refused(
+          () => call(owner, method, url, body),
+          400,
+          "invalid_input",
+        );
+    });
+  });
+
+  // ADM-14 (job 103): giving a group a role, company owners only, with a recent sign-in.
+  describe("groups as role grantees", () => {
+    let target: Group, spare: Group;
+    let role: { objectId: string; versionId: string };
+    let xRole: { objectId: string; versionId: string };
+    const roles = (group: string) => `/api/v1/admin/groups/${group}/roles`;
+    const publish = async (p: Principal, key: string) => {
+      const draft = await createConfigDraft(p, {
+        type: "role",
+        key,
+        body: {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: `Fictional ${key}`,
+        },
+      });
+      await publishConfigVersion(p, draft.versionId);
+      return draft;
+    };
+    beforeAll(async () => {
+      target = await made("Fictional Role Target");
+      spare = await made("Fictional Role Spare");
+      await member(target.id, people[0].userId);
+      role = await publish(owner, "adm-group-role");
+      xRole = await publish(ownerX, "adm-x-role");
+    });
+
+    it("answers 403 on every roles method to a Bearer token, team-only owners and admins, a company admin without people and one with people, writing nothing", async () => {
+      const grant = { teamId: "adm-team-a", roleObjectId: role.objectId };
+      for (const [method, body] of [
+        ["GET", undefined],
+        ["POST", grant],
+        ["DELETE", { teamId: "adm-team-a" }],
+      ] as const) {
+        await refused(
+          () => call("bearer", method, roles(target.id), body),
+          403,
+          "session_required",
+        );
+        for (const p of [teamOwnerB, teamAdminA, fieldsAdmin])
+          await refused(
+            () => call(p, method, roles(target.id), body),
+            403,
+            "group_forbidden",
+          );
+        await refused(
+          () => call(peopleAdmin, method, roles(target.id), body),
+          403,
+          "group_owner_required",
+        );
+      }
+    });
+
+    it("lists the current teams and the roles to give, and never a group, team or role of another workspace", async () => {
+      const { status, body, text } = await stale(
+        owner,
+        "GET",
+        roles(target.id),
+      );
+      expect(status).toBe(200);
+      expect(body.data.teams).toEqual([
+        { id: "adm-team-a", name: "Fictional A Team" },
+        { id: "adm-team-b", name: "Fictional B Team" },
+      ]);
+      expect(body.data.roles).toContainEqual({
+        roleObjectId: role.objectId,
+        name: "Fictional adm-group-role",
+        membership: "recruiter",
+      });
+      for (const hidden of ["adm-team-x", "Fictional X Team", xRole.objectId])
+        expect(text, hidden).not.toContain(hidden);
+      await refused(() => call(owner, "GET", roles(xGroup)), 404, "not_found");
+      await refused(
+        () => call(ownerX, "GET", roles(target.id)),
+        404,
+        "not_found",
+      );
+      for (const grant of [
+        { teamId: "adm-team-x", roleObjectId: role.objectId },
+        { teamId: "adm-team-a", roleObjectId: xRole.objectId },
+      ])
+        await refused(
+          () => call(owner, "POST", roles(target.id), grant),
+          404,
+          "not_found",
+        );
+      await refused(
+        () =>
+          call(owner, "POST", roles(xGroup), {
+            teamId: "adm-team-a",
+            roleObjectId: role.objectId,
+          }),
+        404,
+        "not_found",
+      );
+      await refused(
+        () =>
+          call(owner, "POST", roles(UNKNOWN), {
+            teamId: "adm-team-a",
+            roleObjectId: role.objectId,
+          }),
+        404,
+        "not_found",
+      );
+    });
+
+    it("needs a recent sign-in to give, remove, change the people of and archive a group that gives a role, and never to read it", async () => {
+      const grant = { teamId: "adm-team-a", roleObjectId: role.objectId };
+      await refused(
+        () => stale(owner, "POST", roles(target.id), grant),
+        403,
+        "SESSION_NOT_FRESH",
+      );
+      const given = await call(owner, "POST", roles(target.id), grant);
+      expect([given.status, given.body]).toEqual([
+        201,
+        { data: { granted: true } },
+      ]);
+      for (const path of [
+        `/api/v1/admin/groups/${target.id}`,
+        roles(target.id),
+      ]) {
+        const { status, text } = await stale(owner, "GET", path);
+        expect(status, path).toBe(200);
+        expect(text, path).not.toContain("SESSION_NOT_FRESH");
+      }
+      const archive = {
+        archived: true,
+        replacements: [{ teamId: "adm-team-a", replacementGroupId: spare.id }],
+      };
+      for (const [method, path, body] of [
+        ["DELETE", roles(target.id), { teamId: "adm-team-a" }],
+        [
+          "POST",
+          `/api/v1/admin/groups/${target.id}/members`,
+          { userId: people[2].userId },
+        ],
+        ["PATCH", `/api/v1/admin/groups/${target.id}`, archive],
+      ] as const)
+        await refused(
+          () => stale(owner, method, path, body),
+          403,
+          "SESSION_NOT_FRESH",
+        );
+      // The same changes with a recent sign-in.
+      expect(
+        (
+          await call(
+            owner,
+            "POST",
+            `/api/v1/admin/groups/${target.id}/members`,
+            {
+              userId: people[2].userId,
+            },
+          )
+        ).status,
+      ).toBe(201);
+      const removed = await call(owner, "DELETE", roles(target.id), {
+        teamId: "adm-team-a",
+      });
+      expect([removed.status, removed.body]).toEqual([
+        200,
+        { data: { removed: true } },
+      ]);
+      expect((await call(owner, "POST", roles(target.id), grant)).status).toBe(
+        201,
+      );
+      const archived = await call(
+        owner,
+        "PATCH",
+        `/api/v1/admin/groups/${target.id}`,
+        archive,
+      );
+      expect(archived.status).toBe(200);
+      expect(archived.body.data.archivedAt).not.toBeNull();
+      const { body } = await call(
+        owner,
+        "GET",
+        `/api/v1/admin/groups/${spare.id}`,
+      );
+      expect(body.data.whereUsed).toEqual([
+        {
+          source: "role-grant",
+          team: { id: "adm-team-a", name: "Fictional A Team" },
+          role: { id: role.objectId, name: "Fictional adm-group-role" },
+        },
+      ]);
+    });
+
+    it("answers 400 to malformed roles bodies and any query key, writing nothing", async () => {
+      for (const [method, url, body] of [
+        ["POST", roles(spare.id), { teamId: "adm-team-a" }],
+        [
+          "POST",
+          roles(spare.id),
+          { teamId: "adm-team-a", roleObjectId: "not-a-uuid" },
+        ],
+        ["POST", roles(spare.id), { teamId: "", roleObjectId: role.objectId }],
+        [
+          "POST",
+          roles(spare.id),
+          {
+            teamId: "adm-team-a",
+            roleObjectId: role.objectId,
+            membership: "admin",
+          },
+        ],
+        ["DELETE", roles(spare.id), {}],
+        ["DELETE", roles("not-a-uuid"), { teamId: "adm-team-a" }],
+        ["GET", `${roles(spare.id)}?team=adm-team-a`, undefined],
+        [
+          "PATCH",
+          `/api/v1/admin/groups/${spare.id}`,
+          {
+            archived: true,
+            replacements: [{ teamId: "", replacementGroupId: null }],
+          },
+        ],
       ] as const)
         await refused(
           () => call(owner, method, url, body),

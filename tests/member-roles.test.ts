@@ -52,6 +52,7 @@ import {
 } from "@/lib/insights";
 import { callTool, TOOLS } from "@/lib/mcp/tools";
 import { listStoredTools } from "@/lib/mcp/tools";
+import { addGroupMember, createGroup, grantGroupRole } from "@/lib/groups";
 import {
   assignMemberRole,
   listMemberRoles,
@@ -1816,5 +1817,97 @@ describe("configured roles and member assignment under the split runtime roles",
     );
     expect(bearer.status).toBe(403);
     expect((await bearer.json()).error.code).toBe("session_required");
+  });
+
+  // ADM-14 (job 103): a role a company group gives in the team, under a role chosen here.
+  it("gives a group's members the group's role, lets a role chosen here win, skips team owners and refuses two roles naming the people", async () => {
+    const db = await harness.asOwner();
+    const seed = (userId: string) =>
+      seedIdentity(db, { userId, teamId: "mr-team-a", role: "recruiter" });
+    const grouped = await seed("mr-group-member");
+    const chosen = await seed("mr-group-chosen");
+    await harness.asSuperuser();
+    await harness.client.exec(
+      `UPDATE auth."user" SET name = 'Fictional Grouped Member' WHERE id = 'mr-group-member'`,
+    );
+    const groupRole = await publishRole(
+      "mr-group-role",
+      body(RECRUITER_ROLE.body, "Fictional group recruiter"),
+    );
+    const otherRole = await publishRole(
+      "mr-group-other-role",
+      body(RECRUITER_ROLE.body, "Fictional other group recruiter"),
+    );
+    const signedIn = { ...fresh(owner), sessionCreatedAt: new Date() };
+    await harness.dataDb();
+    const group = await createGroup(owner, { name: "Fictional Role Group" });
+    for (const p of [grouped, chosen, owner])
+      await addGroupMember(owner, group.id, { userId: p.userId });
+    await grantGroupRole(signedIn, group.id, {
+      teamId: "mr-team-a",
+      roleObjectId: groupRole.objectId,
+    });
+    await assign(owner, chosen.userId, otherRole.objectId);
+    // The member holds the group's role; the role chosen here wins; the team owner keeps Owner.
+    expect((await installed(grouped)).stored).toEqual({
+      scopes: roleScopes("recruiter"),
+      role_version_id: groupRole.versionId,
+    });
+    expect((await installed(chosen)).stored.role_version_id).toBe(
+      otherRole.versionId,
+    );
+    expect((await installed(owner)).access.roleVersionId).toBe(
+      builtInRoleFor("owner").versionId,
+    );
+    await harness.dataDb();
+    const listed = await listMemberRoles(fresh(owner));
+    expect(listed.groupRoles).toEqual([
+      {
+        userId: chosen.userId,
+        roleObjectId: groupRole.objectId,
+        roleName: "Fictional group recruiter",
+        groupId: group.id,
+        groupName: "Fictional Role Group",
+      },
+      {
+        userId: grouped.userId,
+        roleObjectId: groupRole.objectId,
+        roleName: "Fictional group recruiter",
+        groupId: group.id,
+        groupName: "Fictional Role Group",
+      },
+    ]);
+    // A second group with another role: adding the member is refused, naming them and the team.
+    await harness.dataDb();
+    const second = await createGroup(owner, {
+      name: "Fictional Second Role Group",
+    });
+    await grantGroupRole(signedIn, second.id, {
+      teamId: "mr-team-a",
+      roleObjectId: otherRole.objectId,
+    });
+    const before = [
+      await rows(),
+      await look("SELECT * FROM app.group_members ORDER BY group_id, user_id"),
+    ];
+    await harness.dataDb();
+    await expect(
+      addGroupMember(signedIn, second.id, { userId: grouped.userId }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "group_role_conflict",
+      message:
+        "This would give Fictional Grouped Member two roles in Fictional Test Team. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.",
+    });
+    expect([
+      await rows(),
+      await look("SELECT * FROM app.group_members ORDER BY group_id, user_id"),
+    ]).toEqual(before);
+    // The member whose role is chosen here may join: that role wins.
+    await harness.dataDb();
+    await addGroupMember(signedIn, second.id, { userId: chosen.userId });
+    expect((await installed(chosen)).stored.role_version_id).toBe(
+      otherRole.versionId,
+    );
   });
 });
