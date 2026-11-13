@@ -274,6 +274,37 @@ import {
   currentOrigin,
 } from "../src/components/settings/domain-tab";
 import type { DomainAddress } from "../src/lib/domain-settings";
+import {
+  DraftState,
+  SAVE_BEFORE_PUBLISH,
+} from "../src/components/settings/fields-tab";
+import {
+  FieldPicker,
+  HIDDEN_FROM_YOU,
+  ScreenPreview,
+  ScreensPanel,
+  pickerFields,
+} from "../src/components/settings/screens-tab";
+import {
+  RULES,
+  addEntry,
+  addSection,
+  addedText,
+  designerRefusal,
+  moveEntry,
+  moveEntryTo,
+  moveSection,
+  movedText,
+  removeEntry,
+  removeSection,
+  removedText,
+  renameSection,
+  ruleText,
+  sectionMovedText,
+  setEntryRule,
+} from "../src/components/settings/screen-designer";
+import { kindSchemaBodySchema } from "../src/domain/config";
+import { screenKey, type Screen } from "../src/domain/screens";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -293,20 +324,12 @@ const COMPANY_LEVELS = ["owner", "admin", null] as const;
 const TEAM_TABS = ["tokens"];
 // ADM-04 (job 075): the old team pages live only as team detail tabs now.
 const OLD_TEAM_KEYS = ["members", "cv-storage", "speed", "task-boards"];
-const NOT_YET = [
-  "Screens",
-  "Workflows",
-  "Boards",
-  "Templates",
-  "AI connections",
-  "Plan",
-];
+const NOT_YET = ["Workflows", "Boards", "Templates", "AI connections", "Plan"];
 // Pages of architecture §14.1 that are not built, or deferred by D29: no link, card or entry.
 const UNBUILT = [
   "permissions",
   "permission-helper",
   "sign-in",
-  "screens",
   "workflows",
   "boards",
   "templates",
@@ -407,6 +430,7 @@ describe("admin portal tabs", () => {
       ["company-authority", "Company authority", "Access"],
       ["roles", "Roles & permissions", "Access"],
       ["fields", "Fields", "Configuration"],
+      ["screens", "Screens", "Configuration"],
       ["domain", "Domain", "Look & feel"],
       ["tokens", "API tokens", "Integrations"],
       ["history", "History", "Monitoring"],
@@ -451,6 +475,7 @@ describe("admin portal tabs", () => {
                     key === "roles" ||
                     key === "organisation" ||
                     key === "fields" ||
+                    key === "screens" ||
                     key === "domain"
                   ? companyLevel === "owner"
                   : key === "history"
@@ -501,6 +526,9 @@ describe("admin portal tabs", () => {
                   adminAreas.includes("organisation")),
               directory: !!actions.directory?.includes("view"),
               fields:
+                companyLevel === "owner" ||
+                (companyLevel === "admin" && adminAreas.includes("fields")),
+              screens:
                 companyLevel === "owner" ||
                 (companyLevel === "admin" && adminAreas.includes("fields")),
               "company-authority": companyLevel === "owner",
@@ -726,6 +754,7 @@ describe("admin portal", () => {
       "company-authority",
       "roles",
       "fields",
+      "screens",
       "domain",
       "tokens",
       "history",
@@ -818,6 +847,7 @@ describe("admin portal", () => {
       "company-authority",
       "roles",
       "fields",
+      "screens",
       "domain",
       "history",
     ]);
@@ -6828,7 +6858,7 @@ describe("fields page", () => {
       ).toBe(shown);
       expect(sidebarGroups(home).includes("Configuration")).toBe(shown);
       expect(
-        /<p id="[^"]+">Configuration<\/p><ul aria-labelledby="[^"]+"><li><a href="\/app\/admin\/fields">Fields<\/a><\/li><\/ul>/.test(
+        /<p id="[^"]+">Configuration<\/p><ul aria-labelledby="[^"]+"><li><a href="\/app\/admin\/fields">Fields<\/a><\/li><li><a href="\/app\/admin\/screens">Screens<\/a><\/li><\/ul>/.test(
           sidebar(home),
         ),
       ).toBe(shown);
@@ -8014,5 +8044,680 @@ describe("domain page", () => {
       "Links in emails already sent",
     ])
       expect(IMPACT_ITEMS.join(" ")).toContain(topic);
+  });
+});
+
+// R2b-10 (job 102): the Screens page's designer, its pure edits, its preview and the FLD-032 check.
+describe("screen designer", () => {
+  const owner = access("recruiter", "owner");
+  const fieldsAdmin = access("viewer", "admin", { adminAreas: ["fields"] });
+  const uuid = (suffix: string) => `00000000-0000-4000-8000-000000${suffix}`;
+  const TYPE = uuid("1021ff");
+  const notice = customField(
+    "Fictional notice period",
+    "number",
+    { help: "Fictional notice help" },
+    uuid("102101"),
+  );
+  const level = customField(
+    "Fictional seniority level",
+    "dropdown",
+    {
+      options: [
+        { id: "fictional-junior", label: "Fictional junior" },
+        { id: "fictional-senior", label: "Fictional senior" },
+        { id: "fictional-old", label: "Fictional old level", disabled: true },
+      ],
+      default: "fictional-senior",
+    },
+    uuid("102102"),
+  );
+  const retired = customField(
+    "Fictional retired note",
+    "long-text",
+    { archived: true },
+    uuid("102103"),
+  );
+  const typed = customField(
+    "Fictional typed note",
+    "short-text",
+    { types: [TYPE], default: "Fictional typed default" },
+    uuid("102104"),
+  );
+  const mobile = customField("Fictional mobile", "phone", {}, uuid("102105"));
+  // A fictional record of the kind; its values never reach the page.
+  const record = {
+    name: "Fictional Screens Person",
+    email: "screens.person@example.test",
+    phone: "+971 50 000 1021",
+  };
+  const contact = [
+    { key: "employer", hidden: true },
+    { key: notice.key },
+    { key: level.key },
+    { key: retired.key },
+    { key: typed.key },
+  ];
+  /**
+   * The fictional candidate body: a create screen of Basics (name, email) and Contact, an edit
+   * screen of Basics (name, email, phone) and an unnamed section, the default view screen, and a
+   * typed edit screen; employer hidden, one archived and one type-limited custom field.
+   */
+  const designed = (): KindSchemaBody => {
+    const body = kindBody(
+      "candidate",
+      [notice, level, retired, typed, mobile],
+      {
+        create: [],
+        edit: [],
+        view: [],
+      },
+    );
+    const screenOf = (action: string) =>
+      body.screens.find((screen) => screen.action === action)!;
+    screenOf("create").groups = [
+      { label: "Basics", fields: [{ key: "name" }, { key: "email" }] },
+      { label: "Contact", fields: structuredClone(contact) },
+    ];
+    screenOf("edit").groups = [
+      {
+        label: "Basics",
+        fields: [{ key: "name" }, { key: "email" }, { key: "phone" }],
+      },
+      { fields: structuredClone(contact) },
+    ];
+    body.screens.push({
+      type: TYPE,
+      action: "edit",
+      groups: [{ fields: [{ key: "name" }, { key: typed.key }] }],
+    });
+    return kindSchemaBodySchema.parse(body);
+  };
+  const screenOf = (body: KindSchemaBody, key: string) =>
+    body.screens.find((screen) => screenKey(screen) === key)!;
+  const state = (
+    kind: (typeof CONFIGURABLE_KINDS)[number],
+    draft: KindSchemaBody | null,
+    current: KindSchemaBody = DEFAULT_KIND_SCHEMAS[kind].body,
+  ): KindSchemaState => ({
+    kind,
+    current: {
+      versionId: DEFAULT_KIND_SCHEMAS[kind].versionId,
+      number: null,
+      body: current,
+    },
+    draft: draft && {
+      versionId: "00000000-0000-4000-8000-0000000102a1",
+      body: draft as unknown as Record<string, unknown>,
+      note: null,
+      createdAt: "2026-11-13T08:00:00.000Z",
+    },
+  });
+  /** Every kind with its built-in default, and the candidate draft. */
+  const kinds = (draft = designed()) =>
+    CONFIGURABLE_KINDS.map((kind) =>
+      state(kind, kind === "candidate" ? draft : null),
+    );
+  const panel = (
+    initial?: Parameters<typeof ScreensPanel>[0]["initial"],
+    list = kinds(),
+    value = owner,
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <ScreensPanel kinds={list} error="" access={value} initial={initial} />
+      </WorkspaceProvider>,
+    );
+  // Text without React's markers between adjacent text nodes.
+  const plain = (markup: string) => markup.replaceAll("<!-- -->", "");
+  /** The opening tag of the button with this accessible name. */
+  const button = (markup: string, name: string) =>
+    new RegExp(`<button[^>]*aria-label="${name}"[^>]*>`).exec(markup)?.[0];
+  /** One field row of the designer, found by its rule radiogroup's name. */
+  const row = (markup: string, label: string) =>
+    markup
+      .split('<li class="screen-entry"')
+      .find((part) => part.includes(`aria-label="${label} rule"`))
+      ?.split("</li>")[0] ?? "";
+  /** Each rule of a row with whether it is checked and whether it is offered. */
+  const rules = (markup: string) =>
+    Object.fromEntries(
+      [...markup.matchAll(/<input type="radio"[^>]*\/>/g)].map(([input]) => [
+        /value="(\w+)"/.exec(input)![1],
+        {
+          checked: input.includes('checked=""'),
+          offered: !input.includes('disabled=""'),
+        },
+      ]),
+    );
+  /** Candidate field rules of the editing person: every field editable but the given ones. */
+  const withRules = (rulesOf: Record<string, "hidden" | "read" | "edit">) =>
+    access("recruiter", "owner", {
+      fields: {
+        candidate: {
+          ...Object.fromEntries(
+            DEFAULT_KIND_SCHEMAS.candidate.body.fields.map((field) => [
+              field.key,
+              "edit" as const,
+            ]),
+          ),
+          customValues: "edit",
+          ...rulesOf,
+        },
+      },
+    });
+
+  it("lists Screens under Configuration after Fields, in the home and the sidebar, for company owners and company admins with fields only", () => {
+    for (const [value, shown] of [
+      [owner, true],
+      [access("owner", "owner", directory), true],
+      [fieldsAdmin, true],
+      [access("owner", "admin", { adminAreas: ["fields", "people"] }), true],
+      [access("owner", null, directory), false],
+      [access("admin", null, directory), false],
+      [access("recruiter", "admin"), false],
+      [access("recruiter", "admin", { adminAreas: ["organisation"] }), false],
+      [access("recruiter", "admin", { adminAreas: ["people"] }), false],
+    ] as const) {
+      const home = render(null, value);
+      expect(
+        content(home).includes(
+          '<li class="panel admin-card"><h3><a href="/app/admin/screens">Screens</a></h3>',
+        ),
+      ).toBe(shown);
+      expect(
+        /<p id="[^"]+">Configuration<\/p><ul aria-labelledby="[^"]+"><li><a href="\/app\/admin\/fields">Fields<\/a><\/li><li><a href="\/app\/admin\/screens">Screens<\/a><\/li><\/ul>/.test(
+          sidebar(home),
+        ),
+      ).toBe(shown);
+      if (shown)
+        expect(sidebar(render("screens", value))).toContain(
+          '<a aria-current="page" href="/app/admin/screens">Screens</a>',
+        );
+      else onlyHeadingAndNoAccess(render("screens", value));
+    }
+  });
+
+  it("reads only the caller's access and the fields, and shows no record value", () => {
+    reads.length = 0;
+    const portal = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortal tab="screens" />
+      </WorkspaceProvider>,
+    );
+    const page = render("screens", owner);
+    expect(page).toContain('<p role="status">Loading screens…</p>');
+    expect([...new Set(reads.map((read) => read.path))].sort()).toEqual([
+      "/api/v1/admin/fields",
+      "/api/v1/me/access",
+    ]);
+    for (const markup of [
+      portal,
+      page,
+      panel(),
+      panel(undefined, kinds(), fieldsAdmin),
+    ])
+      for (const value of Object.values(record))
+        expect(markup).not.toContain(value);
+  });
+
+  it("chooses the record kind, type and action, and shows each section and field row with its controls", () => {
+    const markup = plain(panel());
+    expect(markup).toContain("<h2>Screens</h2>");
+    expect(
+      [
+        .../<span>Record kind<\/span><select[^>]*>([\s\S]*?)<\/select>/
+          .exec(markup)![1]
+          .matchAll(/<option value="([^"]+)"/g),
+      ].map((match) => match[1]),
+    ).toEqual([...CONFIGURABLE_KINDS]);
+    expect(markup).toContain(
+      `<span>Record type</span><select><option value="" selected="">Default</option><option value="${TYPE}">Type ${TYPE}</option></select>`,
+    );
+    expect(markup).toContain(
+      '<span>Action</span><select><option value="create" selected="">Create</option><option value="edit">Edit</option><option value="view">View</option></select>',
+    );
+    expect(markup).toContain('<h3 tabindex="-1">Create screen</h3>');
+    expect(markup.match(/<span>Section name<\/span>/g)).toHaveLength(2);
+    expect(markup).toContain('value="Basics"');
+    expect(markup).toContain('value="Contact"');
+    for (const [label, key, type] of [
+      ["Name", "name", "Text"],
+      ["Email", "email", "Text"],
+      ["Employer", "employer", "Text"],
+      [notice.label, notice.key, "Number"],
+      [level.label, level.key, "Dropdown"],
+      [typed.label, typed.key, "Short text"],
+    ]) {
+      const found = row(markup, label);
+      expect(found, label).toContain(`<code>${key}</code> · ${type}`);
+      expect(found, label).toContain(
+        `role="radiogroup" aria-label="${label} rule"`,
+      );
+      expect(Object.keys(rules(found)), label).toEqual([...RULES]);
+      for (const name of [`Move ${label} up`, `Move ${label} down`])
+        expect(button(found, name), name).toBeDefined();
+      expect(!!button(found, `Remove ${label}`), label).toBe(label !== "Name");
+    }
+    // Employer is listed hidden, so Hidden is checked.
+    expect(rules(row(markup, "Employer")).hidden.checked).toBe(true);
+    // A typed edit screen: its type is chosen, and Edit is its only action.
+    const typedScreen = plain(
+      panel({ kind: "candidate", type: TYPE, action: "edit" }),
+    );
+    expect(typedScreen).toContain(
+      `<span>Action</span><select><option value="edit" selected="">Edit</option></select>`,
+    );
+    expect(typedScreen).toContain(
+      `<h3 tabindex="-1">Edit screen (type ${TYPE})</h3>`,
+    );
+  });
+
+  it("disables only the first entry's Move up and the last entry's Move down, and sections at the ends", () => {
+    const markup = panel();
+    const disabled = (name: string) =>
+      button(markup, name)?.includes('disabled=""');
+    expect(disabled("Move Name up")).toBe(true);
+    expect(disabled(`Move ${typed.label} down`)).toBe(true);
+    // Moves cross sections at a section's ends.
+    expect(disabled("Move Email down")).toBe(false);
+    expect(disabled("Move Employer up")).toBe(false);
+    expect(disabled("Move Name down")).toBe(false);
+    expect(disabled("Move Basics section up")).toBe(true);
+    expect(disabled("Move Basics section down")).toBe(false);
+    expect(disabled("Move Contact section down")).toBe(true);
+    expect(markup).toContain(">Add section</button>");
+    expect(markup).toContain('<p class="sr-only" aria-live="polite">');
+  });
+
+  it("searches the field picker by label, key and type, offering only fields off the screen, and adds to the last section", () => {
+    const body = designed();
+    const create = screenOf(body, "create");
+    const keysOf = (query: string) =>
+      pickerFields(body, create, query).map((field) => field.key);
+    expect(keysOf("phone")).toEqual(["phone", mobile.key]);
+    expect(keysOf("PHONE")).toEqual(["phone", mobile.key]);
+    expect(keysOf("102105")).toEqual([mobile.key]);
+    // The notice period is a number too, but already on the screen.
+    expect(keysOf("number")).toEqual([
+      "yearsExperience",
+      "documentedYearsEstimate",
+    ]);
+    expect(keysOf("")).not.toContain("email");
+    expect(keysOf("")).not.toContain(retired.key);
+    const picker = (query: string) =>
+      plain(
+        renderToStaticMarkup(
+          <FieldPicker
+            body={body}
+            screen={create}
+            query={query}
+            searchRef={() => {}}
+            onQuery={() => {}}
+            onAdd={() => {}}
+          />,
+        ),
+      );
+    const phone = picker("phone");
+    expect(phone).toContain("<span>Search fields</span>");
+    expect(phone).toContain(`<code>${mobile.key}</code> · Phone`);
+    expect(phone).toContain('aria-label="Add Fictional mobile"');
+    expect(phone).toContain('aria-label="Add Phone"');
+    expect(phone).not.toContain('aria-label="Add Email"');
+    expect(phone.match(/aria-label="Add /g)).toHaveLength(2);
+    expect(picker("fictional nothing")).toContain("No field matches.");
+    const added = addEntry(body, "create", "phone");
+    expect(screenOf(added, "create").groups[1].fields.at(-1)).toEqual({
+      key: "phone",
+    });
+    expect(addedText(screenOf(added, "create"), "Phone", "phone")).toBe(
+      "Phone added to Contact.",
+    );
+    expect(body).toEqual(designed());
+  });
+
+  it("moves, adds, renames and removes entries and sections as pure edits of one screen, leaving the body given unchanged", () => {
+    const body = designed();
+    const keys = (next: KindSchemaBody) =>
+      screenOf(next, "create").groups.map((group) => [
+        group.label,
+        group.fields.map((entry) => entry.key),
+      ]);
+    const others = (next: KindSchemaBody) =>
+      next.screens.filter((screen) => screenKey(screen) !== "create");
+    const edits: KindSchemaBody[] = [];
+    const edit = (next: KindSchemaBody) => {
+      edits.push(next);
+      return next;
+    };
+    // Within a section.
+    expect(keys(edit(moveEntry(body, "create", "name", 1)))[0]).toEqual([
+      "Basics",
+      ["email", "name"],
+    ]);
+    // Down from a section's last position: to the start of the next section.
+    const down = edit(moveEntry(body, "create", "email", 1));
+    expect(keys(down)).toEqual([
+      ["Basics", ["name"]],
+      [
+        "Contact",
+        ["email", "employer", notice.key, level.key, retired.key, typed.key],
+      ],
+    ]);
+    expect(movedText(screenOf(down, "create"), "Email", "email")).toBe(
+      "Email moved to position 1 of 6 in Contact.",
+    );
+    // Up from a section's first position: to the end of the previous one, flags kept.
+    const up = edit(moveEntry(body, "create", "employer", -1));
+    expect(screenOf(up, "create").groups[0].fields).toEqual([
+      { key: "name" },
+      { key: "email" },
+      { key: "employer", hidden: true },
+    ]);
+    expect(movedText(screenOf(up, "create"), "Employer", "employer")).toBe(
+      "Employer moved to position 3 of 3 in Basics.",
+    );
+    // Nowhere to go at the screen's ends.
+    expect(edit(moveEntry(body, "create", "name", -1))).toEqual(body);
+    expect(edit(moveEntry(body, "create", typed.key, 1))).toEqual(body);
+    // By drag position: before an entry of another section, later in its own, and at a section's end.
+    expect(
+      keys(
+        edit(moveEntryTo(body, "create", typed.key, { group: 0, index: 1 })),
+      )[0],
+    ).toEqual(["Basics", ["name", typed.key, "email"]]);
+    expect(
+      keys(
+        edit(moveEntryTo(body, "create", "name", { group: 0, index: 2 })),
+      )[0],
+    ).toEqual(["Basics", ["email", "name"]]);
+    expect(
+      keys(
+        edit(moveEntryTo(body, "create", "name", { group: 1, index: 5 })),
+      )[1],
+    ).toEqual([
+      "Contact",
+      ["employer", notice.key, level.key, retired.key, typed.key, "name"],
+    ]);
+    // Sections: added empty as New section, renamed, moved and removed.
+    const added = edit(addSection(body, "create"));
+    expect(screenOf(added, "create").groups.at(-1)).toEqual({
+      label: "New section",
+      fields: [],
+    });
+    expect(
+      screenOf(
+        edit(renameSection(body, "create", 1, "Fictional contact")),
+        "create",
+      ).groups[1].label,
+    ).toBe("Fictional contact");
+    expect(
+      screenOf(edit(renameSection(body, "create", 1, "  ")), "create")
+        .groups[1],
+    ).not.toHaveProperty("label");
+    const moved = edit(moveSection(body, "create", 1, 0));
+    expect(keys(moved).map(([label]) => label)).toEqual(["Contact", "Basics"]);
+    expect(sectionMovedText(screenOf(moved, "create"), 0)).toBe(
+      "Contact section moved to position 1 of 2.",
+    );
+    expect(keys(edit(removeSection(body, "create", 1)))).toEqual([
+      ["Basics", ["name", "email"]],
+    ]);
+    expect(keys(edit(removeEntry(body, "create", "email")))[0]).toEqual([
+      "Basics",
+      ["name"],
+    ]);
+    // Twenty sections at most.
+    let full = body;
+    for (let n = 2; n < 25; n++) full = addSection(full, "create");
+    expect(screenOf(full, "create").groups).toHaveLength(20);
+    // Each rule gives exactly its one flag, or none for Optional, and clears the others.
+    const ruled = (rule: (typeof RULES)[number]) =>
+      screenOf(edit(setEntryRule(body, "create", "employer", rule)), "create")
+        .groups[1].fields[0];
+    expect(RULES.map(ruled)).toEqual([
+      { key: "employer", mandatory: true },
+      { key: "employer" },
+      { key: "employer", readOnly: true },
+      { key: "employer", hidden: true },
+    ]);
+    // Only the chosen screen changes, and the body given never does.
+    for (const next of edits) {
+      expect(others(next)).toEqual(others(body));
+      expect(next.fields).toEqual(body.fields);
+    }
+    expect(body).toEqual(designed());
+    expect(removedText("Email")).toBe("Email removed from this screen.");
+    expect(ruleText("Email", "readOnly")).toBe("Email is now Read only.");
+  });
+
+  it("keeps a required system field on a create screen, refuses custom fields as required there, and refuses in the browser before any request", () => {
+    const fetched = vi.spyOn(globalThis, "fetch");
+    const markup = panel();
+    const name = row(markup, "Name");
+    expect(name).toContain("Required, so it stays on this create screen.");
+    expect(button(name, "Remove Name")).toBeUndefined();
+    expect(rules(name)).toEqual({
+      required: { checked: true, offered: true },
+      optional: { checked: false, offered: false },
+      readOnly: { checked: false, offered: false },
+      hidden: { checked: false, offered: false },
+    });
+    const custom = row(markup, notice.label);
+    expect(custom).toContain(
+      "Custom fields cannot be required on a create screen yet.",
+    );
+    expect(rules(custom).required.offered).toBe(false);
+    expect(rules(custom).optional).toEqual({ checked: true, offered: true });
+    // On the edit screen Name may be read only or hidden, but never optional.
+    const edit = row(
+      panel({ kind: "candidate", type: "", action: "edit" }),
+      "Name",
+    );
+    expect(edit).not.toContain("Required, so it stays");
+    expect(rules(edit).optional.offered).toBe(false);
+    expect(rules(edit).readOnly.offered).toBe(true);
+    const refusal =
+      "Name is required, so the Create screen must show it and let people fill it.";
+    const body = designed();
+    expect(designerRefusal(body, "create")).toEqual([]);
+    expect(
+      designerRefusal(removeEntry(body, "create", "name"), "create"),
+    ).toEqual([refusal]);
+    for (const rule of ["readOnly", "hidden"] as const)
+      expect(
+        designerRefusal(setEntryRule(body, "create", "name", rule), "create"),
+      ).toEqual([refusal]);
+    const empty = addSection(body, "create");
+    expect(designerRefusal(empty, "create")).toEqual([
+      "New section has no fields. Add a field or remove the section.",
+    ]);
+    expect(
+      designerRefusal(renameSection(empty, "create", 2, ""), "create"),
+    ).toEqual([
+      "Section without a name has no fields. Add a field or remove the section.",
+    ]);
+    expect(fetched).not.toHaveBeenCalled();
+    fetched.mockRestore();
+  });
+
+  it("previews the form under the editing person's field rules, with no record value or default", () => {
+    const body = designed();
+    const preview = (screen: Screen, value: MeAccess) =>
+      plain(
+        renderToStaticMarkup(
+          <ScreenPreview body={body} screen={screen} access={value} />,
+        ),
+      );
+    const value = withRules({ email: "hidden", phone: "read" });
+    const edit = preview(screenOf(body, "edit"), value);
+    expect(edit).toContain("<strong>Edit candidate</strong>");
+    expect(edit).toContain(`<p class="muted">${HIDDEN_FROM_YOU}</p>`);
+    expect(edit).not.toContain("Email");
+    expect(edit).not.toContain("email");
+    expect(edit).toContain('Name<span aria-label="required"> *</span></label>');
+    expect(edit).toContain(
+      'Phone<span class="muted"> (read only)</span></label>',
+    );
+    expect(edit).toContain("<h4>Basics</h4>");
+    expect(edit).toContain("Fictional notice help");
+    expect(edit).toContain('type="number"');
+    // Hidden entries and archived fields are left out; the type-limited field is named as left out.
+    expect(edit).not.toContain("Employer");
+    expect(edit).not.toContain(retired.label);
+    expect(edit).toContain(
+      `Left out because it applies only to other record types: ${typed.label}`,
+    );
+    // The dropdown offers its enabled options, none chosen, and no default.
+    expect(edit).toContain("Fictional junior");
+    expect(edit).not.toContain("Fictional old level");
+    expect(edit).not.toContain('selected=""');
+    expect(edit).not.toContain("Fictional typed default");
+    expect(edit).not.toMatch(/<button|<form|type="submit"/);
+    expect(edit.match(/disabled=""/g)).toHaveLength(
+      edit.match(/<input|<select|<textarea/g)!.length,
+    );
+    // The typed screen shows the type-limited field.
+    const typedScreen = preview(screenOf(body, `${TYPE}/edit`), value);
+    expect(typedScreen).toContain(`>${typed.label}</label>`);
+    expect(typedScreen).not.toContain("Left out");
+    // Custom values hidden from the person: the left-out field is not named either.
+    const hiddenCustom = preview(
+      screenOf(body, "edit"),
+      withRules({ customValues: "hidden" }),
+    );
+    expect(hiddenCustom).toContain(
+      `Left out because it applies only to other record types: ${HIDDEN_FROM_YOU}`,
+    );
+    expect(hiddenCustom).not.toContain(notice.label);
+    // A kind the person cannot view: every field is hidden from them.
+    const none = preview(screenOf(body, "edit"), owner);
+    expect(none).not.toMatch(/<label|Name|Phone/);
+    expect(none.match(new RegExp(HIDDEN_FROM_YOU, "g"))).toHaveLength(6);
+    // A view screen shows each label and a dash, and no control.
+    const view = preview(screenOf(body, "view"), value);
+    expect(view).toContain("<strong>Candidate</strong>");
+    expect(view).toContain(
+      '<dt>Name<span aria-label="required"> *</span></dt><dd>—</dd>',
+    );
+    expect(view).not.toMatch(/<input|<select|<textarea/);
+    expect(
+      preview(
+        {
+          action: "view",
+          groups: [{ fields: [{ key: "employer", hidden: true }] }],
+        },
+        value,
+      ),
+    ).toContain("This screen shows no fields.");
+    for (const markup of [edit, typedScreen, hiddenCustom, none, view])
+      for (const text of Object.values(record))
+        expect(markup).not.toContain(text);
+  });
+
+  it("flags required fields off a create screen in the designer and the publish dialog, which then cannot publish", () => {
+    const fetched = vi.spyOn(globalThis, "fetch");
+    const off = designed();
+    Object.assign(
+      off.fields.find((field) => field.key === notice.key)!,
+      {
+        required: true,
+      },
+    );
+    screenOf(off, "create").groups[1].fields[1] = {
+      key: notice.key,
+      hidden: true,
+    };
+    const dialog = plain(
+      renderToStaticMarkup(
+        <PublishDialog
+          view={kindView(state("candidate", off))}
+          onCancel={() => {}}
+          onPublish={() => {}}
+        />,
+      ),
+    );
+    expect(dialog).toContain("<h3>Required but not on the create screen</h3>");
+    expect(dialog).toContain(
+      `<li>${notice.label} <code>${notice.key}</code>: Create screen</li>`,
+    );
+    expect(dialog).toMatch(
+      /<button type="button" class="button" disabled="">Publish<\/button>/,
+    );
+    expect(dialog.indexOf(">Cancel</button>")).toBeLessThan(
+      dialog.indexOf(">Publish</button>"),
+    );
+    // The designer shows the same list before publishing, as a notice rather than an alert.
+    const designer = plain(panel(undefined, kinds(off)));
+    const flagged =
+      /<section class="notice stack"[^>]*>[\s\S]*?<\/section>/.exec(
+        designer,
+      )![0];
+    expect(flagged).toContain("<h3>Required but not on the create screen</h3>");
+    expect(flagged).toContain(`<code>${notice.key}</code>: Create screen`);
+    expect(flagged).not.toContain('role="alert"');
+    expect(plain(panel())).not.toContain(
+      "Required but not on the create screen",
+    );
+    // A draft that only reorders sections names no field, and says so.
+    const reordered = plain(
+      renderToStaticMarkup(
+        <PublishDialog
+          view={kindView(
+            state(
+              "candidate",
+              moveSection(designed(), "create", 1, 0),
+              designed(),
+            ),
+          )}
+          onCancel={() => {}}
+          onPublish={() => {}}
+        />,
+      ),
+    );
+    expect(reordered).toContain(
+      "<p>No field changes; only the layout of sections changes.</p>",
+    );
+    expect(reordered).not.toContain("No changes from the published version.");
+    expect(reordered).toMatch(
+      /<button type="button" class="button">Publish<\/button>/,
+    );
+    expect(fetched).not.toHaveBeenCalled();
+    fetched.mockRestore();
+  });
+
+  it("disables Publish with the reason while the designer holds unsaved changes", () => {
+    const view = kindView(state("candidate", designed()));
+    const draft = (unsaved: boolean) =>
+      plain(
+        renderToStaticMarkup(
+          <DraftState
+            view={view}
+            owner
+            busy={false}
+            unsaved={unsaved}
+            onPublish={() => {}}
+          />,
+        ),
+      );
+    expect(draft(true)).toMatch(
+      /<button type="button" class="button" disabled="" aria-describedby="([^"]+)">Publish Candidate changes<\/button><\/div><p id="\1" class="muted">Save or discard your changes before publishing\.<\/p>/,
+    );
+    expect(SAVE_BEFORE_PUBLISH).toBe(
+      "Save or discard your changes before publishing.",
+    );
+    expect(draft(false)).not.toContain(SAVE_BEFORE_PUBLISH);
+    expect(draft(false)).not.toContain('disabled=""');
+    // The designer shows the draft's state above it; Save draft and Discard start disabled.
+    const markup = plain(panel());
+    expect(markup).toContain(
+      "<strong>Candidates</strong>: Draft in progress. Built-in is in force.",
+    );
+    expect(markup).toMatch(
+      /<button type="button" class="button" disabled="">Save draft<\/button>/,
+    );
+    expect(markup).toMatch(
+      /<button type="button" class="button secondary" disabled="">Discard changes<\/button>/,
+    );
   });
 });

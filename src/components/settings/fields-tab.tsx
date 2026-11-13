@@ -34,6 +34,7 @@ import {
   CHANGE_CATEGORIES,
   kindSchemaChanges,
   kindSchemaDraftIssues,
+  requiredOffCreate,
   sensitiveMarksDiffer,
   type ChangeCategory,
 } from "@/domain/kind-schema-changes";
@@ -458,7 +459,7 @@ export function draftRefusal(
     return [SENSITIVE_OWNER_ONLY];
   return [];
 }
-const unchanged = (before: KindSchemaBody, after: KindSchemaBody) =>
+export const unchanged = (before: KindSchemaBody, after: KindSchemaBody) =>
   JSON.stringify(plainJson(before)) === JSON.stringify(plainJson(after));
 
 /** The kind's draft with this body: a PUT to its draft, or a POST that creates one; its new state. */
@@ -981,21 +982,28 @@ export function FieldBadges({
   );
 }
 
+/** Shown while a page holds changes not yet saved to the draft. */
+export const SAVE_BEFORE_PUBLISH =
+  "Save or discard your changes before publishing.";
 /**
  * A kind's draft: the version in force and Publish or, for an admin's draft that changes a
- * sensitive mark, the sentence that a company owner must publish it.
+ * sensitive mark, the sentence that a company owner must publish it. With `unsaved`, Publish is
+ * disabled and says why.
  */
 export function DraftState({
   view,
   owner,
   busy,
+  unsaved = false,
   onPublish,
 }: {
   view: KindView;
   owner: boolean;
   busy: boolean;
+  unsaved?: boolean;
   onPublish: () => void;
 }) {
+  const id = useId();
   const ownerOnly =
     !owner && sensitiveMarksDiffer(view.state.current.body, view.body);
   return (
@@ -1012,13 +1020,19 @@ export function DraftState({
           <button
             type="button"
             className="button"
-            disabled={busy || !!view.draftError}
+            disabled={busy || unsaved || !!view.draftError}
+            aria-describedby={unsaved ? id : undefined}
             onClick={onPublish}
           >
             Publish {view.body.singular} changes
           </button>
         )}
       </div>
+      {!ownerOnly && unsaved && (
+        <p id={id} className="muted">
+          {SAVE_BEFORE_PUBLISH}
+        </p>
+      )}
       {ownerOnly && <p className="muted">{OWNER_MUST_PUBLISH}</p>}
       {view.draftError && (
         <p className="notice error" role="alert">
@@ -1045,7 +1059,36 @@ export function Refusal({ issues }: { issues: string[] }) {
   );
 }
 
-/** The publish summary of the kind's draft against the version in force, before anything is sent. */
+/**
+ * FLD-032: each required field a create screen of the body does not show, as its label, key and
+ * screen, with what to do; nothing when every required field is on its create screens.
+ */
+export function RequiredOffCreateList({ body }: { body: KindSchemaBody }) {
+  const items = requiredOffCreate(body);
+  if (!items.length) return null;
+  return (
+    <section className="notice stack" style={{ gap: 6 }}>
+      <h3>Required but not on the create screen</h3>
+      <p style={{ margin: 0 }}>
+        People could not fill these required fields when they create a record.
+        Show each one on its create screen, or make it optional, before
+        publishing.
+      </p>
+      <ul style={{ margin: 0, paddingLeft: 18 }}>
+        {items.map((item) => (
+          <li key={`${item.key}:${screenKey(item.screen)}`}>
+            {item.label} <code>{item.key}</code>: {screenLabel(item.screen)}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * The publish summary of the kind's draft against the version in force, before anything is sent.
+ * Publish is disabled while a required field is off a create screen (FLD-032).
+ */
 export function PublishDialog({
   view,
   busy = false,
@@ -1066,6 +1109,7 @@ export function PublishDialog({
   const listed = CHANGE_CATEGORIES.filter(
     (category) => changes[category].length,
   );
+  const offCreate = requiredOffCreate(view.body).length > 0;
   return (
     <Dialog
       title={`Publish ${view.body.singular} changes?`}
@@ -1090,9 +1134,12 @@ export function PublishDialog({
               </ul>
             </section>
           ))
-        ) : (
+        ) : unchanged(view.state.current.body, view.body) ? (
           <p>No changes from the published version.</p>
+        ) : (
+          <p>No field changes; only the layout of sections changes.</p>
         )}
+        <RequiredOffCreateList body={view.body} />
         {refusal.length > 0 && <Refusal issues={refusal} />}
       </div>
       <footer className="dialog-footer">
@@ -1109,7 +1156,7 @@ export function PublishDialog({
         <button
           type="button"
           className="button"
-          disabled={busy}
+          disabled={busy || offCreate}
           onClick={onPublish}
         >
           Publish

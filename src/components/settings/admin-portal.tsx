@@ -26,6 +26,7 @@ import { FieldsTab } from "./fields-tab";
 import { GroupsTab } from "./groups-tab";
 import { OrganisationTab } from "./organisation-tab";
 import { RolesTab } from "./roles-tab";
+import { ScreensTab } from "./screens-tab";
 import { TeamsTab } from "./teams-tab";
 import { UsersTab } from "./users-tab";
 
@@ -197,6 +198,8 @@ export function AdminPortalView({
               <DirectoryTab access={access} />
             ) : current.key === "fields" ? (
               <FieldsTab access={access} />
+            ) : current.key === "screens" ? (
+              <ScreensTab access={access} />
             ) : current.key === "domain" ? (
               <DomainTab />
             ) : (
