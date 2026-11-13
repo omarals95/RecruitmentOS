@@ -441,7 +441,8 @@ describe("split runtime role template", () => {
       ).toEqual(["tenant_context.install(text,text,text[])"]);
       // Only the data role may run the cross-team bulk intake purge, the erasure helper, the
       // two MCP CV helpers (0026), the two company workspace helpers (0028), the five
-      // configuration store helpers (0030) and the public branding read (0053).
+      // configuration store helpers (0030), the public branding read (0053) and the field usage
+      // count (0055).
       for (const helper of [
         "tenant_context.allows_workspace(uuid,text,text)",
         "tenant_context.publish_config_version(uuid)",
@@ -462,6 +463,7 @@ describe("split runtime role template", () => {
         "tenant_context.job_title_usage(text)",
         "tenant_context.group_grants(uuid)",
         "tenant_context.computed_group_members(text)",
+        "tenant_context.field_usage(text,uuid)",
         "tenant_context.public_branding()",
       ])
         expect(evidence.execute.includes(helper), `${kind} ${helper}`).toBe(
@@ -658,6 +660,7 @@ describe("split runtime role template", () => {
       "SELECT tenant_context.publish_bracket_version(gen_random_uuid())",
       "SELECT tenant_context.published_bracket_version()",
       "SELECT * FROM tenant_context.job_title_usage('fictional-title')",
+      "SELECT tenant_context.field_usage('candidate', gen_random_uuid())",
       "SELECT * FROM app.candidate_erasures",
       "SELECT * FROM app.employee_erasures",
       "TRUNCATE app.employee_erasures",
