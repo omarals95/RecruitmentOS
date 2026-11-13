@@ -6370,8 +6370,8 @@ describe("groups page", () => {
       ),
       "utf8",
     );
-    expect(source).toContain(
-      'team ? "/api/v1/me/groups" : null,\n  );\n  return !result.error && !!result.data?.data.length;',
+    expect(source).toMatch(
+      /team \? "\/api\/v1\/me\/groups" : null,\s+\);\s+return !result\.error && !!result\.data\?\.data\.length;/,
     );
   });
 
