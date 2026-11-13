@@ -126,6 +126,163 @@
   flex: 1 1 220px;
   min-width: 0;
 }
+/* Screens: the field picker, the screen's sections and the preview side by side, stacked when the
+   panel is narrow; the panel's own width decides, since the app and admin sidebars take their share. */
+.screen-designer-wrap {
+  container-type: inline-size;
+}
+.screen-designer {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 0.8fr) minmax(0, 1.6fr)
+    minmax(180px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.screen-designer > section {
+  min-width: 0;
+}
+.screen-picker-list,
+.screen-sections,
+.screen-entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.screen-picker-list {
+  max-height: 560px;
+  overflow-y: auto;
+}
+.screen-picker-list > li,
+.screen-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: grab;
+}
+.screen-entry-name {
+  flex: 1 1 140px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.screen-entry-name small {
+  display: block;
+}
+.screen-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.screen-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.screen-section-head .field {
+  flex: 1 1 160px;
+}
+.screen-grip {
+  align-self: center;
+  color: var(--muted);
+  cursor: grab;
+  user-select: none;
+}
+.screen-actions {
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.screen-entry-rule {
+  display: grid;
+  gap: 4px;
+}
+/* One bordered choice per rule, so a narrow row wraps them whole. */
+.screen-rule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.screen-rule label {
+  position: relative;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.screen-rule input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+.screen-rule label:has(input:checked) {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-weight: 700;
+}
+.screen-rule label:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: -3px;
+}
+.screen-rule label:has(input:disabled) {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.screen-drop {
+  padding: 8px;
+  border: 2px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.screen-preview-frame {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.screen-preview-frame h4 {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  margin: 4px 0 0;
+  text-transform: uppercase;
+}
+.screen-preview-frame dl,
+.screen-preview-frame dd {
+  margin: 0;
+}
+.screen-preview-frame dt {
+  font-weight: 600;
+  font-size: 12px;
+}
+@container (max-width: 640px) {
+  .screen-designer {
+    grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.6fr);
+  }
+  .screen-preview {
+    grid-column: 1 / -1;
+  }
+}
+@container (max-width: 480px) {
+  .screen-designer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 @media (max-width: 1100px) {
   .data-table.fields-table td.fields-actions {
     min-width: 0;

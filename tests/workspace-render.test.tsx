@@ -1886,4 +1886,18 @@ describe("configured screens", () => {
     expect(label).toBe("Email");
     expect(input).not.toContain("required");
   });
+
+  // R2b-10 (job 102): a field the screen flags read-only gets no input, like a read-only definition.
+  it("gives a field its edit screen flags read-only no input", () => {
+    const schema = contactBody();
+    for (const screen of schema.screens)
+      if (screen.action === "edit")
+        screen.groups[1].fields[0] = { key: "phone", readOnly: true };
+    const markup = editor(schema, candidate("candidate@example.test"));
+    expect(markup).not.toContain('id="editor-phone"');
+    expect(markup).toContain('id="editor-email"');
+    expect(markup).toContain('id="editor-name"');
+    // The create screen does not flag it, so creating still offers it.
+    expect(editor(schema)).toContain('id="editor-phone"');
+  });
 });

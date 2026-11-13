@@ -419,7 +419,7 @@ describe("admin pages check access on the server (TST-002)", () => {
     allowed["team admin"] = teamPages;
     allowed.recruiter = [];
     allowed.viewer = [];
-    allowed["company admin"] = [null, "teams", "fields", "history"];
+    allowed["company admin"] = [null, "teams", "fields", "screens", "history"];
     allowed["company admin with organisation"] = [
       null,
       "teams",
@@ -444,6 +444,7 @@ describe("admin pages check access on the server (TST-002)", () => {
       "roles",
       "organisation",
       "fields",
+      "screens",
       "domain",
       "history",
     ];
@@ -589,6 +590,31 @@ describe("admin pages check access on the server (TST-002)", () => {
       ["bearer", "sign-in"],
     ] as const)
       expect(await open(callers[name], "[tab]/page.tsx", "fields"), name).toBe(
+        outcome,
+      );
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // R2b-10 (job 102): Screens is a company owner page, and a page of the company admin with fields.
+  it("opens Screens for company owners and the company admin with fields only (R2b-10)", async () => {
+    for (const [name, outcome] of [
+      ["company admin", "allowed"],
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["company admin with organisation", "refused"],
+      ["company admin with people", "refused"],
+      ["company admin with no area", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(await open(callers[name], "[tab]/page.tsx", "screens"), name).toBe(
         outcome,
       );
     expect(authenticateApiToken).not.toHaveBeenCalled();

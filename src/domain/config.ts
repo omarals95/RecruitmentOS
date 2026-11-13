@@ -141,6 +141,7 @@ const kindSchemaShape = z
                             key: z.string(),
                             hidden: z.boolean().optional(),
                             mandatory: z.boolean().optional(),
+                            readOnly: z.boolean().optional(),
                           })
                           .strict(),
                       )
@@ -246,6 +247,8 @@ function kindSchemaIssues(
         listed.add(entry.key);
         if (entry.hidden && entry.mandatory)
           issue(path, "A hidden field cannot be mandatory.");
+        if (entry.readOnly && (entry.hidden || entry.mandatory))
+          issue(path, "A read-only field cannot be hidden or mandatory.");
         if (
           screen.action === "create" &&
           entry.hidden &&
@@ -254,6 +257,15 @@ function kindSchemaIssues(
           issue(
             [...path, "hidden"],
             "A create screen shows every required system field.",
+          );
+        if (
+          screen.action === "create" &&
+          entry.readOnly &&
+          required.has(entry.key)
+        )
+          issue(
+            [...path, "readOnly"],
+            "A create screen lets people fill every required system field.",
           );
       }),
     );
@@ -279,8 +291,8 @@ function kindSchemaIssues(
 }
 /**
  * A kind schema (architecture §1.4): the kind's system fields, its custom fields (field-types.ts)
- * and its screens per type and action, each of ordered groups of ordered fields with hidden and
- * mandatory flags. Strict on every level, so a body cannot carry record ids or record values; a
+ * and its screens per type and action, each of ordered groups of ordered fields with hidden,
+ * mandatory and read-only flags. Strict on every level, so a body cannot carry record ids or record values; a
  * custom field may carry a default, but no reference type takes one.
  */
 export const kindSchemaBodySchema =

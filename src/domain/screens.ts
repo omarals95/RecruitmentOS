@@ -1,5 +1,6 @@
 // Screens of a kind schema (architecture §1.4, §14.6): the one lookup by record type and action, and
-// the one notion of a shown and a mandatory field, used by the server and the client alike. Pure,
+// the one notion of a shown, a read-only and a mandatory field, used by the server and the client
+// alike. Pure,
 // and it imports ./config for types only, so config.ts and field-types.ts can import it.
 import type { KindSchemaBody } from "./config";
 
@@ -63,6 +64,16 @@ export function shownGroups(screen: Screen): ScreenGroup[] {
 export function shownKeys(screen: Screen): string[] {
   return shownGroups(screen).flatMap((group) =>
     group.fields.map((entry) => entry.key),
+  );
+}
+
+/**
+ * The read-only keys of a screen, in screen order: its shown entries flagged read-only. The editor
+ * treats them as it treats a read-only field definition; screens are layout, not permissions.
+ */
+export function readOnlyKeys(screen: Screen): string[] {
+  return shownGroups(screen).flatMap((group) =>
+    group.fields.flatMap((entry) => (entry.readOnly ? [entry.key] : [])),
   );
 }
 

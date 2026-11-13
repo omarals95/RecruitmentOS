@@ -6,9 +6,14 @@ import {
 } from "@/domain/config";
 import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import { compileKindSchema } from "@/domain/field-types";
+import {
+  requiredOffCreate,
+  requiredOffCreateText,
+} from "@/domain/kind-schema-changes";
 import { systemFieldKeys } from "@/domain/record-schemas";
 import {
   mandatoryKeys,
+  readOnlyKeys,
   screenFor,
   shownKeys,
   type Screen,
@@ -411,5 +416,190 @@ describe("screens per kind, type and action (R2b-07)", () => {
         compiled.mandatory.create,
       );
     }
+  });
+});
+
+// R2b-10 (job 102): a read-only flag per screen entry, and the publish check that every required
+// field is on its create screens (FLD-032). Fictional ids and labels only.
+describe("read-only entries and required fields off a create screen (R2b-10)", () => {
+  type Flagged = Entry & { readOnly?: boolean };
+  const candidate = () =>
+    structuredClone(DEFAULT_KIND_SCHEMAS.candidate.body) as RawBody;
+  const entryOf = (body: RawBody, action: string, key: string) =>
+    screen(body, action).groups[0].fields.find(
+      (entry) => entry.key === key,
+    )! as Flagged;
+  const typedCreate = (body: RawBody, type: string) => {
+    body.screens.push({
+      type,
+      action: "create",
+      groups: [{ fields: entries(candidateKeys) }],
+    });
+    return screen(body, "create", type);
+  };
+
+  it("accepts read-only entries unchanged, and refuses one also hidden or mandatory, or a read-only required field on a create screen", () => {
+    const body = candidate();
+    entryOf(body, "edit", "phone").readOnly = true;
+    entryOf(body, "create", "email").readOnly = true;
+    const result = kindSchemaBodySchema.safeParse(body);
+    expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
+    expect(result.data).toStrictEqual(body);
+    const refusal = (change: (body: RawBody) => void, message: string) => {
+      const issues = refusedBy(change, candidate());
+      expect(issues.map((issue) => issue.message)).toEqual([message]);
+      expect(issues[0].path.slice(0, 5)).toEqual([
+        "screens",
+        expect.any(Number),
+        "groups",
+        0,
+        "fields",
+      ]);
+    };
+    const both = "A read-only field cannot be hidden or mandatory.";
+    refusal(
+      (body) =>
+        Object.assign(entryOf(body, "edit", "phone"), {
+          readOnly: true,
+          hidden: true,
+        }),
+      both,
+    );
+    refusal(
+      (body) =>
+        Object.assign(entryOf(body, "view", "phone"), {
+          readOnly: true,
+          mandatory: true,
+        }),
+      both,
+    );
+    const fill =
+      "A create screen lets people fill every required system field.";
+    refusal((body) => (entryOf(body, "create", "name").readOnly = true), fill);
+    refusal((body) => {
+      (
+        typedCreate(body, TYPE).groups[0].fields.find(
+          (entry) => entry.key === "name",
+        ) as Flagged
+      ).readOnly = true;
+    }, fill);
+    // Read only on an edit screen is fine for a required field: screens are layout, not permissions.
+    const edit = candidate();
+    entryOf(edit, "edit", "name").readOnly = true;
+    expect(issuesOf(edit)).toEqual([]);
+  });
+
+  it("keeps every default body valid and unchanged, and gives the shown read-only keys in screen order", () => {
+    for (const kind of CONFIGURABLE_KINDS) {
+      const body = DEFAULT_KIND_SCHEMAS[kind].body;
+      expect(kindSchemaBodySchema.parse(body), kind).toStrictEqual(body);
+      for (const found of body.screens)
+        expect(readOnlyKeys(found), kind).toEqual([]);
+    }
+    const body = configured(false);
+    screen(body, "edit").groups[1].fields = [
+      { key: "email", readOnly: true } as Flagged,
+      { key: "employer", hidden: true },
+      { key: "phone", readOnly: true } as Flagged,
+    ];
+    const parsed = kindSchemaBodySchema.parse(body);
+    expect(readOnlyKeys(screenFor(parsed, null, "edit"))).toEqual([
+      "email",
+      "phone",
+    ]);
+    // A hidden entry is not shown, so it is never among them, even flagged.
+    expect(
+      readOnlyKeys({
+        action: "edit",
+        groups: [
+          {
+            fields: [
+              { key: "phone", hidden: true, readOnly: true },
+              { key: "email", readOnly: true },
+            ],
+          },
+        ],
+      }),
+    ).toEqual(["email"]);
+  });
+
+  describe("requiredOffCreate (FLD-032)", () => {
+    const REQUIRED = uuid(9501);
+    /** The candidate default with a required custom field, listed on every screen but create. */
+    const withRequired = (extra: Record<string, unknown> = {}) => {
+      const body = candidate();
+      body.fields.push({
+        key: REQUIRED,
+        system: false,
+        label: "Fictional must have",
+        type: "short-text",
+        required: true,
+        ...extra,
+      });
+      for (const item of body.screens)
+        if (item.action !== "create")
+          item.groups[0].fields.push({ key: REQUIRED });
+      return body;
+    };
+    const off = (body: RawBody) =>
+      requiredOffCreate(kindSchemaBodySchema.parse(body)).map((item) => [
+        item.key,
+        item.label,
+        item.screen.type ?? "default",
+      ]);
+    const must = (type: string) => [REQUIRED, "Fictional must have", type];
+
+    it("finds nothing in the default bodies or for an archived required field", () => {
+      for (const kind of CONFIGURABLE_KINDS)
+        expect(
+          requiredOffCreate(DEFAULT_KIND_SCHEMAS[kind].body),
+          kind,
+        ).toEqual([]);
+      expect(off(withRequired({ archived: true }))).toEqual([]);
+    });
+
+    it("finds a required field left off or hidden on the default create screen, and on each typed create screen without it", () => {
+      expect(off(withRequired())).toEqual([must("default")]);
+      const hidden = withRequired();
+      screen(hidden, "create").groups[0].fields.push({
+        key: REQUIRED,
+        hidden: true,
+      });
+      expect(off(hidden)).toEqual([must("default")]);
+      // Shown on the default create screen, left off two typed ones.
+      const typed = withRequired();
+      screen(typed, "create").groups[0].fields.push({ key: REQUIRED });
+      typedCreate(typed, TYPE);
+      typedCreate(typed, OTHER_TYPE);
+      expect(off(typed)).toEqual([must(TYPE), must(OTHER_TYPE)]);
+      screen(typed, "create", OTHER_TYPE).groups[0].fields.push({
+        key: REQUIRED,
+      });
+      expect(off(typed)).toEqual([must(TYPE)]);
+    });
+
+    it("checks a type-limited field only on the create screens that serve its types", () => {
+      // T's own create screen leaves it out; another type's create screen does not count.
+      const limited = withRequired({ types: [TYPE] });
+      typedCreate(limited, TYPE);
+      typedCreate(limited, OTHER_TYPE);
+      expect(off(limited)).toEqual([must(TYPE)]);
+      screen(limited, "create", TYPE).groups[0].fields.push({ key: REQUIRED });
+      expect(off(limited)).toEqual([]);
+      // Without a create screen of its own, T is served by the default create screen.
+      const fallback = withRequired({ types: [TYPE] });
+      typedCreate(fallback, OTHER_TYPE);
+      expect(off(fallback)).toEqual([must("default")]);
+    });
+
+    it("says what to do in one sentence per field and screen", () => {
+      const body = withRequired();
+      typedCreate(body, TYPE);
+      const items = requiredOffCreate(kindSchemaBodySchema.parse(body));
+      expect(items.map(requiredOffCreateText)).toEqual([
+        `${REQUIRED}: Required but not on the create screen. Fictional must have is required, but the Create screen does not show it; show it there or make it optional.`,
+        `${REQUIRED}: Required but not on the create screen. Fictional must have is required, but the Create screen (type ${TYPE}) does not show it; show it there or make it optional.`,
+      ]);
+    });
   });
 });

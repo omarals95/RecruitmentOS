@@ -939,6 +939,55 @@ describe("screen-driven record payloads", () => {
       recordMutation("tasks", values, {}, task, body).data,
     ).not.toHaveProperty("customValues");
   });
+  // R2b-10 (job 102): a key the screen flags read-only is not sent, as a read-only definition.
+  it("leaves a field its screen flags read-only out, and keeps a read-only central custom value unchanged", () => {
+    const values = {
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+      phone: "+971 50 000 0005",
+      employer: "Fictional Employer",
+    };
+    const schema = contactBody();
+    for (const screen of schema.screens)
+      if (screen.action === "edit")
+        screen.groups[1].fields[0] = { key: "phone", readOnly: true };
+    const edited = recordMutation("candidates", values, {}, candidate, schema);
+    expect(edited.data).not.toHaveProperty("phone");
+    expect(edited.data).toMatchObject({
+      name: "Fictional Candidate",
+      email: "candidate@example.test",
+    });
+    // Creating uses the create screen, which does not flag it.
+    expect(
+      recordMutation("candidates", values, {}, undefined, schema).data,
+    ).toHaveProperty("phone", "+971 50 000 0005");
+    const central = customField("Fictional read-only note", "short-text");
+    const body = kindBody("task", [central]);
+    for (const screen of body.screens)
+      screen.groups[0].fields = screen.groups[0].fields.map((entry) =>
+        entry.key === "assigneeIds" || entry.key === central.key
+          ? { key: entry.key, readOnly: true }
+          : entry,
+      );
+    const task = {
+      id: "00000000-0000-4000-8000-000000000999",
+      kind: "task",
+      data: { title: "Fictional task", assigneeIds: ["fictional-user"] },
+      version: 3,
+    } as RecordDto;
+    const taskValues = {
+      title: "Fictional task",
+      assigneeIds: ["fictional-user"],
+      customValues: { [central.key]: "Fictional stored note" },
+    };
+    for (const record of [undefined, task]) {
+      const data = recordMutation("tasks", taskValues, {}, record, body).data;
+      expect(data).not.toHaveProperty("assigneeIds");
+      expect(data.customValues).toEqual({
+        [central.key]: "Fictional stored note",
+      });
+    }
+  });
 });
 
 // R2b-08 (job 091): the editor never sends a field the caller's role hides or makes read-only.
