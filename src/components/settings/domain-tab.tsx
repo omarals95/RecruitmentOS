@@ -139,78 +139,83 @@ export function DomainPanel({
           The web address set in the deployment. Links in emails, sign-in and AI
           connections always use it, never the address a request came in on.
         </p>
+        {/* The record screens' phone layout: one labelled card per row at 720 px and below. */}
         {address && (
-          <div className="table-wrap">
-            <table className="data-table">
-              <caption className="sr-only">
-                The web address and its checks
-              </caption>
-              <thead>
-                <tr>
-                  <th>Check</th>
-                  <th>Result</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td data-label="Check">Web address</td>
-                  <td data-label="Result">
-                    {address.origin ?? "Not set or not a valid web address"}
-                  </td>
-                </tr>
-                <tr>
-                  <td data-label="Check">Uses https</td>
-                  <td data-label="Result">{passed(address.https)}</td>
-                </tr>
-                <tr>
-                  <td data-label="Check">No trailing slash or path</td>
-                  <td data-label="Result">{passed(address.originOnly)}</td>
-                </tr>
-                <tr>
-                  <td data-label="Check">Sign-in accepts it</td>
-                  <td data-label="Result">
-                    {!address.valid
-                      ? "No"
-                      : local
-                        ? "Yes, allowed for local development only"
-                        : "Yes"}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div className="records-panel">
+            <div className="table-wrap">
+              <table className="data-table">
+                <caption className="sr-only">
+                  The web address and its checks
+                </caption>
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td data-label="Check">Web address</td>
+                    <td data-label="Result">
+                      {address.origin ?? "Not set or not a valid web address"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td data-label="Check">Uses https</td>
+                    <td data-label="Result">{passed(address.https)}</td>
+                  </tr>
+                  <tr>
+                    <td data-label="Check">No trailing slash or path</td>
+                    <td data-label="Result">{passed(address.originOnly)}</td>
+                  </tr>
+                  <tr>
+                    <td data-label="Check">Sign-in accepts it</td>
+                    <td data-label="Result">
+                      {!address.valid
+                        ? "No"
+                        : local
+                          ? "Yes, allowed for local development only"
+                          : "Yes"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </section>
       <section className="panel stack">
         <h2>Deployment</h2>
-        <div className="table-wrap">
-          <table className="data-table">
-            <caption className="sr-only">This deployment</caption>
-            <thead>
-              <tr>
-                <th>Fact</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td data-label="Fact">Deployment mode</td>
-                <td data-label="Value">{mode.label}</td>
-              </tr>
-              <tr>
-                <td data-label="Fact">Version</td>
-                <td data-label="Value">{build.version}</td>
-              </tr>
-              <tr>
-                <td data-label="Fact">Build</td>
-                <td data-label="Value">{build.build}</td>
-              </tr>
-              <tr>
-                <td data-label="Fact">Commit</td>
-                <td data-label="Value">{build.commit}</td>
-              </tr>
-            </tbody>
-          </table>
+        <div className="records-panel">
+          <div className="table-wrap">
+            <table className="data-table">
+              <caption className="sr-only">This deployment</caption>
+              <thead>
+                <tr>
+                  <th>Fact</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td data-label="Fact">Deployment mode</td>
+                  <td data-label="Value">{mode.label}</td>
+                </tr>
+                <tr>
+                  <td data-label="Fact">Version</td>
+                  <td data-label="Value">{build.version}</td>
+                </tr>
+                <tr>
+                  <td data-label="Fact">Build</td>
+                  <td data-label="Value">{build.build}</td>
+                </tr>
+                <tr>
+                  <td data-label="Fact">Commit</td>
+                  <td data-label="Value">{build.commit}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
       <section className="panel stack">
@@ -219,28 +224,30 @@ export function DomainPanel({
           These settings live in the deployment, not in the app. Nothing on this
           page shows or changes their values.
         </p>
-        <div className="table-wrap">
-          <table className="data-table">
-            <caption className="sr-only">
-              Settings set in the deployment
-            </caption>
-            <thead>
-              <tr>
-                <th>Setting</th>
-                <th>Variables</th>
-                <th>Where</th>
-              </tr>
-            </thead>
-            <tbody>
-              {DEPLOYMENT_SETTINGS.map(([setting, variables]) => (
-                <tr key={setting}>
-                  <td data-label="Setting">{setting}</td>
-                  <td data-label="Variables">{variables}</td>
-                  <td data-label="Where">Set in deployment</td>
+        <div className="records-panel">
+          <div className="table-wrap">
+            <table className="data-table">
+              <caption className="sr-only">
+                Settings set in the deployment
+              </caption>
+              <thead>
+                <tr>
+                  <th>Setting</th>
+                  <th>Variables</th>
+                  <th>Where</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {DEPLOYMENT_SETTINGS.map(([setting, variables]) => (
+                  <tr key={setting}>
+                    <td data-label="Setting">{setting}</td>
+                    <td data-label="Variables">{variables}</td>
+                    <td data-label="Where">Set in deployment</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
       <AddressCheck build={build} entry={entry} onEntry={onEntry} />
