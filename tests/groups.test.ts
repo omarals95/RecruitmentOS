@@ -2575,6 +2575,13 @@ describe("groups as role grantees under the split runtime roles", () => {
     );
     await addGroupMember(owner, second.id, { userId: pat.userId });
     expect(await roleOf(pat)).toBe(roleTwo.versionId);
+    // The same grant, given again while Pat is in both groups, succeeds too.
+    await removeGroupRole(owner, second.id, { teamId: "gr-team-a" });
+    await grantGroupRole(owner, second.id, {
+      teamId: "gr-team-a",
+      roleObjectId: roleTwo.objectId,
+    });
+    expect(await roleOf(pat)).toBe(roleTwo.versionId);
     // Once that role is cleared, the two group roles meet and neither applies.
     await harness.asSuperuser();
     await harness.client.exec(
