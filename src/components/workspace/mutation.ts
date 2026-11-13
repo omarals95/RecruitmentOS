@@ -13,7 +13,12 @@ import {
   type RecordDto,
   type ReferenceField,
 } from "@/domain/records";
-import { screenFor, shownKeys, type Screen } from "@/domain/screens";
+import {
+  readOnlyKeys,
+  screenFor,
+  shownKeys,
+  type Screen,
+} from "@/domain/screens";
 import type { AccessDecision } from "@/lib/authz";
 
 /**
@@ -42,10 +47,11 @@ export function shownSystemFields(
 /**
  * Validate separately, then send only user-editable properties. Zod defaults must not add
  * importer-owned source fields. A task's assigneeIds is left out: assigneeInput adds it. A
- * configurable kind sends only the system fields its create or edit screen shows, and a task's
- * custom values leave out the kind schema's custom fields that screen does not show (R2b-07). With
- * the caller's field `rules` for the kind (GET /api/v1/me/access), a field or custom id whose rule
- * is hidden or read is left out too, so a save never names it (R2b-08).
+ * configurable kind sends only the system fields its create or edit screen shows and does not flag
+ * read-only (R2b-10), and a task's custom values leave out the kind schema's custom fields that
+ * screen does not show (R2b-07). With the caller's field `rules` for the kind (GET
+ * /api/v1/me/access), a field or custom id whose rule is hidden or read is left out too, so a save
+ * never names it (R2b-08).
  */
 export function recordMutation(
   resource: ResourceName,
@@ -59,6 +65,7 @@ export function recordMutation(
   const body = kindSchemaBodyOf(config.kind, schema);
   const screen = body && screenFor(body, null, record ? "edit" : "create");
   const shown = new Set(screen ? shownKeys(screen) : []);
+  const readOnly = new Set(screen ? readOnlyKeys(screen) : []);
   const locked = (key: string) =>
     !!rules &&
     Object.hasOwn(rules, key) &&
@@ -69,6 +76,7 @@ export function recordMutation(
     : config.fields) {
     if (
       field.readOnly ||
+      readOnly.has(field.key) ||
       field.key === "legacyAuthorLabel" ||
       field.key === "assigneeIds" ||
       locked(field.key)

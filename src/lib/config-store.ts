@@ -24,6 +24,8 @@ import {
 import { DEFAULT_KIND_SCHEMAS } from "@/domain/config-defaults";
 import {
   kindSchemaDraftIssues,
+  requiredOffCreate,
+  requiredOffCreateText,
   sensitiveMarksDiffer,
 } from "@/domain/kind-schema-changes";
 import { accessContext } from "@/lib/authz";
@@ -381,8 +383,9 @@ export async function updateConfigDraft(
 /**
  * Publishes the object's draft through the owner-run helper, which audits it; returns its number.
  * A kind schema or branding draft is locked, then its body is parsed and checked again first: a
- * kind schema against the version in force, branding for WCAG 2.2 AA contrast in both themes (400
- * branding_contrast listing every failing pair). With options.type, a version of another type is
+ * kind schema against the version in force and for every required field on its create screens
+ * (FLD-032, publish only, so a draft can be saved part-way), branding for WCAG 2.2 AA contrast in
+ * both themes (400 branding_contrast listing every failing pair). With options.type, a version of another type is
  * not found.
  */
 export async function publishConfigVersion(
@@ -408,6 +411,16 @@ export async function publishConfigVersion(
       if (locked.state !== "draft") throw stateConflict();
       const body = parseBody(target.type, locked.body);
       await checkBody(tx, p, access, target, body);
+      const offCreate =
+        target.type === "kind-schema"
+          ? requiredOffCreate(body as KindSchemaBody)
+          : [];
+      if (offCreate.length)
+        throw new ApiError(
+          400,
+          "invalid_input",
+          offCreate.slice(0, 8).map(requiredOffCreateText).join("; "),
+        );
       const failures =
         target.type === "branding"
           ? brandingContrastFailures(body as BrandingBody)

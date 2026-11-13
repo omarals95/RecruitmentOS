@@ -2,7 +2,8 @@
 // sensitive marks, and the rules every save and publish of a kind schema keeps beside the body
 // schema. Pure and client-safe, so the Fields page and the configuration store share it.
 import type { KindSchemaBody } from "./config";
-import { mandatoryKeys, screenKey, type Screen } from "./screens";
+import { screenLabel } from "./field-where-used";
+import { mandatoryKeys, screenKey, shownKeys, type Screen } from "./screens";
 
 type Field = KindSchemaBody["fields"][number];
 export type FieldRef = { key: string; label: string };
@@ -41,6 +42,7 @@ type Place = {
   group: string | undefined;
   hidden: boolean;
   mandatory: boolean;
+  readOnly: boolean;
 };
 /** Each listed field's group label and flags, and the keys of each group label in screen order. */
 function placesOf(screen: Screen | undefined) {
@@ -52,6 +54,7 @@ function placesOf(screen: Screen | undefined) {
         group: group.label,
         hidden: flag(entry.hidden),
         mandatory: flag(entry.mandatory),
+        readOnly: flag(entry.readOnly),
       });
       groups.set(group.label, [...(groups.get(group.label) ?? []), entry.key]);
     }
@@ -63,8 +66,8 @@ function placesOf(screen: Screen | undefined) {
  * new in `after` counts as added, and as archived, made mandatory or made sensitive when it already
  * is. Regrouped means the field's group label differs on a screen both versions list it on; other is
  * any remaining difference in its definition or screen entries: help text, validation, default,
- * order within its group, the sensitive mark removed, made optional, or added to or removed from a
- * screen. Fields only in `before` are not listed: the store refuses removing a field.
+ * order within its group, the sensitive mark removed, made optional, its hidden or read-only flag
+ * changed, or added to or removed from a screen. Fields only in `before` are not listed: the store refuses removing a field.
  */
 export function kindSchemaChanges(
   before: KindSchemaBody,
@@ -139,7 +142,11 @@ export function kindSchemaChanges(
         )
           mark("other", field.key);
       }
-      if (was.hidden !== now.hidden || (was.mandatory && !now.mandatory))
+      if (
+        was.hidden !== now.hidden ||
+        was.readOnly !== now.readOnly ||
+        (was.mandatory && !now.mandatory)
+      )
         mark("other", field.key);
     }
   }
@@ -212,3 +219,32 @@ export function kindSchemaDraftIssues(
       );
   return issues;
 }
+
+/** A required field and a create screen that does not show it (FLD-032). */
+export type RequiredOffCreate = { key: string; label: string; screen: Screen };
+/**
+ * Each unarchived required field with each create screen of the body that does not show it (not
+ * listed, or listed hidden), in field order and then screen order. A field without record types is
+ * checked on every create screen; a field limited to types on the typed create screen of each of its
+ * types that has one, and on the default create screen when any of its types has none (ADM-29).
+ */
+export function requiredOffCreate(body: KindSchemaBody): RequiredOffCreate[] {
+  const creates = body.screens.filter((screen) => screen.action === "create");
+  return body.fields.flatMap((field) => {
+    if (!field.required || archivedOf(field)) return [];
+    const types = field.system ? undefined : field.types;
+    const serves = (screen: Screen) =>
+      types === undefined ||
+      (screen.type === undefined
+        ? types.some((type) => !creates.some((item) => item.type === type))
+        : types.includes(screen.type));
+    return creates
+      .filter(
+        (screen) => serves(screen) && !shownKeys(screen).includes(field.key),
+      )
+      .map((screen) => ({ key: field.key, label: field.label, screen }));
+  });
+}
+/** The publish refusal for one required field off one create screen, starting with its key. */
+export const requiredOffCreateText = (item: RequiredOffCreate) =>
+  `${item.key}: Required but not on the create screen. ${item.label} is required, but the ${screenLabel(item.screen)} does not show it; show it there or make it optional.`;

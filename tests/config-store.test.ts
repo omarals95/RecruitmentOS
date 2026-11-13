@@ -2194,6 +2194,127 @@ describe("versioned configuration store under the split runtime roles", () => {
         }
       });
     });
+
+    // R2b-10 (job 102): the screen designer's drafts go through the same draft and publish, and a
+    // publish refuses a required field that a create screen does not show (FLD-032).
+    describe("screen designer drafts (R2b-10)", () => {
+      const must = customField("Fictional must note", "short-text", {
+        required: true,
+      });
+      let auditFrom = 0;
+      /** The screen of the body for this action, untyped. */
+      const screenOf = (body: KindSchemaBody, action: string) =>
+        body.screens.find(
+          (screen) => screen.action === action && screen.type === undefined,
+        )!;
+
+      it("saves a required custom field hidden on create, refuses to publish it, and publishes it once archived", async () => {
+        auditFrom = (await audits()).length;
+        const before = kindSchemaFor(await installed(), "candidate");
+        const body = await inForce("candidate");
+        body.fields.push(must);
+        for (const screen of body.screens)
+          screen.groups[0].fields.push(
+            screen.action === "create"
+              ? { key: must.key, hidden: true }
+              : { key: must.key },
+          );
+        const { versionId } = await run(save(fieldsAdmin, "candidate", body));
+        const updated = structuredClone(body);
+        fieldOf(updated, must.key).help = "Fictional must help";
+        await run(() =>
+          updateConfigDraft(fieldsAdmin, versionId, { body: updated }),
+        );
+        await refusedWith(
+          () => publishConfigVersion(fieldsAdmin, versionId),
+          400,
+          "invalid_input",
+          `${must.key}: Required but not on the create screen. ${must.label} is required, but the Create screen does not show it; show it there or make it optional.`,
+        );
+        expect(kindSchemaFor(await installed(), "candidate")).toEqual(before);
+        // Archived, it is no longer required anywhere, so the draft publishes.
+        const archived = structuredClone(updated);
+        Object.assign(fieldOf(archived, must.key), { archived: true });
+        await run(() =>
+          updateConfigDraft(fieldsAdmin, versionId, { body: archived }),
+        );
+        expect(
+          await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+        ).toBe(before.number! + 1);
+        expect(kindSchemaFor(await installed(), "candidate").body).toEqual(
+          archived,
+        );
+      });
+
+      it("publishes read-only entries, renamed and reordered sections, a field moved between sections and a mandatory flag as the next version", async () => {
+        const before = kindSchemaFor(await installed(), "candidate");
+        const body = structuredClone(before.body);
+        const edit = screenOf(body, "edit");
+        for (const group of edit.groups)
+          group.fields = group.fields.map((entry) =>
+            entry.key === "phone" ? { key: "phone", readOnly: true } : entry,
+          );
+        const create = screenOf(body, "create");
+        const work = create.groups.findIndex(
+          (group) => group.label === "Fictional work group",
+        );
+        // Renamed and moved first; jobTitle moves into it from the first section; email mandatory.
+        const [moved] = create.groups.splice(work, 1);
+        moved.label = "Fictional employment";
+        create.groups.unshift(moved);
+        create.groups[1].fields = create.groups[1].fields
+          .filter((entry) => entry.key !== "jobTitle")
+          .map((entry) =>
+            entry.key === "email" ? { key: "email", mandatory: true } : entry,
+          );
+        moved.fields.push({ key: "jobTitle" });
+        const { versionId } = await run(save(fieldsAdmin, "candidate", body));
+        expect(
+          await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+        ).toBe(before.number! + 1);
+        const now = kindSchemaFor(await installed(), "candidate");
+        expect(now).toMatchObject({ versionId, number: before.number! + 1 });
+        expect(now.body).toEqual(body);
+        expect(screenOf(now.body, "create").groups[0]).toEqual({
+          label: "Fictional employment",
+          fields: [{ key: "employer" }, { key: "jobTitle" }],
+        });
+        expect(
+          screenOf(now.body, "edit")
+            .groups.flatMap((group) => group.fields)
+            .find((entry) => entry.key === "phone"),
+        ).toEqual({ key: "phone", readOnly: true });
+      });
+
+      it("audits the designer's drafts and publishes only as draft_created and published, with ids and numbers", async () => {
+        const rows = (await audits()).slice(auditFrom);
+        expect(rows.map((row) => row.action)).toEqual([
+          "config.draft_created",
+          "config.published",
+          "config.draft_created",
+          "config.published",
+        ]);
+        for (const row of rows) {
+          expect(Object.keys(row.metadata).sort()).toEqual([
+            "fromVersionId",
+            "key",
+            "number",
+            "objectId",
+            "type",
+            "versionId",
+            "workspaceId",
+          ]);
+          const text = JSON.stringify(row);
+          for (const label of [
+            must.label,
+            "Fictional must help",
+            "Fictional employment",
+            "Fictional work group",
+          ])
+            expect(text).not.toContain(label);
+        }
+      });
+    });
   });
 
   describe("the kind schema in force (R2b-01)", () => {
@@ -2614,6 +2735,37 @@ describe("kind schema changes", () => {
         ref(f),
       ],
     });
+  });
+
+  // R2b-10 (job 102): a read-only flag set or cleared on a screen is another change, and a
+  // reorder of sections alone names no field.
+  it("names a field made or no longer read-only on a screen as other, and nothing for a section reorder", () => {
+    const flagged = structuredClone(before);
+    for (const entry of flagged.screens[1].groups[0].fields)
+      if (entry.key === a.key) entry.readOnly = true;
+    const none = {
+      added: [],
+      renamed: [],
+      archived: [],
+      regrouped: [],
+      madeMandatory: [],
+      madeSensitive: [],
+      other: [],
+    };
+    for (const [from, to] of [
+      [before, flagged],
+      [flagged, before],
+    ])
+      expect(kindSchemaChanges(from, to)).toEqual({ ...none, other: [ref(a)] });
+    const grouped = structuredClone(before);
+    const edit = grouped.screens[1];
+    edit.groups = [
+      { label: "Fictional first", fields: edit.groups[0].fields.slice(0, 2) },
+      { label: "Fictional second", fields: edit.groups[0].fields.slice(2) },
+    ];
+    const reordered = structuredClone(grouped);
+    reordered.screens[1].groups.reverse();
+    expect(kindSchemaChanges(grouped, reordered)).toEqual(none);
   });
 
   it("gives all-empty lists for identical bodies", () => {

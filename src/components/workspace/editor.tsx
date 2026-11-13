@@ -20,7 +20,12 @@ import { Dialog } from "@/components/ui/dialog";
 import { JobTitlePicker } from "@/components/settings/job-title-picker";
 import { UnitPicker } from "@/components/settings/unit-picker";
 import type { ActionResource, KindSchemaBody } from "@/domain/config";
-import { mandatoryKeys, screenFor, shownGroups } from "@/domain/screens";
+import {
+  mandatoryKeys,
+  readOnlyKeys,
+  screenFor,
+  shownGroups,
+} from "@/domain/screens";
 import type { MeAccess } from "@/lib/authz";
 import {
   ClientError,
@@ -146,6 +151,9 @@ export function RecordEditor({
   );
   const mandatory =
     body && screen ? new Set(mandatoryKeys(body, screen)) : null;
+  // A key the screen flags read-only gets no input and is never sent, like a read-only field
+  // definition; so do the parts tied to it: assignees, the job title and team task fields (R2b-10).
+  const screenReadOnly = new Set(screen ? readOnlyKeys(screen) : []);
   const { team } = useWorkspace();
   const [values, setValues] = useState<Values>(() => ({
     ...defaults(config.kind),
@@ -507,6 +515,7 @@ export function RecordEditor({
                   .filter(
                     (field) =>
                       !field.readOnly &&
+                      !screenReadOnly.has(field.key) &&
                       editable(field.key) &&
                       field.key !== "legacyAuthorLabel" &&
                       field.key !== "customValues" &&
@@ -548,6 +557,7 @@ export function RecordEditor({
               })}
               {resource === "tasks" &&
                 shown.has("customValues") &&
+                !screenReadOnly.has("customValues") &&
                 editable("customValues") &&
                 fields.data?.data
                   .filter((custom) => editable(custom.id))
@@ -586,19 +596,22 @@ export function RecordEditor({
                     );
                   })}
             </div>
-            {assigneesShown && shown.has("assigneeIds") && (
-              <AssigneePicker
-                members={members.members}
-                error={members.error}
-                selected={assignees}
-                onChange={setAssignees}
-                fieldError={fieldErrors.assigneeIds}
-              />
-            )}
+            {assigneesShown &&
+              shown.has("assigneeIds") &&
+              !screenReadOnly.has("assigneeIds") && (
+                <AssigneePicker
+                  members={members.members}
+                  error={members.error}
+                  selected={assignees}
+                  onChange={setAssignees}
+                  fieldError={fieldErrors.assigneeIds}
+                />
+              )}
             {resource === "vacancies" &&
               request &&
               titleRule !== "hidden" &&
-              shown.has("jobTitleKey") && (
+              shown.has("jobTitleKey") &&
+              !screenReadOnly.has("jobTitleKey") && (
                 <JobTitlePicker
                   request={request}
                   access={access.data?.data}
