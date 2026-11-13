@@ -55,11 +55,7 @@ describe("settings navigation", () => {
     );
   it("marks one current tab with the primary button style", () => {
     const markup = renderToStaticMarkup(
-      <SettingsNavigation
-        active="api-tokens"
-        adminPortal={false}
-        managedGroups={false}
-      />,
+      <SettingsNavigation active="api-tokens" adminPortal={false} />,
     );
     const current = [...markup.matchAll(/<a [^>]*>/g)]
       .map((match) => match[0])
@@ -74,11 +70,7 @@ describe("settings navigation", () => {
       expect(
         links(
           renderToStaticMarkup(
-            <SettingsNavigation
-              active={active}
-              adminPortal={false}
-              managedGroups={false}
-            />,
+            <SettingsNavigation active={active} adminPortal={false} />,
           ),
         ),
         String(active),
@@ -351,11 +343,7 @@ describe("speed settings", () => {
     for (const adminPortal of [true, false])
       expect(
         renderToStaticMarkup(
-          <SettingsNavigation
-            active="profile"
-            adminPortal={adminPortal}
-            managedGroups={false}
-          />,
+          <SettingsNavigation active="profile" adminPortal={adminPortal} />,
         ),
       ).not.toContain('href="/app/settings/speed"');
   });
@@ -461,11 +449,7 @@ describe("admin portal link", () => {
   it("lists the Admin portal after the sections when the caller can open an admin page, never as current", () => {
     for (const adminPortal of [true, false]) {
       const markup = renderToStaticMarkup(
-        <SettingsNavigation
-          active="about"
-          adminPortal={adminPortal}
-          managedGroups={false}
-        />,
+        <SettingsNavigation active="about" adminPortal={adminPortal} />,
       );
       const link = /<a [^>]*href="\/app\/admin"[^>]*>Admin portal<\/a>/.exec(
         markup,

@@ -1532,13 +1532,13 @@ export function GET() {
     ),
   };
   const groupDetailShape =
-    '{data:{id, name, description, status, grants, people, members:{people:[{userId, name, email}], groups:[{id, name, status, people:[...], groups:[...]}]}, memberOf:[{id, name, status, via}], managers:[{userId, name, email}], whereUsed:[{source:"parent-group", group:{id, name, status}}], audit:[{occurredAt, action, actorName, target:{kind:"person"|"group"|"parent", name}|{kind:"replacement", parent, replaced, replacement}|null}]}}';
+    '{data:{id, name, description, status, grants, people, members:{people:[{userId, name, email}], groups:[{id, name, status, people:[...], groups:[...]}]}, memberOf:[{id, name, status, via}], audit:[{occurredAt, action, actorName, target:{kind:"person"|"group"|"parent", name}|null}]}}';
   paths["/api/v1/admin/groups/{group}"] = {
     get: operation(
       [],
       {
         summary: "Read one company group",
-        description: `${groupReadRule} Reads one group of the company; an unknown id or another company's group returns 404 not_found. members is the tree of direct people (user id, name, email) and direct child groups, each with its own people and child groups, down to the 3-level limit; people is the effective member count. memberOf lists every group that contains it, at any depth, direct ones first; via is null when direct, else the name of the group in between. managers lists its delegated managers by name. whereUsed lists every current use of the group by id, by source: today only the active groups it is directly in (source parent-group), by name; it is what an archive must replace. audit lists, newest first and at most 50, the group activity rows written from your current team about this group, about it being added to or removed from another group, or about it replacing or being replaced in another group, with the actor's name and the person or group the change names by name (null when it cannot be resolved; a replacement names the parent, the replaced group and the replacement); changes made from another team are shown in that team. It never returns an activity id, a raw user id outside the userId of a member entry, a record or any team data. group must be a uuid and it takes no query parameters: anything else returns 400 invalid_input. Returns ${groupDetailShape}.`,
+        description: `${groupReadRule} Reads one group of the company; an unknown id or another company's group returns 404 not_found. members is the tree of direct people (user id, name, email) and direct child groups, each with its own people and child groups, down to the 3-level limit; people is the effective member count. memberOf lists every group that contains it, at any depth, direct ones first; via is null when direct, else the name of the group in between. audit lists, newest first and at most 50, the group activity rows written from your current team about this group or about it being added to or removed from another group, with the actor's name and the person or group the change names by name (null when it cannot be resolved); changes made from another team are shown in that team. It never returns an activity id, a raw user id outside the userId of a member entry, a record or any team data. group must be a uuid and it takes no query parameters: anything else returns 400 invalid_input. Returns ${groupDetailShape}.`,
       },
       { "200": { description: groupDetailShape } },
       { sessionOnly: true, params: [groupPath] },
@@ -1547,7 +1547,7 @@ export function GET() {
       [],
       {
         summary: "Rename or archive a company group",
-        description: `${groupWriteRule} Send exactly one of {name, description?} to rename (references are by id, so members, parents and effective membership are unchanged; a description left out stays, an empty one clears it) or {archived:true, replacements?} to archive for good (it keeps its members; it cannot be restored), at most 32 KiB; anything else, both together or any query key returns 400 invalid_input. replacements holds, for each current use in whereUsed, {parentGroupId, replacementGroupId}: replacementGroupId is the group that takes its place in that parent, or null to remove it from that parent; at most 200. A group nothing uses archives with {archived:true}; a group in use without replacements returns 409 group_in_use, and parent ids that are not exactly its current uses 409 group_uses_changed, with nothing written. Every replacement (one group.child_replaced row with groupId, childGroupId and replacedGroupId, ids only), every removal (one group.child_removed row) and the archive (one group.archived row) are applied in one transaction: a replacement that is the group itself or already a direct child of that parent returns 409 group_member_exists, an archived one 409 group_archived, an unknown or another company's one 404 not_found, and one that makes a cycle or nests deeper than 3 levels 409 group_cycle or group_depth, and any refusal leaves everything unchanged. ${grantingGroupRule} The rule applies to the group and to each parent named. An unknown or another company's group returns 404 not_found, an archived group 409 group_archived, and a name another current group uses, ignoring case, 409 group_name_exists. An archived group takes no new member, child group or manager and is no group's new child. Returns ${groupShape}.`,
+        description: `${groupWriteRule} Send exactly one of {name, description?} to rename (references are by id, so members, parents and effective membership are unchanged; a description left out stays, an empty one clears it) or {archived:true} to archive for good (members and the groups it is in are kept; it cannot be restored), at most 4 KiB; anything else, both together or any query key returns 400 invalid_input. ${grantingGroupRule} An unknown or another company's group returns 404 not_found, an archived group 409 group_archived, and a name another current group uses, ignoring case, 409 group_name_exists. Returns ${groupShape}.`,
         requestBody: jsonBody(
           {
             oneOf: [
@@ -1564,25 +1564,7 @@ export function GET() {
                 type: "object",
                 required: ["archived"],
                 additionalProperties: false,
-                properties: {
-                  archived: { const: true },
-                  replacements: {
-                    type: "array",
-                    maxItems: 200,
-                    items: {
-                      type: "object",
-                      required: ["parentGroupId", "replacementGroupId"],
-                      additionalProperties: false,
-                      properties: {
-                        parentGroupId: { type: "string", format: "uuid" },
-                        replacementGroupId: {
-                          type: ["string", "null"],
-                          format: "uuid",
-                        },
-                      },
-                    },
-                  },
-                },
+                properties: { archived: { const: true } },
               },
             ],
           },
@@ -1631,86 +1613,6 @@ export function GET() {
         summary: "Remove a person or a group from a company group",
         description: `${groupWriteRule} Send exactly one of {userId} or {childGroupId}, a direct member of the group, at most 1 KiB; anything else or any query key returns 400 invalid_input. ${grantingGroupRule} Someone in it only through a nested group is removed in that group. A person or group that is not a direct member, or an unknown or another company's group, returns 404 not_found. Returns {data:{removed:true}}.`,
         requestBody: groupMemberBody,
-      },
-      { "200": { description: "{data:{removed:true}}." } },
-      { sessionOnly: true, params: [groupPath] },
-    ),
-  };
-  const groupUserBody = jsonBody(
-    {
-      type: "object",
-      required: ["userId"],
-      additionalProperties: false,
-      properties: { userId: { type: "string", minLength: 1, maxLength: 128 } },
-    },
-    { userId: "fictional-user-id" },
-  );
-  paths["/api/v1/admin/groups/{group}/managers"] = {
-    post: operation(
-      [],
-      {
-        summary: "Name a delegated manager of a company group",
-        description: `${groupWriteRule} Send {userId}, a person in a team of the company, at most 1 KiB; anything else or any query key returns 400 invalid_input. A manager adds and removes the group's direct people from Groups I manage in personal settings (/api/v1/me/groups), and nothing else. A group that grants something (it, or a group it is nested in, is an approval group: tenant_context.group_grants) cannot have managers, for a company owner too: 409 group_grants_no_managers, and the database refuses it, so naming one never needs a recent sign-in. An archived group returns 409 group_archived, a person already a manager 409 group_manager_exists, a person in no team of the company 404 user_not_found, and an unknown or another company's group 404 not_found. Writes one group.manager_added activity row, with ids only, to your team. Returns {data:{added:true}} with 201.`,
-        requestBody: groupUserBody,
-      },
-      { "201": { description: "{data:{added:true}}." } },
-      { sessionOnly: true, params: [groupPath] },
-    ),
-    delete: operation(
-      [],
-      {
-        summary: "Remove a delegated manager of a company group",
-        description: `${groupWriteRule} Send {userId}, a manager of the group, at most 1 KiB; anything else or any query key returns 400 invalid_input. ${grantingGroupRule} A manager named before the group started granting is removed this way. A person who is not a manager, or an unknown or another company's group, returns 404 not_found. Writes one group.manager_removed row. Returns {data:{removed:true}}.`,
-        requestBody: groupUserBody,
-      },
-      { "200": { description: "{data:{removed:true}}." } },
-      { sessionOnly: true, params: [groupPath] },
-    ),
-  };
-  // Groups I manage (ADM-13): any signed-in member, through the manager policies of 0055.
-  const managedRule =
-    "Session only: any signed-in member, in the current team's company; Bearer tokens get 403 session_required. What you see and change is decided by the database's manager policies (tenant_context.manages_group): only the current groups you are named a manager of, and only their direct people. A manager never changes a group that grants something, so nothing here needs a recent sign-in.";
-  const managedWriteRule = `${managedRule} A group you do not manage, an unknown one or another company's returns 404 not_found; a group that grants something (it, or a group it is nested in, is an approval group), including one that started granting after you were named, returns 403 group_owner_required ("Only a company owner can change this group now, because it or a group it is in grants access."), and the database refuses it too; an archived group returns 409 group_archived. Each change writes one group activity row, with ids only, to your team.`;
-  const managedShape =
-    "{data:[{id, name, description, grants, people:[{userId, name, email}]}]}";
-  paths["/api/v1/me/groups"] = {
-    get: operation(
-      [],
-      {
-        summary: "List the groups you manage",
-        description: `${managedRule} Lists, by name, the current groups of the company you manage, each with grants (it, or a group it is in, grants something; such a group is read-only to you) and its direct people (user id, name, email) only: no child group, manager, count, archived group or other group. Someone who manages none gets an empty list. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${managedShape}.`,
-      },
-      { "200": { description: managedShape } },
-      { sessionOnly: true },
-    ),
-  };
-  paths["/api/v1/me/groups/{group}/members"] = {
-    post: operation(
-      [],
-      {
-        summary: "Add a person to a group you manage",
-        description: `${managedWriteRule} Send {email}, the email of the person's account (trimmed, 1 to 254 characters, matched ignoring case), at most 1 KiB; anything else or any query key returns 400 invalid_input. An email with no account and a person in no team of the company both return the same 404 user_not_found ("This person is not in any team of your company."), and a direct member already there 409 group_member_exists. Writes one group.member_added row. Returns {data:{added:true}} with 201.`,
-        requestBody: jsonBody(
-          {
-            type: "object",
-            required: ["email"],
-            additionalProperties: false,
-            properties: {
-              email: { type: "string", minLength: 1, maxLength: 254 },
-            },
-          },
-          { email: "fictional.person@example.test" },
-        ),
-      },
-      { "201": { description: "{data:{added:true}}." } },
-      { sessionOnly: true, params: [groupPath] },
-    ),
-    delete: operation(
-      [],
-      {
-        summary: "Remove a person from a group you manage",
-        description: `${managedWriteRule} Send {userId}, a direct person of the group, at most 1 KiB; anything else or any query key returns 400 invalid_input. A person who is not a direct member returns 404 not_found. Writes one group.member_removed row. Returns {data:{removed:true}}.`,
-        requestBody: groupUserBody,
       },
       { "200": { description: "{data:{removed:true}}." } },
       { sessionOnly: true, params: [groupPath] },

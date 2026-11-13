@@ -1015,74 +1015,6 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents archive with replacement, the managers operations and Groups I manage as session-only, with their codes (ADM-13)", () => {
-    const patch = document.paths["/api/v1/admin/groups/{group}"].patch;
-    const managers = document.paths["/api/v1/admin/groups/{group}/managers"];
-    const mine = document.paths["/api/v1/me/groups"].get;
-    const mineMembers = document.paths["/api/v1/me/groups/{group}/members"];
-    expect(Object.keys(managers)).toEqual(["post", "delete"]);
-    expect(Object.keys(mineMembers)).toEqual(["post", "delete"]);
-    const all = [
-      patch,
-      managers.post,
-      managers.delete,
-      mine,
-      mineMembers.post,
-      mineMembers.delete,
-    ];
-    for (const operation of all) {
-      expect(operation["x-session-only"]).toBe(true);
-      expect(operation["x-required-scopes"]).toEqual([]);
-      expect(JSON.stringify(operation)).toContain("session_required");
-    }
-    for (const text of [
-      "replacements",
-      "group_in_use",
-      "group_uses_changed",
-      "group_archived",
-      "group.child_replaced",
-      "replacedGroupId",
-      "SESSION_NOT_FRESH",
-      '"maxItems":200',
-    ])
-      expect(JSON.stringify(patch), text).toContain(text);
-    for (const text of [
-      "group_grants_no_managers",
-      "group_manager_exists",
-      "group_archived",
-      "user_not_found",
-      "not_found",
-      "group_forbidden",
-    ])
-      expect(JSON.stringify(managers.post), text).toContain(text);
-    expect(JSON.stringify(managers.post)).not.toContain("SESSION_NOT_FRESH");
-    expect(JSON.stringify(managers.delete)).toContain("SESSION_NOT_FRESH");
-    for (const text of [
-      "managers:[{userId, name, email}]",
-      'whereUsed:[{source:\\"parent-group\\"',
-    ])
-      expect(
-        JSON.stringify(document.paths["/api/v1/admin/groups/{group}"].get),
-        text,
-      ).toContain(text);
-    for (const operation of [mine, mineMembers.post, mineMembers.delete]) {
-      expect(JSON.stringify(operation)).toContain(
-        "tenant_context.manages_group",
-      );
-      expect(JSON.stringify(operation)).not.toContain("SESSION_NOT_FRESH");
-    }
-    expect(JSON.stringify(mine)).toContain("people:[{userId, name, email}]");
-    for (const operation of [mineMembers.post, mineMembers.delete])
-      for (const text of [
-        "group_owner_required",
-        "group_archived",
-        "not_found",
-      ])
-        expect(JSON.stringify(operation), text).toContain(text);
-    for (const text of ["user_not_found", '"maxLength":254'])
-      expect(JSON.stringify(mineMembers.post), text).toContain(text);
-  });
-
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
     const archive = document.paths["/api/v1/teams/archive"].put;
     const archived = document.paths["/api/v1/me/archived-teams"].get;
@@ -1386,7 +1318,7 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents the recent sign-in rule on exactly the thirteen sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12, ADM-13)", () => {
+  it("documents the recent sign-in rule on exactly the twelve sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12)", () => {
     const guarded = [
       "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
@@ -1401,8 +1333,6 @@ describe("OpenAPI contract", () => {
       "PATCH /api/v1/admin/groups/{group}",
       "POST /api/v1/admin/groups/{group}/members",
       "DELETE /api/v1/admin/groups/{group}/members",
-      // ADM-13: removing a manager from a group that grants something.
-      "DELETE /api/v1/admin/groups/{group}/managers",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1484,11 +1414,6 @@ describe("OpenAPI contract", () => {
         "PATCH /api/v1/admin/groups/{group}",
         "POST /api/v1/admin/groups/{group}/members",
         "DELETE /api/v1/admin/groups/{group}/members",
-        "POST /api/v1/admin/groups/{group}/managers",
-        "DELETE /api/v1/admin/groups/{group}/managers",
-        "GET /api/v1/me/groups",
-        "POST /api/v1/me/groups/{group}/members",
-        "DELETE /api/v1/me/groups/{group}/members",
         "GET /api/v1/admin/fields",
         "POST /api/v1/admin/fields",
         "PUT /api/v1/admin/fields/drafts/{versionId}",

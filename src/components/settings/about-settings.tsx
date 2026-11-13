@@ -3,16 +3,11 @@
 import { useState } from "react";
 import { Info } from "lucide-react";
 import { appVersion, formatBuildTime, versionDetails } from "@/lib/app-version";
-import {
-  SettingsNavigation,
-  useAdminPortalLink,
-  useManagedGroupsLink,
-} from "./settings-navigation";
+import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
 
 /** Every signed-in member: the version and build of this deployment, nothing secret. */
 export function AboutSettings() {
   const adminPortal = useAdminPortalLink();
-  const managedGroups = useManagedGroupsLink();
   return (
     <div className="stack settings-page">
       <header className="page-heading">
@@ -25,11 +20,7 @@ export function AboutSettings() {
         </div>
         <Info size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation
-        active="about"
-        adminPortal={adminPortal}
-        managedGroups={managedGroups}
-      />
+      <SettingsNavigation active="about" adminPortal={adminPortal} />
       <AboutPanel />
     </div>
   );

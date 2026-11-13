@@ -14,11 +14,7 @@ import { authClient } from "@/lib/auth-client";
 import { humanError, useWorkspace } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import {
-  SettingsNavigation,
-  useAdminPortalLink,
-  useManagedGroupsLink,
-} from "./settings-navigation";
+import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
 
 interface SessionItem {
   id: string;
@@ -256,7 +252,6 @@ export function ProfileSettings({
 }) {
   const { user, role } = useWorkspace();
   const adminPortal = useAdminPortalLink();
-  const managedGroups = useManagedGroupsLink();
   const [name, setName] = useState(user.name);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -379,11 +374,7 @@ export function ProfileSettings({
         </div>
         <UserRound size={28} aria-hidden="true" />
       </header>
-      <SettingsNavigation
-        active="profile"
-        adminPortal={adminPortal}
-        managedGroups={managedGroups}
-      />
+      <SettingsNavigation active="profile" adminPortal={adminPortal} />
       {error && (
         <div className="notice error" role="alert">
           {error} Your unsaved form is retained.
