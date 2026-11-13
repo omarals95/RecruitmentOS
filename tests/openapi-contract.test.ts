@@ -11,6 +11,7 @@ import type { Principal } from "@/lib/principal";
 import { mcpScopeDescriptions } from "@/lib/scope-descriptions";
 import { resourceToKind } from "@/domain/records";
 import { EXPORT_RESOURCES } from "@/domain/export";
+import { XLSX_TYPE } from "@/domain/org";
 import { GET as openApi } from "@/app/api/openapi.json/route";
 import {
   createTestDb,
@@ -1153,6 +1154,84 @@ describe("OpenAPI contract", () => {
       );
   });
 
+  it("documents bulk invite: the dry run and apply with the xlsx body, the query, the report and every refusal (ADM-15)", () => {
+    const dryRun = document.paths["/api/v1/admin/users/import/dry-run"];
+    const apply = document.paths["/api/v1/admin/users/import/apply"];
+    expect(Object.keys(dryRun)).toEqual(["post"]);
+    expect(Object.keys(apply)).toEqual(["post"]);
+    for (const operation of [dryRun.post, apply.post]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      const body = operation as unknown as Record<string, unknown>;
+      expect(body["x-request-body"]).toEqual({
+        required: true,
+        content: {
+          [XLSX_TYPE]: { schema: { type: "string", format: "binary" } },
+        },
+      });
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining([
+          "200",
+          "400",
+          "401",
+          "403",
+          "413",
+          "415",
+          "422",
+          "500",
+        ]),
+      );
+      for (const text of [
+        "session_required",
+        "people_forbidden",
+        "xlsx_required",
+        "import_too_large",
+        "import_unreadable",
+        "import_archive_too_large",
+        "import_too_many_rows",
+        "import_columns_missing",
+        "import_empty",
+        "Email, Team, Team role and Group",
+        "ignored",
+        "flagged",
+        "needsOwner",
+        "group_role_conflict",
+        "You can invite people only to teams where you are an owner or admin.",
+        "counts:{invite, alreadyDone, groupAdd, needsOwner, refused}",
+        'refused:[{row, part:\\"row\\"|\\"invitation\\"|\\"group\\", reason}]',
+      ])
+        expect(JSON.stringify(operation), text).toContain(text);
+    }
+    expect(JSON.stringify(dryRun.post)).not.toContain("SESSION_NOT_FRESH");
+    for (const text of [
+      "SESSION_NOT_FRESH",
+      "invalid_input",
+      "import_file_changed",
+      "group_owner_required",
+      "user_import_forbidden",
+      "user-import.applied",
+      "{workspaceId, group, invited, groupAdded, alreadyDone, needsOwner, refused}",
+      "group.member_added",
+      "100 pending invitations per team",
+    ])
+      expect(JSON.stringify(apply.post), text).toContain(text);
+    const { parameters } = apply.post as unknown as {
+      parameters: { in: string }[];
+    };
+    expect(parameters.filter((parameter) => parameter.in === "query")).toEqual([
+      expect.objectContaining({
+        name: "sha256",
+        required: true,
+        schema: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      }),
+      expect.objectContaining({
+        name: "group",
+        required: false,
+        schema: { type: "string", enum: ["owner"] },
+      }),
+    ]);
+  });
+
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
     const archive = document.paths["/api/v1/teams/archive"].put;
     const archived = document.paths["/api/v1/me/archived-teams"].get;
@@ -1511,7 +1590,7 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents the recent sign-in rule on exactly the fifteen sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12, ADM-13, ADM-14)", () => {
+  it("documents the recent sign-in rule on exactly the sixteen sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12, ADM-13, ADM-14, ADM-15)", () => {
     const guarded = [
       "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
@@ -1531,6 +1610,8 @@ describe("OpenAPI contract", () => {
       // ADM-14: giving a group a role and removing it.
       "POST /api/v1/admin/groups/{group}/roles",
       "DELETE /api/v1/admin/groups/{group}/roles",
+      // ADM-15: applying a bulk invite, and its company owner step.
+      "POST /api/v1/admin/users/import/apply",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1606,6 +1687,8 @@ describe("OpenAPI contract", () => {
         "POST /api/v1/admin/users/{user}/clear-lockout",
         "POST /api/v1/admin/users/{user}/anonymise",
         "GET /api/v1/admin/users/{user}/groups",
+        "POST /api/v1/admin/users/import/dry-run",
+        "POST /api/v1/admin/users/import/apply",
         "GET /api/v1/admin/groups",
         "POST /api/v1/admin/groups",
         "GET /api/v1/admin/groups/{group}",

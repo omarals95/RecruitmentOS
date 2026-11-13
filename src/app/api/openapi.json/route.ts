@@ -2998,6 +2998,61 @@ export function GET() {
       },
     ),
   };
+  // Bulk invite and group add (ADM-15): the organisation import's body, caps and same-file check.
+  const userImportRule = `Session only; Bearer tokens, including MCP OAuth tokens, get 403 session_required, and there is no MCP tool. Needs a signed-in company owner, or a company admin holding the people area; anyone else, company admins without people, team owners and admins without company authority and delegated group managers included, gets 403 people_forbidden, checked before the body is read. The body is the raw .xlsx workbook with Content-Type ${XLSX_TYPE} (415 xlsx_required otherwise). Before parsing, a body over 5 MiB returns 413 import_too_large; an archive the organisation import refuses returns 422 import_unreadable, and more than 2,000 entries or 50 MiB declared uncompressed 422 import_archive_too_large. Only the first sheet is read, and before any row is checked against people, teams or groups: more than 20,000 rows below the header returns 422 import_too_many_rows, a file read-excel-file cannot read 422 import_unreadable, a row 1 without one of the columns Email, Team, Team role and Group (trimmed, ignoring case, any order) 422 import_columns_missing naming it, and no data rows 422 import_empty. Every other non-blank header, a configured-role, company-level, authority, area or plan column included, is listed in ignored (a header that is not text as Column <letter>) and its cells are never read; a bulk invite never changes a role or company authority. Blank rows are skipped; cells are trimmed text, a date or true/false cell refuses its part, and a cell starting with =, +, -, @, tab or CR is read as text and listed in flagged. Each row has an invitation part (Team and Team role) and a group part (Group), each classified on its own; an invalid email (or one over 320 characters), or a row with Team, Team role and Group all blank, refuses the whole row once. Emails, teams and groups are matched ignoring case. The invitation part is refused for a Team without a Team role or the reverse, a team name no team of the company has, a name used by more than one team, an archived team, a team where you are not team owner or admin ("You can invite people only to teams where you are an owner or admin."; company authority never counts), a Team role other than Admin, Recruiter or Viewer (and Owner in teams you own), or the same email and team on an earlier row; a member of the team, or an email with a pending unexpired invitation to it, is already done and never changed. The group part is refused for an unknown group, a computed group (read-only), an archived group, the same email and group on an earlier row, an email that is not the account of someone in a team of the company ("<email> is not in a team of the company yet. Apply the same file again after they accept their invitation."), or an add that would give the person two configured roles in one team, with the group_role_conflict sentence naming the person and the team; a direct member is already done, and a group that gives a role or approvals, itself or through a group it is in, is listed in needsOwner. Lists are sorted by row and hold at most 500 entries; truncated is true when one was cut, and the counts are always complete.`;
+  const userImportShape =
+    '{data:{sha256, counts:{invite, alreadyDone, groupAdd, needsOwner, refused}, refused:[{row, part:"row"|"invitation"|"group", reason}], needsOwner:[{row, part, reason}], flagged:[{row, column}], ignored:[<column>], truncated}}';
+  const userImportErrors = {
+    "422": errorResponse(
+      "The workbook is unreadable, too large once unpacked, has too many rows, misses columns or has no rows.",
+    ),
+  };
+  paths["/api/v1/admin/users/import/dry-run"] = {
+    post: operation(
+      [],
+      {
+        summary: "Check a bulk invite workbook without writing",
+        description: `${userImportRule} The dry run never needs a recent sign-in. It reads the workspace in one read-only transaction and accounts, memberships and invitations from the identity database, and sends no invitation, adds no group member, writes no activity row and sends no mail. counts: invite (invitations to send), alreadyDone (already invited or a member, or already in the group), groupAdd (group adds to make), needsOwner and refused (parts; a row refused as a whole counts once). Returns ${userImportShape}, where sha256 is the SHA-256 of the body to send to apply.`,
+        "x-request-body": importBody,
+      },
+      { "200": { description: `${userImportShape}.` }, ...userImportErrors },
+      { sessionOnly: true },
+    ),
+  };
+  paths["/api/v1/admin/users/import/apply"] = {
+    post: operation(
+      [],
+      {
+        summary: "Apply a bulk invite workbook",
+        description: `${userImportRule} ${freshSessionRule} Send the same file the dry run checked, with sha256 set to the dry run's sha256: a missing or malformed sha256, a group other than owner, or any other query key returns 400 invalid_input, and a different file returns 409 import_file_changed before it is parsed. group=owner is for company owners only (403 group_owner_required, "Only a company owner can change a group that grants access, or a group nested in one."). Apply also needs a current team role with candidates:write, recruitment:write, cvs:write or imports:write, so the import can be recorded (403 user_import_forbidden), before anything is sent. The plan is made again against the data as it is now. Without group, each invitation is sent one at a time in row order as Better Auth's own invitation with your session, so its checks, the 100 pending invitations per team limit and the invitation mail apply unchanged, and then each group add that grants nothing is made as a single add; a needsOwner part is never applied. With group=owner a company owner makes only the needsOwner group adds and sends no invitation. A refusal of one part, by Better Auth or by the group rules and the database (group_owner_required, group_role_conflict, user_not_found, group_archived), is listed in refused with its own message and the next part runs; an already-member, already-invited or already-in-group refusal counts as already done. Any other failure stops with 500, and applying the same file again is safe: it sends no second invitation and adds no duplicate member, and reports them as already done. Each group add writes its own group.member_added row; when a step sent or added anything it also writes one user-import activity row (user-import.applied) in your current team with metadata {workspaceId, group, invited, groupAdded, alreadyDone, needsOwner, refused}, counts only, shown only to sessions with company authority. Returns ${userImportShape} plus group, where the counts are what the step sent, added, found already done, left for a company owner and refused.`,
+        "x-request-body": importBody,
+      },
+      {
+        "200": { description: `${userImportShape} plus group.` },
+        ...userImportErrors,
+      },
+      {
+        sessionOnly: true,
+        params: [
+          {
+            name: "sha256",
+            in: "query",
+            required: true,
+            schema: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            description: "The sha256 the dry run of this file returned.",
+          },
+          {
+            name: "group",
+            in: "query",
+            required: false,
+            schema: { type: "string", enum: ["owner"] },
+            description:
+              "owner makes only the group adds that need a company owner; company owners only.",
+          },
+        ],
+      },
+    ),
+  };
   paths["/api/v1/cvs/storage-reconciliation"] = {
     post: operation(
       ["cvs:write"],
