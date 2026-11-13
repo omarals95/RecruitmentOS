@@ -143,7 +143,7 @@ export function DomainPanel({
         {address && (
           <div className="records-panel">
             <div className="table-wrap">
-              <table className="data-table">
+              <table className="data-table facts">
                 <caption className="sr-only">
                   The web address and its checks
                 </caption>
@@ -188,7 +188,7 @@ export function DomainPanel({
         <h2>Deployment</h2>
         <div className="records-panel">
           <div className="table-wrap">
-            <table className="data-table">
+            <table className="data-table facts">
               <caption className="sr-only">This deployment</caption>
               <thead>
                 <tr>
@@ -226,7 +226,7 @@ export function DomainPanel({
         </p>
         <div className="records-panel">
           <div className="table-wrap">
-            <table className="data-table">
+            <table className="data-table facts">
               <caption className="sr-only">
                 Settings set in the deployment
               </caption>

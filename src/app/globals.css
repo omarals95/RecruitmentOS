@@ -1073,6 +1073,17 @@ input[type="color"] {
   min-width: 0;
   overflow-wrap: normal;
 }
+/* Label and value tables such as the Domain page: the last column is the value, not actions. */
+.data-table.facts th:first-child,
+.data-table.facts td:first-child {
+  width: 40%;
+}
+.data-table.facts th:last-child,
+.data-table.facts td:last-child {
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
 .data-table tbody tr:hover {
   background: var(--surface-subtle);
 }

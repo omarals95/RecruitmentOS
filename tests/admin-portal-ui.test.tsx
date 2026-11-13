@@ -6636,6 +6636,10 @@ describe("domain page", () => {
         "db.example.test",
       ])
         expect(markup).not.toContain(secret);
+      // Label and value tables: the value column is not squeezed like an actions column.
+      expect(markup.match(/<table class="[^"]*"/g)).toEqual(
+        Array(3).fill('<table class="data-table facts"'),
+      );
       expect(markup.match(/<input/g)).toHaveLength(1);
       expect(markup).toMatch(
         /<label class="field"><span>New address<\/span><input/,
