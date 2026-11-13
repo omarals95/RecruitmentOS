@@ -224,6 +224,8 @@ const expectedData = {
       ]),
     ),
     "app.group_effective_members": ["SELECT"],
+    // Group role grants: given and removed under company owner sessions, never changed (0057).
+    "app.group_roles": ["DELETE", "INSERT", "SELECT"],
     "db_boundary.connection_marker": ["SELECT"],
     "db_boundary.storage_schema": ["SELECT"],
   },
@@ -967,6 +969,42 @@ describe("split runtime role template", () => {
     expect(await effective()).toEqual([
       { group_id: group, user_id: owner.userId },
     ]);
+  });
+
+  it("grants the data role no UPDATE or TRUNCATE of app.group_roles, the identity role nothing, and no trigger EXECUTE (0057)", async () => {
+    await harness.dataDb();
+    await expectDenied([
+      "UPDATE app.group_roles SET team_id = team_id",
+      "TRUNCATE app.group_roles",
+    ]);
+    await harness.identityDb();
+    await expectDenied([
+      "SELECT * FROM app.group_roles",
+      "INSERT INTO app.group_roles DEFAULT VALUES",
+      "UPDATE app.group_roles SET team_id = team_id",
+      "DELETE FROM app.group_roles",
+      "SELECT * FROM tenant_context.role_assignment_changes(NULL, 50)",
+    ]);
+    await harness.asSuperuser();
+    const execute = async (grantee: string, fn: string) =>
+      (
+        await harness.client.query<{ allowed: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS allowed",
+          [grantee, fn],
+        )
+      ).rows[0].allowed;
+    const helper =
+      "tenant_context.role_assignment_changes(timestamp with time zone,integer)";
+    expect(await execute(splitRoles.data, helper)).toBe(true);
+    expect(await execute(splitRoles.identity, helper)).toBe(false);
+    expect(await execute("public", helper)).toBe(false);
+    for (const fn of [
+      "app.guard_group_role()",
+      "app.check_group_role()",
+      "app.refuse_group_role_conflicts(text[],text[])",
+    ])
+      for (const grantee of [...roles, "public"])
+        expect(await execute(grantee, fn), `${grantee} ${fn}`).toBe(false);
   });
 
   it("grants the data role no directory DELETE or TRUNCATE and the identity role nothing on them (0034)", async () => {
