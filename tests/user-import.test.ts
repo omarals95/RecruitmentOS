@@ -332,14 +332,12 @@ describe("bulk invite and group add from a workbook", () => {
       [owner.userId, "ui-rec", "recruiter"],
       [peopleAdmin.userId, "ui-rec", "recruiter"],
     ])
-      await db
-        .insert(member)
-        .values({
-          id: `${userId}:${teamId}`,
-          organizationId: teamId,
-          userId,
-          role,
-        });
+      await db.insert(member).values({
+        id: `${userId}:${teamId}`,
+        organizationId: teamId,
+        userId,
+        role,
+      });
     ownerX = await seed("ui-else-owner", "ui-elsewhere", "owner");
     await seed("ui-else-person", "ui-elsewhere", "recruiter");
     // Names, company authority, an archived team, a pending invitation and the second company; no
