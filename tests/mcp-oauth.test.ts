@@ -365,7 +365,11 @@ describe("OAuth 2.1 authorization for the MCP endpoint", () => {
 
   it("publishes metadata from BETTER_AUTH_URL only", async () => {
     const hostile = new Request(`${ORIGIN}/.well-known/x`, {
-      headers: { host: "evil.example", "x-forwarded-host": "evil.example" },
+      headers: {
+        host: "evil.example",
+        "x-forwarded-host": "evil.example",
+        "x-forwarded-proto": "http",
+      },
     });
     const call = (route: () => Response) =>
       (route as unknown as (request: Request) => Response)(hostile);
