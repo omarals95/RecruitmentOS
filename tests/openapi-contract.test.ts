@@ -1397,6 +1397,7 @@ describe("OpenAPI contract", () => {
         "GET /api/v1/me/access",
         "GET /api/v1/config-history",
         "GET /api/v1/access-changes",
+        "GET /api/v1/admin/domain",
         "GET /api/v1/teams",
         "PUT /api/v1/teams/archive",
         "GET /api/v1/me/archived-teams",

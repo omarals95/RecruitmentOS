@@ -222,6 +222,14 @@ import {
 import { UserGroupsPanel } from "../src/components/settings/user-detail";
 import { usersPath } from "../src/components/settings/users-tab";
 import { plainError } from "../src/components/settings/roles-tab";
+import {
+  ADDRESS_CHECK_ERROR,
+  DomainPanel,
+  IMPACT_ITEMS,
+  checkAddress,
+  currentOrigin,
+} from "../src/components/settings/domain-tab";
+import type { DomainAddress } from "../src/lib/domain-settings";
 
 // Fictional people, teams and ids only.
 const workspace = {
@@ -260,7 +268,6 @@ const UNBUILT = [
   "templates",
   "config-transfer",
   "branding",
-  "domain",
   "notifications",
   "mail",
   "integrations",
@@ -356,6 +363,7 @@ describe("admin portal tabs", () => {
       ["company-authority", "Company authority", "Access"],
       ["roles", "Roles & permissions", "Access"],
       ["fields", "Fields", "Configuration"],
+      ["domain", "Domain", "Look & feel"],
       ["tokens", "API tokens", "Integrations"],
       ["history", "History", "Monitoring"],
     ]);
@@ -398,7 +406,8 @@ describe("admin portal tabs", () => {
                     key === "company-authority" ||
                     key === "roles" ||
                     key === "organisation" ||
-                    key === "fields"
+                    key === "fields" ||
+                    key === "domain"
                   ? companyLevel === "owner"
                   : key === "history"
                     ? companyLevel !== null
@@ -452,6 +461,7 @@ describe("admin portal tabs", () => {
                 (companyLevel === "admin" && adminAreas.includes("fields")),
               "company-authority": companyLevel === "owner",
               roles: companyLevel === "owner",
+              domain: companyLevel === "owner",
               history: companyLevel !== null,
             };
             expect(
@@ -471,7 +481,8 @@ describe("admin portal tabs", () => {
                 label,
               ).not.toContain(key);
           }
-  });
+    // Every subset of the twelve areas: about 300,000 callers.
+  }, 120_000);
 });
 
 describe("admin home", () => {
@@ -511,7 +522,9 @@ describe("admin home", () => {
         name,
       ).toEqual(tabs.map((tab) => `/app/admin/${tab.key}`));
       expect(
-        [...home.matchAll(/<h2>([^<]+)<\/h2>/g)].map((h) => h[1]),
+        [...home.matchAll(/<h2>([^<]+)<\/h2>/g)].map((h) =>
+          h[1].replaceAll("&amp;", "&"),
+        ),
         name,
       ).toEqual(
         ADMIN_GROUPS.filter((group) => tabs.some((tab) => tab.group === group)),
@@ -613,8 +626,10 @@ describe("admin sidebar", () => {
               group !== "Overview" && tabs.some((item) => item.group === group),
           ),
         ]);
-        for (const group of ["Look & feel", "Communication"])
-          expect(sidebarGroups(markup), label).not.toContain(group);
+        expect(sidebarGroups(markup), label).not.toContain("Communication");
+        expect(sidebarGroups(markup).includes("Look & feel"), label).toBe(
+          value.companyLevel === "owner",
+        );
         expect(sidebar(markup), label).toContain(">Admin home</a>");
         for (const item of tabs)
           expect(sidebar(markup), label).toContain(
@@ -651,7 +666,7 @@ describe("admin sidebar", () => {
         /<p id="([^"]+)">[^<]+<\/p><ul aria-labelledby="([^"]+)">/g,
       ),
     ];
-    expect(groups).toHaveLength(6);
+    expect(groups).toHaveLength(7);
     for (const group of groups) expect(group[2]).toBe(group[1]);
   });
 });
@@ -667,6 +682,7 @@ describe("admin portal", () => {
       "company-authority",
       "roles",
       "fields",
+      "domain",
       "tokens",
       "history",
     ]);
@@ -758,6 +774,7 @@ describe("admin portal", () => {
       "company-authority",
       "roles",
       "fields",
+      "domain",
       "history",
     ]);
     expect(owner).toContain("<h2>Configuration history</h2>");
@@ -6490,5 +6507,280 @@ describe("fields page", () => {
       mandatory: true,
     });
     expect(body).toEqual(kindBody("task", [notice]));
+  });
+});
+
+// ADM-40 (job 098): the Domain page, company owner only (D20), read only.
+describe("domain page", () => {
+  const CONFIGURED = "https://recruitment.example.test";
+  const build = {
+    version: "1.2.0",
+    build: "20261113.1200",
+    commit: "fic7ab1",
+    environment: "Local development",
+  };
+  const address = (extra: Partial<DomainAddress> = {}): DomainAddress => ({
+    origin: CONFIGURED,
+    https: true,
+    originOnly: true,
+    valid: true,
+    ...extra,
+  });
+  const panel = (props: Partial<Parameters<typeof DomainPanel>[0]> = {}) =>
+    renderToStaticMarkup(
+      <DomainPanel
+        address={address()}
+        error=""
+        build={build}
+        browserOrigin={CONFIGURED}
+        entry=""
+        {...props}
+      />,
+    );
+  /** The Result cell of one row of the address checks. */
+  const result = (markup: string, check: string) =>
+    new RegExp(
+      `<td data-label="Check">${check}</td><td data-label="Result">([^<]*)</td>`,
+    ).exec(markup)?.[1];
+
+  it("is in the page table under Look & feel, and in the sidebar and home only for a company owner", () => {
+    expect(ADMIN_TABS.find((tab) => tab.key === "domain")).toMatchObject({
+      label: "Domain",
+      level: "owner",
+      group: "Look & feel",
+    });
+    expect(ADMIN_AREAS).toContain("domain");
+    for (const [name, value, shown] of [
+      ["company owner and team owner", access("owner", "owner"), true],
+      ["company owner as recruiter", access("recruiter", "owner"), true],
+      [
+        "company admin with every area",
+        access("owner", "admin", { adminAreas: [...ADMIN_AREAS] }),
+        false,
+      ],
+      ["team owner", access("owner", null, directory), false],
+      ["recruiter", access("recruiter", null), false],
+    ] as const) {
+      const home = render(null, value);
+      expect(tabLinks(home).includes("domain"), name).toBe(shown);
+      expect(content(home).includes('href="/app/admin/domain"'), name).toBe(
+        shown,
+      );
+      const page = render("domain", value);
+      if (shown) {
+        expect(sidebar(page), name).toContain(
+          '<a aria-current="page" href="/app/admin/domain">Domain</a>',
+        );
+        expect(content(page), name).toContain("<h2>Current address</h2>");
+      } else onlyHeadingAndNoAccess(page);
+    }
+  });
+
+  it("loads the address from the domain route for a company owner, with the static sections shown", () => {
+    reads.length = 0;
+    const markup = render("domain", access("owner", "owner"));
+    expect(reads.map((read) => read.path)).toContain("/api/v1/admin/domain");
+    expect(markup).toContain('<p role="status">Loading the web address…</p>');
+    for (const heading of [
+      "Current address",
+      "Deployment",
+      "Set in deployment",
+      "Check an address",
+      "How to change the address",
+      "What a new address affects",
+    ])
+      expect(markup, heading).toContain(`<h2>${heading}</h2>`);
+    expect(markup.match(/<h1>/g)).toHaveLength(1);
+  });
+
+  it("shows the address and its checks in words, the deployment and four Set in deployment rows, with no control but the address field", () => {
+    vi.stubEnv("RESEND_API_KEY", "re_fictional_domain_page_key");
+    vi.stubEnv("DATABASE_URL", "postgres://fictional:secret@db.example.test/x");
+    try {
+      const markup = panel();
+      expect(result(markup, "Web address")).toBe(CONFIGURED);
+      expect(result(markup, "Uses https")).toBe("Passed");
+      expect(result(markup, "No trailing slash or path")).toBe("Passed");
+      expect(result(markup, "Sign-in accepts it")).toBe("Yes");
+      expect(markup).toContain(
+        '<td data-label="Value">Local development (env file)</td>',
+      );
+      for (const fact of [build.version, build.build, build.commit])
+        expect(markup).toContain(`<td data-label="Value">${fact}</td>`);
+      const rows = [
+        ...markup.matchAll(
+          /<td data-label="Setting">([^<]+)<\/td><td data-label="Variables">([^<]+)<\/td><td data-label="Where">([^<]+)<\/td>/g,
+        ),
+      ].map((row) => [row[1], row[2], row[3]]);
+      expect(rows).toEqual([
+        ["Application address", "BETTER_AUTH_URL", "Set in deployment"],
+        [
+          "Resend key and sender",
+          "RESEND_API_KEY, EMAIL_FROM",
+          "Set in deployment",
+        ],
+        [
+          "Blob storage",
+          "CV_STORAGE_PROVIDER, BLOB_STORE_ID",
+          "Set in deployment",
+        ],
+        [
+          "Database",
+          "DATABASE_URL, IDENTITY_DATABASE_URL",
+          "Set in deployment",
+        ],
+      ]);
+      for (const secret of [
+        "re_fictional_domain_page_key",
+        "postgres://",
+        "db.example.test",
+      ])
+        expect(markup).not.toContain(secret);
+      expect(markup.match(/<input/g)).toHaveLength(1);
+      expect(markup).toMatch(
+        /<label class="field"><span>New address<\/span><input/,
+      );
+      expect(markup).not.toMatch(/<button|<form|<select|<textarea/);
+      for (const word of ["Save", "Switch", "Edit"])
+        expect(markup).not.toContain(word);
+      const failed = panel({
+        address: address({ https: false, originOnly: false, valid: false }),
+      });
+      expect(result(failed, "Uses https")).toBe("Failed");
+      expect(result(failed, "No trailing slash or path")).toBe("Failed");
+      expect(result(failed, "Sign-in accepts it")).toBe("No");
+      const local = panel({
+        address: address({ origin: "http://localhost:3000", https: false }),
+        browserOrigin: "http://localhost:3000",
+      });
+      expect(result(local, "Uses https")).toBe("Failed");
+      expect(result(local, "Sign-in accepts it")).toBe(
+        "Yes, allowed for local development only",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("shows the mismatch banner only when the browser's origin differs from the configured one", () => {
+    vi.stubGlobal("window", {
+      location: { origin: "https://old-recruitment.example.test" },
+    });
+    try {
+      expect(currentOrigin()).toBe("https://old-recruitment.example.test");
+      expect(panel({ browserOrigin: currentOrigin() })).toContain(
+        `<p class="notice" role="status">You opened this page at https://old-recruitment.example.test, but the web address set in the deployment is ${CONFIGURED}. Links, emails and AI connections use ${CONFIGURED}.</p>`,
+      );
+      vi.stubGlobal("window", { location: { origin: CONFIGURED } });
+      expect(panel({ browserOrigin: currentOrigin() })).not.toContain(
+        'class="notice"',
+      );
+      // On the server the browser's origin is unknown, so no banner shows.
+      expect(panel({ browserOrigin: null })).not.toContain('class="notice"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const unset = panel({
+      address: { origin: null, https: false, originOnly: false, valid: false },
+    });
+    expect(unset).toContain(
+      '<p class="notice" role="status">The application address (BETTER_AUTH_URL) is not set or not a valid web address.',
+    );
+    expect(result(unset, "Web address")).toBe(
+      "Not set or not a valid web address",
+    );
+    expect(panel({ address: null, error: "Fictional failure." })).toContain(
+      '<p class="notice error" role="alert">Could not load the web address. Fictional failure.</p>',
+    );
+  });
+
+  it("links a valid address to its version page in a new tab, refuses anything else plainly, and makes no request", () => {
+    const fetched = vi.fn();
+    vi.stubGlobal("fetch", fetched);
+    try {
+      for (const [entry, origin] of [
+        [
+          "recruitment-new.example.test",
+          "https://recruitment-new.example.test",
+        ],
+        [
+          " https://recruitment-new.example.test/app ",
+          "https://recruitment-new.example.test",
+        ],
+        ["localhost:3000", "https://localhost:3000"],
+        ["http://127.0.0.1:3000", "http://127.0.0.1:3000"],
+        ["http://localhost:3000", "http://localhost:3000"],
+      ]) {
+        expect(checkAddress(entry), entry).toEqual({ origin });
+        const markup = panel({ entry });
+        expect(markup, entry).toContain(
+          `<a href="${origin}/api/version" target="_blank" rel="noopener noreferrer">Open ${origin}/api/version</a> (opens in a new tab)`,
+        );
+        expect(markup, entry).not.toContain("field-error");
+      }
+      for (const entry of [
+        "javascript:alert(1)",
+        "ftp://x.example.test",
+        "http://x.example.test",
+        "mailto:owner@example.test",
+        "https://",
+      ]) {
+        expect(checkAddress(entry), entry).toEqual({
+          error: ADDRESS_CHECK_ERROR,
+        });
+        const markup = panel({ entry });
+        expect(markup, entry).toContain(
+          `class="field-error">${ADDRESS_CHECK_ERROR}</p>`,
+        );
+        expect(markup, entry).toContain('aria-invalid="true"');
+        expect(markup, entry).not.toContain("/api/version");
+      }
+      expect(checkAddress("   ")).toBeNull();
+      expect(panel()).not.toContain("/api/version");
+      expect(fetched).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows the checklist of the deployment mode and all five impact items", () => {
+    const local = panel();
+    expect(local).toContain(
+      "<li>Set BETTER_AUTH_URL to the new address in the env file.</li><li>Restart the app.</li>",
+    );
+    expect(local).not.toContain("Redeploy");
+    for (const environment of ["Production", "Preview"]) {
+      const vercel = panel({ build: { ...build, environment } });
+      expect(vercel).toContain(
+        `<td data-label="Value">Vercel, ${environment}</td>`,
+      );
+      expect(vercel).toContain(
+        "<li>Add the domain to the Vercel project and to your DNS.</li>",
+      );
+      expect(vercel).toContain("<li>Redeploy.</li>");
+      expect(vercel).not.toContain("Restart the app.");
+      expect(vercel).toContain(
+        "The app records the change the next time a company owner opens this page.",
+      );
+    }
+    expect(local).toContain(
+      "The app records the change the next time a company owner opens this page.",
+    );
+    const impact = /<h2>What a new address affects<\/h2><ul>([\s\S]*?)<\/ul>/
+      .exec(local)![1]
+      .replaceAll("&#x27;", "'");
+    expect(
+      [...impact.matchAll(/<li>([^<]+)<\/li>/g)].map((item) => item[1]),
+    ).toEqual(IMPACT_ITEMS);
+    expect(IMPACT_ITEMS).toHaveLength(5);
+    for (const topic of [
+      "DNS and the Vercel domain",
+      "Better Auth trusted origin",
+      "OAuth and MCP redirect URIs",
+      "/api/mcp",
+      "Resend sending domain",
+      "Links in emails already sent",
+    ])
+      expect(IMPACT_ITEMS.join(" ")).toContain(topic);
   });
 });

@@ -46,6 +46,7 @@ import { GET as meAccessRoute } from "@/app/api/v1/me/access/route";
 import { GET as configHistoryRoute } from "@/app/api/v1/config-history/route";
 import { GET as accessChangesRoute } from "@/app/api/v1/access-changes/route";
 import { GET as activityRoute } from "@/app/api/v1/activity/route";
+import { GET as domainRoute } from "@/app/api/v1/admin/domain/route";
 import * as authorityRoute from "@/app/api/v1/company-authority/route";
 import * as rolesRoute from "@/app/api/v1/roles/route";
 import * as roleRoute from "@/app/api/v1/roles/[id]/route";
@@ -663,6 +664,48 @@ describe("Admin portal routes under the split runtime roles", () => {
       );
       expect(query.status).toBe(400);
       expect(query.body.error.code).toBe("invalid_input");
+    });
+  });
+
+  // ADM-40 (job 098): the Domain page's route, company owners only (D20).
+  describe("GET /api/v1/admin/domain", () => {
+    it("answers a company owner the configured address, and refuses a company admin, a team owner, a team admin, a recruiter, a Bearer token and any query key", async () => {
+      vi.stubEnv("BETTER_AUTH_URL", ORIGIN);
+      try {
+        const { status, body } = await get(
+          domainRoute,
+          owner,
+          "/api/v1/admin/domain",
+        );
+        expect(status).toBe(200);
+        expect(body).toEqual({
+          data: {
+            address: {
+              origin: ORIGIN,
+              https: false,
+              originOnly: true,
+              valid: true,
+            },
+          },
+        });
+        for (const p of [companyAdmin, teamOwnerB, teamAdminA, recruiter]) {
+          const refused = await get(domainRoute, p, "/api/v1/admin/domain");
+          expect(refused.status, p.userId).toBe(403);
+          expect(refused.body.error.code, p.userId).toBe("domain_forbidden");
+        }
+        const bearer = await get(domainRoute, "bearer", "/api/v1/admin/domain");
+        expect(bearer.status).toBe(403);
+        expect(bearer.body.error.code).toBe("session_required");
+        const query = await get(
+          domainRoute,
+          owner,
+          `/api/v1/admin/domain?address=${encodeURIComponent("https://attacker.example.test")}`,
+        );
+        expect(query.status).toBe(400);
+        expect(query.body.error.code).toBe("invalid_input");
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 });

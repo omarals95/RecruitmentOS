@@ -1255,6 +1255,18 @@ export function GET() {
       { sessionOnly: true },
     ),
   };
+  const domainShape = "{data:{address:{origin, https, originOnly, valid}}}";
+  paths["/api/v1/admin/domain"] = {
+    get: operation(
+      [],
+      {
+        summary: "Show the configured application address",
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins with every area and team owners included, gets 403 domain_forbidden. Read only: the address comes from BETTER_AUTH_URL in the deployment, never from the Host or forwarding headers, and nothing here changes it. origin is the parsed origin, or null when the value is unset or not a web address; the raw value is never returned. https is true for an https address, originOnly is true when the value has no trailing slash, path, query, fragment or credentials, and valid is true when sign-in accepts it. The server makes no outgoing request. When valid, the first open records the address in one domain.url_recorded activity row, and the first open after it changed writes one domain.url_changed row with the old and new origin, once for the whole workspace. It takes no query parameters: any query key returns 400 invalid_input. Returns ${domainShape}.`,
+      },
+      { "200": { description: domainShape } },
+      { sessionOnly: true },
+    ),
+  };
   const teamsShape =
     '{data:[{teamId, name, slug, createdAt, teamRole:"owner"|"admin"|"recruiter"|"viewer"|null, current, archived}]}';
   paths["/api/v1/teams"] = {
