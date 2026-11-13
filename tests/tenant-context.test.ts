@@ -2348,7 +2348,11 @@ describe("signed tenant context under separate nonowner data and identity roles"
         throw error;
       }
       await harness.asSuperuser();
-      const { rows } = await harness.client.query(
+      const { rows } = await harness.client.query<{
+        scopes: string[];
+        role_version_id: string | null;
+        record_scope: unknown;
+      }>(
         "SELECT scopes, role_version_id, record_scope FROM tenant_context.contexts WHERE xid::text = $1",
         [xid],
       );
