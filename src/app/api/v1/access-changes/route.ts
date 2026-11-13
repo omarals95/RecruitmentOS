@@ -7,9 +7,10 @@ export const runtime = "nodejs";
 const PAGE = 100;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 /**
- * Company owners, signed in; others get 403 role_assignment_forbidden. Role assignments and
- * home-unit changes of the last seven days, newest first; truncated when a full page of either kind
- * still ends inside the seven days.
+ * Company owners, signed in; others get 403 role_assignment_forbidden. Role assignments, roles given
+ * to and removed from groups, and home-unit changes of the last seven days, newest first; truncated
+ * when a full page of either kind still ends inside the seven days. A group role row names no
+ * person: its affectedUserIds is empty and groupName names the group.
  */
 export async function GET(request: Request) {
   return runApi(
@@ -30,9 +31,10 @@ export async function GET(request: Request) {
           occurredAt: row.occurredAt,
           kind: "role-assignment" as const,
           action: row.action,
-          affectedUserIds: [row.affectedUserId],
+          affectedUserIds: row.affectedUserId ? [row.affectedUserId] : [],
           roleName: row.roleName,
           actorName: row.actorName,
+          groupName: row.groupName,
         })),
         ...homeUnits.map((row) => ({
           occurredAt: row.occurredAt,
@@ -41,6 +43,7 @@ export async function GET(request: Request) {
           affectedUserIds: row.affectedUserIds,
           roleName: null,
           actorName: row.actorName,
+          groupName: null,
         })),
       ]
         .filter(recent)

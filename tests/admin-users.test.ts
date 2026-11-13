@@ -60,6 +60,8 @@ type Team = {
   team: string;
   teamRole: string | null;
   configuredRole: string | null;
+  roleGroup: string | null;
+  roleConflict: boolean;
 };
 type Row = {
   userId: string | null;
@@ -332,7 +334,13 @@ describe("the workspace people list under the split runtime roles", () => {
         company_level: "owner",
         two_step: true,
         teams: [
-          { team: "Fictional A Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional A Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
         sort_key: "fictional people owner",
         row_key: "people-owner",
@@ -354,8 +362,16 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional A Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
-          { team: "Fictional B Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional B Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
       });
       expect(byEmail.get("people-recruiter@example.test")!.teams).toEqual([
@@ -363,6 +379,8 @@ describe("the workspace people list under the split runtime roles", () => {
           team: "Fictional A Team",
           teamRole: "recruiter",
           configuredRole: "Fictional Sourcer",
+          roleGroup: null,
+          roleConflict: false,
         },
       ]);
       expect(byEmail.get("people-invitee@example.test")).toEqual({
@@ -374,11 +392,15 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional A Team",
             teamRole: "recruiter",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
           {
             team: "Fictional C Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
         company_level: null,
@@ -389,7 +411,13 @@ describe("the workspace people list under the split runtime roles", () => {
         row_key: "invitation:people-invitee@example.test",
       });
       expect(byEmail.get("people-unrecorded@example.test")!.teams).toEqual([
-        { team: "Fictional B Team", teamRole: null, configuredRole: null },
+        {
+          team: "Fictional B Team",
+          teamRole: null,
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        },
       ]);
     }
   });
@@ -417,7 +445,13 @@ describe("the workspace people list under the split runtime roles", () => {
         name: "Fictional People Owner",
         email: "people-owner@example.test",
         teams: [
-          { team: "Fictional A Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional A Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
         companyLevel: "owner",
         status: "active",
@@ -499,6 +533,8 @@ describe("the workspace people list under the split runtime roles", () => {
           team: "Fictional A Team",
           teamRole: "recruiter",
           configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
         },
       ]);
     }
@@ -506,11 +542,27 @@ describe("the workspace people list under the split runtime roles", () => {
     expect(body.data.map((row: Row) => [row.email, row.teams])).toEqual([
       [
         "people-both@example.test",
-        [{ team: "Fictional D Team", teamRole: "admin", configuredRole: null }],
+        [
+          {
+            team: "Fictional D Team",
+            teamRole: "admin",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
+        ],
       ],
       [
         "people-owner-d@example.test",
-        [{ team: "Fictional D Team", teamRole: "owner", configuredRole: null }],
+        [
+          {
+            team: "Fictional D Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
+        ],
       ],
       [
         "people-second-invitee@example.test",
@@ -519,6 +571,8 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional D Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
       ],
@@ -729,6 +783,8 @@ describe("paging and filters over a few hundred fictional people", () => {
           team: "Fictional F Team",
           teamRole: "recruiter",
           configuredRole: "Fictional Bulk Sourcer",
+          roleGroup: null,
+          roleConflict: false,
         },
       ],
       companyLevel: null,
@@ -744,8 +800,16 @@ describe("paging and filters over a few hundred fictional people", () => {
         team: "Fictional E Team",
         teamRole: "viewer",
         configuredRole: "Fictional Bulk Screener",
+        roleGroup: null,
+        roleConflict: false,
       },
-      { team: "Fictional G Team", teamRole: "recruiter", configuredRole: null },
+      {
+        team: "Fictional G Team",
+        teamRole: "recruiter",
+        configuredRole: null,
+        roleGroup: null,
+        roleConflict: false,
+      },
     ]);
   });
 
@@ -901,7 +965,14 @@ describe("one workspace person under the split runtime roles", () => {
     "authoritySince",
     "events",
   ].sort();
-  const TEAM_KEYS = ["configuredRole", "slug", "team", "teamRole"];
+  const TEAM_KEYS = [
+    "configuredRole",
+    "roleConflict",
+    "roleGroup",
+    "slug",
+    "team",
+    "teamRole",
+  ];
   const EVENT_KEYS = [
     "action",
     "actorId",
@@ -1323,12 +1394,16 @@ describe("one workspace person under the split runtime roles", () => {
             slug: "fictional-a",
             teamRole: "recruiter",
             configuredRole: "Fictional Person Sourcer",
+            roleGroup: null,
+            roleConflict: false,
           },
           {
             team: "Fictional B Team",
             slug: "fictional-b",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
         company_level: "admin",
@@ -1505,6 +1580,8 @@ describe("one workspace person under the split runtime roles", () => {
           slug: "fictional-d",
           teamRole: "admin",
           configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
         },
       ],
       company_level: "admin",

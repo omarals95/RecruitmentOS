@@ -1,7 +1,7 @@
-import { DrizzleQueryError, inArray, sql, type SQL } from "drizzle-orm";
+import { DrizzleQueryError, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { getIdentityDb, type TeamTx } from "@/db";
-import { user } from "@/db/auth-schema";
+import { organization, user } from "@/db/auth-schema";
 import {
   computedGroupKey,
   groupApproval,
@@ -9,12 +9,19 @@ import {
   groupPerson,
   groupMember,
   groupReplacements,
+  groupRoleGrant,
+  groupRoleTeam,
   managedMemberEmail,
 } from "@/domain/groups";
 import { userNotFound, withPeopleArea } from "@/lib/admin-users";
 import { withTeam } from "@/lib/db-team";
 import { ApiError } from "@/lib/errors";
 import { requireFreshSession } from "@/lib/fresh-session";
+import {
+  assignableRole,
+  assignableRoles,
+  type AssignableRole,
+} from "@/lib/member-roles";
 import type { Principal } from "@/lib/principal";
 import type { TenantAccess } from "@/lib/tenant-context";
 
@@ -68,20 +75,34 @@ export type GroupAuditRow = {
         replaced: string | null;
         replacement: string | null;
       }
+    | { kind: "role"; role: string | null; team: string | null }
     | null;
 };
 /**
  * One current use of a group, by id. Each source is one query in groupUses, so a later item adds its
- * source here and one query there; today the only source is the active groups it is directly in.
+ * source here and one query there: the active groups it is directly in, and the roles it gives.
  */
-export type GroupUse = {
-  source: "parent-group";
-  group: GroupRef & { status: GroupStatus };
-};
-/** What replaces an archived group in a parent that uses it: another group, or null to remove it. */
-export type GroupReplacement = {
-  parentGroupId: string;
-  replacementGroupId: string | null;
+export type GroupUse =
+  | {
+      source: "parent-group";
+      group: GroupRef & { status: GroupStatus };
+    }
+  | {
+      source: "role-grant";
+      team: { id: string; name: string };
+      role: { id: string; name: string };
+    };
+/**
+ * What replaces an archived group in a parent that uses it, or for the role it gives in a team:
+ * another group, or null to remove it there.
+ */
+export type GroupReplacement =
+  | { parentGroupId: string; replacementGroupId: string | null }
+  | { teamId: string; replacementGroupId: string | null };
+/** What a company owner can give a group: the current teams and the assignable roles, by name. */
+export type GroupRoleChoices = {
+  teams: { id: string; name: string }[];
+  roles: AssignableRole[];
 };
 export type GroupDetail = GroupRef & {
   description: string | null;
@@ -123,7 +144,7 @@ const ownerRequired = () =>
   new ApiError(
     403,
     "group_owner_required",
-    "Only a company owner can change an approval group or a group nested in one.",
+    "Only a company owner can change a group that grants access, or a group nested in one.",
   );
 const notFound = () => new ApiError(404, "not_found", "Group not found.");
 const cycle = () =>
@@ -140,6 +161,12 @@ const memberExists = () =>
   );
 const groupArchived = () =>
   new ApiError(409, "group_archived", "This group is archived.");
+const roleExists = () =>
+  new ApiError(
+    409,
+    "group_role_exists",
+    "This group already gives a role in this team. Remove it first.",
+  );
 /** A manager's refusal on a group that grants something, it or a group it is in. */
 const managerGranting = () =>
   new ApiError(
@@ -179,6 +206,8 @@ const refusals: Record<string, () => ApiError> = {
       "group_manager_exists",
       "This person is already a manager of this group.",
     ),
+  group_roles_pkey: roleExists,
+  group_roles_group_fkey: notFound,
 };
 
 /** A database refusal as its API error, 42501 as `denied`; anything else is returned unchanged. */
@@ -190,6 +219,55 @@ function refusalOf(error: unknown, denied: () => ApiError): unknown {
     ? refusals[String(cause?.constraint)]
     : refusals[String(cause?.code)];
   return refusal ? refusal() : error;
+}
+
+/** RQ024's DETAIL (drizzle/0057_group_roles.sql): ids only. */
+const conflictDetail = z.object({
+  teamId: z.string(),
+  userIds: z.array(z.string()),
+  count: z.number().int().positive(),
+});
+const NAMED_PEOPLE = 5;
+
+/**
+ * As refusalOf, plus the two-roles refusal (RQ024) as 409 group_role_conflict, naming the people
+ * and the team from the identity database by the ids the database reported: at most five people,
+ * then how many more, and a name it cannot find as a former member.
+ */
+async function refusal(
+  error: unknown,
+  denied: () => ApiError,
+): Promise<unknown> {
+  const cause = (error instanceof DrizzleQueryError ? error.cause : error) as
+    { code?: unknown; detail?: unknown } | undefined;
+  if (cause?.code !== "RQ024") return refusalOf(error, denied);
+  let detail: z.infer<typeof conflictDetail>;
+  try {
+    detail = conflictDetail.parse(JSON.parse(String(cause.detail)));
+  } catch {
+    return error;
+  }
+  const shown = detail.userIds.slice(0, NAMED_PEOPLE);
+  const people = await peopleByIds(shown);
+  const names = shown.map((id) => people.get(id)?.name ?? "a former member");
+  const more = detail.count - names.length;
+  const listed =
+    more > 0
+      ? `${names.join(", ")} and ${more} more`
+      : names.length > 1
+        ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`
+        : names[0];
+  const db = await getIdentityDb();
+  const [team] = await db
+    .select({ name: organization.name })
+    .from(organization)
+    .where(eq(organization.id, detail.teamId))
+    .limit(1);
+  return new ApiError(
+    409,
+    "group_role_conflict",
+    `This would give ${listed} two roles in ${team?.name ?? "this team"}. A person holds one configured role per team: remove them from one of the groups, or choose their role in the team's Members tab.`,
+  );
 }
 
 /**
@@ -209,7 +287,7 @@ function requireWrite(p: Principal, access: TenantAccess, ownerOnly: boolean) {
 /**
  * One withTeam transaction; the database stays authoritative and its refusals map to API errors. A
  * 42501 for a caller who passed requireWrite is app.guard_group_write refusing a company admin a
- * group that grants an approval.
+ * group that grants something.
  */
 async function inGroups<T>(
   p: Principal,
@@ -224,7 +302,7 @@ async function inGroups<T>(
       return work(tx, access);
     });
   } catch (error) {
-    throw refusalOf(error, allowed ? ownerRequired : forbidden);
+    throw await refusal(error, allowed ? ownerRequired : forbidden);
   }
 }
 
@@ -307,13 +385,21 @@ export async function renameGroup(
   );
 }
 
+/** The same ids as the current uses of one source, each once. */
+const sameUses = (ids: string[], current: Set<string>) =>
+  ids.length === current.size &&
+  new Set(ids).size === current.size &&
+  ids.every((item) => current.has(item));
+
 /**
  * Archives a group for good, in one transaction: each parent group that uses it first takes the
- * chosen replacement (one UPDATE of its child row) or loses it (null), then archived_at is set. A
+ * chosen replacement (one UPDATE of its child row) or loses it (null), and each role it gives is
+ * removed and, with a replacement, given in the same team by that group; then archived_at is set. A
  * group in use needs a choice for exactly its current uses (409 group_in_use, 409
  * group_uses_changed); a replacement that is the group itself, archived, unknown, already a direct
- * child of that parent, or that makes a cycle or nests too deep is refused, and any refusal rolls
- * everything back. Its members and effective membership stay.
+ * child of that parent or already giving a role in that team, or that makes a cycle, nests too deep
+ * or gives someone two roles in one team is refused, and any refusal rolls everything back. Its
+ * members and effective membership stay.
  */
 export async function archiveGroup(
   p: Principal,
@@ -329,18 +415,40 @@ export async function archiveGroup(
     );
     if (!current[0]) throw notFound();
     if (current[0].archived) throw groupArchived();
-    const uses = new Set((await groupUses(tx, id)).map((use) => use.group.id));
-    if (uses.size && !chosen)
+    const uses = await groupUses(tx, id);
+    if (uses.length && !chosen)
       throw new ApiError(
         409,
         "group_in_use",
         "This group is in use. Choose what replaces it in each place first.",
       );
-    const parents = (chosen ?? []).map((item) => item.parentGroupId);
+    const roles = new Map(
+      uses.flatMap((use) =>
+        use.source === "role-grant"
+          ? [[use.team.id, use.role.id] as const]
+          : [],
+      ),
+    );
+    const parentChoices = (chosen ?? []).flatMap((item) =>
+      "parentGroupId" in item ? [item] : [],
+    );
+    const roleChoices = (chosen ?? []).flatMap((item) =>
+      "teamId" in item ? [item] : [],
+    );
+    const parents = parentChoices.map((item) => item.parentGroupId);
     if (
-      parents.length !== uses.size ||
-      new Set(parents).size !== uses.size ||
-      !parents.every((parent) => uses.has(parent))
+      !sameUses(
+        parents,
+        new Set(
+          uses.flatMap((use) =>
+            use.source === "parent-group" ? [use.group.id] : [],
+          ),
+        ),
+      ) ||
+      !sameUses(
+        roleChoices.map((item) => item.teamId),
+        new Set(roles.keys()),
+      )
     )
       throw new ApiError(
         409,
@@ -349,7 +457,7 @@ export async function archiveGroup(
       );
     for (const parent of parents)
       await requireGrantingChange(tx, p, access, parent);
-    for (const { parentGroupId, replacementGroupId } of chosen ?? []) {
+    for (const { parentGroupId, replacementGroupId } of parentChoices) {
       // The parent already holds the group itself directly.
       if (replacementGroupId === id) throw memberExists();
       await tx.execute(
@@ -357,6 +465,17 @@ export async function archiveGroup(
           ? sql`delete from app.group_members where group_id = ${parentGroupId}::uuid and child_group_id = ${id}::uuid`
           : sql`update app.group_members set child_group_id = ${replacementGroupId}::uuid where group_id = ${parentGroupId}::uuid and child_group_id = ${id}::uuid`,
       );
+    }
+    for (const { teamId, replacementGroupId } of roleChoices) {
+      // The group itself already gives a role in that team.
+      if (replacementGroupId === id) throw roleExists();
+      await tx.execute(
+        sql`delete from app.group_roles where group_id = ${id}::uuid and team_id = ${teamId}`,
+      );
+      if (replacementGroupId !== null)
+        await tx.execute(
+          sql`insert into app.group_roles (group_id, workspace_id, team_id, role_object_id) values (${replacementGroupId}::uuid, ${access.workspaceId}::uuid, ${teamId}, ${roles.get(teamId)}::uuid)`,
+        );
     }
     const { rows } = await tx.execute<{ group: Group }>(
       sql`update app.groups g set archived_at = now() where g.id = ${id}::uuid and g.workspace_id = ${access.workspaceId}::uuid returning ${groupJson} as group`,
@@ -420,6 +539,91 @@ export async function removeGroupMember(
     );
     if (!rows[0]) throw notFound();
   });
+}
+
+/**
+ * Company owners only, here and in app.guard_group_role: what the group can be given, the current
+ * teams of the workspace and the roles assignMemberRole would offer. Viewing needs no recent sign-in.
+ */
+export async function listGroupRoleChoices(
+  p: Principal,
+  groupId: string,
+): Promise<GroupRoleChoices> {
+  const id = z.uuid().parse(groupId);
+  return inGroups(
+    p,
+    async (tx, access) => {
+      const { rows } = await tx.execute(
+        sql`select 1 from app.groups where id = ${id}::uuid and workspace_id = ${access.workspaceId}::uuid`,
+      );
+      if (!rows[0]) throw notFound();
+      const { rows: teams } = await tx.execute<{ id: string; name: string }>(
+        sql`select id, name from tenant_context.workspace_team_list() where not archived order by lower(name), id`,
+      );
+      return { teams, roles: assignableRoles(access) };
+    },
+    true,
+  );
+}
+
+/**
+ * A company owner with a recent sign-in gives a current group a published configured role in one
+ * current team of the workspace (app.guard_group_role and the two-roles check stay the real
+ * controls): 404 for an unknown group, team or role, 409 group_archived, role_not_published,
+ * role_invalid, group_role_exists for a group already giving a role there, and
+ * group_role_conflict when someone would hold two roles in that team.
+ */
+export async function grantGroupRole(
+  p: Principal,
+  groupId: string,
+  input: { teamId: string; roleObjectId: string },
+): Promise<void> {
+  const id = z.uuid().parse(groupId);
+  const { teamId, roleObjectId } = groupRoleGrant.parse(input);
+  await inGroups(
+    p,
+    async (tx, access) => {
+      requireFreshSession(p);
+      const [group] = (
+        await tx.execute<{ archived: boolean }>(
+          sql`select archived_at is not null as archived from app.groups where id = ${id}::uuid and workspace_id = ${access.workspaceId}::uuid`,
+        )
+      ).rows;
+      if (!group) throw notFound();
+      if (group.archived) throw groupArchived();
+      const { rows: teams } = await tx.execute(
+        sql`select 1 from tenant_context.workspace_team_list() where id = ${teamId} and not archived`,
+      );
+      if (!teams[0]) throw new ApiError(404, "not_found", "Team not found.");
+      await assignableRole(tx, access, roleObjectId);
+      await tx.execute(
+        sql`insert into app.group_roles (group_id, workspace_id, team_id, role_object_id) values (${id}::uuid, ${access.workspaceId}::uuid, ${teamId}, ${roleObjectId}::uuid)`,
+      );
+    },
+    true,
+  );
+}
+
+/** A company owner with a recent sign-in removes the role a group gives in one team; 404 when none. */
+export async function removeGroupRole(
+  p: Principal,
+  groupId: string,
+  input: { teamId: string },
+): Promise<void> {
+  const id = z.uuid().parse(groupId);
+  const { teamId } = groupRoleTeam.parse(input);
+  await inGroups(
+    p,
+    async (tx, access) => {
+      requireFreshSession(p);
+      const { rows } = await tx.execute(
+        sql`delete from app.group_roles where group_id = ${id}::uuid and workspace_id = ${access.workspaceId}::uuid and team_id = ${teamId} returning 1`,
+      );
+      if (!rows[0])
+        throw new ApiError(404, "not_found", "Role grant not found.");
+    },
+    true,
+  );
 }
 
 /**
@@ -506,7 +710,8 @@ const statusOf = sql.raw(
 
 /**
  * Every current use of the group by id, one query per source, so a later item adds its source and
- * one query: today the active groups it is directly in, by name.
+ * one query: the active groups it is directly in, by name, and the roles it gives, by team name.
+ * A role's name is its current published name, else its draft's.
  */
 async function groupUses(tx: TeamTx, groupId: string): Promise<GroupUse[]> {
   const { rows: parents } = await tx.execute<
@@ -515,7 +720,25 @@ async function groupUses(tx: TeamTx, groupId: string): Promise<GroupUse[]> {
     sql`select g.id, g.name, ${statusOf} as status from app.group_members m join app.groups g on g.id = m.group_id
       where m.child_group_id = ${groupId}::uuid and g.archived_at is null order by lower(g.name), g.id`,
   );
-  return parents.map((group) => ({ source: "parent-group", group }));
+  const { rows: grants } = await tx.execute<{
+    teamId: string;
+    teamName: string;
+    roleId: string;
+    roleName: string;
+  }>(
+    sql`select r.team_id as "teamId", t.name as "teamName", r.role_object_id as "roleId", coalesce(c.body->>'name', d.body->>'name') as "roleName"
+      from app.group_roles r join tenant_context.workspace_team_list() t on t.id = r.team_id
+      left join app.config_objects o on o.id = r.role_object_id left join app.config_versions c on c.id = o.current_version_id left join app.config_versions d on d.id = o.draft_version_id
+      where r.group_id = ${groupId}::uuid order by lower(t.name), t.id, lower(coalesce(c.body->>'name', d.body->>'name'))`,
+  );
+  return [
+    ...parents.map((group) => ({ source: "parent-group" as const, group })),
+    ...grants.map((row) => ({
+      source: "role-grant" as const,
+      team: { id: row.teamId, name: row.teamName },
+      role: { id: row.roleId, name: row.roleName },
+    })),
+  ];
 }
 
 /** Names and emails by the user ids read under RLS, from the identity database. */
@@ -626,7 +849,8 @@ export async function getGroup(
         sql`select user_id as "userId" from app.group_managers where group_id = ${id}::uuid`,
       );
       const whereUsed = await groupUses(tx, id);
-      // A replacement names three groups: the parent, the replacement and the group it replaced.
+      // A replacement names three groups: the parent, the replacement and the group it replaced; a
+      // role row names the role in the version it recorded and the team.
       const { rows: audit } = await tx.execute<{
         occurredAt: Date | string;
         action: string;
@@ -637,16 +861,21 @@ export async function getGroup(
         parentName: string | null;
         childName: string | null;
         replacedName: string | null;
+        roleName: string | null;
+        teamName: string | null;
       }>(
         sql`select a.created_at as "occurredAt", a.action, tenant_context.activity_actor_name(a.id) as "actorName",
             a.metadata->>'targetUserId' as "targetUserId",
             case when a.metadata->>'childGroupId' = ${id} then 'parent' when a.metadata ? 'childGroupId' then 'group' end as relation,
             case when a.metadata->>'childGroupId' = ${id} then parent.name else child.name end as "groupName",
-            parent.name as "parentName", child.name as "childName", replaced.name as "replacedName"
+            parent.name as "parentName", child.name as "childName", replaced.name as "replacedName",
+            role.body->>'name' as "roleName", team.name as "teamName"
           from app.activity a
           left join app.groups parent on parent.id::text = a.metadata->>'groupId' and parent.workspace_id = ${access.workspaceId}::uuid
           left join app.groups child on child.id::text = a.metadata->>'childGroupId' and child.workspace_id = ${access.workspaceId}::uuid
           left join app.groups replaced on replaced.id::text = a.metadata->>'replacedGroupId' and replaced.workspace_id = ${access.workspaceId}::uuid
+          left join app.config_versions role on role.id::text = a.metadata->>'roleVersionId' and role.workspace_id = ${access.workspaceId}::uuid
+          left join tenant_context.workspace_team_list() team on team.id = a.metadata->>'teamId'
           where a.team_id = ${p.teamId} and a.kind = 'group' and a.metadata->>'workspaceId' = ${access.workspaceId}
             and (a.metadata->>'groupId' = ${id} or a.metadata->>'childGroupId' = ${id} or a.metadata->>'replacedGroupId' = ${id})
           order by a.created_at desc, a.id desc limit ${GROUP_AUDIT_LIMIT}`,
@@ -699,21 +928,24 @@ export async function getGroup(
       action: row.action,
       actorName: row.actorName,
       target:
-        row.action === "group.child_replaced"
-          ? {
-              kind: "replacement" as const,
-              parent: row.parentName,
-              replaced: row.replacedName,
-              replacement: row.childName,
-            }
-          : row.targetUserId
+        row.action === "group.role_granted" ||
+        row.action === "group.role_removed"
+          ? { kind: "role" as const, role: row.roleName, team: row.teamName }
+          : row.action === "group.child_replaced"
             ? {
-                kind: "person" as const,
-                name: people.get(row.targetUserId)?.name ?? null,
+                kind: "replacement" as const,
+                parent: row.parentName,
+                replaced: row.replacedName,
+                replacement: row.childName,
               }
-            : row.relation
-              ? { kind: row.relation, name: row.groupName }
-              : null,
+            : row.targetUserId
+              ? {
+                  kind: "person" as const,
+                  name: people.get(row.targetUserId)?.name ?? null,
+                }
+              : row.relation
+                ? { kind: row.relation, name: row.groupName }
+                : null,
     })),
   };
 }
@@ -759,7 +991,7 @@ async function asManager<T>(
   try {
     return await withTeam(p, work);
   } catch (error) {
-    throw refusalOf(error, managerGranting);
+    throw await refusal(error, managerGranting);
   }
 }
 

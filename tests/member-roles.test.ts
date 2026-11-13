@@ -825,6 +825,7 @@ describe("configured roles and member assignment under the split runtime roles",
         "action",
         "actorName",
         "affectedUserId",
+        "groupName",
         "occurredAt",
         "roleName",
       ]);
@@ -1581,7 +1582,11 @@ describe("configured roles and member assignment under the split runtime roles",
       "/api/v1/teams/member-roles",
     );
     expect(status).toBe(200);
-    expect(Object.keys(listed.data).sort()).toEqual(["assignments", "roles"]);
+    expect(Object.keys(listed.data).sort()).toEqual([
+      "assignments",
+      "groupRoles",
+      "roles",
+    ]);
     const { assignments, roles } = listed.data as {
       assignments: {
         userId: string;

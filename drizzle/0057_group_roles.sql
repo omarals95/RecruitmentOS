@@ -744,7 +744,8 @@ BEGIN
               WHERE gr.team_id = m.organization_id)))
     UNION ALL
     SELECT NULL, NULL, pd.invited_email,
-      jsonb_agg(jsonb_build_object('team', tm.team_name, 'teamRole', pd.team_role, 'configuredRole', NULL)
+      jsonb_agg(jsonb_build_object('team', tm.team_name, 'teamRole', pd.team_role, 'configuredRole', NULL,
+        'roleGroup', NULL, 'roleConflict', false)
         ORDER BY tm.team_name, tm.team_ident, pd.team_role),
       NULL, 'invited', NULL, false, pd.invited_email, 'invitation:' || pd.invited_email
     FROM pending pd JOIN team tm ON tm.team_id = pd.team_id
