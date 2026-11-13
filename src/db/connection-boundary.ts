@@ -51,6 +51,7 @@ export const dataRoleHelpers = [
   "tenant_context.group_grants(uuid)",
   "tenant_context.computed_group_members(text)",
   "tenant_context.field_usage(text,uuid)",
+  "tenant_context.manages_group(uuid)",
   "tenant_context.public_branding()",
   "tenant_context.add_assignment(uuid,text,text)",
   "tenant_context.remove_assignment(uuid,text,text)",

@@ -238,14 +238,27 @@ import {
   GROUP_NOT_FOUND,
   GroupDetailRefusal,
   GroupDetailView,
+  ARCHIVE_MESSAGE,
+  ArchiveDialogView,
   NO_ADD_DRAFT,
+  NO_MANAGERS_GRANTING,
+  REMOVE_FROM_PARENT,
+  WHERE_USED_EMPTY,
   addTarget,
+  archiveReplacements,
   canChange,
   groupAuditLabel,
   groupChoices,
+  replacementChoices,
   sendGroupChange,
   type GroupData,
 } from "../src/components/settings/group-detail";
+import {
+  MANAGED_GRANTING,
+  ManagedGroupsView,
+  NO_MANAGED_GROUPS,
+  sendManagedChange,
+} from "../src/components/settings/managed-groups";
 import {
   GROUP_DETAIL_TABS,
   groupDetailTab,
@@ -821,7 +834,11 @@ describe("admin portal link in personal settings", () => {
   const link = (adminPortal: boolean) =>
     /<a [^>]*href="\/app\/admin"[^>]*>Admin portal<\/a>/.test(
       renderToStaticMarkup(
-        <SettingsNavigation active="profile" adminPortal={adminPortal} />,
+        <SettingsNavigation
+          active="profile"
+          adminPortal={adminPortal}
+          managedGroups={false}
+        />,
       ),
     );
 
@@ -5335,6 +5352,17 @@ describe("groups page", () => {
         via: "Fictional Leadership",
       },
     ],
+    managers: [person("Mira"), person("Faris")],
+    whereUsed: [
+      {
+        source: "parent-group",
+        group: {
+          id: ids.leadership,
+          name: "Fictional Leadership",
+          status: "active",
+        },
+      },
+    ],
     audit: [
       {
         occurredAt: "2026-11-06T10:00:00.000Z",
@@ -5414,6 +5442,12 @@ describe("groups page", () => {
     );
   const tabpanel = (markup: string) =>
     markup.slice(markup.indexOf('<div role="tabpanel"'));
+  /** The open tab's panel alone, without the rename and archive section below it. */
+  const tabOnly = (markup: string) => {
+    const panel = tabpanel(markup);
+    const end = panel.indexOf("<h3>Name and description</h3>");
+    return end < 0 ? panel : panel.slice(0, end);
+  };
   const controlsOf = (markup: string) =>
     [...content(markup).matchAll(/<(button|input|select)\b[^>]*>/g)].map(
       (match) => match[0],
@@ -5555,7 +5589,7 @@ describe("groups page", () => {
     expect(refused).not.toMatch(/<table|<form|Create group/);
   });
 
-  it("shows the detail page with the three tabs in order, ?tab= with Members as the fallback, and keyboard movement", () => {
+  it("shows the detail page with the five tabs in order, ?tab= with Members as the fallback, and keyboard movement", () => {
     const markup = detail();
     expect(sidebar(markup)).toContain(
       '<a aria-current="page" href="/app/admin/groups">Groups</a>',
@@ -5572,6 +5606,8 @@ describe("groups page", () => {
     expect(found.map((match) => match[1])).toEqual([
       "Members",
       "Member of",
+      "Managers",
+      "Where used",
       "Audit",
     ]);
     GROUP_DETAIL_TABS.forEach((tab, index) =>
@@ -5585,7 +5621,7 @@ describe("groups page", () => {
         `<div role="tabpanel" id="group-panel-${tab.key}" aria-labelledby="group-tab-${tab.key}" tabindex="0" class="stack">`,
       );
     }
-    for (const value of [undefined, "", "where-used", "approval", ["audit"]])
+    for (const value of [undefined, "", "where", "approval", ["audit"]])
       expect(groupDetailTab(value), String(value)).toBe("members");
     const source = readFileSync(
       new URL("../src/components/settings/group-detail.tsx", import.meta.url),
@@ -5594,7 +5630,7 @@ describe("groups page", () => {
     expect(source).toMatch(
       /role="tablist"\s+aria-label="Group details"\s+onKeyDown=\{tabKeys\}/,
     );
-    // Three tab buttons, as the tablist renders them: arrows wrap, Home and End jump.
+    // Five tab buttons, as the tablist renders them: arrows wrap, Home and End jump.
     const clicked: string[] = [];
     const doc = { activeElement: null as unknown };
     const buttons = GROUP_DETAIL_TABS.map((tab) => ({
@@ -5617,11 +5653,13 @@ describe("groups page", () => {
       };
       press("ArrowRight", 0);
       press("ArrowRight", 2);
+      press("ArrowRight", 4);
       press("ArrowLeft", 0);
-      press("Home", 2);
+      press("Home", 4);
       press("End", 0);
       expect(clicked).toEqual([
         "member-of",
+        "where-used",
         "members",
         "audit",
         "members",
@@ -5771,6 +5809,569 @@ describe("groups page", () => {
     );
     expect(tabpanel(detail({ tab: "audit" }, { audit: [] }))).toContain(
       '<p class="muted">No changes recorded from your current team.</p>',
+    );
+  });
+
+  // ADM-13 (job 101): Where used, the archive dialog with replacements, Managers and Groups I manage.
+  it("shows Where used with each parent group as a link under Parent groups, read-only, and the empty sentence", () => {
+    const twoParents = {
+      whereUsed: [
+        {
+          source: "parent-group" as const,
+          group: {
+            id: ids.leadership,
+            name: "Fictional Leadership",
+            status: "active" as const,
+          },
+        },
+        {
+          source: "parent-group" as const,
+          group: {
+            id: ids.panel,
+            name: "Fictional Panel",
+            status: "active" as const,
+          },
+        },
+      ],
+    };
+    const panel = tabOnly(detail({ tab: "where-used" }, twoParents));
+    expect(panel).toContain(
+      '<section class="panel stack"><h3>Where used</h3><p class="muted">Everything that refers to Fictional Interviewers. Check this before archiving it.</p>',
+    );
+    expect(panel).toContain("<h4>Parent groups</h4>");
+    expect(rowsOf(panel).slice(1)).toEqual([
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.leadership}">Fictional Leadership</a></td><td data-label="Status">Active</td>`,
+      `<td data-label="Group"><a href="/app/admin/groups/${ids.panel}">Fictional Panel</a></td><td data-label="Status">Active</td>`,
+    ]);
+    // Only the source that exists today; no heading or row for a later one.
+    expect(panel.match(/<h4>/g)).toHaveLength(1);
+    for (const text of [
+      "Role grants",
+      "Approval steps",
+      "Notification rules",
+      "Field context",
+      "Not used here",
+    ])
+      expect(panel, text).not.toContain(text);
+    expect(panel).not.toMatch(/<(button|input|select|form)\b/);
+    const empty = tabpanel(detail({ tab: "where-used" }, { whereUsed: [] }));
+    expect(empty).toContain(`<p class="muted">${WHERE_USED_EMPTY}</p>`);
+    expect(WHERE_USED_EMPTY).toBe("Nothing uses this group.");
+    expect(empty).not.toContain("<h4>");
+  });
+
+  it("archives a group nothing uses with the plain confirmation, and asks for a choice per use otherwise", () => {
+    expect(ARCHIVE_MESSAGE).toBe(
+      "It keeps its members. An archived group cannot be changed or restored.",
+    );
+    const source = readFileSync(
+      new URL("../src/components/settings/group-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    // No uses: the existing confirmation with the new text; uses: the dialog below.
+    expect(source).toMatch(
+      /if \(group\.whereUsed\.length\)\s+setArchiving\(\{ choices: \{\}, error: "" \}\);\s+else\s+void change\(\s+\{ kind: "archive" \},\s+\{\s+title: `Archive \$\{group\.name\}\?`,\s+message: ARCHIVE_MESSAGE,/,
+    );
+  });
+
+  it("shows one labelled choice per parent in the archive dialog, Remove or Replace, none chosen, and Archive group disabled until each has one", () => {
+    // The group is in Leadership and in Panel; Panel already holds Old List.
+    const used = {
+      ...group,
+      whereUsed: [
+        {
+          source: "parent-group" as const,
+          group: {
+            id: ids.leadership,
+            name: "Fictional Leadership",
+            status: "active" as const,
+          },
+        },
+        {
+          source: "parent-group" as const,
+          group: {
+            id: ids.panel,
+            name: "Fictional Panel",
+            status: "active" as const,
+          },
+        },
+      ],
+    };
+    const choices: GroupList = {
+      data: [
+        ...list.data,
+        {
+          ...list.data[0],
+          id: ids.panel,
+          name: "Fictional Panel",
+          childGroups: [
+            { id: ids.interviewers, name: "Fictional Interviewers" },
+            { id: ids.other, name: "Fictional Deep Panel" },
+          ],
+          parentGroups: [],
+        },
+        {
+          ...list.data[0],
+          id: ids.other,
+          name: "Fictional Deep Panel",
+          childGroups: [],
+          parentGroups: [],
+        },
+      ],
+      computed: [],
+    };
+    const dialog = (choicesMade: Record<string, string>, error = "") =>
+      renderToStaticMarkup(
+        <ArchiveDialogView
+          group={used}
+          list={choices}
+          listError=""
+          draft={{ choices: choicesMade, error }}
+          busy={false}
+          onChoose={() => {}}
+          onCancel={() => {}}
+          onConfirm={() => {}}
+        />,
+      );
+    const none = dialog({});
+    expect(none).toContain("<h2");
+    expect(none).toContain(">Archive Fictional Interviewers?</h2>");
+    expect(none).toContain(
+      "Fictional Interviewers is in the groups below. Choose what replaces it in each one, or remove it from that group. It keeps its members. An archived group cannot be changed or restored.",
+    );
+    const selects = [
+      ...none.matchAll(
+        /<label class="field"><span>([^<]+)<\/span><select required="">([\s\S]*?)<\/select><\/label>/g,
+      ),
+    ];
+    expect(selects.map((match) => match[1])).toEqual([
+      "In Fictional Leadership",
+      "In Fictional Panel",
+    ]);
+    const options = (markup: string) =>
+      [
+        ...markup.matchAll(/<option value="([^"]*)"[^>]*>([^<]+)<\/option>/g),
+      ].map((match) => [match[1], match[2]]);
+    // Leadership: remove, or any current group but this one and Leadership itself.
+    expect(options(selects[0][2])).toEqual([
+      ["", "Choose what replaces it"],
+      [REMOVE_FROM_PARENT, "Remove from Fictional Leadership"],
+      [ids.panel, "Replace with Fictional Panel"],
+      [ids.other, "Replace with Fictional Deep Panel"],
+    ]);
+    // Panel: not Panel, nor its direct child groups.
+    expect(options(selects[1][2])).toEqual([
+      ["", "Choose what replaces it"],
+      [REMOVE_FROM_PARENT, "Remove from Fictional Panel"],
+      [ids.leadership, "Replace with Fictional Leadership"],
+    ]);
+    // Only each placeholder is selected.
+    expect(none.match(/selected=""/g)).toHaveLength(2);
+    expect(none).not.toMatch(/<option value="[^"]+" selected/);
+    // Cancel first; Archive group disabled until every use has a choice.
+    const footer = (markup: string) =>
+      markup.slice(markup.indexOf('<footer class="dialog-footer">'));
+    expect(footer(none)).toMatch(
+      /^<footer class="dialog-footer"><button type="button" class="button secondary">Cancel<\/button><button type="button" class="button danger" disabled="">Archive group<\/button><\/footer>/,
+    );
+    const half = dialog({ [ids.leadership]: REMOVE_FROM_PARENT });
+    expect(footer(half)).toContain(
+      '<button type="button" class="button danger" disabled="">Archive group</button>',
+    );
+    const all = {
+      [ids.leadership]: REMOVE_FROM_PARENT,
+      [ids.panel]: ids.leadership,
+    };
+    const ready = dialog(all);
+    expect(footer(ready)).toContain(
+      '<button type="button" class="button danger">Archive group</button>',
+    );
+    expect(archiveReplacements(used.whereUsed, all)).toEqual([
+      { parentGroupId: ids.leadership, replacementGroupId: null },
+      { parentGroupId: ids.panel, replacementGroupId: ids.leadership },
+    ]);
+    expect(
+      archiveReplacements(used.whereUsed, {
+        [ids.leadership]: REMOVE_FROM_PARENT,
+      }),
+    ).toBeNull();
+    expect(replacementChoices(group.id, ids.panel, choices)).toEqual([
+      { id: ids.leadership, name: "Fictional Leadership" },
+    ]);
+    // A refusal shows in the dialog in plain words, and the choices stay.
+    const refusal = dialog(
+      all,
+      plainError(
+        new ClientError(
+          409,
+          "group_cycle",
+          "A group cannot contain itself or a group that contains it.",
+        ),
+      ),
+    );
+    expect(refusal).toContain(
+      '<p class="notice error" role="alert">A group cannot contain itself or a group that contains it.</p>',
+    );
+    expect(refusal).not.toContain("group_cycle");
+    expect(refusal).toContain(
+      `<option value="${REMOVE_FROM_PARENT}" selected="">Remove from Fictional Leadership</option>`,
+    );
+    expect(refusal).toContain(
+      `<option value="${ids.leadership}" selected="">Replace with Fictional Leadership</option>`,
+    );
+  });
+
+  it("sends the archive with its replacements, opening Confirm it's you on a stale granting group and retrying once with the same choices", async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const answers: Response[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return answers.shift() ?? json(200, { data: {} });
+      }),
+    );
+    try {
+      const replacements = [
+        { parentGroupId: ids.leadership, replacementGroupId: null },
+        { parentGroupId: ids.panel, replacementGroupId: ids.old },
+      ];
+      const request = {
+        method: "PATCH",
+        path: `/api/v1/admin/groups/${ids.interviewers}`,
+        body: { archived: true, replacements },
+      };
+      const ask = vi.fn(async () => true);
+      answers.push(
+        json(403, {
+          error: {
+            code: "SESSION_NOT_FRESH",
+            message: "This change needs a recent sign-in.",
+          },
+        }),
+      );
+      await expect(
+        sendGroupChange(
+          "fictional-team",
+          ids.interviewers,
+          { kind: "archive", replacements },
+          (work) => retryWithFreshSession(work, ask),
+        ),
+      ).resolves.toBe(true);
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(sent).toEqual([request, request]);
+      // A refusal after the retry reaches the dialog in plain words.
+      sent.length = 0;
+      answers.push(
+        json(409, {
+          error: {
+            code: "group_uses_changed",
+            message:
+              "What uses this group changed. Review Where used and try again.",
+          },
+        }),
+      );
+      const error = await sendGroupChange(
+        "fictional-team",
+        ids.interviewers,
+        { kind: "archive", replacements },
+        (work) => retryWithFreshSession(work, ask),
+      ).then(
+        () => "",
+        (e) => plainError(e),
+      );
+      expect(error).toBe(
+        "What uses this group changed. Review Where used and try again.",
+      );
+      expect(sent).toEqual([request]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lists the managers on the Managers tab with Add manager and Remove for an editable group that grants nothing", () => {
+    const panel = tabpanel(
+      detail({ tab: "managers", manager: "fictional-eve" }),
+    );
+    expect(panel).toContain(
+      '<p class="muted">Managers can add and remove the people in this group from <strong>Groups I manage</strong> in their personal settings. They cannot change anything else.</p>',
+    );
+    expect(panel).toContain(
+      '<li class="group-tree-row"><a href="/app/admin/users/fictional-mira">Fictional Mira</a><span class="muted">mira@example.test</span><button type="button" class="button secondary" aria-label="Remove Fictional Mira as a manager">Remove</button></li>',
+    );
+    expect(panel.match(/>Remove</g)).toHaveLength(2);
+    expect(panel).toContain('<form class="stack" aria-label="Add a manager">');
+    expect(panel).toContain(
+      '<option value="fictional-eve" selected="">Fictional Eve · eve@example.test</option>',
+    );
+    expect(panel).toContain(
+      '<button type="submit" class="button">Add manager</button>',
+    );
+    expect(tabpanel(detail({ tab: "managers" }, { managers: [] }))).toContain(
+      '<p class="muted">No managers.</p>',
+    );
+  });
+
+  it("shows the granting sentence on the Managers tab, Remove only for a company owner, and no control for an admin or an archived group", () => {
+    expect(NO_MANAGERS_GRANTING).toBe(
+      "A group that grants access cannot have managers. Only a company owner can change its people.",
+    );
+    const owner = tabOnly(detail({ tab: "managers" }, { grants: true }));
+    expect(owner).toContain(`<p class="muted">${NO_MANAGERS_GRANTING}</p>`);
+    expect(owner).not.toContain("Groups I manage");
+    expect(owner.match(/>Remove</g)).toHaveLength(2);
+    expect(owner).not.toContain("Add manager");
+    expect(owner).not.toContain("<form");
+    for (const markup of [
+      tabpanel(
+        detail({ tab: "managers", companyOwner: false }, { grants: true }),
+      ),
+      tabpanel(detail({ tab: "managers" }, { status: "archived" })),
+    ]) {
+      expect(markup).toContain("Fictional Mira");
+      expect(markup).not.toMatch(/<(button|input|select|form)\b/);
+    }
+  });
+
+  it("sends Add manager and Remove manager to the managers route", async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return new Response(JSON.stringify({ data: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    try {
+      for (const kind of ["add-manager", "remove-manager"] as const)
+        await sendGroupChange(
+          "fictional-team",
+          ids.interviewers,
+          { kind, userId: "fictional-eve" },
+          (work) => retryWithFreshSession(work, async () => true),
+        );
+      expect(sent).toEqual([
+        {
+          method: "POST",
+          path: `/api/v1/admin/groups/${ids.interviewers}/managers`,
+          body: { userId: "fictional-eve" },
+        },
+        {
+          method: "DELETE",
+          path: `/api/v1/admin/groups/${ids.interviewers}/managers`,
+          body: { userId: "fictional-eve" },
+        },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("labels a replacement on the Audit tab with all three groups by name", () => {
+    expect(
+      groupAuditLabel({
+        occurredAt: "2026-11-01T10:00:00.000Z",
+        action: "group.child_replaced",
+        actorName: null,
+        target: {
+          kind: "replacement",
+          parent: "Fictional Parent",
+          replaced: "Fictional A",
+          replacement: "Fictional B",
+        },
+      }),
+    ).toBe("Replaced Fictional A with Fictional B in Fictional Parent");
+    expect(
+      groupAuditLabel({
+        occurredAt: "2026-11-01T10:00:00.000Z",
+        action: "group.child_replaced",
+        actorName: null,
+        target: {
+          kind: "replacement",
+          parent: "Fictional Parent",
+          replaced: null,
+          replacement: "Fictional B",
+        },
+      }),
+    ).toBe("Replaced Not recorded with Fictional B in Fictional Parent");
+  });
+
+  it("shows Groups I manage as one panel per group with its people, Remove, and Add a person by email", () => {
+    const managed = [
+      {
+        id: ids.interviewers,
+        name: "Fictional Interviewers",
+        description: "Fictional interview panel",
+        grants: false,
+        people: [person("Amal"), person("Basil")],
+      },
+      {
+        id: ids.leadership,
+        name: "Fictional Leadership",
+        description: null,
+        grants: true,
+        people: [person("Celia")],
+      },
+    ];
+    const markup = renderToStaticMarkup(
+      <ManagedGroupsView
+        groups={managed}
+        error=""
+        emails={{ [ids.interviewers]: "eve@example.test" }}
+        outcome={{ error: "", notice: "Added to the group." }}
+      />,
+    );
+    expect(markup).toContain(
+      '<div tabindex="-1" class="notice success" role="status">Added to the group.</div>',
+    );
+    const [plainPanel, grantingPanel] = markup
+      .split('<section class="panel stack">')
+      .slice(1);
+    expect(plainPanel).toContain(
+      '<h2>Fictional Interviewers</h2><p class="muted">Fictional interview panel</p>',
+    );
+    expect(plainPanel).toContain(
+      '<li class="group-tree-row"><span>Fictional Amal</span><span class="muted">amal@example.test</span><button type="button" class="button secondary" aria-label="Remove Fictional Amal from Fictional Interviewers">Remove</button></li>',
+    );
+    expect(plainPanel).toContain(
+      '<form class="stack" aria-label="Add a person to Fictional Interviewers"><h3>Add a person</h3><label class="field"><span>Email</span><input type="email" required="" maxLength="254" autoComplete="off" value="eve@example.test"/></label>',
+    );
+    expect(plainPanel).toContain(
+      '<button type="submit" class="button">Add</button>',
+    );
+    // A granting group: the sentence, its people, and no control.
+    expect(MANAGED_GRANTING).toBe(
+      "Only a company owner can change this group now, because it or a group it is in grants access.",
+    );
+    expect(grantingPanel).toContain(`<p class="muted">${MANAGED_GRANTING}</p>`);
+    expect(grantingPanel).toContain("<span>Fictional Celia</span>");
+    expect(grantingPanel).not.toMatch(/<(button|input|select|form)\b/);
+    // A refusal in plain words, focused like the group detail page.
+    expect(
+      renderToStaticMarkup(
+        <ManagedGroupsView
+          groups={managed}
+          error=""
+          outcome={{
+            error: "This person is not in any team of your company.",
+            notice: "",
+          }}
+        />,
+      ),
+    ).toContain(
+      '<div tabindex="-1" class="notice error" role="alert">This person is not in any team of your company.</div>',
+    );
+  });
+
+  it("shows Groups I manage loading, failed and empty, and sends a manager's add by email and remove by id", async () => {
+    expect(
+      renderToStaticMarkup(<ManagedGroupsView groups={[]} error="" />),
+    ).toContain(`<section class="panel"><p>${NO_MANAGED_GROUPS}</p></section>`);
+    expect(NO_MANAGED_GROUPS).toBe("You do not manage any groups.");
+    expect(
+      renderToStaticMarkup(<ManagedGroupsView groups={null} error="" />),
+    ).toContain('<p role="status">Loading your groups…</p>');
+    expect(
+      renderToStaticMarkup(
+        <ManagedGroupsView
+          groups={null}
+          error="The request could not be completed."
+        />,
+      ),
+    ).toContain(
+      '<p class="notice error" role="alert">Could not load your groups. The request could not be completed.</p>',
+    );
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return new Response(JSON.stringify({ data: {} }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    try {
+      await sendManagedChange("fictional-team", ids.interviewers, {
+        email: "eve@example.test",
+      });
+      await sendManagedChange("fictional-team", ids.interviewers, {
+        userId: "fictional-amal",
+      });
+      expect(sent).toEqual([
+        {
+          method: "POST",
+          path: `/api/v1/me/groups/${ids.interviewers}/members`,
+          body: { email: "eve@example.test" },
+        },
+        {
+          method: "DELETE",
+          path: `/api/v1/me/groups/${ids.interviewers}/members`,
+          body: { userId: "fictional-amal" },
+        },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows Groups I manage in the settings navigation only when the person manages a group", () => {
+    const links = (managedGroups: boolean, active?: "groups") =>
+      [
+        ...renderToStaticMarkup(
+          <SettingsNavigation
+            active={active}
+            adminPortal={false}
+            managedGroups={managedGroups}
+          />,
+        ).matchAll(/<a ([^>]*)>([^<]+)<\/a>/g),
+      ].map((match) => [match[1], match[2]]);
+    expect(links(false).map(([, label]) => label)).toEqual([
+      "My profile",
+      "API tokens",
+      "About",
+    ]);
+    expect(links(true).map(([, label]) => label)).toEqual([
+      "My profile",
+      "API tokens",
+      "About",
+      "Groups I manage",
+    ]);
+    expect(links(true, "groups")[3][0]).toContain(
+      'href="/app/settings/groups"',
+    );
+    expect(links(true, "groups")[3][0]).toContain('aria-current="page"');
+    // The link follows GET /api/v1/me/groups: hidden while it loads, on failure or when empty.
+    const source = readFileSync(
+      new URL(
+        "../src/components/settings/settings-navigation.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(source).toContain(
+      'team ? "/api/v1/me/groups" : null,\n  );\n  return !result.error && !!result.data?.data.length;',
     );
   });
 
@@ -6001,7 +6602,7 @@ describe("groups page", () => {
     );
   });
 
-  it("never shows an approval setting, Where used, managers, role grants or Export on either page", () => {
+  it("never shows an approval setting, role grants, approval steps, notification rules, field contexts or Export on either page", () => {
     const pages = [
       listPanel(),
       ...GROUP_DETAIL_TABS.flatMap((tab) => [
@@ -6014,10 +6615,12 @@ describe("groups page", () => {
       for (const text of [
         "Approval",
         "approval",
-        "Where used",
         "Export",
-        "Managers",
         "Role grant",
+        "Notification",
+        "notification",
+        "Field context",
+        "field context",
         "Paste a list",
       ])
         expect(markup, text).not.toContain(text);

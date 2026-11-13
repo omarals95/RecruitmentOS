@@ -8,10 +8,10 @@ import { ApiError } from "../lib/errors";
  * employee erasure and retention, record scope and assignment, record scope row-level security,
  * record pin, workspace team list, workspace people, company authority two-step, team archive, job
  * architecture, workspace person, user deactivation, salary bracket, record file, job title usage,
- * user anonymisation, company groups, branding, domain audit and field usage schema this code was
- * written for (`0055_field_usage.sql`).
+ * user anonymisation, company groups, branding, domain audit, field usage and group manager schema
+ * this code was written for (`0056_group_managers.sql`).
  */
-export const STORAGE_SCHEMA_VERSION = 33;
+export const STORAGE_SCHEMA_VERSION = 34;
 
 /** Refuse to serve when the owner-controlled storage marker is missing or another version. */
 export async function assertStorageSchema(client: {

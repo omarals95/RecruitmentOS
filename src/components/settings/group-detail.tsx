@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type FormEvent, type Ref } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type Ref,
+} from "react";
 import type { WorkspacePeople } from "@/lib/admin-users";
 import type { MeAccess } from "@/lib/authz";
 import type {
@@ -11,6 +18,8 @@ import type {
   GroupList,
   GroupMembers,
   GroupRef,
+  GroupReplacement,
+  GroupUse,
 } from "@/lib/groups";
 import {
   ClientError,
@@ -24,6 +33,7 @@ import {
   useConfirm,
   type ConfirmOptions,
 } from "@/components/ui/confirm-dialog";
+import { Dialog } from "@/components/ui/dialog";
 import { tabKeys } from "@/components/ui/tab-keys";
 import { AdminPortalView } from "./admin-portal";
 import { NO_ACCESS } from "./admin-tabs";
@@ -57,16 +67,32 @@ export const ARCHIVED_GROUP =
 export const AUDIT_SCOPE =
   "Changes made from your current team, newest first. Changes made from another team are shown in that team.";
 export const ARCHIVE_MESSAGE =
-  "It keeps its members and stays in the groups it is in. An archived group cannot be changed or restored.";
+  "It keeps its members. An archived group cannot be changed or restored.";
+export const NO_MANAGERS_GRANTING =
+  "A group that grants access cannot have managers. Only a company owner can change its people.";
+export const WHERE_USED_EMPTY = "Nothing uses this group.";
+/** The heading of each source of Where used; a later item adds its own. */
+export const USE_SOURCES: Record<GroupUse["source"], string> = {
+  "parent-group": "Parent groups",
+};
+/** The archive dialog's choice that removes the group from a parent instead of replacing it. */
+export const REMOVE_FROM_PARENT = "remove";
 
 /** A direct member: a person or a child group. */
 export type GroupMember = { userId: string } | { childGroupId: string };
 /** One change of the group, sent as its route expects. */
 export type GroupChange =
   | { kind: "rename"; draft: GroupDraft }
-  | { kind: "archive" }
+  | { kind: "archive"; replacements?: GroupReplacement[] }
   | { kind: "add"; member: GroupMember }
-  | { kind: "remove"; member: GroupMember };
+  | { kind: "remove"; member: GroupMember }
+  | { kind: "add-manager"; userId: string }
+  | { kind: "remove-manager"; userId: string };
+/**
+ * The archive dialog of a group in use: per parent group id, REMOVE_FROM_PARENT or the replacing
+ * group's id ("" while unchosen), and the refusal it shows.
+ */
+export type ArchiveDraft = { choices: Record<string, string>; error: string };
 /** The Add form: what kind of member, and the chosen person or group. */
 export type AddDraft = {
   kind: "person" | "group";
@@ -126,12 +152,21 @@ export async function sendGroupChange(
       : change.kind === "archive"
         ? requestJson(teamId, path, {
             method: "PATCH",
-            body: JSON.stringify({ archived: true }),
+            body: JSON.stringify(
+              change.replacements
+                ? { archived: true, replacements: change.replacements }
+                : { archived: true },
+            ),
           })
-        : requestJson(teamId, `${path}/members`, {
-            method: change.kind === "add" ? "POST" : "DELETE",
-            body: JSON.stringify(change.member),
-          });
+        : change.kind === "add-manager" || change.kind === "remove-manager"
+          ? requestJson(teamId, `${path}/managers`, {
+              method: change.kind === "add-manager" ? "POST" : "DELETE",
+              body: JSON.stringify({ userId: change.userId }),
+            })
+          : requestJson(teamId, `${path}/members`, {
+              method: change.kind === "add" ? "POST" : "DELETE",
+              body: JSON.stringify(change.member),
+            });
   return (await withFreshSession(send)) !== REAUTH_CANCELLED;
 }
 
@@ -148,6 +183,8 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
     description: "",
   });
   const [add, setAdd] = useState<AddDraft>(NO_ADD_DRAFT);
+  const [manager, setManager] = useState("");
+  const [archiving, setArchiving] = useState<ArchiveDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState({ error: "", notice: "" });
   const { confirm, dialog } = useConfirm();
@@ -206,6 +243,7 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
       if (done) {
         setOutcome({ error: "", notice: changeNotice(step) });
         if (step.kind === "add") setAdd({ ...NO_ADD_DRAFT, kind: add.kind });
+        if (step.kind === "add-manager") setManager("");
         setRun((value) => value + 1);
         groups.refresh();
       }
@@ -217,6 +255,39 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
       setBusy(false);
     }
     if (done) setOutcomeFocus((count) => count + 1);
+  }
+
+  /** Archive with a choice for every use, from the dialog, which keeps the choices on a refusal. */
+  async function archiveInUse() {
+    if (!teamId || !group || !archiving || busy) return;
+    const replacements = archiveReplacements(
+      group.whereUsed,
+      archiving.choices,
+    );
+    if (!replacements) return;
+    setBusy(true);
+    try {
+      const done = await sendGroupChange(
+        teamId,
+        group.id,
+        { kind: "archive", replacements },
+        freshSession.withFreshSession,
+      );
+      if (done) {
+        setArchiving(null);
+        setOutcome({ error: "", notice: changeNotice({ kind: "archive" }) });
+        setRun((value) => value + 1);
+        groups.refresh();
+        setOutcomeFocus((count) => count + 1);
+      }
+    } catch (e) {
+      setArchiving((draft) => draft && { ...draft, error: plainError(e) });
+      // Where used is read again, so the dialog lists what uses the group now.
+      if (e instanceof ClientError && e.code === "group_uses_changed")
+        setRun((value) => value + 1);
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!loaded) return <p role="status">Loading this group…</p>;
@@ -259,17 +330,20 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
           event.preventDefault();
           void change({ kind: "rename", draft: rename });
         }}
-        onArchive={() =>
-          void change(
-            { kind: "archive" },
-            {
-              title: `Archive ${group.name}?`,
-              message: ARCHIVE_MESSAGE,
-              confirmLabel: "Archive group",
-              destructive: true,
-            },
-          )
-        }
+        onArchive={() => {
+          setOutcome({ error: "", notice: "" });
+          if (group.whereUsed.length) setArchiving({ choices: {}, error: "" });
+          else
+            void change(
+              { kind: "archive" },
+              {
+                title: `Archive ${group.name}?`,
+                message: ARCHIVE_MESSAGE,
+                confirmLabel: "Archive group",
+                destructive: true,
+              },
+            );
+        }}
         onSubmitAdd={(event) => {
           event.preventDefault();
           const target = addTarget(add);
@@ -278,7 +352,44 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
         onRemove={(target, name) =>
           void change({ kind: "remove", member: target }, member(target, name))
         }
+        manager={manager}
+        onManager={setManager}
+        onSubmitManager={(event) => {
+          event.preventDefault();
+          if (manager) void change({ kind: "add-manager", userId: manager });
+        }}
+        onRemoveManager={(userId, name) =>
+          void change(
+            { kind: "remove-manager", userId },
+            {
+              title: `Remove ${name} as a manager?`,
+              message: `${name} can no longer add or remove the people in ${group.name}.`,
+              confirmLabel: "Remove",
+              destructive: true,
+            },
+          )
+        }
       />
+      {archiving && (
+        <ArchiveDialogView
+          group={group}
+          list={groups.data}
+          listError={groups.error}
+          draft={archiving}
+          busy={busy}
+          onChoose={(parentId, value) =>
+            setArchiving(
+              (draft) =>
+                draft && {
+                  ...draft,
+                  choices: { ...draft.choices, [parentId]: value },
+                },
+            )
+          }
+          onCancel={() => setArchiving(null)}
+          onConfirm={() => void archiveInUse()}
+        />
+      )}
       {freshSession.dialog}
       {dialog}
     </>
@@ -373,6 +484,48 @@ export function groupChoices(
     .map(({ id, name }) => ({ id, name }));
 }
 
+/**
+ * The groups that may replace this group in one parent: current groups other than it, the parent
+ * and the parent's direct child groups, by name.
+ */
+export function replacementChoices(
+  groupId: string,
+  parentId: string,
+  list: GroupList,
+): GroupRef[] {
+  const children = new Set(
+    list.data
+      .find((row) => row.id === parentId)
+      ?.childGroups.map((item) => item.id),
+  );
+  return list.data
+    .filter(
+      (row) =>
+        row.status === "active" &&
+        row.id !== groupId &&
+        row.id !== parentId &&
+        !children.has(row.id),
+    )
+    .map(({ id, name }) => ({ id, name }));
+}
+
+/** The archive body's replacements, one per use, or null while a use has no choice. */
+export function archiveReplacements(
+  uses: GroupUse[],
+  choices: Record<string, string>,
+): GroupReplacement[] | null {
+  const replacements = uses.map((use) => {
+    const choice = choices[use.group.id] ?? "";
+    return choice
+      ? {
+          parentGroupId: use.group.id,
+          replacementGroupId: choice === REMOVE_FROM_PARENT ? null : choice,
+        }
+      : null;
+  });
+  return replacements.every((item) => item !== null) ? replacements : null;
+}
+
 /** The member the Add form names, or null when nothing is chosen. */
 export function addTarget(draft: AddDraft): GroupMember | null {
   if (draft.kind === "person")
@@ -387,7 +540,11 @@ function changeNotice(step: GroupChange) {
       ? "The group was archived."
       : step.kind === "add"
         ? "Added to the group."
-        : "Removed from the group.";
+        : step.kind === "add-manager"
+          ? "Added as a manager."
+          : step.kind === "remove-manager"
+            ? "Removed as a manager."
+            : "Removed from the group.";
 }
 
 /** A group that did not load: the no-access sentence on 403, not found on 404, else the error. */
@@ -413,9 +570,15 @@ export function GroupDetailRefusal({
 
 /** The plain words for one audit row, with names; "Not recorded" for a name that cannot be found. */
 export function groupAuditLabel(row: GroupAuditRow) {
-  const name = row.target?.name ?? "Not recorded";
-  const kind = row.target?.kind;
+  const target = row.target;
+  const name =
+    (target && "name" in target ? target.name : null) ?? "Not recorded";
+  const kind = target?.kind;
   switch (row.action) {
+    case "group.child_replaced": {
+      const names = target?.kind === "replacement" ? target : null;
+      return `Replaced ${names?.replaced ?? "Not recorded"} with ${names?.replacement ?? "Not recorded"} in ${names?.parent ?? "Not recorded"}`;
+    }
     case "group.created":
       return "Created the group";
     case "group.renamed":
@@ -445,7 +608,7 @@ const count = (n: number, one: string, many: string) =>
   `${n} ${n === 1 ? one : many}`;
 
 /**
- * The loaded group: name, description, the three tabs and the open tab's panel, and the rename and
+ * The loaded group: name, description, the five tabs and the open tab's panel, and the rename and
  * archive controls for a caller who may change it.
  */
 export function GroupDetailView({
@@ -461,6 +624,7 @@ export function GroupDetailView({
   personChoices = null,
   groupChoices: groupOptions = null,
   groupChoicesError = "",
+  manager = "",
   onRename = () => {},
   onAdd = () => {},
   onShowMorePeople = () => {},
@@ -468,6 +632,9 @@ export function GroupDetailView({
   onArchive = () => {},
   onSubmitAdd = (event) => event.preventDefault(),
   onRemove = () => {},
+  onManager = () => {},
+  onSubmitManager = (event) => event.preventDefault(),
+  onRemoveManager = () => {},
 }: {
   group: GroupData;
   tab: GroupDetailTab;
@@ -484,6 +651,8 @@ export function GroupDetailView({
   /** Null while the groups load. */
   groupChoices?: GroupRef[] | null;
   groupChoicesError?: string;
+  /** The person the Add manager form names, "" for none. */
+  manager?: string;
   onRename?: (draft: GroupDraft) => void;
   onAdd?: (draft: AddDraft) => void;
   onShowMorePeople?: () => void;
@@ -491,6 +660,9 @@ export function GroupDetailView({
   onArchive?: () => void;
   onSubmitAdd?: (event: FormEvent) => void;
   onRemove?: (member: GroupMember, name: string) => void;
+  onManager?: (userId: string) => void;
+  onSubmitManager?: (event: FormEvent) => void;
+  onRemoveManager?: (userId: string, name: string) => void;
 }) {
   const [current, setCurrent] = useState(tab);
   const editable = canChange(group, companyOwner);
@@ -575,6 +747,20 @@ export function GroupDetailView({
           />
         ) : current === "member-of" ? (
           <MemberOfTab group={group} />
+        ) : current === "managers" ? (
+          <ManagersTab
+            group={group}
+            editable={editable}
+            busy={busy}
+            manager={manager}
+            personChoices={personChoices}
+            onManager={onManager}
+            onShowMorePeople={onShowMorePeople}
+            onSubmitManager={onSubmitManager}
+            onRemoveManager={onRemoveManager}
+          />
+        ) : current === "where-used" ? (
+          <WhereUsedTab group={group} />
         ) : (
           <AuditTab rows={group.audit} />
         )}
@@ -911,6 +1097,281 @@ function MemberOfTab({ group }: { group: GroupData }) {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The delegated managers, by name; Add manager for a group that grants nothing, and Remove for
+ * anyone who may change the group. A group that grants something has none to add.
+ */
+function ManagersTab({
+  group,
+  editable,
+  busy,
+  manager,
+  personChoices,
+  onManager,
+  onShowMorePeople,
+  onSubmitManager,
+  onRemoveManager,
+}: {
+  group: GroupData;
+  editable: boolean;
+  busy: boolean;
+  manager: string;
+  personChoices: PersonChoices | null;
+  onManager: (userId: string) => void;
+  onShowMorePeople: () => void;
+  onSubmitManager: (event: FormEvent) => void;
+  onRemoveManager: (userId: string, name: string) => void;
+}) {
+  const named = new Set(group.managers.map((item) => item.userId));
+  const people = personChoices?.rows.filter((row) => !named.has(row.userId));
+  return (
+    <section className="panel stack">
+      <h3>Managers</h3>
+      {group.grants ? (
+        <p className="muted">{NO_MANAGERS_GRANTING}</p>
+      ) : (
+        <p className="muted">
+          Managers can add and remove the people in this group from{" "}
+          <strong>Groups I manage</strong> in their personal settings. They
+          cannot change anything else.
+        </p>
+      )}
+      {!group.managers.length ? (
+        <p className="muted">No managers.</p>
+      ) : (
+        <ul className="group-tree">
+          {group.managers.map((person) => {
+            const name = person.name ?? person.email ?? "Not recorded";
+            return (
+              <li key={person.userId} className="group-tree-row">
+                <Link
+                  href={`/app/admin/users/${encodeURIComponent(person.userId)}`}
+                >
+                  {name}
+                </Link>
+                {person.email && <span className="muted">{person.email}</span>}
+                {editable && (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={busy}
+                    aria-label={`Remove ${name} as a manager`}
+                    onClick={() => onRemoveManager(person.userId, name)}
+                  >
+                    Remove
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {editable && !group.grants && (
+        <form
+          className="stack"
+          aria-label="Add a manager"
+          onSubmit={onSubmitManager}
+        >
+          <label className="field">
+            <span>Person</span>
+            <select
+              required
+              value={manager}
+              onChange={(e) => onManager(e.target.value)}
+            >
+              <option value="">
+                {people ? "Choose a person" : "Loading people…"}
+              </option>
+              {(people ?? []).map((row) => (
+                <option key={row.userId} value={row.userId}>
+                  {row.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {personChoices?.error && (
+            <p className="notice error" role="alert">
+              Could not load the people. {personChoices.error}
+            </p>
+          )}
+          {personChoices?.nextCursor && (
+            <div className="row">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={onShowMorePeople}
+              >
+                Show more people
+              </button>
+            </div>
+          )}
+          <div className="row">
+            <button type="submit" className="button" disabled={busy}>
+              Add manager
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+/** Every current use of the group, one section per source that has any; read-only. */
+function WhereUsedTab({ group }: { group: GroupData }) {
+  const sections = (Object.keys(USE_SOURCES) as GroupUse["source"][])
+    .map((source) => ({
+      source,
+      uses: group.whereUsed.filter((use) => use.source === source),
+    }))
+    .filter((section) => section.uses.length);
+  return (
+    <section className="panel stack">
+      <h3>Where used</h3>
+      <p className="muted">
+        Everything that refers to {group.name}. Check this before archiving it.
+      </p>
+      {!sections.length ? (
+        <p className="muted">{WHERE_USED_EMPTY}</p>
+      ) : (
+        sections.map(({ source, uses }) => (
+          <div key={source} className="stack">
+            <h4>{USE_SOURCES[source]}</h4>
+            <div className="records-panel">
+              <div className="table-wrap">
+                <table className="data-table compact">
+                  <caption className="sr-only">
+                    {USE_SOURCES[source]} that use this group
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th>Group</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uses.map((use) => (
+                      <tr key={use.group.id}>
+                        <td data-label="Group">
+                          <Link
+                            href={`/app/admin/groups/${encodeURIComponent(use.group.id)}`}
+                          >
+                            {use.group.name}
+                          </Link>
+                        </td>
+                        <td data-label="Status">
+                          {groupStatuses[use.group.status]}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
+
+/**
+ * Archiving a group in use: one labelled choice per parent group, removal or a replacement, none
+ * chosen at first; Archive group stays disabled until every use has one, and a refusal shows here
+ * with the choices kept.
+ */
+export function ArchiveDialogView({
+  group,
+  list,
+  listError,
+  draft,
+  busy,
+  onChoose,
+  onCancel,
+  onConfirm,
+}: {
+  group: Pick<GroupData, "id" | "name" | "whereUsed">;
+  /** Null while the groups load. */
+  list: GroupList | null;
+  listError: string;
+  draft: ArchiveDraft;
+  busy: boolean;
+  onChoose: (parentId: string, value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const description = useId();
+  const ready = archiveReplacements(group.whereUsed, draft.choices) !== null;
+  return (
+    <Dialog
+      title={`Archive ${group.name}?`}
+      onClose={onCancel}
+      busy={busy}
+      describedBy={description}
+    >
+      <div className="dialog-body stack">
+        <p id={description}>
+          {group.name} is in the groups below. Choose what replaces it in each
+          one, or remove it from that group. {ARCHIVE_MESSAGE}
+        </p>
+        {draft.error && (
+          <p className="notice error" role="alert">
+            {draft.error}
+          </p>
+        )}
+        {listError && (
+          <p className="notice error" role="alert">
+            Could not load the groups. {listError}
+          </p>
+        )}
+        {group.whereUsed.map((use) => (
+          <label key={use.group.id} className="field">
+            <span>In {use.group.name}</span>
+            <select
+              required
+              value={draft.choices[use.group.id] ?? ""}
+              disabled={busy}
+              onChange={(e) => onChoose(use.group.id, e.target.value)}
+            >
+              <option value="">
+                {list ? "Choose what replaces it" : "Loading groups…"}
+              </option>
+              <option value={REMOVE_FROM_PARENT}>
+                Remove from {use.group.name}
+              </option>
+              {(list
+                ? replacementChoices(group.id, use.group.id, list)
+                : []
+              ).map((row) => (
+                <option key={row.id} value={row.id}>
+                  Replace with {row.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+      <footer className="dialog-footer">
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button danger"
+          disabled={busy || !ready}
+          onClick={onConfirm}
+        >
+          Archive group
+        </button>
+      </footer>
+    </Dialog>
   );
 }
 

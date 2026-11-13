@@ -14,11 +14,17 @@ vi.mock("@/db", async (original) => ({
 import type { AppDb, TeamTx } from "@/db";
 import { withDeadlinesAndSnapshot } from "@/db/deadlines";
 import {
+  addGroupManager,
   addGroupMember,
+  addManagedMember,
   archiveGroup,
   computedGroupMembers,
   createGroup,
+  getGroup,
+  listManagedGroups,
+  removeGroupManager,
   removeGroupMember,
+  removeManagedMember,
   renameGroup,
   setGroupApproval,
   type Group,
@@ -931,16 +937,6 @@ describe("company groups under the split runtime roles", () => {
           () =>
             sqlAs(
               owner,
-              `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${g.id}', '${COMPANY}', '${newUser.userId}')`,
-            ),
-          "group.manager_added",
-          g.id,
-          { targetUserId: newUser.userId },
-        ],
-        [
-          () =>
-            sqlAs(
-              owner,
               `DELETE FROM app.group_managers WHERE group_id = '${g.id}' AND user_id = '${newUser.userId}'`,
             ),
           "group.manager_removed",
@@ -954,6 +950,19 @@ describe("company groups under the split runtime roles", () => {
           {},
         ],
       ];
+      // No context names a manager of a group that grants something, the company owner included
+      // (0056); one named by the owner's own SQL, as before G was flagged, may still be removed.
+      await refused(
+        () =>
+          sqlAs(
+            owner,
+            `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${g.id}', '${COMPANY}', '${newUser.userId}')`,
+          ),
+        "42501",
+      );
+      await look(
+        `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${g.id}', '${COMPANY}', '${newUser.userId}')`,
+      );
       for (const [call, action, groupId, extraKeys] of steps) {
         expectAudit(await audited(call), action, owner, groupId, extraKeys);
         await expectEffective();
@@ -966,8 +975,15 @@ describe("company groups under the split runtime roles", () => {
         g.id,
         { targetUserId: newUser.userId },
       );
+      // H stays in G, so G keeps granting through it below; the service would first ask what
+      // replaces H in G (ADM-13), and the database archives a group in use as it is.
       expectAudit(
-        await audited(() => archiveGroup(peopleAdmin, h.id)),
+        await audited(() =>
+          sqlAs(
+            peopleAdmin,
+            `UPDATE app.groups SET archived_at = now() WHERE id = '${h.id}'`,
+          ),
+        ),
         "group.archived",
         peopleAdmin,
         h.id,
@@ -1196,6 +1212,637 @@ describe("company groups under the split runtime roles", () => {
     });
   });
 
+  // ADM-13 (job 101, 0056): Where used, archive with replacement and archived groups.
+  describe("where used and archive with replacement", () => {
+    let g: Group, p1: Group, p2: Group, r: Group, k: Group, x: Group;
+    let d: Group, d1: Group, gone: Group, oldParent: Group, empty: Group;
+    let xGroup: Group;
+    const replace = (parent: Group, replacement: string | null) => ({
+      parentGroupId: parent.id,
+      replacementGroupId: replacement,
+    });
+    const children = async (parent: Group) =>
+      (await directMembers(parent.id)).flatMap((row) =>
+        row.child_group_id ? [row.child_group_id] : [],
+      );
+    beforeAll(async () => {
+      // X ⊃ P2 ⊃ G and P1 ⊃ G, K; D ⊃ D1; an archived parent of G; G holds one person, R another.
+      g = await createGroup(owner, { name: "Fictional Used Group" });
+      p1 = await createGroup(owner, { name: "Fictional First Parent" });
+      p2 = await createGroup(owner, { name: "Fictional Second Parent" });
+      r = await createGroup(owner, { name: "Fictional Replacement" });
+      k = await createGroup(owner, { name: "Fictional Sibling" });
+      x = await createGroup(owner, { name: "Fictional Top Parent" });
+      d = await createGroup(owner, { name: "Fictional Deep Head" });
+      d1 = await createGroup(owner, { name: "Fictional Deep Tail" });
+      gone = await createGroup(owner, { name: "Fictional Gone Group" });
+      oldParent = await createGroup(owner, { name: "Fictional Old Parent" });
+      empty = await createGroup(owner, { name: "Fictional Unused Group" });
+      xGroup = await createGroup(ownerX, { name: "Fictional Other Spare" });
+      for (const [parent, child] of [
+        [p1, g],
+        [p2, g],
+        [p1, k],
+        [x, p2],
+        [d, d1],
+        [oldParent, g],
+      ] as const)
+        await addGroupMember(owner, parent.id, { childGroupId: child.id });
+      await addGroupMember(owner, g.id, { userId: loadUsers[1].userId });
+      await addGroupMember(owner, r.id, { userId: loadUsers[2].userId });
+      await archiveGroup(owner, gone.id);
+      await archiveGroup(owner, oldParent.id);
+    });
+
+    it("lists only the active direct parents in Where used, by name, and nothing for an unused group", async () => {
+      const used = await getGroup(owner, g.id);
+      expect(used.whereUsed).toEqual([
+        {
+          source: "parent-group",
+          group: { id: p1.id, name: p1.name, status: "active" },
+        },
+        {
+          source: "parent-group",
+          group: { id: p2.id, name: p2.name, status: "active" },
+        },
+      ]);
+      // X is above P2, not a direct parent; the archived parent is no current use.
+      expect((await getGroup(peopleAdmin, p2.id)).whereUsed).toEqual([
+        {
+          source: "parent-group",
+          group: { id: x.id, name: x.name, status: "active" },
+        },
+      ]);
+      expect((await getGroup(owner, empty.id)).whereUsed).toEqual([]);
+    });
+
+    it("refuses an archive in use without replacements and with stale or extra parents, writing nothing", async () => {
+      await refusedApi(() => archiveGroup(owner, g.id), 409, "group_in_use");
+      for (const stale of [
+        [replace(p1, null)],
+        [replace(p1, null), replace(p1, r.id)],
+        [replace(p1, null), replace(p2, null), replace(x, null)],
+        [replace(p1, null), replace(x, null)],
+      ])
+        await refusedApi(
+          () => archiveGroup(owner, g.id, stale),
+          409,
+          "group_uses_changed",
+        );
+      await refusedApi(
+        () => archiveGroup(owner, empty.id, [replace(p1, null)]),
+        409,
+        "group_uses_changed",
+      );
+    });
+
+    it("rolls everything back when a replacement makes a cycle, nests too deep or cannot be used", async () => {
+      const activity = (await audits()).length;
+      for (const [replacement, status, code] of [
+        // X contains P2, so P2 would contain its own parent.
+        [x.id, 409, "group_cycle"],
+        // X ⊃ P2 ⊃ D ⊃ D1 is four levels.
+        [d.id, 409, "group_depth"],
+        [gone.id, 409, "group_archived"],
+        [g.id, 409, "group_member_exists"],
+        [xGroup.id, 404, "not_found"],
+        ["00000000-0000-4000-a000-0000000000ff", 404, "not_found"],
+      ] as const) {
+        // P1 is removed first, so the refusal must undo it too.
+        await refusedApi(
+          () =>
+            archiveGroup(owner, g.id, [
+              replace(p1, null),
+              replace(p2, replacement),
+            ]),
+          status,
+          code,
+        );
+      }
+      // K is already a direct child of P1.
+      await refusedApi(
+        () => archiveGroup(owner, g.id, [replace(p2, null), replace(p1, k.id)]),
+        409,
+        "group_member_exists",
+      );
+      expect((await groupRow(g.id)).archived_at).toBeNull();
+      expect(await children(p1)).toEqual(expect.arrayContaining([g.id, k.id]));
+      expect(await children(p2)).toEqual([g.id]);
+      expect(await audits()).toHaveLength(activity);
+    });
+
+    it("replaces and removes in one transaction with the archive, one ids-only audit row each, and rebuilds effective membership", async () => {
+      const rows = await audited(() =>
+        archiveGroup(owner, g.id, [replace(p2, null), replace(p1, r.id)]),
+      );
+      expect((await groupRow(g.id)).archived_at).not.toBeNull();
+      expect((await children(p1)).sort()).toEqual([k.id, r.id].sort());
+      expect(await children(p2)).toEqual([]);
+      // The archived parent keeps its link: it is no current use.
+      expect(await children(oldParent)).toEqual([g.id]);
+      await expectEffective();
+      const effective = (group: Group) =>
+        look<{ user_id: string }>(
+          "SELECT user_id FROM app.group_effective_members WHERE group_id = $1 ORDER BY user_id",
+          [group.id],
+        );
+      expect(await effective(p1)).toEqual([{ user_id: loadUsers[2].userId }]);
+      expect(await effective(p2)).toEqual([]);
+      expect(await effective(x)).toEqual([]);
+      expect(rows.map((row) => row.action).sort()).toEqual([
+        "group.archived",
+        "group.child_removed",
+        "group.child_replaced",
+      ]);
+      const one = (action: string) =>
+        rows.filter((row) => row.action === action);
+      expectAudit(
+        one("group.child_replaced"),
+        "group.child_replaced",
+        owner,
+        p1.id,
+        {
+          childGroupId: r.id,
+          replacedGroupId: g.id,
+        },
+      );
+      expect(one("group.child_replaced")[0].summary).toBe(
+        "Replaced a group in a group",
+      );
+      expectAudit(
+        one("group.child_removed"),
+        "group.child_removed",
+        owner,
+        p2.id,
+        {
+          childGroupId: g.id,
+        },
+      );
+      expectAudit(one("group.archived"), "group.archived", owner, g.id);
+      // The parent's, the replaced group's and the replacement's Audit tab name all three groups.
+      for (const group of [p1, g, r])
+        expect(
+          (await getGroup(owner, group.id)).audit.find(
+            (row) => row.action === "group.child_replaced",
+          )?.target,
+          group.name,
+        ).toEqual({
+          kind: "replacement",
+          parent: p1.name,
+          replaced: g.name,
+          replacement: r.name,
+        });
+      expect((await getGroup(owner, g.id)).whereUsed).toEqual([]);
+    });
+
+    it("takes nothing new into an archived group, by the service (409 group_archived) and the database (RQ023)", async () => {
+      const person = { userId: loadUsers[3].userId };
+      for (const call of [
+        () => addGroupMember(owner, g.id, person),
+        () => addGroupMember(owner, g.id, { childGroupId: empty.id }),
+        () => addGroupMember(owner, empty.id, { childGroupId: g.id }),
+        () => addGroupManager(owner, g.id, person),
+        () => archiveGroup(owner, g.id),
+      ])
+        await refusedApi(call, 409, "group_archived");
+      for (const statement of [
+        insertMember(g.id, person),
+        insertMember(g.id, { childGroupId: empty.id }),
+        insertMember(empty.id, { childGroupId: g.id }),
+        `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${g.id}', '${COMPANY}', '${person.userId}')`,
+        `UPDATE app.group_members SET child_group_id = '${g.id}' WHERE group_id = '${p1.id}' AND child_group_id = '${r.id}'`,
+      ])
+        for (const p of [owner, peopleAdmin])
+          await refused(() => sqlAs(p, statement), "RQ023");
+      // An archived parent takes no new child through the replacement update either: the archived
+      // Old Parent still holds G, and replacing G there with a current group is refused, with the
+      // same effective rows.
+      const before = await expectEffective();
+      for (const p of [owner, peopleAdmin])
+        await refused(
+          () =>
+            sqlAs(
+              p,
+              `UPDATE app.group_members SET child_group_id = '${empty.id}' WHERE group_id = '${oldParent.id}' AND child_group_id = '${g.id}'`,
+            ),
+          "RQ023",
+        );
+      expect(await expectEffective()).toBe(before);
+      expect(await children(oldParent)).toEqual([g.id]);
+    });
+
+    it("refuses every other member or manager update, for a company owner too, with 42501", async () => {
+      await sqlAs(
+        owner,
+        `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${p1.id}', '${COMPANY}', '${loadUsers[4].userId}')`,
+      );
+      for (const statement of [
+        `UPDATE app.group_members SET user_id = '${loadUsers[4].userId}' WHERE group_id = '${r.id}' AND user_id = '${loadUsers[2].userId}'`,
+        `UPDATE app.group_members SET added_at = now() WHERE group_id = '${r.id}'`,
+        `UPDATE app.group_members SET group_id = '${empty.id}' WHERE group_id = '${p1.id}' AND child_group_id = '${k.id}'`,
+        `UPDATE app.group_members SET child_group_id = child_group_id WHERE group_id = '${p1.id}' AND child_group_id = '${k.id}'`,
+        `UPDATE app.group_members SET child_group_id = '${empty.id}', added_by = NULL WHERE group_id = '${p1.id}' AND child_group_id = '${k.id}'`,
+        `UPDATE app.group_managers SET user_id = '${loadUsers[5].userId}' WHERE group_id = '${p1.id}'`,
+      ])
+        await refused(() => sqlAs(owner, statement), "42501");
+      // The one update there is: a child group replaced in place, with its audit row.
+      expectAudit(
+        await audited(() =>
+          sqlAs(
+            peopleAdmin,
+            `UPDATE app.group_members SET child_group_id = '${empty.id}' WHERE group_id = '${p1.id}' AND child_group_id = '${k.id}'`,
+          ),
+        ),
+        "group.child_replaced",
+        peopleAdmin,
+        p1.id,
+        { childGroupId: empty.id, replacedGroupId: k.id },
+      );
+      await expectEffective();
+    });
+  });
+
+  // ADM-13 (job 101, 0056): delegated managers, named by company authority, acting without it.
+  describe("delegated managers", () => {
+    let m: Group, mc: Group, other: Group, spare: Group, parent: Group;
+    let xGroup: Group;
+    let managerToken: Principal;
+    const manager = () => recruiter;
+    const email = (p: Principal) => `${p.userId}@example.test`;
+    const stale = (p: Principal): Principal => ({
+      ...p,
+      sessionCreatedAt: new Date(Date.now() - 16 * 60_000),
+    });
+    const managersOf = (group: Group) =>
+      look<{ user_id: string }>(
+        "SELECT user_id FROM app.group_managers WHERE group_id = $1 ORDER BY user_id",
+        [group.id],
+      );
+    beforeAll(async () => {
+      // M holds a person and a child group; the recruiter and team B's admin manage M.
+      m = await createGroup(owner, {
+        name: "Fictional Managed Crew",
+        description: "Fictional crew a recruiter looks after",
+      });
+      mc = await createGroup(owner, { name: "Fictional Managed Child" });
+      other = await createGroup(owner, { name: "Fictional Unmanaged Crew" });
+      spare = await createGroup(owner, { name: "Fictional Manager Spare" });
+      parent = await createGroup(owner, { name: "Fictional Later Approvers" });
+      await addGroupMember(owner, m.id, { userId: loadUsers[3].userId });
+      await addGroupMember(owner, m.id, { childGroupId: mc.id });
+      await addGroupMember(owner, mc.id, { userId: loadUsers[4].userId });
+      await addGroupMember(owner, other.id, { userId: loadUsers[5].userId });
+      await addGroupManager(owner, m.id, { userId: manager().userId });
+      await addGroupManager(peopleAdmin, m.id, { userId: teamAdminB.userId });
+      await addGroupManager(owner, other.id, { userId: teamAdminB.userId });
+      xGroup = await createGroup(ownerX, { name: "Fictional Other Managed" });
+      await addGroupMember(ownerX, xGroup.id, { userId: ownerX.userId });
+      managerToken = await seedApiToken(await harness.asOwner(), manager());
+    });
+
+    it("lets a company owner and a company admin with people name and remove managers, one ids-only audit row each", async () => {
+      for (const p of [owner, peopleAdmin]) {
+        expectAudit(
+          await audited(() =>
+            addGroupManager(p, spare.id, { userId: teamAdminA.userId }),
+          ),
+          "group.manager_added",
+          p,
+          spare.id,
+          { targetUserId: teamAdminA.userId },
+        );
+        await refusedApi(
+          () => addGroupManager(p, spare.id, { userId: teamAdminA.userId }),
+          409,
+          "group_manager_exists",
+        );
+        expectAudit(
+          await audited(() =>
+            removeGroupManager(p, spare.id, { userId: teamAdminA.userId }),
+          ),
+          "group.manager_removed",
+          p,
+          spare.id,
+          { targetUserId: teamAdminA.userId },
+        );
+        await refusedApi(
+          () => removeGroupManager(p, spare.id, { userId: teamAdminA.userId }),
+          404,
+          "not_found",
+        );
+      }
+      await refusedApi(
+        () => addGroupManager(owner, spare.id, { userId: ownerX.userId }),
+        404,
+        "user_not_found",
+      );
+      await refusedApi(
+        () => addGroupManager(owner, xGroup.id, { userId: recruiter.userId }),
+        404,
+        "not_found",
+      );
+      expect(
+        (await getGroup(owner, m.id)).managers.map((row) => row.userId).sort(),
+      ).toEqual([manager().userId, teamAdminB.userId].sort());
+      expect((await getGroup(owner, m.id)).managers[0]).toEqual({
+        userId: expect.any(String),
+        name: "Fictional Test User",
+        email: expect.stringMatching(/@example\.test$/),
+      });
+    });
+
+    it("lists a manager's current groups with their direct people only", async () => {
+      expect(await listManagedGroups(manager())).toEqual([
+        {
+          id: m.id,
+          name: m.name,
+          description: "Fictional crew a recruiter looks after",
+          grants: false,
+          people: [
+            {
+              userId: loadUsers[3].userId,
+              name: "Fictional Test User",
+              email: email(loadUsers[3]),
+            },
+          ],
+        },
+      ]);
+      // Team B's admin manages M and the crew the recruiter does not, by name.
+      expect(
+        (await listManagedGroups(teamAdminB)).map((row) => row.id),
+      ).toEqual([m.id, other.id]);
+      // Someone who manages nothing, a company owner included, and another workspace see none.
+      for (const p of [teamOwnerB, peopleAdmin, ownerX, managerToken])
+        expect(await listManagedGroups(p), p.userId).toEqual([]);
+    });
+
+    it("lets a manager without company authority add and remove a person through the service and by direct SQL", async () => {
+      const added = loadUsers[6];
+      // By email, trimmed and ignoring case; the row is the same as an admin's.
+      expectAudit(
+        await audited(() =>
+          addManagedMember(manager(), m.id, {
+            email: `  ${email(added).toUpperCase()} `,
+          }),
+        ),
+        "group.member_added",
+        manager(),
+        m.id,
+        { targetUserId: added.userId },
+      );
+      await expectEffective();
+      await refusedApi(
+        () => addManagedMember(manager(), m.id, { email: email(added) }),
+        409,
+        "group_member_exists",
+      );
+      expectAudit(
+        await audited(() =>
+          removeManagedMember(manager(), m.id, { userId: added.userId }),
+        ),
+        "group.member_removed",
+        manager(),
+        m.id,
+        { targetUserId: added.userId },
+      );
+      await refusedApi(
+        () => removeManagedMember(manager(), m.id, { userId: added.userId }),
+        404,
+        "not_found",
+      );
+      expectAudit(
+        await audited(() =>
+          sqlAs(manager(), insertMember(m.id, { userId: added.userId })),
+        ),
+        "group.member_added",
+        manager(),
+        m.id,
+        { targetUserId: added.userId },
+      );
+      expectAudit(
+        await audited(() =>
+          sqlAs(manager(), deleteMember(m.id, { userId: added.userId })),
+        ),
+        "group.member_removed",
+        manager(),
+        m.id,
+        { targetUserId: added.userId },
+      );
+      await expectEffective();
+      // An unknown email and a person outside the workspace get the same answer.
+      const answers = [];
+      for (const value of ["fictional-nobody@example.test", email(ownerX)]) {
+        const before = await state();
+        answers.push(
+          await addManagedMember(manager(), m.id, { email: value }).catch(
+            (e) => ({ status: e.status, code: e.code, message: e.message }),
+          ),
+        );
+        expect(await state()).toEqual(before);
+      }
+      expect(answers).toEqual([
+        {
+          status: 404,
+          code: "user_not_found",
+          message: "This person is not in any team of your company.",
+        },
+        {
+          status: 404,
+          code: "user_not_found",
+          message: "This person is not in any team of your company.",
+        },
+      ]);
+      // A group they do not manage, or of another workspace, is not found.
+      for (const call of [
+        () => addManagedMember(manager(), other.id, { email: email(added) }),
+        () =>
+          removeManagedMember(manager(), other.id, {
+            userId: loadUsers[5].userId,
+          }),
+        () => addManagedMember(manager(), xGroup.id, { email: email(added) }),
+        () => addManagedMember(teamOwnerB, m.id, { email: email(added) }),
+      ])
+        await refusedApi(call, 404, "not_found");
+    });
+
+    it("refuses a manager every other write by direct SQL with 42501", async () => {
+      for (const statement of [
+        insertMember(m.id, { childGroupId: spare.id }),
+        `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${m.id}', '${COMPANY}', '${loadUsers[6].userId}')`,
+        `UPDATE app.groups SET name = 'Fictional Taken Over' WHERE id = '${m.id}'`,
+        `UPDATE app.groups SET archived_at = now() WHERE id = '${m.id}'`,
+        `UPDATE app.group_members SET added_at = now() WHERE group_id = '${m.id}'`,
+        `INSERT INTO app.groups(workspace_id, name) VALUES ('${COMPANY}', 'Fictional Manager Made')`,
+        insertMember(other.id, { userId: loadUsers[6].userId }),
+        insertMember(spare.id, { userId: loadUsers[6].userId }),
+      ])
+        await refused(() => sqlAs(manager(), statement), "42501");
+      // Rows a manager cannot see are never matched: no error, nothing changed.
+      for (const statement of [
+        deleteMember(m.id, { childGroupId: mc.id }),
+        deleteMember(other.id, { userId: loadUsers[5].userId }),
+        `DELETE FROM app.group_managers WHERE group_id = '${m.id}'`,
+      ]) {
+        const before = await state();
+        expect(await sqlAs(manager(), statement)).toEqual([]);
+        expect(await state()).toEqual(before);
+      }
+    });
+
+    it("lets a manager read only their groups, their own manager rows and those groups' user members", async () => {
+      expect(await sqlAs(manager(), "SELECT id FROM app.groups")).toEqual([
+        { id: m.id },
+      ]);
+      expect(
+        await sqlAs(
+          manager(),
+          "SELECT group_id, user_id, child_group_id FROM app.group_members ORDER BY user_id",
+        ),
+      ).toEqual([
+        {
+          group_id: m.id,
+          user_id: loadUsers[3].userId,
+          child_group_id: null,
+        },
+      ]);
+      expect(
+        await sqlAs(
+          manager(),
+          "SELECT group_id, user_id FROM app.group_managers",
+        ),
+      ).toEqual([{ group_id: m.id, user_id: manager().userId }]);
+      expect(
+        await sqlAs(manager(), "SELECT * FROM app.group_effective_members"),
+      ).toEqual([]);
+      for (const table of TABLES)
+        expect(
+          await sqlAs(
+            manager(),
+            `SELECT * FROM app.${table} WHERE workspace_id = '${OTHER}'`,
+          ),
+          table,
+        ).toEqual([]);
+      // A token of the manager, and a team owner who manages nothing, see and change nothing.
+      for (const p of [managerToken, teamOwnerB]) {
+        for (const table of TABLES)
+          expect(
+            await sqlAs(p, `SELECT * FROM app.${table}`),
+            `${p.authType} ${table}`,
+          ).toEqual([]);
+        await refused(
+          () => sqlAs(p, insertMember(m.id, { userId: loadUsers[6].userId })),
+          "42501",
+        );
+      }
+      await refusedApi(
+        () =>
+          addManagedMember(managerToken, m.id, { email: email(loadUsers[6]) }),
+        404,
+        "not_found",
+      );
+    });
+
+    it("refuses a manager once the group or a group it is in grants something, by the service and by direct SQL", async () => {
+      const person = loadUsers[3].userId;
+      const sentence =
+        "Only a company owner can change this group now, because it or a group it is in grants access.";
+      const expectRefused = async () => {
+        for (const call of [
+          () =>
+            addManagedMember(manager(), m.id, { email: email(loadUsers[6]) }),
+          () => removeManagedMember(manager(), m.id, { userId: person }),
+        ]) {
+          const before = await state();
+          await expect(call()).rejects.toMatchObject({
+            status: 403,
+            code: "group_owner_required",
+            message: sentence,
+          });
+          expect(await state()).toEqual(before);
+        }
+        for (const statement of [
+          insertMember(m.id, { userId: loadUsers[6].userId }),
+          deleteMember(m.id, { userId: person }),
+        ])
+          await refused(() => sqlAs(manager(), statement), "42501");
+        expect(await listManagedGroups(manager())).toEqual([
+          expect.objectContaining({ id: m.id, grants: true }),
+        ]);
+      };
+      // Flagged itself after the manager was named.
+      await setGroupApproval(owner, m.id, { approval: true });
+      await expectRefused();
+      await setGroupApproval(owner, m.id, { approval: false });
+      // Nested in a group the owner then flags.
+      await addGroupMember(owner, parent.id, { childGroupId: m.id });
+      await setGroupApproval(owner, parent.id, { approval: true });
+      await expectRefused();
+      // Their managers stay named, and only a company owner with a recent sign-in removes one.
+      await refusedApi(
+        () =>
+          removeGroupManager(peopleAdmin, m.id, { userId: teamAdminB.userId }),
+        403,
+        "group_owner_required",
+      );
+      await refusedApi(
+        () =>
+          removeGroupManager(stale(owner), m.id, {
+            userId: teamAdminB.userId,
+          }),
+        403,
+        "SESSION_NOT_FRESH",
+      );
+      expectAudit(
+        await audited(() =>
+          removeGroupManager(owner, m.id, { userId: teamAdminB.userId }),
+        ),
+        "group.manager_removed",
+        owner,
+        m.id,
+        { targetUserId: teamAdminB.userId },
+      );
+      await removeGroupMember(owner, parent.id, { childGroupId: m.id });
+      // Granting nothing again, the manager's change goes through.
+      expectAudit(
+        await audited(() =>
+          removeManagedMember(manager(), m.id, { userId: person }),
+        ),
+        "group.member_removed",
+        manager(),
+        m.id,
+        { targetUserId: person },
+      );
+    });
+
+    it("names no manager on a group that grants something, a company owner included", async () => {
+      for (const p of [owner, stale(owner), peopleAdmin])
+        await refusedApi(
+          () => addGroupManager(p, parent.id, { userId: teamAdminA.userId }),
+          409,
+          "group_grants_no_managers",
+        );
+      for (const p of [owner, peopleAdmin])
+        await refused(
+          () =>
+            sqlAs(
+              p,
+              `INSERT INTO app.group_managers(group_id, workspace_id, user_id) VALUES ('${parent.id}', '${COMPANY}', '${teamAdminA.userId}')`,
+            ),
+          "42501",
+        );
+      expect(await managersOf(parent)).toEqual([]);
+    });
+
+    it("gives no manager rights to a token or to anyone not named", async () => {
+      for (const p of [ownerToken, teamOwnerB, teamAdminA, orgAdmin])
+        for (const call of [
+          () => addManagedMember(p, m.id, { email: email(loadUsers[6]) }),
+          () => removeManagedMember(p, m.id, { userId: loadUsers[3].userId }),
+        ])
+          await refusedApi(call, 404, "not_found");
+    });
+  });
+
   it("keeps effective membership right after every change on 200 groups", async () => {
     const random = seeded(92);
     const pick = <T>(items: T[]) => items[Math.floor(random() * items.length)];
@@ -1230,19 +1877,21 @@ describe("company groups under the split runtime roles", () => {
         ? 1 + Math.max(...next.map((id) => chain(all, id, up)))
         : 0;
     };
+    /** An archive that removes the group from no parent keeps every effective row. */
     async function change(
       kind: string,
       service: () => Promise<unknown>,
       statement: string,
       viaService: boolean,
+      keepsEffective = kind === "archive",
     ) {
-      const before = kind === "archive" ? await expectEffective() : 0;
+      const before = keepsEffective ? await expectEffective() : 0;
       const started = performance.now();
       await (viaService ? service() : sqlAs(owner, statement));
       slowest = Math.max(slowest, performance.now() - started);
       counts[kind] = (counts[kind] ?? 0) + 1;
       const after = await expectEffective();
-      if (kind === "archive") expect(after).toBe(before);
+      if (keepsEffective) expect(after).toBe(before);
     }
     // The person anonymised half way is first a member of three groups, one of them nested.
     await addGroupMember(owner, ids[0], { childGroupId: ids[1] });
@@ -1277,8 +1926,15 @@ describe("company groups under the split runtime roles", () => {
       const roll = random();
       const users = all.filter((l) => l.user_id);
       const children = all.filter((l) => l.child_group_id);
+      // An archived group takes no new member or child, and is nobody's new child (0056).
+      const current = (
+        await look<{ id: string }>(
+          "SELECT id FROM app.groups WHERE id = ANY($1) AND archived_at IS NULL",
+          [ids],
+        )
+      ).map((row) => row.id);
       if (roll < 0.35 || (roll < 0.55 && !users.length)) {
-        const group = pick(ids);
+        const group = pick(current);
         const user = pick(people());
         if (users.some((l) => l.group_id === group && l.user_id === user))
           continue;
@@ -1300,8 +1956,8 @@ describe("company groups under the split runtime roles", () => {
       } else if (roll < 0.8 || (roll < 0.92 && !children.length)) {
         // A child link within depth 3 that makes no cycle.
         for (let attempt = 0; attempt < 30; attempt++) {
-          const parent = pick(ids);
-          const child = pick(ids);
+          const parent = pick(current);
+          const child = pick(current);
           const above = new Set<string>([parent]);
           for (let grew = true; grew;) {
             grew = false;
@@ -1339,18 +1995,22 @@ describe("company groups under the split runtime roles", () => {
           viaService,
         );
       } else {
-        const current = (
-          await look<{ id: string }>(
-            "SELECT id FROM app.groups WHERE id = ANY($1) AND archived_at IS NULL",
-            [ids],
-          )
-        ).map((row) => row.id);
+        // The service removes a group in use from each current parent first; direct SQL keeps it.
         const group = pick(current);
+        const uses = children
+          .filter(
+            (l) => l.child_group_id === group && current.includes(l.group_id),
+          )
+          .map((l) => ({
+            parentGroupId: l.group_id,
+            replacementGroupId: null,
+          }));
         await change(
           "archive",
-          () => archiveGroup(actor, group),
+          () => archiveGroup(actor, group, uses.length ? uses : undefined),
           `UPDATE app.groups SET archived_at = now() WHERE id = '${group}'`,
           viaService,
+          !viaService || !uses.length,
         );
       }
     }
@@ -1419,6 +2079,9 @@ describe("company groups under the split runtime roles", () => {
             "workspaceId",
             ...(/member_|manager_/.test(row.action) ? ["targetUserId"] : []),
             ...(/child_/.test(row.action) ? ["childGroupId"] : []),
+            ...(row.action === "group.child_replaced"
+              ? ["replacedGroupId"]
+              : []),
           ].sort(),
         );
         const text = JSON.stringify([row.summary, row.metadata]).toLowerCase();

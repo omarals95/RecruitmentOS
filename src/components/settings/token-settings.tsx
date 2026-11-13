@@ -26,7 +26,11 @@ import {
 } from "@/components/workspace/client";
 import { formatDate } from "@/components/workspace/helpers";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { SettingsNavigation, useAdminPortalLink } from "./settings-navigation";
+import {
+  SettingsNavigation,
+  useAdminPortalLink,
+  useManagedGroupsLink,
+} from "./settings-navigation";
 
 const date = (value: string | null) =>
   value ? formatDate(value, true) : "Never";
@@ -39,6 +43,7 @@ export function TokenSettings() {
 function TokenSettingsContent() {
   const { team, user, role } = useWorkspace();
   const adminPortal = useAdminPortalLink();
+  const managedGroups = useManagedGroupsLink();
   const [tokens, setTokens] = useState<TokenDto[]>([]);
   const [all, setAll] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -196,7 +201,11 @@ function TokenSettingsContent() {
         </div>
         <KeyRound aria-hidden="true" size={28} />
       </header>
-      <SettingsNavigation active="api-tokens" adminPortal={adminPortal} />
+      <SettingsNavigation
+        active="api-tokens"
+        adminPortal={adminPortal}
+        managedGroups={managedGroups}
+      />
       {error && (
         <div className="notice error" role="alert">
           {error}
