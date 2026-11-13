@@ -1,4 +1,4 @@
--- Field usage (ADM-29, job 100). Apply after 0054_domain_audit.sql, then rerun
+-- Field usage (ADM-29, job 100). Apply after migration 0054 (the Domain page), then rerun
 -- infrastructure/postgres-split-runtime-roles.sql, which grants the data role EXECUTE on
 -- tenant_context.field_usage; the identity role gets nothing. The field detail page shows company
 -- owners and company admins with fields how many records of the context's workspace hold a value of
