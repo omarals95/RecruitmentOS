@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type FormEvent, type Ref } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import type { AdminTeamRow } from "@/lib/admin-teams";
 import type { WorkspacePeople, WorkspacePersonRow } from "@/lib/admin-users";
 import type { GroupList, GroupListRow } from "@/lib/groups";
@@ -21,6 +28,7 @@ import {
   type TeamClient,
   type TeamRole,
 } from "./team-members";
+import { BulkInvite } from "./user-import";
 
 export type { WorkspacePersonRow };
 export type UserFilters = {
@@ -71,8 +79,11 @@ type Loaded = {
   denied: boolean;
 };
 
-/** Admin > Users: GET /api/v1/admin/users for the applied filters, 25 at a time. */
-export function UsersTab() {
+/**
+ * Admin > Users: GET /api/v1/admin/users for the applied filters, 25 at a time. owner: the caller is
+ * a company owner, for the bulk invite's company owner step.
+ */
+export function UsersTab({ owner = false }: { owner?: boolean }) {
   const { team } = useWorkspace();
   const teamId = team?.id ?? null;
   const teams = useApi<{ data: AdminTeamRow[] }>(
@@ -88,6 +99,9 @@ export function UsersTab() {
   const countRef = useRef<HTMLParagraphElement>(null);
   const [countFocus, setCountFocus] = useState(0);
   const current = loaded?.run === applied.run ? loaded : null;
+  // Invited rows appear in the list, with the filters already applied.
+  const reload = () =>
+    setApplied((value) => ({ filters: value.filters, run: value.run + 1 }));
 
   useEffect(() => {
     if (!teamId) return;
@@ -179,17 +193,12 @@ export function UsersTab() {
           setApplied((value) => ({ filters: draft, run: value.run + 1 }));
         }}
         onShowMore={() => void showMore()}
+        actions={<BulkInvite owner={owner} onApplied={reload} />}
       />
       <InviteToTeams
         teams={teams.data ? inviteTeams(teams.data.data) : null}
         teamsError={teams.error}
-        // The invited rows appear in the list, with the filters already applied.
-        onInvited={() =>
-          setApplied((value) => ({
-            filters: value.filters,
-            run: value.run + 1,
-          }))
-        }
+        onInvited={reload}
       />
     </>
   );
@@ -218,6 +227,7 @@ export function UsersPanel({
   onFilters = () => {},
   onApply = (event) => event.preventDefault(),
   onShowMore = () => {},
+  actions,
 }: {
   /** Null while the first page loads or after it failed. */
   rows: WorkspacePersonRow[] | null;
@@ -240,6 +250,8 @@ export function UsersPanel({
   onFilters?: (change: Partial<UserFilters>) => void;
   onApply?: (event: FormEvent) => void;
   onShowMore?: () => void;
+  /** Controls under the description, such as Bulk invite. */
+  actions?: ReactNode;
 }) {
   if (denied)
     return (
@@ -255,6 +267,7 @@ export function UsersPanel({
         Everyone in every team of the company and everyone with a pending
         invitation, with their teams and roles.
       </p>
+      {actions && <div className="row">{actions}</div>}
       <form
         className="stack"
         style={{ gap: 12 }}
