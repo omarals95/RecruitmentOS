@@ -13,6 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { Brand } from "@/components/workspace/shell";
+import { SpeedInsightsReporter } from "@/components/speed-insights";
 
 export default function Home() {
   return (
@@ -193,7 +194,7 @@ export default function Home() {
               {
                 icon: KanbanSquare,
                 title: "A workflow that fits your team",
-                text: "Customize recruitment task buckets and fields. Move applications through clear, manual stages and see what needs attention.",
+                text: "Customize team task buckets and fields. Move applications through clear, manual stages and see what needs attention.",
               },
               {
                 icon: ShieldCheck,
@@ -269,6 +270,7 @@ export default function Home() {
           <ArrowUpRight size={15} aria-hidden="true" />
         </Link>
       </footer>
+      <SpeedInsightsReporter />
     </div>
   );
 }

@@ -111,3 +111,153 @@ test("copies chunks as they arrive so a producer cannot change earlier bytes", a
   const result = await readBlobSnapshot(reused(), 6);
   assert.equal(result.bytes.toString(), "hello!");
 });
+
+test("aborts a stalled snapshot without returning any bytes", async () => {
+  const controller = new AbortController();
+  let closed = false;
+  let nextCalled = false;
+  const stalled: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => {
+          nextCalled = true;
+          return new Promise<IteratorResult<Uint8Array>>(() => {});
+        },
+        return: async () => {
+          closed = true;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  const result = readBlobSnapshot(stalled, document.length, {
+    controller,
+  }).then(
+    () => "returned bytes",
+    () => "aborted",
+  );
+  controller.abort();
+  const outcome = await Promise.race([
+    result,
+    new Promise<string>((resolve) => setTimeout(() => resolve("stalled"), 100)),
+  ]);
+  assert.equal(outcome, "aborted");
+  assert.equal(closed, true);
+  assert.equal(nextCalled, false);
+});
+
+test("deadline aborts the provider's shared controller and closes the iterator", async () => {
+  const controller = new AbortController();
+  let closed = false;
+  let providerAborted = false;
+  controller.signal.addEventListener("abort", () => {
+    providerAborted = true;
+  });
+  const stalled: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+        return: async () => {
+          closed = true;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    readBlobSnapshot(stalled, document.length, { controller, timeoutMs: 10 }),
+    /cancelled/,
+  );
+  assert.equal(providerAborted, true);
+  assert.equal(closed, true);
+});
+
+test("invalid stream data aborts the provider without waiting for stalled cleanup", async () => {
+  const controller = new AbortController();
+  const invalid: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => ({ done: false, value: new Uint8Array() }),
+        return: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+      };
+    },
+  };
+  const outcome = await Promise.race([
+    readBlobSnapshot(invalid, document.length, { controller }).then(
+      () => "returned bytes",
+      () => "rejected",
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("stalled"), 100)),
+  ]);
+  assert.equal(outcome, "rejected");
+  assert.equal(controller.signal.aborted, true);
+});
+
+test("invalid snapshot metadata aborts the provider request before reading", async () => {
+  const controller = new AbortController();
+  await assert.rejects(readBlobSnapshot(chunks(document), 0, { controller }));
+  assert.equal(controller.signal.aborted, true);
+});
+
+test("invalid slice metadata aborts the provider request before reading", async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    readVerifiedBlobSlice(chunks(document), document.length, "bad", 0, 1, {
+      controller,
+    }),
+  );
+  assert.equal(controller.signal.aborted, true);
+});
+
+const tenMiB = Buffer.alloc(MAX_CV_BYTES);
+for (let i = 0; i < tenMiB.length; i++) tenMiB[i] = (i * 31 + 7) % 251;
+tenMiB.write("%PDF-1.7\nfictional streamed CV\n");
+const tenMiBDigest = createHash("sha256").update(tenMiB).digest("hex");
+const sliceBounds: [number, number][] = [
+  [0, MAX_BLOB_DOWNLOAD_SLICE_BYTES],
+  [MAX_BLOB_DOWNLOAD_SLICE_BYTES, MAX_BLOB_DOWNLOAD_SLICE_BYTES],
+  [
+    2 * MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+    tenMiB.length - 2 * MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+  ],
+];
+/** Parts of an uneven size, so slice boundaries fall inside parts. */
+async function* streamed(bytes: Buffer) {
+  for (let i = 0; i < bytes.length; i += 100_003)
+    yield new Uint8Array(bytes.subarray(i, i + 100_003));
+}
+
+test("streams a 10 MiB object and returns exactly each requested slice", async () => {
+  for (const [offset, length] of sliceBounds) {
+    const slice = await readVerifiedBlobSlice(
+      streamed(tenMiB),
+      tenMiB.length,
+      tenMiBDigest,
+      offset,
+      length,
+    );
+    assert.equal(slice.length, length);
+    assert.ok(slice.equals(tenMiB.subarray(offset, offset + length)));
+  }
+});
+
+test("a one-byte change anywhere in a 10 MiB object rejects every slice", async () => {
+  for (const changed of [0, 5_000_000, tenMiB.length - 1]) {
+    const modified = Buffer.from(tenMiB);
+    modified[changed] ^= 1;
+    for (const [offset, length] of sliceBounds) {
+      let returned: Buffer | undefined;
+      await assert.rejects(
+        readVerifiedBlobSlice(
+          streamed(modified),
+          tenMiB.length,
+          tenMiBDigest,
+          offset,
+          length,
+        ).then((bytes) => (returned = bytes)),
+        /integrity/i,
+      );
+      assert.equal(returned, undefined);
+    }
+  }
+});

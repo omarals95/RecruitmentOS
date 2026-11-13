@@ -1,17 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, count, desc, eq, lte, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  DrizzleQueryError,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 import { z } from "zod";
 import {
   activity,
   idempotency,
+  recordFiles,
   records,
   storageUsage,
   uploads,
 } from "@/db/schema";
 import type { TeamTx } from "@/db";
 import { ApiError } from "@/lib/errors";
+import { accessContext, scopeFilter, type AccessContext } from "@/lib/authz";
 import { withTeam } from "@/lib/db-team";
+import { idempotencyActorKey } from "@/lib/records";
+import { requireScope } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
+import type { BlobGateway } from "@/lib/blob-storage";
+import { MAX_BLOB_DOWNLOAD_SLICE_BYTES } from "@/lib/blob-integrity";
 import {
   CvValidationError,
   cvExtension,
@@ -21,12 +40,20 @@ import {
 import {
   getStorage,
   inspectStoredCv,
+  resolveStorageBinding,
   storageConfigured,
   StorageConfigurationError,
+  storageSetupRequired,
+  type StorageBinding,
   type StorageGateway,
 } from "@/lib/storage";
 
-const reservationMs = 60 * 60 * 1000;
+const S3_RESERVATION_MS = 60 * 60 * 1000;
+/**
+ * Kept short because a still-valid Blob ticket can recreate a deleted object; cleanup waits for
+ * the last ticket of a pathname to expire. Tickets stay capped at 300 s inside it.
+ */
+export const BLOB_RESERVATION_MS = 15 * 60 * 1000;
 export const cvUploadSchema = z
   .object({
     originalName: z.string().trim().min(1).max(180),
@@ -55,7 +82,19 @@ export const cvUploadSchema = z
   .strict();
 export type CvUploadInput = z.infer<typeof cvUploadSchema>;
 type UploadRow = typeof uploads.$inferSelect;
+/** A row a candidate still owns; only an erased upload has no candidate and no file name. */
+type LiveUpload = UploadRow & { candidateId: string; originalName: string };
+function live(row: UploadRow | undefined): row is LiveUpload {
+  return !!row && row.erasureId === null;
+}
+type CvStorage = StorageGateway | BlobGateway;
 export type CvDto = ReturnType<typeof cvDto>;
+/** Clients choose the download protocol from the reference, never from a hostname. */
+function downloadProtocol(row: UploadRow) {
+  if (row.status !== "ready") return null;
+  if (row.storageProvider === "blob") return "blob-chunks-v1" as const;
+  return row.storageProvider === "s3" ? ("s3-url-v1" as const) : null;
+}
 function cvDto(row: UploadRow) {
   return {
     id: row.id,
@@ -69,6 +108,7 @@ function cvDto(row: UploadRow) {
     createdAt: row.createdAt.toISOString(),
     completedAt: row.completedAt?.toISOString() ?? null,
     expiresAt: row.expiresAt.toISOString(),
+    downloadProtocol: downloadProtocol(row),
   };
 }
 function validId(id: string) {
@@ -79,13 +119,11 @@ function validId(id: string) {
       "A valid candidate or CV identifier is required.",
     );
 }
-function actorKey(p: Principal) {
-  return `${p.authType}:${p.tokenId ?? p.userId}`;
-}
-function storageFailure(error: unknown): never {
+/** Setup refusals all show one plain message; their own text can name a provider or setting. */
+export function storageFailure(error: unknown): never {
   if (error instanceof ApiError) throw error;
   if (error instanceof StorageConfigurationError)
-    throw new ApiError(503, "STORAGE_SETUP_REQUIRED", error.message);
+    throw storageSetupRequired(error);
   if (error instanceof CvValidationError)
     throw new ApiError(400, "INVALID_CV", error.message);
   throw new ApiError(
@@ -94,29 +132,92 @@ function storageFailure(error: unknown): never {
     "Private storage could not complete this request. Retry shortly; your upload reference is retained.",
   );
 }
-async function storageClient(): Promise<StorageGateway> {
+export async function storageClient(): Promise<CvStorage> {
   try {
     return await getStorage();
   } catch (error) {
     return storageFailure(error);
   }
 }
+/** The injected gateway's binding, or the configured one; resolving it contacts no provider. */
+export function storageBinding(storage?: CvStorage): StorageBinding {
+  try {
+    return storage ? storage.binding : resolveStorageBinding();
+  } catch (error) {
+    return storageFailure(error);
+  }
+}
+/** Legacy unbound references never match, so they are refused until re-bound. */
+function assertBinding(row: UploadRow, binding: StorageBinding) {
+  if (
+    row.storageProvider !== binding.provider ||
+    row.storageEnvironment !== binding.environment ||
+    row.storageStore !== binding.store
+  )
+    throw new ApiError(
+      409,
+      "CV_STORAGE_BINDING_MISMATCH",
+      "This CV belongs to a different storage configuration. Ask the administrator to review it.",
+    );
+}
+/** After assertBinding the gateway must also speak the row's protocol; nothing falls back. */
+export function blobGateway(storage: CvStorage): BlobGateway {
+  if (!("readVerifiedSlice" in storage))
+    throw new StorageConfigurationError(
+      "The configured CV storage cannot serve Blob references.",
+      "blob_protocol_mismatch",
+    );
+  return storage;
+}
+function s3Gateway(storage: CvStorage): StorageGateway {
+  if ("readVerifiedSlice" in storage)
+    throw new StorageConfigurationError(
+      "The configured CV storage cannot serve S3 references.",
+      "aws_protocol_mismatch",
+    );
+  return storage;
+}
+const integrityFailure = () =>
+  new ApiError(
+    409,
+    "CV_INTEGRITY_FAILED",
+    "This CV no longer matches its validated copy. Ask the administrator to review it.",
+  );
+const protocolMismatch = () =>
+  new ApiError(
+    409,
+    "CV_DOWNLOAD_PROTOCOL_MISMATCH",
+    "This CV uses a different download method. Refresh the CV list and try again.",
+  );
+/** Maps ledger refusals by SQLSTATE; database message text never reaches the client. */
+export function ledgerFailure(error: unknown): never {
+  const cause = error instanceof DrizzleQueryError ? error.cause : error;
+  const code = (cause as { code?: unknown } | undefined)?.code;
+  if (code === "RQ001")
+    throw new ApiError(
+      409,
+      "STORAGE_QUOTA_EXCEEDED",
+      "The CV storage limit has been reached, including pending uploads and files waiting for cleanup. Ask a team owner or admin to review the team's storage settings.",
+    );
+  if (code === "RQ002")
+    throw new ApiError(
+      503,
+      "STORAGE_SETUP_REQUIRED",
+      "The configured CV storage does not match its recorded environment or budget.",
+    );
+  throw error;
+}
+/** A candidate of the team in the caller's record scope; any other is answered as missing. */
 async function assertCandidate(
   tx: TeamTx,
-  p: Principal,
+  ctx: AccessContext,
   id: string,
   allowArchived = false,
 ) {
   const [candidate] = await tx
     .select({ id: records.id, archivedAt: records.archivedAt })
     .from(records)
-    .where(
-      and(
-        eq(records.teamId, p.teamId),
-        eq(records.id, id),
-        eq(records.kind, "candidate"),
-      ),
-    )
+    .where(and(...scopeFilter(ctx, "candidate"), eq(records.id, id)))
     .limit(1);
   if (!candidate || (!allowArchived && candidate.archivedAt))
     throw new ApiError(
@@ -149,29 +250,66 @@ async function audit(
   });
 }
 
-/** Always lock usage before upload rows, so completion and expiry have a consistent lock order. */
-async function lockUsage(tx: TeamTx, teamId: string) {
-  await tx.insert(storageUsage).values({ teamId }).onConflictDoNothing();
-  const [usage] = await tx
-    .select()
-    .from(storageUsage)
-    .where(eq(storageUsage.teamId, teamId))
-    .for("update");
-  if (!usage)
-    throw new ApiError(
-      503,
-      "STORAGE_QUOTA_UNAVAILABLE",
-      "Storage quota information is unavailable.",
+/**
+ * Locks the store ledger row, then team rows, before any upload row, so reservation, completion
+ * and expiry share one lock order: store, then team, then ticket. The helper also releases the
+ * store's expired S3 reservations for every team before any new charge is checked.
+ */
+export async function lockAllocation(tx: TeamTx, binding: StorageBinding) {
+  try {
+    await tx.execute(
+      sql`select tenant_context.lock_storage_allocation(${binding.provider}, ${binding.environment}, ${binding.store})`,
     );
-  return usage;
+  } catch (error) {
+    return ledgerFailure(error);
+  }
 }
 
-/** Bounded cleanup releases database reservations; S3 version cleanup is a separate DB-aware operation. */
+/**
+ * Caps Blob provider reads across server instances (2 per team, 8 per store, fixed in the database
+ * helper). The lease commits before the read and fails fast over a cap instead of queueing. Release
+ * is best effort: a lease left behind by a crash or a failed release expires on its own after 30 s.
+ */
+export async function withBlobReadLease<T>(
+  p: Principal,
+  store: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  const lease = await withTeam(p, async (tx) => {
+    try {
+      const { rows } = await tx.execute<{ lease: string | null }>(
+        sql`select tenant_context.acquire_blob_read(${store}) as lease`,
+      );
+      return rows[0]?.lease ?? null;
+    } catch (error) {
+      return ledgerFailure(error);
+    }
+  });
+  if (!lease)
+    return storageFailure(
+      new Error("Too many private Blob reads are in progress."),
+    );
+  try {
+    return await read();
+  } finally {
+    await withTeam(p, (tx) =>
+      tx.execute(sql`select tenant_context.release_blob_read(${lease})`),
+    ).catch(() => {});
+  }
+}
+
+/**
+ * Bounded cleanup of expired tickets for the current binding and legacy unbound rows. The database
+ * settles each charge: S3 and legacy rows release it, Blob rows keep it as retained until cleanup
+ * confirms the object deleted. Returns how many reservations it expired.
+ */
 export async function expireCvReservations(
   tx: TeamTx,
   teamId: string,
+  binding: StorageBinding,
   now: Date,
-) {
+): Promise<number> {
+  await lockAllocation(tx, binding);
   const expired = await tx
     .select()
     .from(uploads)
@@ -180,13 +318,19 @@ export async function expireCvReservations(
         eq(uploads.teamId, teamId),
         eq(uploads.status, "pending"),
         lte(uploads.expiresAt, now),
+        or(
+          and(
+            eq(uploads.storageProvider, binding.provider),
+            eq(uploads.storageEnvironment, binding.environment),
+            eq(uploads.storageStore, binding.store),
+          ),
+          isNull(uploads.storageStore),
+        ),
       ),
     )
     .limit(100)
     .for("update");
-  if (!expired.length) return;
-  let bytes = 0;
-  for (const row of expired) {
+  for (const row of expired)
     await tx
       .update(uploads)
       .set({ status: "rejected" })
@@ -197,16 +341,7 @@ export async function expireCvReservations(
           eq(uploads.status, "pending"),
         ),
       );
-    bytes += row.sizeBytes;
-  }
-  await tx
-    .update(storageUsage)
-    .set({
-      reservedBytes: sql`${storageUsage.reservedBytes} - ${bytes}`,
-      reservedFiles: sql`${storageUsage.reservedFiles} - ${expired.length}`,
-      updatedAt: now,
-    })
-    .where(eq(storageUsage.teamId, teamId));
+  return expired.length;
 }
 
 const cvPaginationSchema = z
@@ -243,11 +378,34 @@ export function parseCvListQuery(query: URLSearchParams) {
   return parsed.data;
 }
 
+/** Exactly one decimal index without leading zeros, and nothing else. */
+export function parseCvChunkQuery(query: URLSearchParams): number {
+  const keys = [...query.keys()];
+  const value = query.get("index") ?? "";
+  if (
+    keys.length !== 1 ||
+    keys[0] !== "index" ||
+    !/^(?:0|[1-9]\d{0,8})$/.test(value)
+  )
+    throw new ApiError(
+      400,
+      "INVALID_CV_CHUNK",
+      "Request one chunk with a single whole decimal index parameter.",
+    );
+  return Number(value);
+}
+
+/** A CV is the candidate's personal data, so every CV read also needs candidates:read. */
+function requireCandidateRead(p: Principal) {
+  requireScope(p, "candidates:read");
+}
+
 export async function listCandidateCvsPage(
   p: Principal,
   candidateId: string,
   options: { page?: number; pageSize?: number } = {},
 ) {
+  requireCandidateRead(p);
   validId(candidateId);
   const parsed = cvPaginationSchema.safeParse(options);
   if (!parsed.success)
@@ -257,8 +415,8 @@ export async function listCandidateCvsPage(
       "Use a page from 1 to 1000000 and a page size from 1 to 100.",
     );
   const { page, pageSize } = parsed.data;
-  return withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId, true);
+  return withTeam(p, async (tx, access) => {
+    await assertCandidate(tx, accessContext(p, access), candidateId, true);
     const where = and(
       eq(uploads.teamId, p.teamId),
       eq(uploads.candidateId, candidateId),
@@ -291,9 +449,10 @@ export async function listCandidateCvs(
   p: Principal,
   candidateId: string,
 ): Promise<CvDto[]> {
+  requireCandidateRead(p);
   validId(candidateId);
-  return withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId, true);
+  return withTeam(p, async (tx, access) => {
+    await assertCandidate(tx, accessContext(p, access), candidateId, true);
     const rows = await tx
       .select()
       .from(uploads)
@@ -305,24 +464,94 @@ export async function listCandidateCvs(
   });
 }
 
+/** PUT tickets per Blob reservation, the first included; 0019 holds the same cap. */
+const BLOB_PUT_TICKET_LIMIT = 5;
+
+/**
+ * The refusal for one more new reservation under the team's upload rate, or null when it is off.
+ * New CV and record file reservations count together.
+ */
+export async function uploadRateRefusal(tx: TeamTx, p: Principal, now: Date) {
+  const [usage] = await tx
+    .select({ rate: storageUsage.uploadRequestsPerMinute })
+    .from(storageUsage)
+    .where(eq(storageUsage.teamId, p.teamId));
+  if (!usage?.rate) return null;
+  const since = new Date(now.getTime() - 60_000);
+  const [{ recent }] = await tx
+    .select({
+      recent: sql<number>`(${count()}) + (select count(*) from ${recordFiles} where ${and(
+        eq(recordFiles.teamId, p.teamId),
+        gt(recordFiles.createdAt, since),
+      )})::int`,
+    })
+    .from(uploads)
+    .where(and(eq(uploads.teamId, p.teamId), gt(uploads.createdAt, since)));
+  return Number(recent) >= usage.rate
+    ? new ApiError(
+        429,
+        "CV_UPLOAD_RATE_LIMITED",
+        `Your team allows ${usage.rate} new CV uploads per minute. Wait a minute, then try again.`,
+      )
+    : null;
+}
+
+/** Whether the request names an existing reservation, which the upload rate never refuses. */
+export async function isUploadReplay(
+  tx: TeamTx,
+  p: Principal,
+  operation: string,
+  input: CvUploadInput,
+) {
+  const [previous] = await tx
+    .select({ key: idempotency.key })
+    .from(idempotency)
+    .where(
+      and(
+        eq(idempotency.teamId, p.teamId),
+        eq(idempotency.actorKey, idempotencyActorKey(p)),
+        eq(idempotency.operation, operation),
+        eq(idempotency.key, input.clientUploadId),
+      ),
+    )
+    .limit(1);
+  if (previous) return true;
+  if (!input.legacySourceId) return false;
+  const [existing] = await tx
+    .select({ id: uploads.id })
+    .from(uploads)
+    .where(
+      and(
+        eq(uploads.teamId, p.teamId),
+        eq(uploads.legacySourceId, input.legacySourceId),
+      ),
+    )
+    .limit(1);
+  return Boolean(existing);
+}
+
 export async function beginCvUpload(
   p: Principal,
   candidateId: string,
   input: CvUploadInput,
-  storage?: StorageGateway,
+  storage?: CvStorage,
 ) {
   validId(candidateId);
   // Resolve configuration errors before reserving quota, without contacting a provider.
   if (!storage && !storageConfigured()) await storageClient();
-  if (
-    (input.legacySourceId || input.sourcePath) &&
-    !p.scopes.includes("imports:write")
-  )
-    throw new ApiError(
-      403,
-      "IMPORT_PERMISSION_REQUIRED",
-      "Legacy CV source metadata requires import permission.",
-    );
+  const binding = storageBinding(storage);
+  const requireImport = () => {
+    if (
+      (input.legacySourceId || input.sourcePath) &&
+      !p.scopes.includes("imports:write")
+    )
+      throw new ApiError(
+        403,
+        "IMPORT_PERMISSION_REQUIRED",
+        "Legacy CV source metadata requires import permission.",
+      );
+  };
+  requireImport();
   let metadata;
   try {
     metadata = validateCvMetadata(
@@ -346,21 +575,44 @@ export async function beginCvUpload(
     )
     .digest("hex");
   // Expiry commits independently, even if the following reservation is refused or a retry conflicts.
-  await withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId);
-    await lockUsage(tx, p.teamId);
-    await expireCvReservations(tx, p.teamId, now);
+  const overRate = await withTeam(p, async (tx, access) => {
+    // Again with the scopes install stored, which a configured role may have narrowed.
+    requireImport();
+    await assertCandidate(tx, accessContext(p, access), candidateId);
+    await expireCvReservations(tx, p.teamId, binding, now);
+    // Early, so an over-rate request makes no provider call; the locked check below stays authoritative.
+    const refusal = await uploadRateRefusal(tx, p, now);
+    return refusal && !(await isUploadReplay(tx, p, operation, input))
+      ? refusal
+      : null;
   });
-  const row = await withTeam(p, async (tx) => {
-    await assertCandidate(tx, p, candidateId);
-    await lockUsage(tx, p.teamId);
+  if (overRate) throw overRate;
+  let client = storage;
+  if (binding.provider === "blob")
+    try {
+      // Best effort: frees a few retained charges whose objects are confirmed deleted. Its outcome
+      // never changes the reservation; a setup failure is reported again when the ticket is issued.
+      client ??= await getStorage();
+      const { releaseRetainedBlobCharges } =
+        await import("@/lib/blob-reconcile");
+      await releaseRetainedBlobCharges(p, blobGateway(client), {
+        maxRows: 5,
+        deadline: Date.now() + 5000,
+        now: new Date(),
+      });
+    } catch {
+      // Swallowed: the next upload or an owner's cleanup call retries.
+    }
+  const row = await withTeam(p, async (tx, access): Promise<LiveUpload> => {
+    await assertCandidate(tx, accessContext(p, access), candidateId);
+    await lockAllocation(tx, binding);
     const [previous] = await tx
       .select()
       .from(idempotency)
       .where(
         and(
           eq(idempotency.teamId, p.teamId),
-          eq(idempotency.actorKey, actorKey(p)),
+          eq(idempotency.actorKey, idempotencyActorKey(p)),
           eq(idempotency.operation, operation),
           eq(idempotency.key, input.clientUploadId),
         ),
@@ -398,6 +650,7 @@ export async function beginCvUpload(
         : [];
     if (existing) {
       if (
+        !live(existing) ||
         existing.candidateId !== candidateId ||
         existing.originalName !== metadata.originalName ||
         existing.mimeType !== metadata.mimeType ||
@@ -409,29 +662,35 @@ export async function beginCvUpload(
           "CV_SOURCE_CONFLICT",
           "This legacy source or upload identifier already refers to a different CV.",
         );
-      if (existing.status === "ready" || existing.status === "pending")
-        return existing;
+      assertBinding(existing, binding);
+      if (existing.status === "ready") return existing;
+      if (existing.status === "pending") {
+        if (existing.storageProvider !== "blob") return existing;
+        // Counted under the row lock before the ticket is issued; the guard allows only +1.
+        if (existing.putTicketsIssued >= BLOB_PUT_TICKET_LIMIT)
+          throw new ApiError(
+            409,
+            "CV_UPLOAD_TICKET_LIMIT",
+            "This upload has used all of its upload links. Try again after its reservation expires, within 15 minutes, by selecting the file again.",
+          );
+        const [counted] = await tx
+          .update(uploads)
+          .set({ putTicketsIssued: sql`${uploads.putTicketsIssued} + 1` })
+          .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, existing.id)))
+          .returning();
+        return counted as LiveUpload;
+      }
       throw new ApiError(
         409,
         "CV_UPLOAD_REJECTED",
         "This CV upload was rejected or expired. Select the file again to create a new upload; imported rejected sources require review.",
       );
     }
-    const [usage] = await tx
-      .select()
-      .from(storageUsage)
-      .where(eq(storageUsage.teamId, p.teamId));
-    if (
-      usage.usedBytes + usage.reservedBytes + metadata.sizeBytes >
-        usage.maxBytes ||
-      usage.usedFiles + usage.reservedFiles + 1 > usage.maxFiles
-    )
-      throw new ApiError(
-        409,
-        "STORAGE_QUOTA_EXCEEDED",
-        "This team has reached its CV storage allowance, including pending uploads.",
-      );
+    // Only a new reservation counts against the team's rate; the ledger lock above serializes it.
+    const refusal = await uploadRateRefusal(tx, p, now);
+    if (refusal) throw refusal;
     const id = randomUUID();
+    // The insert trigger charges the store and team ledgers or refuses over either budget.
     const [created] = await tx
       .insert(uploads)
       .values({
@@ -441,48 +700,71 @@ export async function beginCvUpload(
         ...metadata,
         status: "pending",
         objectKey: `teams/${p.teamId}/cvs/${candidateId}/${id}/${randomUUID()}.${cvExtension(metadata.originalName)}`,
+        storageProvider: binding.provider,
+        storageEnvironment: binding.environment,
+        storageStore: binding.store,
         createdBy: p.userId,
         legacySourceId: input.legacySourceId ?? null,
         sourcePath: input.sourcePath ?? null,
+        // The first Blob ticket is issued below and counts against the reservation's cap.
+        putTicketsIssued: binding.provider === "blob" ? 1 : 0,
         createdAt: now,
-        expiresAt: new Date(now.getTime() + reservationMs),
+        expiresAt: new Date(
+          now.getTime() +
+            (binding.provider === "blob"
+              ? BLOB_RESERVATION_MS
+              : S3_RESERVATION_MS),
+        ),
       })
-      .returning();
-    await tx
-      .update(storageUsage)
-      .set({
-        reservedBytes: sql`${storageUsage.reservedBytes} + ${metadata.sizeBytes}`,
-        reservedFiles: sql`${storageUsage.reservedFiles} + 1`,
-        updatedAt: now,
-      })
-      .where(eq(storageUsage.teamId, p.teamId));
+      .returning()
+      .catch(ledgerFailure);
     await tx.insert(idempotency).values({
       teamId: p.teamId,
-      actorKey: actorKey(p),
+      actorKey: idempotencyActorKey(p),
       operation,
       key: input.clientUploadId,
       payloadHash: hash,
       response: { uploadId: id },
+      roleVersionId: access.roleVersionId,
       createdAt: now,
       expiresAt: new Date(now.getTime() + 7 * 86400_000),
     });
-    return created;
+    // Reserved above for this candidate and file name.
+    return created as LiveUpload;
   });
   if (row.status === "ready") return { data: cvDto(row), upload: null };
-  const client = storage ?? (await storageClient());
+  client ??= await storageClient();
+  const expired = () =>
+    new ApiError(
+      409,
+      "CV_UPLOAD_EXPIRED",
+      "The upload reservation expired. Select the file again to start a new upload.",
+    );
   try {
-    await client.assertVersioning();
+    if (row.storageProvider === "blob") {
+      if (row.expiresAt.getTime() - Date.now() < 1000) throw expired();
+      // The charge is committed; a failed issuance keeps it and a replay reuses the path.
+      const ticket = await blobGateway(client).issuePutTicket(row);
+      return {
+        data: cvDto(row),
+        upload: {
+          protocol: "blob-put-v1" as const,
+          method: "PUT" as const,
+          url: ticket.url,
+          headers: { "content-type": row.mimeType },
+          expiresAt: new Date(ticket.expiresAt).toISOString(),
+          maxBytes: row.sizeBytes,
+        },
+      };
+    }
+    const s3 = s3Gateway(client);
+    await s3.assertVersioning();
     const expiresSeconds = Math.min(
       300,
       Math.floor((row.expiresAt.getTime() - Date.now()) / 1000),
     );
-    if (expiresSeconds < 1)
-      throw new ApiError(
-        409,
-        "CV_UPLOAD_EXPIRED",
-        "The upload reservation expired. Select the file again to start a new upload.",
-      );
-    const ticket = await client.presignPost(
+    if (expiresSeconds < 1) throw expired();
+    const ticket = await s3.presignPost(
       row.objectKey,
       row.mimeType,
       row.sizeBytes,
@@ -491,8 +773,11 @@ export async function beginCvUpload(
     return {
       data: cvDto(row),
       upload: {
+        protocol: "s3-form-v1" as const,
+        method: "POST" as const,
         ...ticket,
         expiresAt: new Date(Date.now() + expiresSeconds * 1000).toISOString(),
+        maxBytes: row.sizeBytes,
       },
     };
   } catch (error) {
@@ -500,27 +785,32 @@ export async function beginCvUpload(
   }
 }
 
+/** readTimeoutMs is internal (tests); routes never pass it and it is capped at 15 s. */
 export async function completeCvUpload(
   p: Principal,
   id: string,
-  storage?: StorageGateway,
+  storage?: CvStorage,
+  options: { readTimeoutMs?: number } = {},
 ): Promise<CvDto> {
   validId(id);
-  const initial = await withTeam(p, async (tx) => {
+  const initial = await withTeam(p, async (tx, access) => {
     const [row] = await tx
       .select()
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .limit(1);
-    if (!row)
+    // An erased upload reads as missing; completing it changes nothing and writes no activity.
+    if (!live(row))
       throw new ApiError(
         404,
         "CV_NOT_FOUND",
         "This CV is not available in the selected team.",
       );
-    await assertCandidate(tx, p, row.candidateId);
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
     return row;
   });
+  const binding = storageBinding(storage);
+  assertBinding(initial, binding);
   if (initial.status === "ready") return cvDto(initial);
   if (initial.status === "rejected")
     throw new ApiError(
@@ -528,57 +818,62 @@ export async function completeCvUpload(
       "CV_UPLOAD_REJECTED",
       "This upload was rejected or expired. Start a new upload.",
     );
-  let version: string | undefined, rejection: CvValidationError | undefined;
+  let version: string | undefined,
+    sha256: string | undefined,
+    rejection: CvValidationError | undefined;
   if (initial.expiresAt.getTime() > Date.now()) {
     try {
-      version = await inspectStoredCv(
-        storage ?? (await storageClient()),
-        initial,
-      );
+      const client = storage ?? (await storageClient());
+      if (initial.storageProvider === "blob") {
+        const gateway = blobGateway(client);
+        // A missing object or transport failure stays pending: a Blob rejection burns the path.
+        const inspected = await withBlobReadLease(p, binding.store, () =>
+          gateway.inspectUpload(initial, options.readTimeoutMs),
+        );
+        if (!inspected)
+          throw new Error("The uploaded CV is not in private storage yet.");
+        sha256 = inspected.sha256;
+      } else version = await inspectStoredCv(s3Gateway(client), initial);
     } catch (error) {
       if (error instanceof CvValidationError) rejection = error;
       else return storageFailure(error);
     }
   }
-  const result = await withTeam(p, async (tx) => {
-    await lockUsage(tx, p.teamId);
+  const result = await withTeam(p, async (tx, access) => {
+    await lockAllocation(tx, binding);
     const [row] = await tx
       .select()
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .for("update");
-    if (!row)
+    if (!live(row))
       throw new ApiError(
         404,
         "CV_NOT_FOUND",
         "This CV is no longer available.",
       );
-    if (row.status === "ready") return { row, rejected: false };
-    if (row.status === "rejected") return { row, rejected: true };
-    await assertCandidate(tx, p, row.candidateId);
+    if (row.status === "ready") return { row, rejected: false, settled: false };
+    if (row.status === "rejected")
+      return { row, rejected: true, settled: false };
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
     const now = new Date(),
       reject = Boolean(
-        rejection || !version || row.expiresAt.getTime() <= now.getTime(),
+        rejection ||
+        !(version || sha256) ||
+        row.expiresAt.getTime() <= now.getTime(),
       );
+    // The status trigger settles the insert-time charge exactly once.
     const [updated] = await tx
       .update(uploads)
       .set({
         status: reject ? "rejected" : "ready",
-        objectVersion: reject ? null : version,
+        s3VersionId: reject ? null : (version ?? null),
+        blobSha256: reject ? null : (sha256 ?? null),
+        blobSizeBytes: reject || !sha256 ? null : row.sizeBytes,
         completedAt: reject ? null : now,
       })
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .returning();
-    await tx
-      .update(storageUsage)
-      .set({
-        reservedBytes: sql`${storageUsage.reservedBytes} - ${row.sizeBytes}`,
-        reservedFiles: sql`${storageUsage.reservedFiles} - 1`,
-        usedBytes: sql`${storageUsage.usedBytes} + ${reject ? 0 : row.sizeBytes}`,
-        usedFiles: sql`${storageUsage.usedFiles} + ${reject ? 0 : 1}`,
-        updatedAt: now,
-      })
-      .where(eq(storageUsage.teamId, p.teamId));
     await audit(
       tx,
       p,
@@ -586,8 +881,13 @@ export async function completeCvUpload(
       reject ? "cv.rejected" : "cv.uploaded",
       { uploadId: id, sizeBytes: row.sizeBytes, mimeType: row.mimeType },
     );
-    return { row: updated, rejected: reject };
+    return { row: updated, rejected: reject, settled: true };
   });
+  // This call settled a Blob upload: one cooldown-gated cleanup sweep, which never alters the response.
+  if (result.settled && result.row.storageProvider === "blob") {
+    const { sweepAfterBlobUpload } = await import("@/lib/blob-reconcile");
+    await sweepAfterBlobUpload(p, storage);
+  }
   if (result.rejected)
     throw new ApiError(
       400,
@@ -598,28 +898,36 @@ export async function completeCvUpload(
   return cvDto(result.row);
 }
 
-export async function getCvDownload(
-  p: Principal,
-  id: string,
-  storage?: StorageGateway,
-) {
+/** Reauthorizes every download request; archived candidates' CVs stay readable. */
+export async function readyCv(p: Principal, id: string) {
+  requireCandidateRead(p);
   validId(id);
-  const row = await withTeam(p, async (tx) => {
+  return withTeam(p, async (tx, access) => {
     const [cv] = await tx
       .select()
       .from(uploads)
       .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
       .limit(1);
-    if (!cv || cv.status !== "ready")
+    if (!live(cv) || cv.status !== "ready")
       throw new ApiError(
         404,
         "CV_NOT_FOUND",
         "This CV is not available in the selected team.",
       );
-    await assertCandidate(tx, p, cv.candidateId, true);
+    await assertCandidate(tx, accessContext(p, access), cv.candidateId, true);
     return cv;
   });
-  if (!row.objectVersion)
+}
+
+export async function getCvDownload(
+  p: Principal,
+  id: string,
+  storage?: CvStorage,
+) {
+  const row = await readyCv(p, id);
+  if (row.storageProvider === "blob") throw protocolMismatch();
+  assertBinding(row, storageBinding(storage));
+  if (!row.s3VersionId)
     throw new ApiError(
       409,
       "CV_VERSION_MISSING",
@@ -627,13 +935,218 @@ export async function getCvDownload(
     );
   try {
     return {
-      url: await (storage ?? (await storageClient())).signDownload(
+      url: await s3Gateway(storage ?? (await storageClient())).signDownload(
         row.objectKey,
-        row.objectVersion,
+        row.s3VersionId,
         row.originalName,
       ),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     };
+  } catch (error) {
+    return storageFailure(error);
+  }
+}
+
+/** The trusted Blob reference; no provider call, URL or pathname. */
+async function blobReference(p: Principal, id: string, storage?: CvStorage) {
+  const row = await readyCv(p, id);
+  if (row.storageProvider !== "blob") throw protocolMismatch();
+  const binding = storageBinding(storage);
+  assertBinding(row, binding);
+  if (!row.blobSha256 || row.blobSizeBytes !== row.sizeBytes)
+    throw integrityFailure();
+  return {
+    row,
+    store: binding.store,
+    manifest: {
+      protocol: "blob-chunks-v1" as const,
+      uploadId: row.id,
+      originalName: row.originalName,
+      contentType: row.mimeType,
+      sizeBytes: row.blobSizeBytes,
+      sha256: row.blobSha256,
+      chunkSize: MAX_BLOB_DOWNLOAD_SLICE_BYTES,
+      chunkCount: Math.ceil(row.blobSizeBytes / MAX_BLOB_DOWNLOAD_SLICE_BYTES),
+    },
+  };
+}
+
+/** The manifest grants nothing by itself; every chunk is authorized again. */
+export async function getCvManifest(
+  p: Principal,
+  id: string,
+  storage?: CvStorage,
+) {
+  return (await blobReference(p, id, storage)).manifest;
+}
+
+/** Releases one slice only after the whole object matches its validated digest. */
+export async function getCvChunk(
+  p: Principal,
+  id: string,
+  index: number,
+  storage?: CvStorage,
+  options: { readTimeoutMs?: number } = {},
+) {
+  const { row, store, manifest } = await blobReference(p, id, storage);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= manifest.chunkCount)
+    throw new ApiError(
+      400,
+      "INVALID_CV_CHUNK",
+      "This CV has no chunk with that index.",
+    );
+  const offset = index * manifest.chunkSize;
+  let bytes: Buffer | null;
+  try {
+    const gateway = blobGateway(storage ?? (await storageClient()));
+    bytes = await withBlobReadLease(p, store, () =>
+      gateway.readVerifiedSlice(
+        {
+          teamId: row.teamId,
+          objectKey: row.objectKey,
+          mimeType: row.mimeType,
+          sizeBytes: manifest.sizeBytes,
+          sha256: manifest.sha256,
+        },
+        offset,
+        Math.min(manifest.chunkSize, manifest.sizeBytes - offset),
+        options.readTimeoutMs,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof CvValidationError) throw integrityFailure();
+    return storageFailure(error);
+  }
+  if (!bytes) throw integrityFailure();
+  return { ...manifest, index, offset, bytes };
+}
+
+/**
+ * Each listed candidate of the team (archived ones included) with its ready CVs, oldest completed
+ * first. A candidate the team does not have, or outside the caller's record scope, is left out.
+ */
+export async function readyCvsOf(p: Principal, candidateIds: string[]) {
+  requireCandidateRead(p);
+  for (const id of candidateIds) validId(id);
+  return withTeam(p, async (tx, access) => {
+    const found = await tx
+      .select({ id: records.id })
+      .from(records)
+      .where(
+        and(
+          ...scopeFilter(accessContext(p, access), "candidate"),
+          inArray(records.id, candidateIds),
+        ),
+      );
+    const rows = await tx
+      .select({
+        id: uploads.id,
+        candidateId: uploads.candidateId,
+        originalName: uploads.originalName,
+        mimeType: uploads.mimeType,
+        completedAt: uploads.completedAt,
+      })
+      .from(uploads)
+      .where(
+        and(
+          eq(uploads.teamId, p.teamId),
+          inArray(uploads.candidateId, candidateIds),
+          eq(uploads.status, "ready"),
+          isNull(uploads.erasureId),
+        ),
+      )
+      .orderBy(asc(uploads.completedAt), asc(uploads.id));
+    return new Map(
+      found.map(({ id }) => [
+        id,
+        rows
+          .filter((row) => row.candidateId === id)
+          .map((row) => ({
+            id: row.id,
+            candidateId: id,
+            originalName: row.originalName!,
+            mimeType: row.mimeType,
+            completedAt: row.completedAt!.toISOString(),
+          })),
+      ]),
+    );
+  });
+}
+
+/**
+ * The whole verified object of a CV readyCv authorized, for server-side text extraction only; it is
+ * never returned to a client. Read under the Blob read lease and released only when it matches the
+ * validated digest. Null for a legacy S3 reference, which is not read this way.
+ */
+export async function readVerifiedCv(
+  p: Principal,
+  row: UploadRow,
+  timeoutMs: number,
+  storage?: CvStorage,
+): Promise<Buffer | null> {
+  if (row.storageProvider !== "blob") return null;
+  const binding = storageBinding(storage);
+  assertBinding(row, binding);
+  if (!row.blobSha256 || row.blobSizeBytes !== row.sizeBytes)
+    throw integrityFailure();
+  let bytes: Buffer | null;
+  try {
+    const gateway = blobGateway(storage ?? (await storageClient()));
+    bytes = await withBlobReadLease(p, binding.store, () =>
+      gateway.readVerifiedObject(
+        {
+          teamId: row.teamId,
+          objectKey: row.objectKey,
+          mimeType: row.mimeType,
+          sizeBytes: row.sizeBytes,
+          sha256: row.blobSha256!,
+        },
+        timeoutMs,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof CvValidationError) throw integrityFailure();
+    return storageFailure(error);
+  }
+  if (!bytes) throw integrityFailure();
+  return bytes;
+}
+
+/**
+ * Writes the exact bytes of a pending Blob reservation from the server, for uploads sent inside an
+ * MCP request. completeCvUpload then verifies them as for any upload; an object already at the path,
+ * for example after a lost response, is left for completion to judge. Anything not pending is left
+ * to completion as well.
+ */
+export async function putCvBytes(
+  p: Principal,
+  id: string,
+  bytes: Buffer,
+  storage?: CvStorage,
+): Promise<void> {
+  validId(id);
+  const row = await withTeam(p, async (tx, access) => {
+    const [row] = await tx
+      .select()
+      .from(uploads)
+      .where(and(eq(uploads.teamId, p.teamId), eq(uploads.id, id)))
+      .limit(1);
+    if (!live(row))
+      throw new ApiError(
+        404,
+        "CV_NOT_FOUND",
+        "This CV is not available in the selected team.",
+      );
+    await assertCandidate(tx, accessContext(p, access), row.candidateId);
+    return row;
+  });
+  if (row.status !== "pending") return;
+  assertBinding(row, storageBinding(storage));
+  try {
+    await blobGateway(storage ?? (await storageClient())).putReservedObject(
+      row,
+      bytes,
+    );
   } catch (error) {
     return storageFailure(error);
   }

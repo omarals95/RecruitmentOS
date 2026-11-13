@@ -766,6 +766,44 @@ textarea::placeholder {
   color: var(--muted);
   opacity: 0.85;
 }
+/* Native popups take these colours, not the select's own (the team switcher's is transparent). */
+option,
+optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+option:disabled {
+  color: var(--muted);
+}
+/* Dark native popups, date and time pickers, picker icons and datalist lists. */
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] option,
+:root[data-theme="dark"] optgroup,
+:root[data-theme="dark"] datalist {
+  color-scheme: dark;
+}
+:root[data-theme="dark"] input[type="file"] {
+  color: var(--text);
+}
+:root[data-theme="dark"] input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+:root[data-theme="dark"],
+:root[data-theme="dark"] .kanban,
+:root[data-theme="dark"] .table-wrap,
+:root[data-theme="dark"] .calendar-scroll,
+:root[data-theme="dark"] .dialog {
+  scrollbar-color: var(--border-strong) transparent;
+}
 input[type="checkbox"] {
   width: 16px;
   height: 16px;
@@ -957,6 +995,9 @@ input[type="color"] {
 .filter-reference select {
   min-height: 38px;
 }
+.filters-toggle {
+  display: none;
+}
 .directory-note {
   display: flex;
   align-items: center;
@@ -975,6 +1016,7 @@ input[type="color"] {
   margin-left: 6px;
 }
 .table-wrap {
+  position: relative;
   overflow: auto;
   width: 100%;
   overscroll-behavior-x: contain;
@@ -1020,6 +1062,27 @@ input[type="color"] {
 .data-table tr > td:has(input[type="checkbox"]) {
   min-width: 42px;
   width: 42px;
+}
+/* Wide tables such as the Directory: narrower cells that wrap only between words. */
+.data-table.compact th,
+.data-table.compact td {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.data-table.compact td {
+  min-width: 0;
+  overflow-wrap: normal;
+}
+/* Label and value tables such as the Domain page: the last column is the value, not actions. */
+.data-table.facts th:first-child,
+.data-table.facts td:first-child {
+  width: 40%;
+}
+.data-table.facts th:last-child,
+.data-table.facts td:last-child {
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 .data-table tbody tr:hover {
   background: var(--surface-subtle);
@@ -1173,6 +1236,42 @@ input[type="color"] {
   padding: 70px 24px;
   color: var(--muted);
   font-size: 12px;
+}
+/* Skeleton rows while a screen has nothing cached yet; existing colours only. */
+.skeleton-list {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px;
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.skeleton-block {
+  display: block;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.skeleton-line {
+  flex: 1;
+}
+.skeleton-line.short {
+  flex: 0 0 22%;
+}
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.55;
+  }
 }
 .spin {
   animation: spin 1s linear infinite;
@@ -1418,6 +1517,18 @@ input[type="color"] {
 .related-item:hover {
   color: var(--primary-text);
 }
+.role-difference {
+  align-items: flex-start;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.role-difference small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .comment {
   padding: 16px;
   border: 1px solid var(--border);
@@ -1472,6 +1583,7 @@ input[type="color"] {
 }
 /* Boards */
 .kanban {
+  position: relative;
   display: flex;
   gap: 18px;
   padding: 24px;
@@ -2063,7 +2175,6 @@ progress::-moz-progress-bar {
 }
 .calendar-day.outside-month .calendar-day-number {
   color: var(--muted);
-  opacity: 0.6;
 }
 .calendar-event {
   display: flex;
@@ -2089,7 +2200,6 @@ progress::-moz-progress-bar {
   text-overflow: ellipsis;
 }
 .calendar-event.cancelled {
-  opacity: 0.55;
   text-decoration: line-through;
 }
 .calendar-more {
@@ -2098,6 +2208,7 @@ progress::-moz-progress-bar {
   background: transparent;
   text-align: left;
   padding: 4px;
+  min-height: 24px;
 }
 .week-view .calendar-day {
   min-height: 350px;
@@ -2188,17 +2299,6 @@ progress::-moz-progress-bar {
   height: 1px;
   background: var(--border);
   flex: 1;
-}
-.settings-nav {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.settings-nav a {
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
 }
 /* Public homepage */
 .landing {
@@ -2810,6 +2910,12 @@ progress::-moz-progress-bar {
   flex-wrap: wrap;
   font-size: 10px;
 }
+.auth-card > .auth-version {
+  margin: 16px 0 0;
+  text-align: center;
+  font-size: 10px;
+  color: var(--muted);
+}
 .auth-error {
   background: var(--danger-bg);
   color: var(--danger);
@@ -2876,6 +2982,56 @@ progress::-moz-progress-bar {
 .auth-trust > svg {
   flex: none;
   color: var(--primary-text);
+}
+/* Two-step sign-in setup and code screens */
+.auth-card h2 {
+  font-size: 15px;
+}
+.two-step-qr {
+  display: block;
+  width: 100%;
+  max-width: 232px;
+  /* Black on white in both themes, with the quiet zone drawn inside the image. */
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.two-step-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  font-size: 12px;
+  margin: 0;
+}
+.two-step-details dt {
+  font-weight: 600;
+}
+.two-step-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.two-step-key,
+.two-step-codes code {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  word-spacing: 4px;
+}
+.two-step-codes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  list-style: none;
+  padding: 12px;
+  margin: 0;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.two-step-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
 }
 .onboarding-progress {
   display: flex;
@@ -3162,8 +3318,16 @@ progress::-moz-progress-bar {
     width: 245px;
     transition: transform 0.2s ease;
   }
+  /* Closed: out of the tab order and the accessibility tree once the slide ends. */
+  .workspace-sidebar:not(.is-open) {
+    visibility: hidden;
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+  }
   .workspace-sidebar.is-open {
     transform: translateX(0);
+    visibility: visible;
   }
   .workspace-body {
     margin-left: 0;
@@ -3286,6 +3450,60 @@ progress::-moz-progress-bar {
   }
   .filter-bar .text-link {
     font-size: 11px;
+  }
+  .filters-toggle {
+    display: inline-flex;
+  }
+  .filter-bar:not(.is-open) {
+    display: none;
+  }
+  /* Phone tables become one labelled card per record, without sideways scrolling. */
+  .records-panel .table-wrap {
+    overflow: visible;
+  }
+  .records-panel .data-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .records-panel .data-table,
+  .records-panel .data-table tr {
+    display: block;
+  }
+  .records-panel .data-table tbody {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+  }
+  .records-panel .data-table tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+  }
+  .records-panel .data-table td,
+  .records-panel .data-table td:first-child,
+  .records-panel .data-table td:last-child,
+  .records-panel .data-table tr > td:has(input[type="checkbox"]) {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    width: auto;
+    padding: 6px 0;
+    border-bottom: 0;
+  }
+  .records-panel .data-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .records-panel .table-record-button {
+    min-width: 0;
+    max-width: none;
   }
   .record-card-grid {
     padding: 16px;
@@ -3663,4 +3881,302 @@ progress::-moz-progress-bar {
 .editor-fieldset:disabled select {
   opacity: 0.65;
   cursor: wait;
+}
+
+/* The task editor's assignee picker (R2a-20): a bordered group whose member list scrolls inside it. */
+.assignee-picker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 0;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+/* The legend and the filter label match the editor's other field labels. */
+.assignee-picker legend,
+.assignee-picker > label {
+  font-weight: 600;
+  font-size: 12px;
+}
+.assignee-picker legend {
+  padding: 0 4px;
+}
+.assignee-picker input[type="search"] {
+  width: 100%;
+}
+.assignee-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.assignee-list .checkbox-label {
+  overflow-wrap: anywhere;
+}
+
+/* The org tree by units (ADM-22): one nested list, drawn top-down with connector lines when wide
+   and as an indented outline at 720px and narrower. Theme variables only, so dark follows. */
+.org-tree-scroll {
+  overflow: auto;
+  max-width: 100%;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-subtle);
+}
+.org-tree,
+.org-tree-group {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.org-tree {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 32px;
+  width: max-content;
+  min-width: 100%;
+}
+.org-tree-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 6px 0;
+}
+.org-tree > .org-tree-node {
+  padding-top: 0;
+}
+/* Positions stack under their unit; its units sit side by side in the last row. */
+.org-tree-group {
+  position: relative;
+  display: grid;
+  justify-content: center;
+  justify-items: center;
+  align-items: start;
+  padding-top: 20px;
+}
+.org-tree-group::before,
+.org-tree-position::before,
+.org-tree-group > .org-tree-node::before,
+.org-tree-group > .org-tree-node::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  border: 0 solid var(--border-strong);
+}
+.org-tree-group::before {
+  left: 50%;
+  height: 20px;
+  border-left-width: 1.5px;
+}
+.org-tree-position {
+  grid-column: 1 / -1;
+  position: relative;
+  padding-top: 8px;
+}
+.org-tree-position:first-child {
+  padding-top: 0;
+}
+.org-tree-position::before {
+  left: 50%;
+  height: 8px;
+  border-left-width: 1.5px;
+}
+.org-tree-position:first-child::before {
+  display: none;
+}
+/* Each unit in a row draws its half of the bar over the row, and its own line down. */
+.org-tree-group > .org-tree-node::before,
+.org-tree-group > .org-tree-node::after {
+  width: 50%;
+  height: 20px;
+  border-top-width: 1.5px;
+}
+.org-tree-group > .org-tree-node::before {
+  right: 50%;
+}
+.org-tree-group > .org-tree-node::after {
+  left: 50%;
+  border-left-width: 1.5px;
+}
+.org-tree-group > .org-tree-first::before,
+.org-tree-group > .org-tree-only::before {
+  display: none;
+}
+.org-tree-group > .org-tree-last::after,
+.org-tree-group > .org-tree-only::after {
+  border-top-width: 0;
+}
+.org-tree-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.org-tree-unit > .org-tree-box {
+  border-top: 3px solid var(--primary);
+}
+.org-tree-position > .org-tree-box {
+  width: 180px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: default;
+}
+.org-tree-more > .org-tree-box {
+  color: var(--primary-text);
+  font-weight: 700;
+}
+/* A vacant position: dashed, and labelled "Vacant" so colour is never the only sign. */
+.org-tree-vacant > .org-tree-box {
+  border: 1.5px dashed var(--warning);
+}
+.org-tree-vacant-label {
+  color: var(--warning);
+  font-weight: 700;
+}
+.org-tree-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-weight: 700;
+}
+.org-tree-title svg {
+  flex: none;
+  margin-top: 2px;
+}
+.org-tree-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+.org-tree-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+/* The focused treeitem's own box carries the outline, not its whole branch. */
+.org-tree [role="treeitem"]:focus {
+  outline: none;
+}
+.org-tree [role="treeitem"]:focus-visible > .org-tree-box {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .org-tree-scroll {
+    padding: 8px;
+  }
+  .org-tree,
+  .org-tree-group {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    width: auto;
+    min-width: 0;
+  }
+  .org-tree-group {
+    margin: 8px 0 0 8px;
+    padding: 0 0 0 12px;
+    border-left: 1px solid var(--border-strong);
+  }
+  .org-tree-node,
+  .org-tree > .org-tree-node,
+  .org-tree-position {
+    align-items: stretch;
+    padding: 0;
+  }
+  .org-tree-group::before,
+  .org-tree-position::before,
+  .org-tree-group > .org-tree-node::before,
+  .org-tree-group > .org-tree-node::after {
+    display: none;
+  }
+  .org-tree-box,
+  .org-tree-position > .org-tree-box {
+    width: auto;
+  }
+}
+
+/* Job architecture (ADM-26): the salary bracket band, scaled to the version's highest maximum, with
+   the midpoint marked; theme variables only, so dark follows. */
+.bracket-band {
+  position: relative;
+  min-width: 120px;
+  height: 10px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+}
+.bracket-band-range {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  border-radius: 999px;
+}
+.bracket-band-midpoint {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 16px;
+  margin-left: -1px;
+  background: var(--primary);
+}
+.bracket-grade {
+  margin: 0;
+  font-size: 13px;
+}
+.bracket-amounts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 720px) {
+  .bracket-amounts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Company groups (ADM-12): the Members tree as nested lists, each nested group a native disclosure;
+   theme variables only, so dark follows, and long names and emails wrap at 360 px. */
+.group-tree {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.group-tree .group-tree {
+  margin: 8px 0 0 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+.group-tree-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.group-tree details {
+  margin: 4px 0 0 6px;
+}
+.group-tree summary {
+  font-size: 12px;
 }

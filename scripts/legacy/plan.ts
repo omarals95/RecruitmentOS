@@ -5,6 +5,7 @@ import {
   referencesByKind,
   CANDIDATE_STATUSES,
   daySchema,
+  reviewStatusValue,
   type ResourceName,
   type ReferenceField,
 } from "../../src/domain/records";
@@ -376,7 +377,8 @@ export function buildPlan(inputs: LegacyInputs): MigrationPlan {
         roleStatus: factual("Role status in source"),
         experienceBasis: factual("Experience basis"),
         experienceWording: factual("Experience wording in source"),
-        reviewStatus: factual("Source review status"),
+        // The original text stays in rawSource.
+        reviewStatus: reviewStatusValue(factual("Source review status")),
         sourceNotes: text(v.Notes),
         rawSource: v,
         evidence: evidence
@@ -729,6 +731,8 @@ export function buildPlan(inputs: LegacyInputs): MigrationPlan {
     const mapped: Row = {};
     for (const [key, value] of Object.entries(query)) {
       if (key === "dir") mapped.direction = value;
+      else if (key === "reviewStatus")
+        mapped.reviewStatus = text(value) ? reviewStatusValue(text(value)) : "";
       else if (knownKeys.has(key)) mapped[key] = value;
       else if (key === "vacancyId" && text(value)) {
         /* UUID requires apply-time mapping below */

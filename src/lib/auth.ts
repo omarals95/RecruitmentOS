@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type AuthContext } from "better-auth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   APIError,
@@ -6,22 +6,51 @@ import {
   getAuthoritativeSessionFromCtx,
 } from "better-auth/api";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
-import { organization as organizationPlugin } from "better-auth/plugins";
 import {
+  organization as organizationPlugin,
+  twoFactor,
+} from "better-auth/plugins";
+import {
+  defineRequestState,
   getCurrentAdapter,
+  getCurrentDBAdapterAsyncLocalStorage,
+  hasRequestState,
+  runWithTransaction,
   tryGetCurrentAuthEndpointContext,
 } from "@better-auth/core/context";
-import { and, eq } from "drizzle-orm";
-import { getIdentityDb, type AppDb } from "@/db";
-import { authTables, member } from "@/db/auth-schema";
+import type { BetterAuthRateLimitStorage } from "@better-auth/core";
+import { isAPIError } from "@better-auth/core/utils/is-api-error";
+import { and, eq, like, sql, type SQLWrapper } from "drizzle-orm";
+import { getIdentityDb, prepareDbPairTargets, type AppDb } from "@/db";
+import {
+  apiRateLimits,
+  authTables,
+  member,
+  rateLimit,
+  user,
+  verification,
+} from "@/db/auth-schema";
+import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
 import { ApiError } from "./errors";
 import { ac, roles } from "./auth-roles";
 import {
+  canCreateTeam,
   canRegisterEmail,
   isUsableAuthSecret,
+  SESSION_FRESH_AGE_SECONDS,
+  TWO_STEP_SETUP_MESSAGE,
+  twoStepSetupRequired,
   validateInvitationRole,
 } from "./auth-policy";
+import { cleanClientName } from "./client-name";
+import {
+  clientIpHeader,
+  keyedRateLimitHash,
+  signInBackoffKey,
+} from "./client-ip";
 import { dispatchAuthMail, mailConfigured, type MailDelivery } from "./mail";
+import { companyAuthorityHeld } from "./two-step";
+import { accountDeactivated } from "./user-account";
 
 export type AuthOptions = {
   configured: boolean;
@@ -31,33 +60,50 @@ export type AuthOptions = {
   publicSignup: boolean;
   bootstrapConfigured: boolean;
 };
-export function getAuthOptions(): AuthOptions {
+/**
+ * Whether sign-in accepts this BETTER_AUTH_URL: an origin with nothing after it, on https, or on
+ * http for localhost or 127.0.0.1 when not hosted. The Domain page shows the same answer.
+ */
+export function usableAuthURL(value: string | undefined): boolean {
   const hosted =
     process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
-  let validURL = false;
   try {
-    const url = new URL(process.env.BETTER_AUTH_URL ?? "");
-    validURL =
+    const url = new URL(value ?? "");
+    return (
       url.origin === url.href.replace(/\/$/, "") &&
       (url.protocol === "https:" ||
         (!hosted &&
           url.protocol === "http:" &&
-          ["localhost", "127.0.0.1"].includes(url.hostname)));
+          ["localhost", "127.0.0.1"].includes(url.hostname)))
+    );
   } catch {
     /* Public pages remain available before setup. */
+    return false;
   }
-  const database =
-    Boolean(
-      process.env.DATABASE_URL &&
-      (!hosted || process.env.IDENTITY_DATABASE_URL),
-    ) ||
-    (!hosted &&
-      process.env.DATABASE_MODE === "pglite" &&
-      process.env.ALLOW_LOCAL_DB === "true");
+}
+
+export function getAuthOptions(): AuthOptions {
+  const hosted =
+    process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  const validURL = usableAuthURL(process.env.BETTER_AUTH_URL);
+  let database = false;
+  if (hosted) {
+    try {
+      // The same refusals createDbPair applies before any pool; connection-time checks still run at first use.
+      prepareDbPairTargets();
+      // Hosted sign-in runs only in the Vercel production runtime.
+      database =
+        process.env.NODE_ENV === "production" && process.env.VERCEL === "1";
+    } catch {
+      /* Report setup required without revealing which setting was refused. */
+    }
+  } else
+    database =
+      Boolean(process.env.DATABASE_URL) ||
+      (process.env.DATABASE_MODE === "pglite" &&
+        process.env.ALLOW_LOCAL_DB === "true");
   return {
     configured: Boolean(
-      // Keep hosted sign-in unavailable while the database isolation gate is active.
-      !hosted &&
       validURL &&
       database &&
       isUsableAuthSecret(process.env.BETTER_AUTH_SECRET) &&
@@ -89,6 +135,124 @@ type FactoryConfig = {
   microsoft?: { clientId: string; clientSecret: string; tenantId?: string };
 };
 
+/**
+ * Better Auth's database limiter semantics in one atomic upsert on auth.rate_limit, but its
+ * `<ip>|<path>` key is stored only as a keyed hash. Allowed while count < max within the window
+ * since the last allowed request; a passed window restarts at 1. A refusal leaves the window as it
+ * is (the count is capped at max + 1 to mark it) and reports the seconds until the window frees.
+ */
+function hashedRateLimitStorage(
+  db: AppDb,
+  secret: string,
+): BetterAuthRateLimitStorage {
+  return {
+    async consume(key, rule) {
+      const now = Date.now();
+      const windowMs = rule.window * 1000;
+      const passed = sql`${now}::bigint - ${rateLimit.lastRequest} >= ${windowMs}::bigint`;
+      const [row] = await db
+        .insert(rateLimit)
+        .values({
+          key: `ba:${keyedRateLimitHash(key, secret)}`,
+          count: 1,
+          lastRequest: now,
+        })
+        .onConflictDoUpdate({
+          target: rateLimit.key,
+          set: {
+            count: sql`CASE WHEN ${passed} THEN 1 ELSE LEAST(${rateLimit.count} + 1, ${rule.max + 1}::int) END`,
+            lastRequest: sql`CASE WHEN ${passed} OR ${rateLimit.count} < ${rule.max}::int THEN ${now}::bigint ELSE ${rateLimit.lastRequest} END`,
+          },
+        })
+        .returning({
+          count: rateLimit.count,
+          lastRequest: rateLimit.lastRequest,
+        });
+      await purgeExpiredAuthRowsThrottled(db);
+      if (row.count <= rule.max) return { allowed: true, retryAfter: null };
+      return {
+        allowed: false,
+        retryAfter: Math.ceil((row.lastRequest + windowMs - now) / 1000),
+      };
+    },
+  };
+}
+
+const SIGN_IN_BACKOFF_MESSAGE =
+  "Too many sign-in attempts. Wait a few minutes and try again.";
+/** Seconds a sign-in waits after `count` counted attempts: none for 1-4, then 1, 2, 4, 8, then 15 minutes. */
+const signInDelay = (count: SQLWrapper) =>
+  sql`(CASE WHEN ${count} < 5 THEN 0 WHEN ${count} < 9 THEN 60 * (1 << (${count} - 5)) ELSE 900 END) * interval '1 second'`;
+
+/**
+ * Per-email sign-in backoff in auth.api_rate_limits under a keyed hash of the address. One atomic
+ * upsert charges the attempt before the password is checked: window_start is the last counted
+ * attempt and count the attempts since the last success. A refused attempt changes nothing and
+ * returns no row. Existing and unknown addresses are treated identically.
+ */
+async function chargeSignInAttempt(db: AppDb, key: string) {
+  const quiet = sql`${apiRateLimits.windowStart} <= current_timestamp - interval '15 minutes'`;
+  const [charged] = await db
+    .insert(apiRateLimits)
+    .values({ key, windowStart: sql`current_timestamp`, count: 1 })
+    .onConflictDoUpdate({
+      target: apiRateLimits.key,
+      set: {
+        count: sql`CASE WHEN ${quiet} THEN 1 ELSE LEAST(${apiRateLimits.count} + 1, 1000000) END`,
+        windowStart: sql`current_timestamp`,
+      },
+      setWhere: sql`${quiet} OR ${apiRateLimits.count} < 5 OR ${apiRateLimits.windowStart} + ${signInDelay(apiRateLimits.count)} <= current_timestamp`,
+    })
+    .returning({ count: apiRateLimits.count });
+  if (charged) return;
+  const [waiting] = await db
+    .select({
+      seconds: sql<string>`ceil(extract(epoch from ${apiRateLimits.windowStart} + ${signInDelay(apiRateLimits.count)} - current_timestamp))`,
+    })
+    .from(apiRateLimits)
+    .where(eq(apiRateLimits.key, key));
+  throw new APIError(
+    "TOO_MANY_REQUESTS",
+    { code: "sign_in_backoff", message: SIGN_IN_BACKOFF_MESSAGE },
+    { "Retry-After": String(Math.max(1, Number(waiting?.seconds ?? 60))) },
+  );
+}
+
+/** A trusted device is honoured for 30 days after its code was last entered, never longer. */
+const TRUST_DEVICE_SECONDS = 60 * 60 * 24 * 30;
+/** Expiry of the trust row a trusted sign-in presented; the row it is re-issued as may not outlive it. */
+const presentedTrustExpiry = defineRequestState<Date | null>(() => null);
+/** Set when this request turns two-step sign-in on, so the user's other sessions end. */
+const twoStepTurnedOn = defineRequestState<boolean>(() => false);
+/** Turning two-step off or replacing the backup codes forgets every trusted device of this user. */
+const forgetTrustedDevicesOf = defineRequestState<string | null>(() => null);
+const FORGET_TRUSTED_DEVICE_PATHS = new Set([
+  "/two-factor/disable",
+  "/two-factor/generate-backup-codes",
+]);
+/** The user `hooks.before` found active, before Better Auth opens a password change's transaction. */
+const checkedActiveUser = defineRequestState<string | null>(() => null);
+const accountDeactivatedError = () =>
+  new APIError("FORBIDDEN", {
+    code: "account_deactivated",
+    message:
+      "This account has been deactivated. Ask a company owner or admin to reactivate it.",
+  });
+/** Only these paths may create a session for a user with two-step sign-in. */
+const TWO_STEP_SESSION_PATHS = new Set([
+  "/sign-in/email",
+  "/two-factor/verify-totp",
+  "/two-factor/verify-backup-code",
+  "/change-password",
+]);
+/** What a setup-required owner or admin may still call. */
+const TWO_STEP_SETUP_PATHS = new Set([
+  "/get-session",
+  "/sign-out",
+  "/two-factor/enable",
+  "/two-factor/verify-totp",
+]);
+
 export function createAuth(db: AppDb, config: FactoryConfig) {
   const mail = (to: string, subject: string, text: string) =>
     dispatchAuthMail({ to, subject, text }, config.deliver);
@@ -115,12 +279,36 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         },
       },
     },
-    allowUserToCreateOrganization: (user) => user.emailVerified,
+    // Read the creator's row and owner memberships from the database, never from the request.
+    allowUserToCreateOrganization: async (sessionUser) => {
+      const ctx = tryGetCurrentAuthEndpointContext();
+      if (!ctx) return false;
+      const adapter = await getCurrentAdapter(ctx.context.adapter);
+      const row = await adapter.findOne<{
+        emailVerified: boolean;
+        initialAdmin: boolean | null;
+      }>({
+        model: "user",
+        where: [{ field: "id", value: sessionUser.id }],
+      });
+      if (!row) return false;
+      const owned = await adapter.count({
+        model: "member",
+        where: [
+          { field: "userId", value: sessionUser.id },
+          { field: "role", value: "owner" },
+        ],
+      });
+      return canCreateTeam(row, owned > 0 ? ["owner"] : []);
+    },
     sendInvitationEmail: async (data) => {
+      // Team names are user-chosen; mail never carries their control, bidi or invisible characters.
+      const teamName =
+        cleanClientName(data.organization.name) || "a RecruitmentOS team";
       await mail(
         data.email,
-        `Invitation to ${data.organization.name} on RecruitmentOS`,
-        `You have been invited to join ${data.organization.name}. Sign in using this email address, verify it, and accept the invitation:\n${config.baseURL}/accept-invitation?id=${encodeURIComponent(data.id)}\nThis invitation expires in 48 hours.`,
+        `Invitation to ${teamName} on RecruitmentOS`,
+        `You have been invited to join ${teamName}. Sign in using this email address, verify it, and accept the invitation:\n${config.baseURL}/accept-invitation?id=${encodeURIComponent(data.id)}\nThis invitation expires in 48 hours.`,
       );
     },
     organizationHooks: {
@@ -152,6 +340,15 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       },
     },
   });
+  // The plugin writes the team, its owner and the active team separately; commit them together.
+  const createOrganization = plugin.endpoints.createOrganization;
+  plugin.endpoints.createOrganization = Object.assign(
+    (input: Parameters<typeof createOrganization>[0] & { context: object }) =>
+      runWithTransaction((input.context as AuthContext).adapter, () =>
+        createOrganization(input),
+      ),
+    { path: createOrganization.path, options: createOrganization.options },
+  ) as unknown as typeof createOrganization;
   return betterAuth({
     appName: "RecruitmentOS",
     baseURL: config.baseURL,
@@ -168,7 +365,13 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
       schema: authTables,
       transaction: true,
     }),
-    advanced: { database: { generateId: "uuid" } },
+    advanced: {
+      database: { generateId: "uuid" },
+      // Better Auth skips callback and redirect origin checks when NODE_ENV=test or TEST is set; keep them on everywhere.
+      disableOriginCheck: false,
+      // Auth rate limits and session addresses use the same single client-IP header as the API.
+      ipAddress: { ipAddressHeaders: [clientIpHeader()] },
+    },
     user: {
       deleteUser: { enabled: false },
       changeEmail: { enabled: false },
@@ -190,12 +393,12 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
     },
     session: {
       expiresIn: 60 * 60 * 24 * 7,
-      freshAge: 60 * 15,
+      freshAge: SESSION_FRESH_AGE_SECONDS,
       cookieCache: { enabled: false },
     },
     rateLimit: {
       enabled: true,
-      storage: "database",
+      customStorage: hashedRateLimitStorage(db, config.secret),
       window: 60,
       max: 100,
       customRules: {
@@ -248,7 +451,78 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
         : {}),
     },
     databaseHooks: {
+      session: {
+        create: {
+          // A two-step user's session comes only from a path that challenged or checked the code.
+          before: async (row, ctx) => {
+            if (!ctx || !TWO_STEP_SESSION_PATHS.has(ctx.path)) {
+              const [owner] = ctx
+                ? [
+                    await (
+                      await getCurrentAdapter(ctx.context.adapter)
+                    ).findOne<{ twoFactorEnabled: boolean }>({
+                      model: "user",
+                      where: [{ field: "id", value: row.userId }],
+                    }),
+                  ]
+                : await db
+                    .select({ twoFactorEnabled: user.twoFactorEnabled })
+                    .from(user)
+                    .where(eq(user.id, row.userId));
+              if (owner?.twoFactorEnabled)
+                throw new APIError("FORBIDDEN", {
+                  code: "two_step_sign_in_required",
+                  message:
+                    "Sign in with your email, password and authenticator code.",
+                });
+            }
+            // A deactivated person gets no session on any path. Better Auth has already checked
+            // the password or code, so the state is never shown to someone without them.
+            const store = (
+              await getCurrentDBAdapterAsyncLocalStorage()
+            ).getStore();
+            if (store?.isTransactionActive) {
+              // No second transaction may open beside Better Auth's own (a single connection on
+              // PGlite); only a password change, checked before its transaction, gets here.
+              const checked = (await hasRequestState())
+                ? await checkedActiveUser.get()
+                : null;
+              if (checked !== row.userId)
+                throw new Error("The account state was not checked.");
+            } else if (await accountDeactivated(db, row.userId))
+              throw accountDeactivatedError();
+          },
+        },
+      },
+      verification: {
+        create: {
+          before: async (row) => {
+            if (
+              !row.identifier.startsWith("trust-device-") ||
+              !(await hasRequestState())
+            )
+              return;
+            const limit = await presentedTrustExpiry.get();
+            if (limit && row.expiresAt > limit)
+              return { data: { ...row, expiresAt: limit } };
+          },
+        },
+      },
       user: {
+        update: {
+          before: async (data) => {
+            if (data.twoFactorEnabled === true && (await hasRequestState()))
+              await twoStepTurnedOn.set(true);
+          },
+          // A password-only session never survives turning two-step sign-in on; the plugin
+          // creates the request's replacement session after this.
+          after: async (updated, ctx) => {
+            if (!updated || !ctx || !(await hasRequestState())) return;
+            if (!(await twoStepTurnedOn.get())) return;
+            await twoStepTurnedOn.set(false);
+            await ctx.context.internalAdapter.deleteUserSessions(updated.id);
+          },
+        },
         create: {
           before: async (user, ctx) => {
             if (!ctx)
@@ -323,8 +597,87 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
                 "Authentication requests must come from this application.",
             });
         }
+        // The plugin can return the stored secret again; it is shown only once, during setup.
+        if (ctx.path === "/two-factor/get-totp-uri")
+          throw new APIError("FORBIDDEN", {
+            code: "two_step_key_hidden",
+            message:
+              "The authenticator key is shown only once, during setup. Turn two-step sign-in off and on again to add a new authenticator.",
+          });
+        // Team or company owners and admins without two-step sign-in may only set it up or sign out.
+        const gated =
+          !TWO_STEP_SETUP_PATHS.has(ctx.path) &&
+          Boolean(ctx.getCookie(ctx.context.authCookies.sessionToken.name));
+        const session = gated
+          ? await getAuthoritativeSessionFromCtx(ctx)
+          : undefined;
+        // A deactivated person's surviving session is refused on every gated endpoint, whatever
+        // their team role or two-step state: team management never reaches tenant_context.install.
+        if (session) {
+          if (await accountDeactivated(db, session.user.id))
+            throw accountDeactivatedError();
+          // A password change creates its new session inside Better Auth's transaction, where the
+          // deactivation check cannot open its own; the session hook relies on this check.
+          if (ctx.path === "/change-password")
+            await checkedActiveUser.set(session.user.id);
+        }
+        if (session && !session.user.twoFactorEnabled) {
+          const memberships = await db
+            .select({ teamId: member.organizationId, role: member.role })
+            .from(member)
+            .where(eq(member.userId, session.user.id));
+          let held: boolean;
+          try {
+            held = await companyAuthorityHeld(db, session.user, memberships);
+          } catch (error) {
+            // A deactivation committed since the check above; answer the same refusal.
+            if (
+              error instanceof ApiError &&
+              error.code === "account_deactivated"
+            )
+              throw accountDeactivatedError();
+            throw error;
+          }
+          if (
+            twoStepSetupRequired(
+              false,
+              memberships.map((row) => row.role),
+              held,
+            )
+          )
+            throw new APIError("FORBIDDEN", {
+              code: "two_step_setup_required",
+              message: TWO_STEP_SETUP_MESSAGE,
+            });
+        }
+        if (session && FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path))
+          await forgetTrustedDevicesOf.set(session.user.id);
+        if (ctx.path === "/sign-in/email") {
+          const email = (ctx.body as { email?: unknown } | undefined)?.email;
+          if (typeof email === "string")
+            await chargeSignInAttempt(
+              db,
+              signInBackoffKey(email, config.secret),
+            );
+          // The trust row a trusted sign-in re-issues may not outlive this one.
+          const presented = await ctx.getSignedCookie(
+            ctx.context.createAuthCookie("trust_device").name,
+            ctx.context.secret,
+          );
+          const identifier =
+            typeof presented === "string" ? presented.split("!")[1] : "";
+          if (identifier?.startsWith("trust-device-")) {
+            const row =
+              await ctx.context.internalAdapter.findVerificationValue(
+                identifier,
+              );
+            if (row) await presentedTrustExpiry.set(new Date(row.expiresAt));
+          }
+        }
         if (!ctx.path.startsWith("/organization/")) return;
-        const identity = await getAuthoritativeSessionFromCtx(ctx);
+        const identity = gated
+          ? session
+          : await getAuthoritativeSessionFromCtx(ctx);
         if (!identity?.user.emailVerified)
           throw new APIError("FORBIDDEN", {
             message: "Sign in with a verified email to manage teams.",
@@ -337,16 +690,19 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
           [
             "/organization/invite-member",
             "/organization/update-member-role",
+            "/organization/remove-member",
           ].includes(ctx.path)
         ) {
           const body = ctx.body as {
             role?: unknown;
             organizationId?: string;
-            memberId?: string;
+            memberId?: unknown;
+            memberIdOrEmail?: unknown;
           };
-          const role = validateRole(
-            typeof body?.role === "string" ? body.role : "",
-          );
+          const role =
+            ctx.path === "/organization/remove-member"
+              ? undefined
+              : validateRole(typeof body?.role === "string" ? body.role : "");
           const organizationId =
             body?.organizationId ?? identity.session.activeOrganizationId;
           if (!organizationId)
@@ -363,20 +719,26 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
               )
               .limit(1)
           )[0];
-          const target = body.memberId
-            ? (
-                await db
-                  .select()
-                  .from(member)
-                  .where(
-                    and(
-                      eq(member.id, body.memberId),
-                      eq(member.organizationId, organizationId),
-                    ),
-                  )
-                  .limit(1)
-              )[0]
-            : undefined;
+          // Removal names the member by id or email; resolve both so an owner cannot be removed by a non-owner.
+          const targetKey = body?.memberId ?? body?.memberIdOrEmail;
+          const target =
+            typeof targetKey === "string"
+              ? (
+                  await db
+                    .select({ role: member.role })
+                    .from(member)
+                    .innerJoin(user, eq(user.id, member.userId))
+                    .where(
+                      and(
+                        targetKey.includes("@")
+                          ? eq(user.email, targetKey.trim().toLowerCase())
+                          : eq(member.id, targetKey),
+                        eq(member.organizationId, organizationId),
+                      ),
+                    )
+                    .limit(1)
+                )[0]
+              : undefined;
           if (
             (role === "owner" || target?.role === "owner") &&
             actor?.role !== "owner"
@@ -386,8 +748,51 @@ export function createAuth(db: AppDb, config: FactoryConfig) {
             });
         }
       }),
+      after: createAuthMiddleware(async (ctx) => {
+        if (isAPIError(ctx.context.returned)) return;
+        if (FORGET_TRUSTED_DEVICE_PATHS.has(ctx.path)) {
+          const userId = await forgetTrustedDevicesOf.get();
+          if (userId)
+            await db
+              .delete(verification)
+              .where(
+                and(
+                  like(verification.identifier, "trust-device-%"),
+                  eq(verification.value, userId),
+                ),
+              );
+          return;
+        }
+        // A correct password (including a two-step challenge) clears the address's backoff.
+        if (ctx.path !== "/sign-in/email") return;
+        const email = (ctx.body as { email?: unknown } | undefined)?.email;
+        if (typeof email !== "string") return;
+        // A failure must not stop the plugin's after hook, which ends a challenged password session.
+        try {
+          await db
+            .delete(apiRateLimits)
+            .where(
+              eq(apiRateLimits.key, signInBackoffKey(email, config.secret)),
+            );
+        } catch (error) {
+          const code = (
+            (error as { cause?: { code?: unknown } } | null)?.cause ??
+            (error as { code?: unknown } | null)
+          )?.code;
+          console.error(
+            `sign_in_backoff_clear_failed${typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? ` sqlstate=${code}` : ""}`,
+          );
+        }
+      }),
     },
-    plugins: [plugin],
+    plugins: [
+      plugin,
+      twoFactor({
+        issuer: "RecruitmentOS",
+        totpOptions: { digits: 6, period: 30 },
+        trustDeviceMaxAge: TRUST_DEVICE_SECONDS,
+      }),
+    ],
   });
 }
 

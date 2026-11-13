@@ -20,8 +20,31 @@ import {
 } from "lucide-react";
 import type { RecordDto, ResourceName } from "@/domain/records";
 import { RecordEditor } from "./editor";
-import { dataOf, formatDate, recordLabel, saveCsv } from "./helpers";
-import { useApi, useWorkspace, requestJson, humanError } from "./client";
+import {
+  analyticsExportMetadata,
+  analyticsRange,
+  dataOf,
+  formatDate,
+  formatNumber,
+  recordLabel,
+  saveCsv,
+} from "./helpers";
+import {
+  dataCache,
+  teamRequester,
+  useApi,
+  useCacheIdentity,
+  usePendingKeys,
+  useWorkspace,
+} from "./client";
+import { markNotificationsRead } from "./optimistic";
+import { useReadyTiming } from "./speed-log";
+import {
+  activityPath,
+  analyticsPath,
+  NOTIFICATIONS_PATH,
+  OVERVIEW_PATH,
+} from "./tab-requests";
 import {
   BarChart,
   HiringMetrics,
@@ -88,7 +111,8 @@ interface AnalyticsData extends HiringMetricData {
 }
 export function Overview() {
   const { team, user, role } = useWorkspace();
-  const result = useApi<OverviewData>("/api/v1/overview");
+  const result = useApi<OverviewData>(OVERVIEW_PATH);
+  useReadyTiming("tab.overview", !!result.data);
   const [editor, setEditor] = useState<ResourceName | null>(null);
   if (!team) return <NoTeam />;
   return (
@@ -137,7 +161,7 @@ export function Overview() {
                 value={result.data.counts.vacancies}
                 icon={BriefcaseBusiness}
                 href="/app/vacancies"
-                caption="Roles currently being recruited"
+                caption="Vacancies with status Open"
               />
               <Stat
                 label="Applications"
@@ -147,30 +171,31 @@ export function Overview() {
                 caption="Nonarchived application records"
               />
               <Stat
-                label="Recruitment tasks"
+                label="Team tasks"
                 value={result.data.counts.tasks}
                 icon={CheckCheck}
                 href="/app/tasks"
-                caption="Next steps for your team"
+                caption="Tasks not in a completed bucket"
               />
             </div>
             <div className="data-reconciliation">
               <span>
-                <strong>
-                  {result.data.counts.candidates?.toLocaleString()}
-                </strong>{" "}
+                <strong>{formatNumber(result.data.counts.candidates)}</strong>{" "}
                 candidate records
               </span>
               <span>
                 <strong>
-                  {result.data.counts.cvFiles?.toLocaleString() ?? "—"}
+                  {result.data.counts.cvFiles === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.cvFiles)}
                 </strong>{" "}
                 private CV files
               </span>
               <span>
                 <strong>
-                  {result.data.counts.candidatesWithCvs?.toLocaleString() ??
-                    "—"}
+                  {result.data.counts.candidatesWithCvs === undefined
+                    ? "—"
+                    : formatNumber(result.data.counts.candidatesWithCvs)}
                 </strong>{" "}
                 candidates with CVs
               </span>
@@ -356,7 +381,7 @@ function Stat({
         </span>
       </div>
       <strong className="stat-value">
-        {typeof value === "number" ? value.toLocaleString() : "—"}
+        {typeof value === "number" ? formatNumber(value) : "—"}
       </strong>
       <div className="row space-between">
         <small>{caption}</small>
@@ -405,7 +430,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
           <div className="row space-between">
             <span>{row.name}</span>
             <strong>
-              {row.count.toLocaleString()} / {coverage.total.toLocaleString()}
+              {formatNumber(row.count)} / {formatNumber(coverage.total)}
             </strong>
           </div>
           <progress
@@ -418,7 +443,7 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
       <Link className="coverage-review" href="/app/source-review">
         <span>Source records needing review</span>
         <strong>
-          {coverage.reviewRequired.toLocaleString()}
+          {formatNumber(coverage.reviewRequired)}
           <ArrowUpRight size={15} aria-hidden="true" />
         </strong>
       </Link>
@@ -426,14 +451,13 @@ function Coverage({ coverage }: { coverage: OverviewData["coverage"] }) {
   );
 }
 export function Analytics({ talent = false }: { talent?: boolean }) {
-  const { team } = useWorkspace();
+  const { team, environment } = useWorkspace();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [dates, setDates] = useState({ from: "", to: "" });
-  const result = useApi<AnalyticsData>(
-    `/api/v1/analytics?from=${dates.from}&to=${dates.to}`,
-  );
-  const overview = useApi<OverviewData>(talent ? "/api/v1/overview" : null);
+  const result = useApi<AnalyticsData>(analyticsPath(dates.from, dates.to));
+  useReadyTiming(talent ? "tab.insights" : "tab.analytics", !!result.data);
+  const overview = useApi<OverviewData>(talent ? OVERVIEW_PATH : null);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -453,27 +477,35 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
           className="button secondary"
           disabled={!result.data}
           onClick={() => {
-            if (result.data)
-              saveCsv(
-                "RecruitmentOS-analytics.csv",
-                ["Metric", "Group", "Count"],
-                [
-                  ...result.data.stages.map((item) => [
-                    "Application stage",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.sources.map((item) => [
-                    "Application source",
-                    item.name,
-                    item.count,
-                  ]),
-                  ...result.data.series.flatMap((item) => [
-                    ["Applications", item.date, item.applications],
-                    ["Observed hires", item.date, item.hired],
-                  ]),
-                ],
-              );
+            if (!result.data) return;
+            const now = new Date();
+            saveCsv(
+              "RecruitmentOS-analytics.csv",
+              ["Metric", "Group", "Count"],
+              [
+                ...result.data.stages.map((item) => [
+                  "Application stage",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.sources.map((item) => [
+                  "Application source",
+                  item.name,
+                  item.count,
+                ]),
+                ...result.data.series.flatMap((item) => [
+                  ["Applications", item.date, item.applications],
+                  ["Observed hires", item.date, item.hired],
+                ]),
+              ],
+              analyticsExportMetadata({
+                title: talent ? "Talent insights" : "Hiring analytics",
+                from: result.data.from,
+                to: result.data.to,
+                now,
+                environment,
+              }),
+            );
           }}
         >
           Export statistics
@@ -520,6 +552,11 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
             Last 30 days
           </button>
         </form>
+      )}
+      {!talent && result.data && (
+        <p className="muted">
+          {analyticsRange(result.data.from, result.data.to)}
+        </p>
       )}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />
@@ -605,7 +642,7 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     caption="Current active application records"
                   />
                   <Stat
-                    label="Vacancies"
+                    label="Open vacancies"
                     value={result.data.counts.vacancies}
                     icon={BriefcaseBusiness}
                     href="/app/vacancies"
@@ -646,7 +683,10 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
                     <BarChart data={result.data.offers} />
                   </section>
                   <section className="panel">
-                    <PanelHeading title="Open roles by department" />
+                    <PanelHeading
+                      title="Open roles by department"
+                      description="Vacancies with status Open"
+                    />
                     <BarChart data={result.data.departments} />
                   </section>
                 </div>
@@ -670,17 +710,22 @@ export function Analytics({ talent = false }: { talent?: boolean }) {
     </div>
   );
 }
-export function ActivityScreen() {
-  const { team } = useWorkspace();
+type ActivityPage = {
+  data: ActivityItem[];
+  pagination: { total: number; totalPages: number };
+};
+/** The activity feed's search, record type and page, and its read of the active or TeamScope team. */
+function useActivity() {
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState("");
   const [page, setPage] = useState(1);
-  const result = useApi<{
-    data: ActivityItem[];
-    pagination: { total: number; totalPages: number };
-  }>(
-    `/api/v1/activity?page=${page}&pageSize=50&search=${encodeURIComponent(search)}&kind=${encodeURIComponent(kind)}`,
-  );
+  const result = useApi<ActivityPage>(activityPath(page, search, kind));
+  return { search, setSearch, kind, setKind, page, setPage, result };
+}
+export function ActivityScreen() {
+  const { team } = useWorkspace();
+  const activity = useActivity();
+  useReadyTiming("tab.activity", !!activity.result.data);
   if (!team) return <NoTeam />;
   return (
     <div className="stack">
@@ -692,110 +737,136 @@ export function ActivityScreen() {
             A traceable record of changes across your recruitment workspace.
           </p>
         </div>
-        <button className="button secondary" onClick={result.refresh}>
+        <button className="button secondary" onClick={activity.result.refresh}>
           <RefreshCw size={16} aria-hidden="true" />
           Refresh
         </button>
       </div>
-      <section className="panel">
-        <div className="records-toolbar">
-          <div className="search-field">
-            <Search size={18} aria-hidden="true" />
-            <input
-              aria-label="Search activity"
-              placeholder="Search activity…"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
-              }}
-            />
-          </div>
-          <select
-            aria-label="Filter activity by record type"
-            value={kind}
+      <ActivityPanel {...activity} />
+    </div>
+  );
+}
+/** The team detail Activity tab: the same feed as /app/activity, for the TeamScope's team. */
+export function ActivityList() {
+  const activity = useActivity();
+  return <ActivityPanel heading="Activity" {...activity} />;
+}
+/** The activity feed with its search, record-type filter and paging, 50 events a page. */
+function ActivityPanel({
+  heading,
+  search,
+  setSearch,
+  kind,
+  setKind,
+  page,
+  setPage,
+  result,
+}: ReturnType<typeof useActivity> & { heading?: string }) {
+  return (
+    <section className="panel">
+      {heading && <h2>{heading}</h2>}
+      <div className="records-toolbar">
+        <div className="search-field">
+          <Search size={18} aria-hidden="true" />
+          <input
+            aria-label="Search activity"
+            placeholder="Search activity…"
+            value={search}
             onChange={(e) => {
-              setKind(e.target.value);
+              setSearch(e.target.value);
               setPage(1);
             }}
-          >
-            <option value="">All record types</option>
-            {[
-              "candidate",
-              "vacancy",
-              "application",
-              "task",
-              "interview",
-              "offer",
-              "onboarding",
-              "checklist",
-              "comment",
-            ].map((item) => (
-              <option key={item}>{item}</option>
-            ))}
-          </select>
-        </div>
-        {result.error ? (
-          <LoadError message={result.error} retry={result.refresh} />
-        ) : result.loading ? (
-          <Loading />
-        ) : result.data?.data.length ? (
-          <div className="activity-feed">
-            {result.data.data.map((item) => (
-              <article key={item.id}>
-                <span className="activity-icon">
-                  <Activity size={18} aria-hidden="true" />
-                </span>
-                <div>
-                  <p>
-                    <strong>{item.actorName || item.actorType}</strong>
-                    <span className="badge">{item.kind}</span>
-                  </p>
-                  <h3>{item.summary}</h3>
-                  <p className="muted">
-                    {formatDate(item.createdAt, true)} · {item.actorType}
-                    {item.action === "import"
-                      ? " · Imported source record"
-                      : ""}
-                  </p>
-                  {item.metadata.fromStage && item.metadata.toStage ? (
-                    <p>
-                      <Badge value={item.metadata.fromStage} /> →{" "}
-                      <Badge value={item.metadata.toStage} />
-                    </p>
-                  ) : null}
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="Your team’s story starts here"
-            description="Saved changes and workflow updates appear in this audit trail."
           />
-        )}
-        <div className="pagination">
-          <span>{result.data?.pagination.total || 0} events</span>
-          <div className="row">
-            <button
-              className="button secondary small"
-              disabled={page === 1}
-              onClick={() => setPage((n) => n - 1)}
-            >
-              Previous
-            </button>
-            <span>Page {page}</span>
-            <button
-              className="button secondary small"
-              disabled={page >= (result.data?.pagination.totalPages || 1)}
-              onClick={() => setPage((n) => n + 1)}
-            >
-              Next
-            </button>
-          </div>
         </div>
-      </section>
-    </div>
+        <select
+          aria-label="Filter activity by record type"
+          value={kind}
+          onChange={(e) => {
+            setKind(e.target.value);
+            setPage(1);
+          }}
+        >
+          <option value="">All record types</option>
+          {[
+            "candidate",
+            "vacancy",
+            "application",
+            "task",
+            "interview",
+            "offer",
+            "onboarding",
+            "checklist",
+            "comment",
+            "export",
+          ].map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </div>
+      {result.error ? (
+        <LoadError message={result.error} retry={result.refresh} />
+      ) : result.loading ? (
+        <Loading />
+      ) : result.data?.data.length ? (
+        <div className="activity-feed">
+          {result.data.data.map((item) => (
+            <article key={item.id}>
+              <span className="activity-icon">
+                <Activity size={18} aria-hidden="true" />
+              </span>
+              <div>
+                <p>
+                  <strong>{item.actorName || item.actorType}</strong>
+                  <span className="badge">{item.kind}</span>
+                </p>
+                <h3>{item.summary}</h3>
+                <p className="muted">
+                  {formatDate(item.createdAt, true)} · {item.actorType}
+                  {item.action === "import" ? " · Imported source record" : ""}
+                </p>
+                {item.metadata.fromStage && item.metadata.toStage ? (
+                  <p>
+                    <Badge value={item.metadata.fromStage} /> →{" "}
+                    <Badge value={item.metadata.toStage} />
+                  </p>
+                ) : null}
+                {item.metadata.fromStatus && item.metadata.toStatus ? (
+                  <p>
+                    <Badge value={item.metadata.fromStatus} /> →{" "}
+                    <Badge value={item.metadata.toStatus} />
+                  </p>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          title="Your team’s story starts here"
+          description="Saved changes and workflow updates appear in this audit trail."
+        />
+      )}
+      <div className="pagination">
+        <span>{result.data?.pagination.total || 0} events</span>
+        <div className="row">
+          <button
+            className="button secondary small"
+            disabled={page === 1}
+            onClick={() => setPage((n) => n - 1)}
+          >
+            Previous
+          </button>
+          <span>Page {page}</span>
+          <button
+            className="button secondary small"
+            disabled={page >= (result.data?.pagination.totalPages || 1)}
+            onClick={() => setPage((n) => n + 1)}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 interface NotificationItem {
@@ -815,25 +886,23 @@ export function Notifications() {
     unreadCount?: number;
     total?: number;
     limited?: boolean;
-  }>("/api/v1/notifications");
+  }>(NOTIFICATIONS_PATH);
+  useReadyTiming("tab.notifications", !!result.data);
+  const identity = useCacheIdentity();
   const [show, setShow] = useState("all");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const mark = async (keys: string[]) => {
-    if (!team) return;
-    setBusy(true);
+  const busy = usePendingKeys().has(NOTIFICATIONS_PATH);
+  // Read at once here and in the navigation count; undone with a message if the save fails.
+  const mark = (keys: string[]) => {
+    if (!team || !identity || busy) return;
     setError("");
-    try {
-      await requestJson(team.id, "/api/v1/notifications", {
-        method: "POST",
-        body: JSON.stringify({ keys }),
-      });
-      result.refresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusy(false);
-    }
+    void markNotificationsRead(dataCache, teamRequester(team.id), {
+      identity,
+      path: NOTIFICATIONS_PATH,
+      keys,
+    }).then((outcome) => {
+      if (!outcome.ok && outcome.message) setError(outcome.message);
+    });
   };
   if (!team) return <NoTeam />;
   const items =

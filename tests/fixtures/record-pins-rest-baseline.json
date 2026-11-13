@@ -1,0 +1,744 @@
+{
+  "lists": {
+    "candidates": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067004",
+          "kind": "candidate",
+          "data": {
+            "name": "Fictional Pin Candidate",
+            "email": "pin-candidate@example.test",
+            "skills": ["SQL"],
+            "reviewStatus": "Reviewed"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:03:00.000Z",
+          "updatedAt": "2026-01-01T09:03:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000067005",
+          "kind": "candidate",
+          "data": { "name": "Fictional Second Pin Candidate" },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:04:00.000Z",
+          "updatedAt": "2026-01-01T09:04:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 2, "totalPages": 1 }
+    },
+    "job-roles": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067001",
+          "kind": "job-role",
+          "data": {
+            "title": "Fictional Data Analyst",
+            "department": "Analytics"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:00:00.000Z",
+          "updatedAt": "2026-01-01T09:00:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "vacancies": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067003",
+          "kind": "vacancy",
+          "data": {
+            "title": "Fictional Data Analyst",
+            "status": "Open",
+            "requisitionId": "PIN-001"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:02:00.000Z",
+          "updatedAt": "2026-01-01T09:02:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": "00000000-0000-4000-8000-000000067001",
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "applications": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067006",
+          "kind": "application",
+          "data": { "stage": "Interview", "source": "Referral" },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:05:00.000Z",
+          "updatedAt": "2026-01-01T09:05:00.000Z",
+          "archivedAt": null,
+          "candidateId": "00000000-0000-4000-8000-000000067004",
+          "vacancyId": "00000000-0000-4000-8000-000000067003",
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null,
+          "label": "Fictional Pin Candidate · Fictional Data Analyst",
+          "candidateLabel": "Fictional Pin Candidate",
+          "vacancyLabel": "Fictional Data Analyst"
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "buckets": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067011",
+          "kind": "bucket",
+          "data": { "name": "Fictional pin follow-ups", "position": 0 },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:10:00.000Z",
+          "updatedAt": "2026-01-01T09:10:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "task-fields": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067012",
+          "kind": "task-field",
+          "data": {
+            "name": "Fictional reference",
+            "type": "Text",
+            "position": 0
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:11:00.000Z",
+          "updatedAt": "2026-01-01T09:11:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "tasks": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067013",
+          "kind": "task",
+          "data": {
+            "title": "Fictional pin follow-up",
+            "priority": "High",
+            "customValues": {
+              "00000000-0000-4000-8000-000000067012": "Fictional reference 42"
+            },
+            "assigneeIds": []
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:12:00.000Z",
+          "updatedAt": "2026-01-01T09:12:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": "00000000-0000-4000-8000-000000067011",
+          "jobRoleId": null,
+          "parentRecordId": "00000000-0000-4000-8000-000000067003",
+          "parentKind": "vacancy",
+          "parentLabel": "Fictional Data Analyst"
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "interviews": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067007",
+          "kind": "interview",
+          "data": {
+            "title": "Fictional pin interview",
+            "minutes": 45,
+            "startAt": "2026-03-02T09:00:00.000Z"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:06:00.000Z",
+          "updatedAt": "2026-01-01T09:06:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": "00000000-0000-4000-8000-000000067006",
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "offers": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067008",
+          "kind": "offer",
+          "data": {
+            "title": "Fictional pin offer",
+            "amount": "18000.00",
+            "status": "Draft",
+            "currency": "AED"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:07:00.000Z",
+          "updatedAt": "2026-01-01T09:07:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": "00000000-0000-4000-8000-000000067006",
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "onboarding": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067009",
+          "kind": "onboarding",
+          "data": { "status": "Planned", "startDate": "2026-04-01" },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:08:00.000Z",
+          "updatedAt": "2026-01-01T09:08:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": "00000000-0000-4000-8000-000000067006",
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null,
+          "label": "Onboarding · Fictional Pin Candidate · Fictional Data Analyst"
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "checklist": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067010",
+          "kind": "checklist",
+          "data": {
+            "title": "Fictional laptop setup",
+            "category": "Orientation"
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:09:00.000Z",
+          "updatedAt": "2026-01-01T09:09:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": "00000000-0000-4000-8000-000000067009",
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "views": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067014",
+          "kind": "saved-view",
+          "data": {
+            "area": "directory",
+            "name": "Fictional private pin view",
+            "query": { "search": "Fictional" }
+          },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": "record-pins-upgrade-recruiter",
+          "createdAt": "2026-01-01T09:13:00.000Z",
+          "updatedAt": "2026-01-01T09:13:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": null
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    },
+    "comments": {
+      "data": [
+        {
+          "id": "00000000-0000-4000-8000-000000067015",
+          "kind": "comment",
+          "data": { "body": "Fictional pin comment" },
+          "version": 1,
+          "legacyId": null,
+          "createdBy": "record-pins-upgrade-owner",
+          "privateOwnerId": null,
+          "createdAt": "2026-01-01T09:14:00.000Z",
+          "updatedAt": "2026-01-01T09:14:00.000Z",
+          "archivedAt": null,
+          "candidateId": null,
+          "vacancyId": null,
+          "applicationId": null,
+          "onboardingId": null,
+          "bucketId": null,
+          "jobRoleId": null,
+          "parentRecordId": "00000000-0000-4000-8000-000000067004",
+          "authorName": "Fictional Pin Owner"
+        }
+      ],
+      "pagination": { "page": 1, "pageSize": 30, "total": 1, "totalPages": 1 }
+    }
+  },
+  "gets": {
+    "job-roles/00000000-0000-4000-8000-000000067001": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067001",
+        "kind": "job-role",
+        "data": {
+          "title": "Fictional Data Analyst",
+          "department": "Analytics"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:00:00.000Z",
+        "updatedAt": "2026-01-01T09:00:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "job-roles/00000000-0000-4000-8000-000000067002": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067002",
+        "kind": "job-role",
+        "data": { "title": "Fictional Archived Role" },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:01:00.000Z",
+        "updatedAt": "2026-01-01T09:01:00.000Z",
+        "archivedAt": "2026-01-05T12:00:00.000Z",
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "vacancies/00000000-0000-4000-8000-000000067003": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067003",
+        "kind": "vacancy",
+        "data": {
+          "title": "Fictional Data Analyst",
+          "status": "Open",
+          "requisitionId": "PIN-001"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:02:00.000Z",
+        "updatedAt": "2026-01-01T09:02:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": "00000000-0000-4000-8000-000000067001",
+        "parentRecordId": null
+      }
+    },
+    "candidates/00000000-0000-4000-8000-000000067004": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067004",
+        "kind": "candidate",
+        "data": {
+          "name": "Fictional Pin Candidate",
+          "email": "pin-candidate@example.test",
+          "skills": ["SQL"],
+          "reviewStatus": "Reviewed"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:03:00.000Z",
+        "updatedAt": "2026-01-01T09:03:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "candidates/00000000-0000-4000-8000-000000067005": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067005",
+        "kind": "candidate",
+        "data": { "name": "Fictional Second Pin Candidate" },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:04:00.000Z",
+        "updatedAt": "2026-01-01T09:04:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "applications/00000000-0000-4000-8000-000000067006": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067006",
+        "kind": "application",
+        "data": { "stage": "Interview", "source": "Referral" },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:05:00.000Z",
+        "updatedAt": "2026-01-01T09:05:00.000Z",
+        "archivedAt": null,
+        "candidateId": "00000000-0000-4000-8000-000000067004",
+        "vacancyId": "00000000-0000-4000-8000-000000067003",
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null,
+        "label": "Fictional Pin Candidate · Fictional Data Analyst",
+        "candidateLabel": "Fictional Pin Candidate",
+        "vacancyLabel": "Fictional Data Analyst"
+      }
+    },
+    "interviews/00000000-0000-4000-8000-000000067007": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067007",
+        "kind": "interview",
+        "data": {
+          "title": "Fictional pin interview",
+          "minutes": 45,
+          "startAt": "2026-03-02T09:00:00.000Z"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:06:00.000Z",
+        "updatedAt": "2026-01-01T09:06:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": "00000000-0000-4000-8000-000000067006",
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "offers/00000000-0000-4000-8000-000000067008": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067008",
+        "kind": "offer",
+        "data": {
+          "title": "Fictional pin offer",
+          "amount": "18000.00",
+          "status": "Draft",
+          "currency": "AED"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:07:00.000Z",
+        "updatedAt": "2026-01-01T09:07:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": "00000000-0000-4000-8000-000000067006",
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "onboarding/00000000-0000-4000-8000-000000067009": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067009",
+        "kind": "onboarding",
+        "data": { "status": "Planned", "startDate": "2026-04-01" },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:08:00.000Z",
+        "updatedAt": "2026-01-01T09:08:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": "00000000-0000-4000-8000-000000067006",
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null,
+        "label": "Onboarding · Fictional Pin Candidate · Fictional Data Analyst"
+      }
+    },
+    "checklist/00000000-0000-4000-8000-000000067010": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067010",
+        "kind": "checklist",
+        "data": {
+          "title": "Fictional laptop setup",
+          "category": "Orientation"
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:09:00.000Z",
+        "updatedAt": "2026-01-01T09:09:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": "00000000-0000-4000-8000-000000067009",
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "buckets/00000000-0000-4000-8000-000000067011": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067011",
+        "kind": "bucket",
+        "data": { "name": "Fictional pin follow-ups", "position": 0 },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:10:00.000Z",
+        "updatedAt": "2026-01-01T09:10:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "task-fields/00000000-0000-4000-8000-000000067012": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067012",
+        "kind": "task-field",
+        "data": {
+          "name": "Fictional reference",
+          "type": "Text",
+          "position": 0
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:11:00.000Z",
+        "updatedAt": "2026-01-01T09:11:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "tasks/00000000-0000-4000-8000-000000067013": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067013",
+        "kind": "task",
+        "data": {
+          "title": "Fictional pin follow-up",
+          "priority": "High",
+          "customValues": {
+            "00000000-0000-4000-8000-000000067012": "Fictional reference 42"
+          },
+          "assigneeIds": []
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:12:00.000Z",
+        "updatedAt": "2026-01-01T09:12:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": "00000000-0000-4000-8000-000000067011",
+        "jobRoleId": null,
+        "parentRecordId": "00000000-0000-4000-8000-000000067003",
+        "parentKind": "vacancy",
+        "parentLabel": "Fictional Data Analyst"
+      }
+    },
+    "views/00000000-0000-4000-8000-000000067014": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067014",
+        "kind": "saved-view",
+        "data": {
+          "area": "directory",
+          "name": "Fictional private pin view",
+          "query": { "search": "Fictional" }
+        },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": "record-pins-upgrade-recruiter",
+        "createdAt": "2026-01-01T09:13:00.000Z",
+        "updatedAt": "2026-01-01T09:13:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": null
+      }
+    },
+    "comments/00000000-0000-4000-8000-000000067015": {
+      "data": {
+        "id": "00000000-0000-4000-8000-000000067015",
+        "kind": "comment",
+        "data": { "body": "Fictional pin comment" },
+        "version": 1,
+        "legacyId": null,
+        "createdBy": "record-pins-upgrade-owner",
+        "privateOwnerId": null,
+        "createdAt": "2026-01-01T09:14:00.000Z",
+        "updatedAt": "2026-01-01T09:14:00.000Z",
+        "archivedAt": null,
+        "candidateId": null,
+        "vacancyId": null,
+        "applicationId": null,
+        "onboardingId": null,
+        "bucketId": null,
+        "jobRoleId": null,
+        "parentRecordId": "00000000-0000-4000-8000-000000067004",
+        "authorName": "Fictional Pin Owner"
+      }
+    }
+  }
+}

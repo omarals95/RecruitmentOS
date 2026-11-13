@@ -47,6 +47,29 @@ export interface ApplyResult {
   sourceMapping: Record<string, string>;
   notificationMapping: Record<string, string>;
   notificationReads: Row[];
+  /** Target records with a legacy ID this plan no longer contains; reported only, never changed. */
+  missing: string[];
+  reconciliation: Reconciliation;
+}
+/** One outcome per planned item, so each category's planned total equals the sum of its outcomes. */
+export interface Reconciliation {
+  records: {
+    planned: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    conflicts: number;
+    failed: number;
+    missing: number;
+  };
+  states: {
+    planned: number;
+    imported: number;
+    unchanged: number;
+    conflicts: number;
+    failed: number;
+  };
+  files: { planned: number; ready: number; skipped: number; failed: number };
 }
 const key = (resource: ResourceName, id: string) => `${resource}:${id}`;
 export function canonical(value: unknown): string {
@@ -140,6 +163,45 @@ function awsTicket(urlValue: unknown): string {
     );
   return url.href;
 }
+/** Only an exact private Vercel Blob PUT for this file; the server's tag, never the host, decides. */
+function blobTicket(
+  ticket: Row,
+  mimeType: string | undefined,
+  sizeBytes: number | undefined,
+): { url: string; contentType: string } {
+  const invalid = () =>
+    new ImportError(
+      "INVALID_UPLOAD_TICKET",
+      "Upload target is not a Vercel Blob PUT ticket for this exact file.",
+    );
+  if (typeof ticket.url !== "string") throw invalid();
+  let url: URL;
+  try {
+    url = new URL(ticket.url);
+  } catch {
+    throw invalid();
+  }
+  const headers = ticket.headers;
+  if (
+    typeof mimeType !== "string" ||
+    url.protocol !== "https:" ||
+    url.origin !== "https://vercel.com" ||
+    url.pathname !== "/api/blob/" ||
+    url.username ||
+    url.password ||
+    ticket.url.includes("#") ||
+    ticket.method !== "PUT" ||
+    !headers ||
+    typeof headers !== "object" ||
+    Array.isArray(headers) ||
+    Object.keys(headers).length !== 1 ||
+    (headers as Row)["content-type"] !== mimeType ||
+    !Number.isSafeInteger(sizeBytes) ||
+    ticket.maxBytes !== sizeBytes
+  )
+    throw invalid();
+  return { url: ticket.url, contentType: mimeType };
+}
 
 export async function applyPlan(
   plan: MigrationPlan,
@@ -168,7 +230,32 @@ export async function applyPlan(
     sourceMapping: {},
     notificationMapping: {},
     notificationReads: plan.notificationReads,
+    missing: [],
+    reconciliation: {
+      records: {
+        planned: plan.records.length,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        conflicts: 0,
+        failed: 0,
+        missing: 0,
+      },
+      states: {
+        planned: plan.states.length,
+        imported: 0,
+        unchanged: 0,
+        conflicts: 0,
+        failed: 0,
+      },
+      files: { planned: plan.sources.length, ready: 0, skipped: 0, failed: 0 },
+    },
   };
+  const {
+    records: recordTally,
+    states: stateTally,
+    files: fileTally,
+  } = result.reconciliation;
   let lastRequest = 0;
   const request = async (
     path: string,
@@ -296,6 +383,13 @@ export async function applyPlan(
       page++;
     }
   }
+  const plannedKeys = new Set(
+    plan.records.map((record) => key(record.resource, record.legacyId)),
+  );
+  result.missing = [...existing.keys()].filter(
+    (recordKey) => !plannedKeys.has(recordKey),
+  );
+  recordTally.missing = result.missing.length;
   function payloadFor(record: PlannedRecord): Row {
     const data: Row = { ...record.data },
       payload: Row = {
@@ -356,6 +450,7 @@ export async function applyPlan(
           canonical(old.importMeta || {}) === canonical(record.importMeta);
         if (equal) {
           result.skipped++;
+          recordTally.skipped++;
           continue;
         }
         const immutableRefMismatch = Object.entries(
@@ -370,6 +465,7 @@ export async function applyPlan(
           immutableRefMismatch
         ) {
           result.conflicts.push(recordKey);
+          recordTally.conflicts++;
           if (immutableRefMismatch) delete result.mapping[recordKey];
           continue;
         }
@@ -391,6 +487,7 @@ export async function applyPlan(
           saved.data ? object(saved.data) : object(payload.data),
         );
         result.updated++;
+        recordTally.updated++;
       } else {
         const response = await request(
             `/api/v1/${record.resource}`,
@@ -405,9 +502,11 @@ export async function applyPlan(
           saved.data ? object(saved.data) : object(payload.data),
         );
         result.created++;
+        recordTally.created++;
       }
     } catch (error) {
       failure(recordKey, error);
+      recordTally.failed++;
     }
     options.onProgress?.(
       `Records processed: ${result.created + result.updated + result.skipped}; conflicts: ${result.conflicts.length}; errors: ${result.errors.length}`,
@@ -438,9 +537,13 @@ export async function applyPlan(
         current.status === state.status &&
         current.note === note &&
         canonical(current.importMeta || {}) === canonical(importMeta);
-      if (same) continue;
+      if (same) {
+        stateTally.unchanged++;
+        continue;
+      }
       if (current.version !== 0 && !options.updateExisting) {
         result.conflicts.push(location);
+        stateTally.conflicts++;
         continue;
       }
       await request(`/api/v1/candidates/${id}/state`, "PATCH", {
@@ -451,8 +554,10 @@ export async function applyPlan(
         importMeta,
       });
       result.statesImported++;
+      stateTally.imported++;
     } catch (error) {
       failure(location, error);
+      stateTally.failed++;
     }
   }
   const notificationResources: Record<string, ResourceName> = {
@@ -527,6 +632,7 @@ export async function applyPlan(
   for (const source of plan.sources) {
     if (!source.uploadable) {
       result.uploadsSkipped++;
+      fileTally.skipped++;
       continue;
     }
     const location = `CV:${source.id}`;
@@ -543,6 +649,7 @@ export async function applyPlan(
       if (prior) {
         result.sourceMapping[source.id] = prior;
         result.uploadsSkipped++;
+        fileTally.skipped++;
         continue;
       }
       const metadata = {
@@ -579,43 +686,82 @@ export async function applyPlan(
             "Server returned no upload ticket for a CV that is not ready.",
           );
       } else {
-        const ticket = object(upload),
-          url = awsTicket(ticket.url),
-          fields = object(ticket.fields),
-          bytes = await readSourceBytes(plan, source),
-          form = new FormData();
-        for (const [name, value] of Object.entries(fields)) {
-          if (typeof value !== "string")
+        const ticket = object(upload);
+        if (ticket.protocol === "s3-form-v1") {
+          if (ticket.method !== "POST")
             throw new ImportError(
               "INVALID_UPLOAD_TICKET",
-              "S3 form fields must be strings.",
+              "S3 upload tickets must use a form POST.",
             );
-          form.append(name, value);
-        }
-        form.append(
-          "file",
-          new Blob([new Uint8Array(bytes)], { type: source.mimeType }),
-          metadata.originalName,
-        );
-        let uploaded: Response;
-        try {
-          uploaded = await fetcher(url, {
-            method: "POST",
-            body: form,
-            redirect: "error",
-            credentials: "omit",
-            signal: AbortSignal.timeout(60000),
-          });
-        } catch {
-          throw new ImportError(
-            "UPLOAD_OUTCOME_UNCERTAIN",
-            "S3 upload did not finish. Rerun to reuse its reservation and complete validation.",
+          const url = awsTicket(ticket.url),
+            fields = object(ticket.fields),
+            bytes = await readSourceBytes(plan, source),
+            form = new FormData();
+          for (const [name, value] of Object.entries(fields)) {
+            if (typeof value !== "string")
+              throw new ImportError(
+                "INVALID_UPLOAD_TICKET",
+                "S3 form fields must be strings.",
+              );
+            form.append(name, value);
+          }
+          form.append(
+            "file",
+            new Blob([new Uint8Array(bytes)], { type: source.mimeType }),
+            metadata.originalName,
           );
-        }
-        if (!uploaded.ok)
+          let uploaded: Response;
+          try {
+            uploaded = await fetcher(url, {
+              method: "POST",
+              body: form,
+              redirect: "error",
+              credentials: "omit",
+              signal: AbortSignal.timeout(60000),
+            });
+          } catch {
+            throw new ImportError(
+              "UPLOAD_OUTCOME_UNCERTAIN",
+              "S3 upload did not finish. Rerun to reuse its reservation and complete validation.",
+            );
+          }
+          if (!uploaded.ok)
+            throw new ImportError(
+              "S3_UPLOAD_FAILED",
+              `S3 returned HTTP ${uploaded.status}; no API token was sent to S3.`,
+            );
+        } else if (ticket.protocol === "blob-put-v1") {
+          const target = blobTicket(
+              ticket,
+              source.mimeType,
+              metadata.sizeBytes,
+            ),
+            bytes = await readSourceBytes(plan, source);
+          let uploaded: Response;
+          try {
+            uploaded = await fetcher(target.url, {
+              method: "PUT",
+              body: new Uint8Array(bytes),
+              headers: { "content-type": target.contentType },
+              redirect: "error",
+              credentials: "omit",
+              signal: AbortSignal.timeout(60000),
+            });
+          } catch {
+            throw new ImportError(
+              "UPLOAD_OUTCOME_UNCERTAIN",
+              "Blob upload did not finish. Rerun to reuse its reservation and complete validation.",
+            );
+          }
+          if (!uploaded.ok)
+            throw new ImportError(
+              "BLOB_UPLOAD_FAILED",
+              `Private Blob storage returned HTTP ${uploaded.status}; no API token was sent to it.`,
+            );
+        } else
           throw new ImportError(
-            "S3_UPLOAD_FAILED",
-            `S3 returned HTTP ${uploaded.status}; no API token was sent to S3.`,
+            "UNSUPPORTED_UPLOAD_PROTOCOL",
+            "The server returned an upload protocol this importer does not support. No CV bytes were sent.",
           );
         const completed = object(
           (await request(`/api/v1/cvs/uploads/${cvId}/complete`, "POST", {}))
@@ -630,8 +776,10 @@ export async function applyPlan(
       result.sourceMapping[source.id] = cvId;
       uploadedPhysical.set(physicalKey, cvId);
       result.uploadsReady++;
+      fileTally.ready++;
     } catch (error) {
       failure(location, error);
+      fileTally.failed++;
     }
     options.onProgress?.(
       `CVs ready: ${result.uploadsReady}; skipped: ${result.uploadsSkipped}; errors: ${result.errors.length}`,

@@ -6,3 +6,7 @@ package-lock.json
 next-env.d.ts
 PROJECT_CONTRACT.md
 docs/superpowers/
+docs/admin-platform/spec/
+docs/admin-platform/mockups/
+.claude/
+factory/

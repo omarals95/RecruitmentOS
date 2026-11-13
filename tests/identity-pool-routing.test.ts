@@ -13,7 +13,7 @@ vi.mock("@/db", async (original) => ({
 }));
 vi.mock("@/lib/auth-session", () => ({
   getVerifiedSession: vi.fn(async () => ({
-    user: { id: "fictional-user", emailVerified: true },
+    user: { id: "fictional-user", emailVerified: true, twoFactorEnabled: true },
     session: { activeOrganizationId: "fictional-team" },
   })),
   getSession: vi.fn(async () => ({
@@ -36,14 +36,19 @@ vi.mock("next/navigation", () => ({
 import { applyMigrations, schema, type AppDb } from "@/db";
 import { getAuth, getAuthOptions } from "@/lib/auth";
 import { requirePrincipal } from "@/lib/principal";
+import { installTenantContextKey } from "@/lib/tenant-context";
 import { getWorkspaceContext } from "@/lib/workspace";
 import CreateAdmin from "../src/app/(auth)/create-admin/page";
+import { stubHostedReadiness } from "./helpers/readiness";
 
 describe("identity-only operations use the identity pool", () => {
   const pg = new PGlite();
   let db: AppDb;
   beforeAll(async () => {
     await applyMigrations(pg);
+    await installTenantContextKey(pg);
+    // A recruiter without two-step or company authority: the two-step gate's company authority
+    // lookup runs, and must use the identity pool too.
     await pg.exec(`
       INSERT INTO auth."user"(id,name,email,email_verified,initial_admin)
         VALUES('fictional-user','Fictional User','fictional@example.test',true,true);
@@ -51,6 +56,7 @@ describe("identity-only operations use the identity pool", () => {
         VALUES('fictional-team','Fictional Team','fictional-team','fictional-user');
       INSERT INTO auth.member(id,organization_id,user_id,role)
         VALUES('fictional-member','fictional-team','fictional-user','recruiter');
+      DELETE FROM app.workspace_admins WHERE user_id='fictional-user';
     `);
     db = drizzle(pg, { schema }) as unknown as AppDb;
     route.identity.mockImplementation(async () => db);
@@ -104,55 +110,21 @@ describe("identity-only operations use the identity pool", () => {
     expect(route.data).not.toHaveBeenCalled();
   });
 
-  it("reports production sign-in unavailable while tenant isolation is pending", () => {
-    const mode = process.env.NODE_ENV;
-    try {
-      vi.stubEnv("NODE_ENV", "production");
-      vi.stubEnv("BETTER_AUTH_URL", "https://fictional.example.test");
-      vi.stubEnv("DATABASE_URL", "postgres://fictional-data");
-      vi.stubEnv("IDENTITY_DATABASE_URL", undefined);
-      vi.stubEnv("RESEND_API_KEY", "fictional-key");
-      vi.stubEnv("EMAIL_FROM", "sender@example.test");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("IDENTITY_DATABASE_URL", "postgres://fictional-identity");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("BETTER_AUTH_URL", "http://localhost:3000");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("DATABASE_MODE", "pglite");
-      vi.stubEnv("ALLOW_LOCAL_DB", "true");
-      vi.stubEnv("DATABASE_URL", undefined);
-      vi.stubEnv("BETTER_AUTH_URL", "https://fictional.example.test");
-      expect(getAuthOptions().configured).toBe(false);
-    } finally {
-      vi.stubEnv("NODE_ENV", mode);
-    }
+  it("reports hosted sign-in ready on the Vercel production runtime", () => {
+    stubHostedReadiness();
+    expect(getAuthOptions().configured).toBe(true);
+    stubHostedReadiness({ IDENTITY_DATABASE_URL: undefined });
+    expect(getAuthOptions().configured).toBe(false);
+    stubHostedReadiness({ BETTER_AUTH_URL: "http://localhost:3000" });
+    expect(getAuthOptions().configured).toBe(false);
+    stubHostedReadiness({ DATABASE_MODE: "pglite", ALLOW_LOCAL_DB: "true" });
+    expect(getAuthOptions().configured).toBe(false);
   });
 
-  it("reports hosted sign-in unavailable even with a development NODE_ENV", () => {
-    const mode = process.env.NODE_ENV;
-    const vercel = process.env.VERCEL;
-    try {
-      vi.stubEnv("NODE_ENV", "development");
-      vi.stubEnv("VERCEL", "1");
-      vi.stubEnv("BETTER_AUTH_URL", "https://fictional.example.test");
-      vi.stubEnv("DATABASE_URL", "postgres://fictional-data");
-      vi.stubEnv("DATABASE_MODE", "postgres");
-      vi.stubEnv("IDENTITY_DATABASE_URL", undefined);
-      vi.stubEnv("RESEND_API_KEY", "fictional-key");
-      vi.stubEnv("EMAIL_FROM", "sender@example.test");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("IDENTITY_DATABASE_URL", "postgres://fictional-identity");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("BETTER_AUTH_URL", "http://localhost:3000");
-      expect(getAuthOptions().configured).toBe(false);
-      vi.stubEnv("DATABASE_MODE", "pglite");
-      vi.stubEnv("ALLOW_LOCAL_DB", "true");
-      vi.stubEnv("DATABASE_URL", undefined);
-      vi.stubEnv("BETTER_AUTH_URL", "https://fictional.example.test");
-      expect(getAuthOptions().configured).toBe(false);
-    } finally {
-      vi.stubEnv("NODE_ENV", mode);
-      vi.stubEnv("VERCEL", vercel);
-    }
+  it("reports hosted sign-in unavailable outside the Vercel production runtime", () => {
+    stubHostedReadiness({ NODE_ENV: "development" });
+    expect(getAuthOptions().configured).toBe(false);
+    stubHostedReadiness({ VERCEL: undefined });
+    expect(getAuthOptions().configured).toBe(false);
   });
 });

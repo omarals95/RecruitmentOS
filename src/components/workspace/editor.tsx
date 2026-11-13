@@ -1,9 +1,10 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { Fragment, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Search } from "lucide-react";
 import {
   RESOURCE_CONFIG,
+  TASK_LINK_KINDS,
   createRecordSchemas,
   updateRecordSchemas,
   referencesByKind,
@@ -16,17 +17,61 @@ import {
   type FieldConfig,
 } from "@/domain/records";
 import { Dialog } from "@/components/ui/dialog";
+import { JobTitlePicker } from "@/components/settings/job-title-picker";
+import { UnitPicker } from "@/components/settings/unit-picker";
+import type { ActionResource, KindSchemaBody } from "@/domain/config";
 import {
+  mandatoryKeys,
+  readOnlyKeys,
+  screenFor,
+  shownGroups,
+} from "@/domain/screens";
+import type { MeAccess } from "@/lib/authz";
+import {
+  ClientError,
   useApi,
   useDebounced,
+  useUnsavedWork,
   useWorkspace,
   requestJson,
   humanError,
+  teamRequester,
 } from "./client";
-import { dataOf, recordLabel, toDubaiInput, fromDubaiInput } from "./helpers";
-import { recordMutation, customValueDefaults } from "./mutation";
+import { DuplicateWarning, useDuplicateLookup } from "./duplicate-warning";
+import {
+  dataOf,
+  recordLabel,
+  roleSnapshot,
+  toDubaiInput,
+  fromDubaiInput,
+} from "./helpers";
+import {
+  assigneeInput,
+  kindSchemaBodyOf,
+  recordMutation,
+  customValueDefaults,
+  vacancyTitleInput,
+} from "./mutation";
+import { startSpeedTimer } from "./speed-log";
+import { useTeamMembers, type TeamMember } from "./team-members";
 
 type Values = Record<string, unknown>;
+/** A vacancy's org unit as the editor shows it: its id and "Name (CODE)". */
+type ChosenUnit = { id: string; label: string } | null;
+/** Candidate keys the editor shows only after Show source and experience details. */
+const ADVANCED_KEYS = [
+  "experienceWording",
+  "educationDates",
+  "latestRoleDates",
+  "roleStatus",
+  "educationStatus",
+  "experienceBasis",
+  "sourceNotes",
+];
+/** Most assignees a task takes (recordDataSchemas.task). */
+const ASSIGNEE_LIMIT = 10;
+/** The linked record type of a task whose linked record the caller cannot see. */
+const UNAVAILABLE = "unavailable";
 const REFERENCE_LABELS: Record<ReferenceField, string> = {
   candidateId: "Candidate",
   vacancyId: "Vacancy",
@@ -36,6 +81,12 @@ const REFERENCE_LABELS: Record<ReferenceField, string> = {
   jobRoleId: "Job role",
   parentRecordId: "Parent record",
 };
+// Empty as the server's mandatory rule counts it; false is a value.
+const isEmptyValue = (value: unknown) =>
+  value === undefined ||
+  value === null ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
 function defaults(kind: RecordKind): Values {
   const input: Values = {};
   for (const field of RESOURCE_CONFIG[kindToResource[kind]].fields) {
@@ -68,6 +119,8 @@ interface RecordEditorProps {
   references?: Partial<Record<ReferenceField, string>>;
   onClose: () => void;
   onSaved: (record: RecordDto) => void;
+  /** The kind schema to render from; a configurable kind defaults to its compiled default. */
+  schema?: KindSchemaBody;
 }
 export function RecordEditor({
   resource,
@@ -76,8 +129,31 @@ export function RecordEditor({
   references = {},
   onClose,
   onSaved,
+  schema,
 }: RecordEditorProps) {
   const config = RESOURCE_CONFIG[resource];
+  // A configurable kind renders the create or edit screen of its kind schema for a record with no
+  // type (R2b-07): its groups, its field order, no hidden field, and its mandatory fields marked.
+  const body = kindSchemaBodyOf(config.kind, schema);
+  const screen = body && screenFor(body, null, record ? "edit" : "create");
+  const groups: { label?: string; fields: FieldConfig[] }[] =
+    body && screen
+      ? shownGroups(screen).map((group) => ({
+          label: group.label,
+          fields: group.fields.flatMap(({ key }) => {
+            const field = body.fields.find((field) => field.key === key);
+            return field?.system ? [field] : [];
+          }),
+        }))
+      : [{ fields: config.fields }];
+  const shown = new Set(
+    groups.flatMap((group) => group.fields.map((field) => field.key)),
+  );
+  const mandatory =
+    body && screen ? new Set(mandatoryKeys(body, screen)) : null;
+  // A key the screen flags read-only gets no input and is never sent, like a read-only field
+  // definition; so do the parts tied to it: assignees, the job title and team task fields (R2b-10).
+  const screenReadOnly = new Set(screen ? readOnlyKeys(screen) : []);
   const { team } = useWorkspace();
   const [values, setValues] = useState<Values>(() => ({
     ...defaults(config.kind),
@@ -95,9 +171,77 @@ export function RecordEditor({
       return result;
     },
   );
+  // Vacancies only: the unit as saved, the one this save will send and the picker's fallback.
+  const [savedUnit] = useState<ChosenUnit>(() =>
+    record?.orgUnitId
+      ? { id: record.orgUnitId, label: record.orgUnitLabel ?? "Org unit" }
+      : null,
+  );
+  const [orgUnit, setOrgUnit] = useState<ChosenUnit>(savedUnit);
+  const [unitBase, setUnitBase] = useState<ChosenUnit>(savedUnit);
+  const [pickerKey, setPickerKey] = useState(0);
+  const [unitError, setUnitError] = useState("");
+  const unitChanged = (orgUnit?.id ?? null) !== (savedUnit?.id ?? null);
+  const teamId = team?.id ?? null;
+  const request = useMemo(
+    () => (teamId ? teamRequester(teamId) : null),
+    [teamId],
+  );
+  // Tasks only: the assignees as saved and as chosen, the team's members and the linked record's
+  // type, preset from parentKind; a link the caller cannot see keeps its id until they pick None.
+  const [savedAssignees] = useState<string[]>(() =>
+    record && Array.isArray(dataOf(record).assigneeIds)
+      ? (dataOf(record).assigneeIds as string[])
+      : [],
+  );
+  const [assignees, setAssignees] = useState<string[]>(savedAssignees);
+  const assigneesChanged =
+    assigneeInput(savedAssignees, assignees).assigneeIds !== undefined;
+  const members = useTeamMembers(teamId, resource === "tasks");
+  const access = useApi<{ data: MeAccess }>("/api/v1/me/access");
+  // The role's field rules for the kind: a hidden or read-only field gets no input and is never
+  // sent. While they load or if they fail, the editor sends as before and shows any refusal.
+  const rules = access.data?.data.fields[config.kind];
+  const editable = (key: string) =>
+    rules?.[key] !== "hidden" && rules?.[key] !== "read";
+  // Vacancies only: the job title as saved and as chosen. The role's field rule hides the picker
+  // or shows the title as text; once saved, a title can be changed but not cleared.
+  const [savedTitle] = useState(() =>
+    record && typeof dataOf(record).jobTitleKey === "string"
+      ? (dataOf(record).jobTitleKey as string)
+      : "",
+  );
+  const [titleKey, setTitleKey] = useState(savedTitle);
+  const [titleError, setTitleError] = useState("");
+  const titleRule = access.data?.data.fields.vacancy?.jobTitleKey;
+  const titleChanged = titleKey !== savedTitle;
+  // A role that hides assigneeIds leaves it out of the record, so the picker is left out too.
+  const assigneesShown =
+    resource === "tasks" &&
+    (record
+      ? Array.isArray(dataOf(record).assigneeIds)
+      : access.data?.data.fields.task?.assigneeIds !== "hidden");
+  const [linkKind, setLinkKind] = useState<string>(
+    () => record?.parentKind ?? (record?.parentRecordId ? UNAVAILABLE : ""),
+  );
+  const linkKinds = TASK_LINK_KINDS.filter(
+    (kind) =>
+      kind === record?.parentKind ||
+      access.data?.data.actions[
+        kindToResource[kind] as ActionResource
+      ]?.includes("view"),
+  );
+  const [opened] = useState(() => JSON.stringify([values, refs]));
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(
+    saving ||
+      unitChanged ||
+      titleChanged ||
+      assigneesChanged ||
+      JSON.stringify([values, refs]) !== opened,
+  );
   const [copyingRole, setCopyingRole] = useState(false);
   const pending = saving || copyingRole;
   const [advanced, setAdvanced] = useState(false);
@@ -108,6 +252,16 @@ export function RecordEditor({
       ? "/api/v1/task-fields?pageSize=100&sort=position"
       : null,
   );
+  const duplicates = useDuplicateLookup(
+    team?.id ?? null,
+    resource === "candidates",
+    values.email,
+    values.phone,
+  );
+  // On edit a mandatory field is marked only when its stored value is filled: the server lets an
+  // older record keep a newly mandatory field empty (architecture §1.5 item 5).
+  const requiredOn = (key: string) =>
+    !!mandatory?.has(key) && (!record || !isEmptyValue(dataOf(record)[key]));
   const update = (key: string, value: unknown) =>
     setValues((old) => ({ ...old, [key]: value }));
   const submit = async (event: React.FormEvent) => {
@@ -115,6 +269,8 @@ export function RecordEditor({
     if (!team || pending) return;
     setError("");
     setFieldErrors({});
+    setUnitError("");
+    setTitleError("");
     const submitted =
       resource === "tasks"
         ? {
@@ -125,7 +281,37 @@ export function RecordEditor({
             ),
           }
         : values;
-    const input = recordMutation(resource, submitted, refs, record);
+    const mutation = recordMutation(
+      resource,
+      submitted,
+      refs,
+      record,
+      schema,
+      rules,
+    );
+    const input: Values = {
+      ...mutation,
+      // Sent only when they changed, so a save that leaves them alone never touches them.
+      ...(resource === "vacancies" && unitChanged
+        ? { orgUnitId: orgUnit?.id ?? null }
+        : {}),
+      ...(resource === "vacancies"
+        ? {
+            data: {
+              ...mutation.data,
+              ...vacancyTitleInput(savedTitle || undefined, titleKey),
+            },
+          }
+        : {}),
+      ...(resource === "tasks"
+        ? {
+            data: {
+              ...mutation.data,
+              ...assigneeInput(savedAssignees, assignees),
+            },
+          }
+        : {}),
+    };
     const parsed = (
       record
         ? updateRecordSchemas[config.kind]
@@ -143,6 +329,13 @@ export function RecordEditor({
       return;
     }
     setSaving(true);
+    // Click to saved, for the two editor saves the speed log times.
+    const timed =
+      resource === "candidates"
+        ? startSpeedTimer("candidate.save")
+        : resource === "interviews" && !record
+          ? startSpeedTimer("interview.schedule")
+          : null;
     try {
       const serialized = JSON.stringify(input);
       let key = idempotency.current.get(serialized);
@@ -159,9 +352,31 @@ export function RecordEditor({
           body: serialized,
         },
       );
+      timed?.();
       onSaved(response.data);
     } catch (e) {
-      setError(humanError(e));
+      // The unit is refused only when it changed; the rest of the draft stays as entered.
+      if (
+        unitChanged &&
+        e instanceof ClientError &&
+        e.code === "invalid_reference" &&
+        e.message.startsWith("orgUnitId")
+      ) {
+        setUnitError(
+          "This unit is not a current unit of your company. Choose another unit, or remove the org unit.",
+        );
+        setError("Please review the org unit.");
+      } else if (
+        titleChanged &&
+        e instanceof ClientError &&
+        e.code === "invalid_reference" &&
+        e.message.startsWith("jobTitleKey")
+      ) {
+        setTitleError(
+          "This job title is not in the published job architecture. Choose another job title.",
+        );
+        setError("Please review the job title.");
+      } else setError(humanError(e));
       setTimeout(() => errorRef.current?.focus(), 0);
     } finally {
       setSaving(false);
@@ -175,7 +390,7 @@ export function RecordEditor({
         team.id,
         `/api/v1/job-roles/${id}`,
       );
-      setValues((old) => ({ ...old, ...role.data.data }));
+      setValues((old) => ({ ...old, ...roleSnapshot(role.data.data) }));
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -221,8 +436,13 @@ export function RecordEditor({
               </p>
             )}
             <div className="form-grid">
-              {Object.entries(referencesByKind[config.kind]).map(
-                ([key, details]) => (
+              {Object.entries(referencesByKind[config.kind])
+                // A task's linked record has its own type and record pickers below.
+                .filter(
+                  ([key]) =>
+                    !(resource === "tasks" && key === "parentRecordId"),
+                )
+                .map(([key, details]) => (
                   <div key={key} className="field">
                     <ReferencePicker
                       kind={details.kind}
@@ -248,70 +468,219 @@ export function RecordEditor({
                       </button>
                     )}
                   </div>
-                ),
-              )}
-              {config.fields
-                .filter(
-                  (field) =>
-                    !field.readOnly &&
-                    field.key !== "legacyAuthorLabel" &&
-                    field.key !== "customValues" &&
-                    (advanced ||
-                      ![
-                        "experienceWording",
-                        "educationDates",
-                        "latestRoleDates",
-                        "roleStatus",
-                        "educationStatus",
-                        "experienceBasis",
-                        "sourceNotes",
-                      ].includes(field.key)),
-                )
-                .map((field) => (
-                  <FieldInput
-                    key={field.key}
-                    field={field}
-                    value={values[field.key]}
-                    error={fieldErrors[field.key]}
-                    onChange={(value) => update(field.key, value)}
-                  />
                 ))}
+              {resource === "tasks" && (
+                <div className="field">
+                  <label htmlFor="editor-parent-kind">Linked record type</label>
+                  <select
+                    id="editor-parent-kind"
+                    value={linkKind}
+                    onChange={(e) => {
+                      setLinkKind(e.target.value);
+                      setRefs((old) => ({ ...old, parentRecordId: "" }));
+                    }}
+                  >
+                    <option value="">None</option>
+                    {linkKind === UNAVAILABLE && (
+                      <option value={UNAVAILABLE}>Unavailable record</option>
+                    )}
+                    {linkKinds.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {RESOURCE_CONFIG[kindToResource[kind]].singular}
+                      </option>
+                    ))}
+                  </select>
+                  {fieldErrors.parentRecordId && (
+                    <span className="field-error">
+                      {fieldErrors.parentRecordId}
+                    </span>
+                  )}
+                </div>
+              )}
+              {resource === "tasks" && linkKind && linkKind !== UNAVAILABLE && (
+                <div className="field">
+                  <ReferencePicker
+                    kind={linkKind as RecordKind}
+                    label="Linked record"
+                    value={refs.parentRecordId || ""}
+                    onChange={(value) =>
+                      setRefs((old) => ({ ...old, parentRecordId: value }))
+                    }
+                    id="editor-parentRecordId"
+                  />
+                </div>
+              )}
+              {groups.flatMap((group, index) => {
+                const inputs = group.fields
+                  .filter(
+                    (field) =>
+                      !field.readOnly &&
+                      !screenReadOnly.has(field.key) &&
+                      editable(field.key) &&
+                      field.key !== "legacyAuthorLabel" &&
+                      field.key !== "customValues" &&
+                      field.key !== "assigneeIds" &&
+                      (advanced || !ADVANCED_KEYS.includes(field.key)),
+                  )
+                  .map((field) => (
+                    <Fragment key={field.key}>
+                      <FieldInput
+                        field={
+                          mandatory
+                            ? { ...field, required: requiredOn(field.key) }
+                            : field
+                        }
+                        value={values[field.key]}
+                        error={fieldErrors[field.key]}
+                        onChange={(value) => update(field.key, value)}
+                      />
+                      {resource === "candidates" && field.key === "phone" && (
+                        <DuplicateWarning
+                          lookup={duplicates}
+                          excludeId={record?.id}
+                        />
+                      )}
+                    </Fragment>
+                  ));
+                // An unlabelled group's inputs sit in the form grid itself, as before screens.
+                return group.label && inputs.length
+                  ? [
+                      <fieldset
+                        key={`group-${index}`}
+                        className="editor-fieldset full-width"
+                      >
+                        <legend>{group.label}</legend>
+                        <div className="form-grid">{inputs}</div>
+                      </fieldset>,
+                    ]
+                  : inputs;
+              })}
               {resource === "tasks" &&
-                fields.data?.data.map((custom) => {
-                  const field = custom.data;
-                  const customValues = (values.customValues as Values) || {};
-                  const type =
-                    field.type === "Checkbox"
-                      ? "checkbox"
-                      : field.type === "Number"
-                        ? "number"
-                        : field.type === "Date"
-                          ? "date"
-                          : field.type === "Dropdown"
-                            ? "select"
-                            : "text";
-                  return (
-                    <FieldInput
-                      key={custom.id}
-                      field={{
-                        key: custom.id,
-                        label: field.name,
-                        type,
-                        required: field.required,
-                        options: field.options,
-                      }}
-                      value={customValues[custom.id]}
-                      error={fieldErrors[`customValues.${custom.id}`]}
-                      onChange={(value) =>
-                        update("customValues", {
-                          ...customValues,
-                          [custom.id]: value,
-                        })
-                      }
-                    />
-                  );
-                })}
+                shown.has("customValues") &&
+                !screenReadOnly.has("customValues") &&
+                editable("customValues") &&
+                fields.data?.data
+                  .filter((custom) => editable(custom.id))
+                  .map((custom) => {
+                    const field = custom.data;
+                    const customValues = (values.customValues as Values) || {};
+                    const type =
+                      field.type === "Checkbox"
+                        ? "checkbox"
+                        : field.type === "Number"
+                          ? "number"
+                          : field.type === "Date"
+                            ? "date"
+                            : field.type === "Dropdown"
+                              ? "select"
+                              : "text";
+                    return (
+                      <FieldInput
+                        key={custom.id}
+                        field={{
+                          key: custom.id,
+                          label: field.name,
+                          type,
+                          required: field.required,
+                          options: field.options,
+                        }}
+                        value={customValues[custom.id]}
+                        error={fieldErrors[`customValues.${custom.id}`]}
+                        onChange={(value) =>
+                          update("customValues", {
+                            ...customValues,
+                            [custom.id]: value,
+                          })
+                        }
+                      />
+                    );
+                  })}
             </div>
+            {assigneesShown &&
+              shown.has("assigneeIds") &&
+              !screenReadOnly.has("assigneeIds") && (
+                <AssigneePicker
+                  members={members.members}
+                  error={members.error}
+                  selected={assignees}
+                  onChange={setAssignees}
+                  fieldError={fieldErrors.assigneeIds}
+                />
+              )}
+            {resource === "vacancies" &&
+              request &&
+              titleRule !== "hidden" &&
+              shown.has("jobTitleKey") &&
+              !screenReadOnly.has("jobTitleKey") && (
+                <JobTitlePicker
+                  request={request}
+                  access={access.data?.data}
+                  value={titleKey}
+                  onChange={(key) => {
+                    setTitleKey(key);
+                    setTitleError("");
+                  }}
+                  allowNone={!savedTitle}
+                  readOnly={titleRule === "read"}
+                  disabled={pending}
+                  error={titleError}
+                />
+              )}
+            {resource === "vacancies" && request && (
+              <fieldset
+                className="stack"
+                style={{
+                  border: "1px solid var(--border, #e2e4eb)",
+                  borderRadius: 10,
+                  padding: 16,
+                  minWidth: 0,
+                }}
+                aria-describedby={
+                  unitError ? "editor-org-unit-error" : undefined
+                }
+              >
+                <legend>Org unit</legend>
+                <p id="editor-org-unit" style={{ margin: 0 }}>
+                  {orgUnit ? orgUnit.label : "No org unit"}
+                </p>
+                {unitChanged && <small className="muted">Not saved yet.</small>}
+                <UnitPicker
+                  key={pickerKey}
+                  request={request}
+                  label="Choose an org unit"
+                  emptyLabel="Choose a unit"
+                  disabled={pending}
+                  onChange={(unit) =>
+                    setOrgUnit(
+                      unit
+                        ? { id: unit.id, label: `${unit.name} (${unit.code})` }
+                        : unitBase,
+                    )
+                  }
+                />
+                {orgUnit && (
+                  <div>
+                    <button
+                      type="button"
+                      className="button secondary small"
+                      onClick={() => {
+                        setOrgUnit(null);
+                        setUnitBase(null);
+                        setUnitError("");
+                        setPickerKey((key) => key + 1);
+                      }}
+                    >
+                      Remove org unit
+                    </button>
+                  </div>
+                )}
+                {unitError && (
+                  <span id="editor-org-unit-error" className="field-error">
+                    {unitError}
+                  </span>
+                )}
+              </fieldset>
+            )}
             {resource === "tasks" && fields.error && (
               <p className="notice error" role="alert">
                 Custom fields could not be loaded: {fields.error}. Refresh
@@ -375,6 +744,104 @@ export function RecordEditor({
         </fieldset>
       </form>
     </Dialog>
+  );
+}
+/**
+ * A task's assignees: one native checkbox per team member by name, with a filter. At most ten; an
+ * assignee who is no longer a member shows as "Former member" and cannot be removed here, since the
+ * service refuses to change a non-member's assignment. A load failure disables only this group.
+ */
+export function AssigneePicker({
+  members,
+  error,
+  selected,
+  onChange,
+  fieldError,
+}: {
+  members: TeamMember[] | null;
+  error: string;
+  selected: string[];
+  onChange: (selected: string[]) => void;
+  fieldError?: string;
+}) {
+  const [filter, setFilter] = useState("");
+  const filterId = useId();
+  const countId = useId();
+  const known = new Set((members ?? []).map((member) => member.userId));
+  const former = members ? selected.filter((userId) => !known.has(userId)) : [];
+  const full = selected.length >= ASSIGNEE_LIMIT;
+  const wanted = filter.trim().toLocaleLowerCase();
+  const shown = (members ?? []).filter((member) =>
+    member.name.toLocaleLowerCase().includes(wanted),
+  );
+  return (
+    <fieldset
+      className="assignee-picker"
+      id="editor-assigneeIds"
+      disabled={!members || !!error}
+      aria-describedby={countId}
+    >
+      <legend>Assignees</legend>
+      {error ? (
+        <p className="field-error" role="alert">
+          Team members could not be loaded, so assignees cannot be changed:{" "}
+          {error}
+        </p>
+      ) : !members ? (
+        <p className="muted" role="status">
+          Loading team members…
+        </p>
+      ) : (
+        <>
+          <label htmlFor={filterId}>Filter members</label>
+          <input
+            id={filterId}
+            type="search"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <ul className="assignee-list">
+            {former.map((userId) => (
+              <li key={userId}>
+                <label className="checkbox-label">
+                  <input type="checkbox" checked disabled />
+                  Former member
+                </label>
+              </li>
+            ))}
+            {shown.map((member) => {
+              const checked = selected.includes(member.userId);
+              return (
+                <li key={member.userId}>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!checked && full}
+                      onChange={(e) =>
+                        onChange(
+                          e.target.checked
+                            ? [...selected, member.userId]
+                            : selected.filter((id) => id !== member.userId),
+                        )
+                      }
+                    />
+                    {member.name}
+                  </label>
+                </li>
+              );
+            })}
+            {!shown.length && (
+              <li className="muted">No member matches this filter.</li>
+            )}
+          </ul>
+        </>
+      )}
+      <p id={countId} className="small-text muted" aria-live="polite">
+        {selected.length} of {ASSIGNEE_LIMIT} selected
+      </p>
+      {fieldError && <span className="field-error">{fieldError}</span>}
+    </fieldset>
   );
 }
 function FieldInput({

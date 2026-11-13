@@ -7,27 +7,103 @@ export const SCOPES = [
   "cvs:read",
   "cvs:write",
   "imports:write",
+  "directory:read",
+  "directory:write",
+  "plans:read",
+  "plans:write",
 ] as const;
 export type Scope = (typeof SCOPES)[number];
+/** Scopes an API token may hold; the directory and plan scopes are membership ceilings only. */
+export const API_TOKEN_SCOPES = [
+  "candidates:read",
+  "candidates:write",
+  "recruitment:read",
+  "recruitment:write",
+  "cvs:read",
+  "cvs:write",
+  "imports:write",
+] as const satisfies readonly Scope[];
+export type ApiTokenScope = (typeof API_TOKEN_SCOPES)[number];
+/**
+ * Scopes an OAuth client may request for the MCP endpoint. cvs:read shares CV contents and cvs:write
+ * uploads CVs; legacy imports (imports:write) are never offered.
+ */
+export const MCP_SCOPES = [
+  "candidates:read",
+  "recruitment:read",
+  "cvs:read",
+  "candidates:write",
+  "recruitment:write",
+  "cvs:write",
+] as const satisfies readonly Scope[];
+export type McpScope = (typeof MCP_SCOPES)[number];
 export type Role = "owner" | "admin" | "recruiter" | "viewer";
 export function parseRole(value: string): Role {
   if (["owner", "admin", "recruiter", "viewer"].includes(value))
     return value as Role;
   throw new ApiError(403, "unknown_role", "Your team role is not supported.");
 }
+/** Explicit lists, so a scope appended to SCOPES never reaches recruiters or viewers. */
+const RECRUITER_SCOPES: readonly Scope[] = [
+  "candidates:read",
+  "candidates:write",
+  "recruitment:read",
+  "recruitment:write",
+  "cvs:read",
+  "cvs:write",
+];
+const VIEWER_SCOPES: readonly Scope[] = [
+  "candidates:read",
+  "recruitment:read",
+  "cvs:read",
+];
 export function roleScopes(role: Role): Scope[] {
   return role === "owner" || role === "admin"
     ? [...SCOPES]
     : role === "recruiter"
-      ? SCOPES.filter((s) => s !== "imports:write")
-      : SCOPES.filter((s) => s.endsWith(":read"));
+      ? [...RECRUITER_SCOPES]
+      : [...VIEWER_SCOPES];
 }
 export const getRoleScopes = roleScopes;
+/** The refusal message for a member whose assigned role install could not use (failed closed). */
+export const ROLE_UNAVAILABLE =
+  "Your role is no longer available. Ask a company owner to choose a role for you.";
+// Principals whose context install failed closed on an assigned role; withTeam marks them.
+const roleUnavailable = new WeakSet<object>();
+export function markRoleUnavailable(p: object) {
+  roleUnavailable.add(p);
+}
+/** The one refusal of every write in an archived team (ADM-05). */
+export const TEAM_ARCHIVED =
+  "This team is archived. You can still read everything, but nothing can be changed until a team owner restores it.";
+export const teamArchived = () =>
+  new ApiError(403, "team_archived", TEAM_ARCHIVED);
+// Principals whose context install found their team archived; withTeam marks them.
+const archivedTeam = new WeakSet<object>();
+export function markTeamArchived(p: object) {
+  archivedTeam.add(p);
+}
+// The scopes each principal has passed requireScope with, so withTeam can refuse a request whose
+// stored scopes lack one that was checked before the transaction.
+const passed = new WeakMap<object, Set<Scope>>();
 export function requireScope(p: { scopes: readonly string[] }, scope: Scope) {
+  if (
+    !p.scopes.includes(scope) &&
+    scope.endsWith(":write") &&
+    archivedTeam.has(p)
+  )
+    throw teamArchived();
   if (!p.scopes.includes(scope))
     throw new ApiError(
       403,
       "scope_required",
-      `Permission ${scope} is required.`,
+      roleUnavailable.has(p)
+        ? ROLE_UNAVAILABLE
+        : `Permission ${scope} is required.`,
     );
+  const checked = passed.get(p) ?? new Set<Scope>();
+  passed.set(p, checked.add(scope));
+}
+export function passedScopes(p: object): Scope[] {
+  return [...(passed.get(p) ?? [])];
 }

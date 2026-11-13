@@ -64,6 +64,19 @@ test("completion rejects metadata mismatch and unsafe reservations before readin
   );
 });
 
+test("completion aborts its provider request when metadata validation fails", async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    inspectBlobUpload(
+      reservation,
+      { ...observed, sizeBytes: pdf.length + 1 },
+      stream(pdf),
+      { controller },
+    ),
+  );
+  assert.equal(controller.signal.aborted, true);
+});
+
 test("completion rejects spoofed, truncated, and oversized content", async () => {
   const spoofed = Buffer.alloc(pdf.length, 0x41);
   for (const contents of [

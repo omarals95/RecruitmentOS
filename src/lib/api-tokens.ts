@@ -1,9 +1,28 @@
-import { randomUUID } from "node:crypto";
-import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { randomBytes, randomUUID } from "node:crypto";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  isNull,
+  sql,
+} from "drizzle-orm";
 import { getIdentityDb, type TeamTx } from "@/db";
-import { apiTokens, apiRateLimits, member, user } from "@/db/auth-schema";
-import { activity } from "@/db/schema";
-import { withTeam } from "./db-team";
+import { withDeadlines, withDeadlinesAndSnapshot } from "@/db/deadlines";
+import {
+  apiTokens,
+  apiRateLimits,
+  member,
+  oauthClients,
+  oauthCodes,
+  oauthTokens,
+  user,
+} from "@/db/auth-schema";
+import { getAuthOptions } from "./auth";
+import { purgeExpiredAuthRowsThrottled } from "./auth-purge";
+import { rateLimitClientKey } from "./client-ip";
 import { ApiError } from "./errors";
 import { parseRole, type Role, type Scope } from "./permissions";
 import type { Principal } from "./principal";
@@ -14,6 +33,7 @@ import {
   tokenInputSchema,
   type TokenInput,
 } from "./api-token-policy";
+import { assertTenantContextKey, installTenantContext } from "./tenant-context";
 
 type TokenRow = typeof apiTokens.$inferSelect;
 export interface TokenDto {
@@ -26,8 +46,9 @@ export interface TokenDto {
   revokedAt: string | null;
   lastUsedAt: string | null;
   createdAt: string;
+  oauthClient: { id: string; name: string } | null;
 }
-function dto(row: TokenRow): TokenDto {
+function dto(row: TokenRow, clientName: string | null = null): TokenDto {
   return {
     id: row.id,
     userId: row.userId,
@@ -38,6 +59,9 @@ function dto(row: TokenRow): TokenDto {
     revokedAt: row.revokedAt?.toISOString() ?? null,
     lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
+    oauthClient: row.oauthClientId
+      ? { id: row.oauthClientId, name: clientName ?? "" }
+      : null,
   };
 }
 function human(p: Principal) {
@@ -48,11 +72,19 @@ function human(p: Principal) {
       "Sign in to manage API tokens.",
     );
 }
-async function liveHuman(tx: TeamTx, p: Principal): Promise<Role> {
+async function liveHuman(
+  tx: TeamTx,
+  p: Principal,
+  requireTwoStep = false,
+): Promise<Role> {
   human(p);
   // Lock this user's row while creating a token, making the active-token cap atomic.
   const [current] = await tx
-    .select({ verified: user.emailVerified, role: member.role })
+    .select({
+      verified: user.emailVerified,
+      twoStep: user.twoFactorEnabled,
+      role: member.role,
+    })
     .from(user)
     .innerJoin(
       member,
@@ -66,82 +98,95 @@ async function liveHuman(tx: TeamTx, p: Principal): Promise<Role> {
       "membership_required",
       "A verified account and current team membership are required.",
     );
+  // New credentials come only from a session that passed two-step sign-in.
+  if (requireTwoStep && !current.twoStep)
+    throw new ApiError(
+      403,
+      "two_step_required",
+      "Turn on two-step sign-in in your profile before creating API tokens or connecting apps.",
+    );
   return parseRole(current.role);
 }
 
-export async function authenticateApiToken(raw: string): Promise<Principal> {
-  if (!/^ros_live_[A-Za-z0-9_-]{43}$/.test(raw))
-    throw new ApiError(
-      401,
-      "invalid_token",
-      "The API token is invalid or no longer active.",
-    );
-  const db = await getIdentityDb();
-  const result = await db.transaction(async (tx) => {
-    const [found] = await tx
-      .select({
-        token: apiTokens,
-        verified: user.emailVerified,
-        role: member.role,
-      })
-      .from(apiTokens)
-      .innerJoin(user, eq(apiTokens.userId, user.id))
-      .innerJoin(
-        member,
-        and(
-          eq(member.userId, apiTokens.userId),
-          eq(member.organizationId, apiTokens.teamId),
-        ),
-      )
-      .where(
-        and(
-          eq(apiTokens.tokenHash, hashToken(raw)),
-          isNull(apiTokens.revokedAt),
-          gt(apiTokens.expiresAt, sql`current_timestamp`),
-        ),
-      );
-    if (
-      !found?.verified ||
-      !["owner", "admin", "recruiter", "viewer"].includes(found.role)
-    )
-      return null;
-    const [limit] = await tx
-      .insert(apiRateLimits)
-      .values({
-        key: `api-token:${found.token.id}`,
-        windowStart: sql`current_timestamp`,
-        count: 1,
-      })
-      .onConflictDoUpdate({
-        target: apiRateLimits.key,
-        set: {
-          count: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN 1 ELSE LEAST(${apiRateLimits.count} + 1, 1000000) END`,
-          windowStart: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN current_timestamp ELSE ${apiRateLimits.windowStart} END`,
-        },
-      })
-      .returning({ count: apiRateLimits.count });
-    if (!limit || limit.count > 60) return { limited: true as const };
-    await tx
-      .update(apiTokens)
-      .set({ lastUsedAt: sql`current_timestamp` })
-      .where(eq(apiTokens.id, found.token.id));
-    const principal: Principal = {
-      userId: found.token.userId,
-      teamId: found.token.teamId,
-      role: found.role as Role,
-      scopes: effectiveTokenScopes(found.token.scopes, found.role),
+/**
+ * One-minute window counter in auth.api_rate_limits. The upsert locks the key's row until
+ * commit, so concurrent callers cannot pass a budget. add = 0 only reads (and resets) the window.
+ */
+export async function rateWindow(
+  tx: TeamTx,
+  key: string,
+  add: 0 | 1,
+): Promise<number> {
+  const [row] = await tx
+    .insert(apiRateLimits)
+    .values({ key, windowStart: sql`current_timestamp`, count: add })
+    .onConflictDoUpdate({
+      target: apiRateLimits.key,
+      set: {
+        count: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN ${add}::int ELSE LEAST(${apiRateLimits.count} + ${add}::int, 1000000) END`,
+        windowStart: sql`CASE WHEN ${apiRateLimits.windowStart} <= current_timestamp - interval '1 minute' THEN current_timestamp ELSE ${apiRateLimits.windowStart} END`,
+      },
+    })
+    .returning({ count: apiRateLimits.count });
+  return row?.count ?? Number.MAX_SAFE_INTEGER;
+}
+/** Charges one failed attempt to a window read earlier in the same transaction. */
+export async function chargeRateWindow(tx: TeamTx, key: string) {
+  await tx
+    .update(apiRateLimits)
+    .set({ count: sql`LEAST(${apiRateLimits.count} + 1, 1000000)` })
+    .where(eq(apiRateLimits.key, key));
+}
+
+/** Unknown-hash guesses allowed per client key and minute before non-live tokens from it get 429. */
+const GUESS_LIMIT = 10;
+
+type Authenticated =
+  | { guessLimited: true }
+  | { guess: true }
+  | { limited: true }
+  | { principal: Principal }
+  | null;
+const MEMBER_ROLES = ["owner", "admin", "recruiter", "viewer"];
+/** Shared by both Bearer authenticators once a live token row and role are found. */
+async function admit(
+  tx: TeamTx,
+  token: TokenRow,
+  role: string,
+): Promise<Authenticated> {
+  if ((await rateWindow(tx, `api-token:${token.id}`, 1)) > 60)
+    return { limited: true };
+  await tx
+    .update(apiTokens)
+    .set({ lastUsedAt: sql`current_timestamp` })
+    .where(eq(apiTokens.id, token.id));
+  return {
+    principal: {
+      userId: token.userId,
+      teamId: token.teamId,
+      role: role as Role,
+      scopes: effectiveTokenScopes(token.scopes, role),
       authType: "token",
-      tokenId: found.token.id,
-    };
-    return { principal };
-  });
-  if (!result)
+      tokenId: token.id,
+      ...(token.oauthClientId ? { oauthClientId: token.oauthClientId } : {}),
+    },
+  };
+}
+const guessLimitedError = () =>
+  new ApiError(
+    429,
+    "token_guess_rate_limited",
+    "Too many invalid API token attempts. Try again in a minute.",
+  );
+// Throw after commit so rejected rate-limit attempts cannot roll back their counter.
+function settle(result: Authenticated): Principal {
+  if (!result || "guess" in result)
     throw new ApiError(
       401,
       "invalid_token",
       "The API token is invalid or no longer active.",
     );
-  // Throw after commit so rejected rate-limit attempts cannot roll back their counter.
+  if ("guessLimited" in result) throw guessLimitedError();
   if ("limited" in result)
     throw new ApiError(
       429,
@@ -149,6 +194,149 @@ export async function authenticateApiToken(raw: string): Promise<Principal> {
       "This API token is limited to 60 requests per minute.",
     );
   return result.principal;
+}
+function requireReadiness(raw: string, format: RegExp) {
+  // Tokens never work where sign-in is unavailable.
+  if (!getAuthOptions().configured)
+    throw new ApiError(
+      503,
+      "AUTH_NOT_CONFIGURED",
+      "Authentication setup is required.",
+    );
+  if (!format.test(raw))
+    throw new ApiError(
+      401,
+      "invalid_token",
+      "The API token is invalid or no longer active.",
+    );
+}
+/**
+ * The database guess budget around one token lookup, keyed by the hashed client address. Only a
+ * hash with no row at all is a guess (`charge`), so stale credentials (revoked, expired, expired
+ * MCP access tokens) cannot spend a shared egress address's budget. Over budget, a token that
+ * matches a live row is still admitted: tokens carry 256 random bits, so admission tells a guesser
+ * nothing usable, and a shared address must not lock out its valid tokens. Every other token gets
+ * 429 and charges nothing further.
+ */
+async function withGuessBudget(
+  clientIp: string | null,
+  lookup: (
+    tx: TeamTx,
+    charge: () => Promise<Authenticated>,
+  ) => Promise<Authenticated>,
+): Promise<Principal> {
+  const guessKey = `api-guess:${rateLimitClientKey(clientIp, process.env.BETTER_AUTH_SECRET!)}`;
+  const db = await getIdentityDb();
+  const result = await withDeadlines(db, async (tx): Promise<Authenticated> => {
+    const over = (await rateWindow(tx, guessKey, 0)) >= GUESS_LIMIT;
+    const found = await lookup(tx, async () => {
+      if (over) return { guessLimited: true };
+      await chargeRateWindow(tx, guessKey);
+      return { guess: true };
+    });
+    if (over && !(found && ("principal" in found || "limited" in found)))
+      return { guessLimited: true };
+    return found;
+  });
+  await purgeExpiredAuthRowsThrottled(db);
+  return settle(result);
+}
+
+export async function authenticateApiToken(
+  raw: string,
+  clientIp: string | null,
+): Promise<Principal> {
+  requireReadiness(raw, /^ros_live_[A-Za-z0-9_-]{43}$/);
+  return withGuessBudget(clientIp, async (tx, charge) => {
+    const [found] = await tx
+      .select({
+        token: apiTokens,
+        // An OAuth grant authenticates only through its access tokens.
+        active: sql<boolean>`${apiTokens.revokedAt} is null and ${apiTokens.expiresAt} > current_timestamp and ${apiTokens.oauthClientId} is null`,
+        verified: user.emailVerified,
+        role: member.role,
+      })
+      .from(apiTokens)
+      .leftJoin(user, eq(apiTokens.userId, user.id))
+      .leftJoin(
+        member,
+        and(
+          eq(member.userId, apiTokens.userId),
+          eq(member.organizationId, apiTokens.teamId),
+        ),
+      )
+      .where(eq(apiTokens.tokenHash, hashToken(raw)));
+    if (!found) return charge();
+    if (
+      !found.active ||
+      !found.verified ||
+      !found.role ||
+      !MEMBER_ROLES.includes(found.role)
+    )
+      return null;
+    return admit(tx, found.token, found.role);
+  });
+}
+
+/**
+ * OAuth access tokens, accepted only by /api/mcp. The same readiness gate, guess budget,
+ * per-grant limit and role intersection as API tokens; the grant row is what the tenant context checks.
+ */
+export async function authenticateOAuthAccessToken(
+  raw: string,
+  clientIp: string | null,
+  audience: string,
+): Promise<Principal> {
+  requireReadiness(raw, /^ros_oat_[A-Za-z0-9_-]{43}$/);
+  return withGuessBudget(clientIp, async (tx, charge) => {
+    const [found] = await tx
+      .select({
+        token: getTableColumns(apiTokens),
+        active: sql<boolean>`${oauthTokens.kind} = 'access' and ${oauthTokens.expiresAt} > current_timestamp and ${oauthTokens.audience} = ${audience} and ${apiTokens.revokedAt} is null and ${apiTokens.expiresAt} > current_timestamp and ${apiTokens.oauthClientId} is not null`,
+        verified: user.emailVerified,
+        role: member.role,
+      })
+      .from(oauthTokens)
+      .innerJoin(apiTokens, eq(apiTokens.id, oauthTokens.grantId))
+      .leftJoin(user, eq(apiTokens.userId, user.id))
+      .leftJoin(
+        member,
+        and(
+          eq(member.userId, apiTokens.userId),
+          eq(member.organizationId, apiTokens.teamId),
+        ),
+      )
+      .where(eq(oauthTokens.tokenHash, hashToken(raw)));
+    if (!found) return charge();
+    if (
+      !found.active ||
+      !found.verified ||
+      !found.role ||
+      !MEMBER_ROLES.includes(found.role)
+    )
+      return null;
+    return admit(tx, found.token, found.role);
+  });
+}
+
+async function assertTokenCap(tx: TeamTx, p: Principal) {
+  const [existing] = await tx
+    .select({ total: count() })
+    .from(apiTokens)
+    .where(
+      and(
+        eq(apiTokens.teamId, p.teamId),
+        eq(apiTokens.userId, p.userId),
+        isNull(apiTokens.revokedAt),
+        gt(apiTokens.expiresAt, sql`current_timestamp`),
+      ),
+    );
+  if ((existing?.total ?? 0) >= 50)
+    throw new ApiError(
+      409,
+      "token_limit",
+      "Revoke an unused token before creating another. You can have 50 active tokens per team.",
+    );
 }
 
 export async function createToken(
@@ -163,8 +351,12 @@ export async function createToken(
       "invalid_token_request",
       "Provide a token name, valid scopes and an expiry between 1 and 365 days.",
     );
-  return withTeam(p, async (tx) => {
-    const role = await liveHuman(tx, p);
+  assertTenantContextKey();
+  const db = await getIdentityDb();
+  return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+    const role = await liveHuman(tx, p, true);
+    // Lock the user row first; the context lets the audit helper pass activity RLS.
+    await installTenantContext(tx, p, snapshot);
     const scopes = effectiveTokenScopes(parsed.data.scopes, role);
     if (scopes.length !== parsed.data.scopes.length)
       throw new ApiError(
@@ -172,23 +364,7 @@ export async function createToken(
         "scope_not_allowed",
         "One or more token scopes are not available to your current team role.",
       );
-    const [existing] = await tx
-      .select({ total: count() })
-      .from(apiTokens)
-      .where(
-        and(
-          eq(apiTokens.teamId, p.teamId),
-          eq(apiTokens.userId, p.userId),
-          isNull(apiTokens.revokedAt),
-          gt(apiTokens.expiresAt, sql`current_timestamp`),
-        ),
-      );
-    if ((existing?.total ?? 0) >= 50)
-      throw new ApiError(
-        409,
-        "token_limit",
-        "Revoke an unused token before creating another. You can have 50 active tokens per team.",
-      );
+    await assertTokenCap(tx, p);
     const material = createTokenMaterial();
     const id = randomUUID();
     const [saved] = await tx
@@ -204,16 +380,67 @@ export async function createToken(
         expiresAt: sql`current_timestamp + (${parsed.data.expiresInDays} * interval '1 day')`,
       })
       .returning();
-    await tx.insert(activity).values({
-      teamId: p.teamId,
-      actorId: p.userId,
-      actorType: "session",
-      action: "token.created",
-      kind: "api-token",
-      summary: "Created an API token",
-      metadata: { tokenId: id, prefix: material.prefix, scopes },
-    });
+    await tx.execute(
+      sql`select tenant_context.audit_token(${id}, ${"token.created"})`,
+    );
     return { token: material.token, data: dto(saved) };
+  });
+}
+
+/**
+ * Records an approved OAuth consent: a grant row that expires after 120 seconds unless its
+ * authorization code is redeemed, plus that code. Only hashes are stored; the code is returned once.
+ */
+export async function createOAuthGrant(
+  p: Principal,
+  input: {
+    clientId: string;
+    clientName: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scopes: Scope[];
+  },
+): Promise<{ code: string }> {
+  human(p);
+  assertTenantContextKey();
+  const db = await getIdentityDb();
+  return withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
+    const role = await liveHuman(tx, p, true);
+    await installTenantContext(tx, p, snapshot);
+    const scopes = effectiveTokenScopes(input.scopes, role);
+    if (!scopes.length || scopes.length !== new Set(input.scopes).size)
+      throw new ApiError(
+        403,
+        "scope_not_allowed",
+        "One or more permissions are not available to your current team role.",
+      );
+    await assertTokenCap(tx, p);
+    const id = randomUUID();
+    await tx.insert(apiTokens).values({
+      id,
+      teamId: p.teamId,
+      userId: p.userId,
+      name: input.clientName,
+      // The grant's own secret is never issued; the client uses OAuth access tokens.
+      tokenHash: hashToken(randomBytes(32).toString("base64url")),
+      prefix: `ros_oauth_${randomBytes(6).toString("base64url")}`,
+      scopes,
+      oauthClientId: input.clientId,
+      expiresAt: sql`current_timestamp + interval '120 seconds'`,
+    });
+    await tx.execute(
+      sql`select tenant_context.audit_token(${id}, ${"token.created"})`,
+    );
+    const code = randomBytes(32).toString("base64url");
+    await tx.insert(oauthCodes).values({
+      codeHash: hashToken(code),
+      grantId: id,
+      clientId: input.clientId,
+      redirectUri: input.redirectUri,
+      codeChallenge: input.codeChallenge,
+      expiresAt: sql`current_timestamp + interval '120 seconds'`,
+    });
+    return { code };
   });
 }
 
@@ -223,7 +450,7 @@ export async function listTokens(
 ): Promise<TokenDto[]> {
   human(p);
   const db = await getIdentityDb();
-  return db.transaction(async (tx) => {
+  return withDeadlines(db, async (tx) => {
     const role = await liveHuman(tx, p);
     if (all && role !== "owner" && role !== "admin")
       throw new ApiError(
@@ -232,8 +459,12 @@ export async function listTokens(
         "Only owners and admins can view all team tokens.",
       );
     const rows = await tx
-      .select()
+      .select({
+        token: getTableColumns(apiTokens),
+        clientName: oauthClients.name,
+      })
       .from(apiTokens)
+      .leftJoin(oauthClients, eq(oauthClients.id, apiTokens.oauthClientId))
       .where(
         and(
           eq(apiTokens.teamId, p.teamId),
@@ -242,7 +473,7 @@ export async function listTokens(
       )
       .orderBy(desc(apiTokens.createdAt))
       .limit(1000);
-    return rows.map(dto);
+    return rows.map((row) => dto(row.token, row.clientName));
   });
 }
 
@@ -250,8 +481,11 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
   human(p);
   if (!/^[0-9a-f-]{36}$/i.test(id))
     throw new ApiError(404, "token_not_found", "The API token was not found.");
-  await withTeam(p, async (tx) => {
+  assertTenantContextKey();
+  const db = await getIdentityDb();
+  await withDeadlinesAndSnapshot(db, async (tx, snapshot) => {
     const role = await liveHuman(tx, p);
+    await installTenantContext(tx, p, snapshot);
     const canManageTeam = role === "owner" || role === "admin";
     const [found] = await tx
       .select()
@@ -275,15 +509,9 @@ export async function revokeToken(p: Principal, id: string): Promise<void> {
       .update(apiTokens)
       .set({ revokedAt: sql`current_timestamp` })
       .where(and(eq(apiTokens.teamId, p.teamId), eq(apiTokens.id, id)));
-    await tx.insert(activity).values({
-      teamId: p.teamId,
-      actorId: p.userId,
-      actorType: "session",
-      action: "token.revoked",
-      kind: "api-token",
-      summary: "Revoked an API token",
-      metadata: { tokenId: id, prefix: found.prefix },
-    });
+    await tx.execute(
+      sql`select tenant_context.audit_token(${id}, ${"token.revoked"})`,
+    );
   });
 }
 

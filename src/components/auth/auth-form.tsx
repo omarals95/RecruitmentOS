@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { ArrowRight, ShieldCheck } from "lucide-react";
+import { versionLabel } from "@/lib/app-version";
 import { authClient } from "@/lib/auth-client";
 import type { AuthOptions } from "@/lib/auth";
+import { safeNext } from "@/lib/safe-next";
 
 type Mode =
   | "sign-in"
@@ -42,17 +44,7 @@ const headings: Record<Mode, [string, string]> = {
   ],
 };
 
-function safeNext(value?: string) {
-  if (!value?.startsWith("/") || value.startsWith("//") || value.includes("\\"))
-    return "/app";
-  const url = new URL(value, "https://recruitment.invalid");
-  return url.origin === "https://recruitment.invalid" &&
-    (url.pathname === "/app" ||
-      url.pathname.startsWith("/app/") ||
-      url.pathname === "/accept-invitation")
-    ? `${url.pathname}${url.search}`
-    : "/app";
-}
+export { safeNext };
 
 export function AuthForm({
   mode,
@@ -61,6 +53,7 @@ export function AuthForm({
   invitationId,
   next,
   initialError,
+  signInMessage,
 }: {
   mode: Mode;
   options: AuthOptions;
@@ -68,6 +61,8 @@ export function AuthForm({
   invitationId?: string;
   next?: string;
   initialError?: string;
+  /** The company's published sign-in message: plain text, rendered escaped. */
+  signInMessage?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -113,13 +108,32 @@ export function AuthForm({
     ) as HTMLInputElement | null;
     const email = String(fields.get("email") ?? "").trim();
     const password = String(fields.get("password") ?? "");
-    if (mode === "sign-in")
+    if (mode === "sign-in") {
+      let challenged = false;
       return action(
-        () => authClient.signIn.email({ email, password, callbackURL: target }),
+        async () => {
+          const result = await authClient.signIn.email({
+            email,
+            password,
+            callbackURL: target,
+          });
+          challenged = Boolean(
+            result.data &&
+            "twoFactorRedirect" in result.data &&
+            result.data.twoFactorRedirect,
+          );
+          return result;
+        },
         () => {
-          window.location.assign(target);
+          // A two-step account continues on the code screen, then reaches the same target.
+          window.location.assign(
+            challenged
+              ? `/two-step?next=${encodeURIComponent(target)}`
+              : target,
+          );
         },
       );
+    }
     if (mode === "sign-up" || mode === "create-admin")
       return action(
         () =>
@@ -204,6 +218,7 @@ export function AuthForm({
           <h1>{title}</h1>
           <p>{description}</p>
         </header>
+        {mode === "sign-in" && signInMessage && <p>{signInMessage}</p>}
         {!options.configured && (
           <div className="auth-notice" role="status">
             <strong>Setup required</strong>
@@ -445,6 +460,7 @@ export function AuthForm({
             </Link>
           )}
         </footer>
+        {mode === "sign-in" && <p className="auth-version">{versionLabel()}</p>}
         {mode === "sign-up" && !options.publicSignup && (
           <p className="auth-help">
             Registration is by invitation. The configured first administrator

@@ -6,18 +6,27 @@ import {
   useEffect,
   useState,
   useCallback,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
-  failedResourceState,
-  resourceSnapshot,
-  type ResourceState,
-} from "./resource-state";
+  createDataCache,
+  DISABLED_SNAPSHOT,
+  LOADING_SNAPSHOT,
+  type CacheIdentity,
+  type CacheSnapshot,
+  type DataCache,
+  type Loader,
+} from "./data-cache";
+import type { Requester } from "./optimistic";
+import { speedLog, startSpeedLog } from "./speed-log";
 
 export interface WorkspaceIdentity {
-  user: { id: string; name: string; email: string };
+  user: { id: string; name: string; email: string; twoStepEnabled: boolean };
   team: { id: string; name: string; slug: string } | null;
   role: string | null;
+  environment: string;
+  canCreateTeam: boolean;
 }
 const WorkspaceContext = createContext<WorkspaceIdentity | null>(null);
 export function WorkspaceProvider({
@@ -27,6 +36,13 @@ export function WorkspaceProvider({
   value: WorkspaceIdentity;
   children: ReactNode;
 }) {
+  const userId = value.user.id;
+  const teamId = value.team?.id ?? null;
+  // Children subscribe first; then everything cached for another user or team is dropped.
+  useEffect(() => {
+    dataCache.setIdentity(teamId ? { userId, teamId } : null);
+    startSpeedLog()?.setTeam(teamId);
+  }, [userId, teamId]);
   return (
     <WorkspaceContext.Provider value={value}>
       {children}
@@ -47,6 +63,44 @@ export class ClientError extends Error {
     super(message);
   }
 }
+/** A non-GET request, except the read-only duplicate lookup POST. */
+function isWrite(path: string, method?: string) {
+  return (
+    !!method &&
+    method.toUpperCase() !== "GET" &&
+    path !== "/api/v1/candidates/duplicates"
+  );
+}
+// In-flight requests per team, so a team switch can abort them.
+const inFlight = new Map<
+  string,
+  Set<{ controller: AbortController; write: boolean }>
+>();
+export function isAbortError(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
+function errorFromBody(status: number, body: unknown) {
+  const error = (body ?? {}) as {
+    error?: { message?: string; code?: string } | string;
+    message?: string;
+  };
+  return new ClientError(
+    status,
+    typeof error.error === "object"
+      ? error.error.code || "request_failed"
+      : "request_failed",
+    typeof error.error === "object"
+      ? error.error.message || "The request could not be completed."
+      : typeof error.error === "string"
+        ? error.error
+        : error.message || "The request could not be completed.",
+  );
+}
 export async function requestJson<T>(
   teamId: string | null,
   path: string,
@@ -54,108 +108,285 @@ export async function requestJson<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (teamId) headers.set("X-Team-Id", teamId);
-  if (init.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, {
-    ...init,
-    headers,
-    credentials: "same-origin",
-    cache: "no-store",
-  });
-  let body: unknown;
+  if (init.body && !headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
+  const controller = new AbortController();
+  const signal = init.signal
+    ? AbortSignal.any([controller.signal, init.signal])
+    : controller.signal;
+  const entry = { controller, write: isWrite(path, init.method) };
+  if (teamId)
+    inFlight.set(teamId, (inFlight.get(teamId) ?? new Set()).add(entry));
   try {
-    body = await response.json();
-  } catch {
-    throw new ClientError(
-      response.status,
-      "invalid_response",
-      response.ok
-        ? "The server returned an unreadable response."
-        : "The request could not be completed.",
-    );
+    const response = await fetch(path, {
+      ...init,
+      signal,
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    // One in five responses gives a route timing: method, path pattern and Server-Timing only.
+    if (teamId)
+      speedLog()?.route(
+        init.method ?? "GET",
+        path,
+        response.headers.get("server-timing"),
+      );
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new ClientError(
+        response.status,
+        "invalid_response",
+        response.ok
+          ? "The server returned an unreadable response."
+          : "The request could not be completed.",
+      );
+    }
+    if (!response.ok) throw errorFromBody(response.status, body);
+    // The duplicate lookup is a read-only POST, so it must not refresh open views.
+    if (teamId && entry.write) {
+      dataCache.afterWrite(teamId, path, body);
+      teamCache.afterWrite(teamId, path, body);
+    }
+    if (typeof window !== "undefined" && entry.write)
+      window.dispatchEvent(
+        new CustomEvent("recruitmentos:data-changed", {
+          detail: { teamId, path },
+        }),
+      );
+    return body as T;
+  } finally {
+    if (teamId) {
+      const entries = inFlight.get(teamId);
+      entries?.delete(entry);
+      if (entries?.size === 0) inFlight.delete(teamId);
+    }
   }
-  if (!response.ok) {
-    const error = body as {
-      error?: { message?: string; code?: string } | string;
-      message?: string;
+}
+/**
+ * POSTs a record export and returns the file. A team switch aborts it like any team request, but
+ * it is not a write: it never blocks a switch or refreshes open views.
+ */
+export async function requestExport(
+  teamId: string,
+  path: string,
+): Promise<{ blob: Blob; filename: string; rows: number }> {
+  const controller = new AbortController();
+  const entry = { controller, write: false };
+  inFlight.set(teamId, (inFlight.get(teamId) ?? new Set()).add(entry));
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "X-Team-Id": teamId },
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        throw new ClientError(
+          response.status,
+          "invalid_response",
+          "The request could not be completed.",
+        );
+      }
+      throw errorFromBody(response.status, body);
+    }
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+    const filename = encoded
+      ? decodeURIComponent(encoded)
+      : /filename="([^"]+)"/i.exec(disposition)?.[1];
+    const count = response.headers.get("x-export-rows") ?? "";
+    const rows = /^\d{1,6}$/.test(count) ? Number(count) : -1;
+    if (!filename || rows < 0)
+      throw new ClientError(
+        response.status,
+        "invalid_response",
+        "The server returned an unreadable response.",
+      );
+    return { blob: await response.blob(), filename, rows };
+  } finally {
+    const entries = inFlight.get(teamId);
+    entries?.delete(entry);
+    if (entries?.size === 0) inFlight.delete(teamId);
+  }
+}
+/** Aborts every in-flight requestJson or requestExport call started for this team. */
+export function abortTeamRequests(teamId: string) {
+  const entries = inFlight.get(teamId);
+  inFlight.delete(teamId);
+  for (const entry of entries ?? []) entry.controller.abort();
+}
+export function hasWritesInFlight(teamId: string) {
+  return [...(inFlight.get(teamId) ?? [])].some((entry) => entry.write);
+}
+// Components holding unsaved work, counted per team.
+const unsaved = new Map<string, number>();
+export function hasUnsavedWork(teamId: string) {
+  return (unsaved.get(teamId) ?? 0) > 0;
+}
+/** Registers unsaved work for the current team while `active` holds. */
+export function useUnsavedWork(active: boolean) {
+  const { team } = useWorkspace();
+  const teamId = team?.id;
+  useEffect(() => {
+    if (!active || !teamId) return;
+    unsaved.set(teamId, (unsaved.get(teamId) ?? 0) + 1);
+    return () => {
+      const left = (unsaved.get(teamId) ?? 1) - 1;
+      if (left > 0) unsaved.set(teamId, left);
+      else unsaved.delete(teamId);
     };
-    throw new ClientError(
-      response.status,
-      typeof error.error === "object"
-        ? error.error.code || "request_failed"
-        : "request_failed",
-      typeof error.error === "object"
-        ? error.error.message || "The request could not be completed."
-        : typeof error.error === "string"
-          ? error.error
-          : error.message || "The request could not be completed.",
-    );
-  }
-  if (
-    typeof window !== "undefined" &&
-    init.method &&
-    init.method.toUpperCase() !== "GET"
-  )
-    window.dispatchEvent(
-      new CustomEvent("recruitmentos:data-changed", {
-        detail: { teamId, path },
-      }),
-    );
-  return body as T;
+  }, [active, teamId]);
+}
+/** Kept in module state so it survives the team-keyed remount. */
+export interface SwitchNotice {
+  fromTeam: string;
+  toTeamId: string;
+}
+let switchNotice: SwitchNotice | null = null;
+const noticeListeners = new Set<() => void>();
+export function setSwitchNotice(value: SwitchNotice | null) {
+  switchNotice = value;
+  for (const listener of noticeListeners) listener();
+}
+function subscribeSwitchNotice(listener: () => void) {
+  noticeListeners.add(listener);
+  return () => {
+    noticeListeners.delete(listener);
+  };
+}
+export function useSwitchNotice() {
+  return useSyncExternalStore(
+    subscribeSwitchNotice,
+    () => switchNotice,
+    () => null,
+  );
+}
+/** Every workspace read: one in-memory cache for this browser tab, keyed by user, team and path. */
+export const dataCache = createDataCache((teamId, path, signal) =>
+  requestJson(teamId, path, { signal }),
+);
+/**
+ * Reads of a TeamScope's team, such as Admin > Teams > team for a team that may not be the active
+ * one. They keep their own cache because an identity change drops every other team's entries from
+ * dataCache, those of a scope just mounted included.
+ */
+const teamCache = createDataCache((teamId, path, signal) =>
+  requestJson(teamId, path, { signal }),
+);
+const TeamScopeContext = createContext<string | null>(null);
+/** Every read below, and useTeamId, name this team instead of the active one. */
+export function TeamScope({
+  teamId,
+  children,
+}: {
+  teamId: string;
+  children: ReactNode;
+}) {
+  return (
+    <TeamScopeContext.Provider value={teamId}>
+      {children}
+    </TeamScopeContext.Provider>
+  );
+}
+/** The team a component's reads and writes name: its TeamScope's team, else the active team. */
+export function useTeamId(): string | null {
+  const scoped = useContext(TeamScopeContext);
+  const { team } = useWorkspace();
+  return scoped ?? team?.id ?? null;
+}
+/** The cache and identity a read uses: a TeamScope's team in teamCache, else the active team. */
+export function useQueryScope(): {
+  cache: DataCache;
+  identity: CacheIdentity | null;
+} {
+  const scoped = useContext(TeamScopeContext);
+  const { user, team } = useWorkspace();
+  const teamId = scoped ?? team?.id;
+  return {
+    cache: scoped ? teamCache : dataCache,
+    identity: teamId ? { userId: user.id, teamId } : null,
+  };
+}
+/** requestJson for one team, in the shape the optimistic actions take. */
+export function teamRequester(teamId: string): Requester {
+  return <T,>(path: string, init?: RequestInit) =>
+    requestJson<T>(teamId, path, init);
+}
+/** Team switch and sign-out: nothing cached for one team may be shown in another. */
+export function clearWorkspaceCache() {
+  dataCache.clear();
+  teamCache.clear();
+  speedLog()?.clear();
+}
+/**
+ * Cached data at once (refreshing in the background), or loading without it. `load` replaces the
+ * single GET for reads such as the whole-vacancy board; keep it stable with useCallback.
+ */
+export function useCachedQuery<T>(path: string | null, load?: Loader) {
+  const { cache, identity } = useQueryScope();
+  const userId = identity?.userId;
+  const teamId = identity?.teamId;
+  const enabled = !!path && !!teamId;
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      enabled
+        ? cache.subscribe(
+            { userId: userId!, teamId: teamId! },
+            path!,
+            listener,
+            load,
+          )
+        : () => {},
+    [cache, enabled, userId, teamId, path, load],
+  );
+  const getSnapshot = useCallback(
+    () =>
+      enabled
+        ? cache.getSnapshot({ userId: userId!, teamId: teamId! }, path!)
+        : DISABLED_SNAPSHOT,
+    [cache, enabled, userId, teamId, path],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, () =>
+    enabled ? LOADING_SNAPSHOT : DISABLED_SNAPSHOT,
+  ) as CacheSnapshot<T>;
+  const refresh = useCallback(() => {
+    if (enabled)
+      void cache.revalidate({ userId: userId!, teamId: teamId! }, path!, true);
+  }, [cache, enabled, userId, teamId, path]);
+  const setData = useCallback(
+    (data: T | null) => {
+      if (enabled) cache.set({ userId: userId!, teamId: teamId! }, path!, data);
+    },
+    [cache, enabled, userId, teamId, path],
+  );
+  return { ...snapshot, refresh, setData };
 }
 export function useApi<T>(path: string | null) {
-  const { team } = useWorkspace();
-  const [state, setState] = useState<ResourceState<T> | null>(null);
-  const [revision, setRevision] = useState(0);
-  const key = JSON.stringify([team?.id || "", path || ""]);
-  const refresh = useCallback(() => setRevision((n) => n + 1), []);
-  useEffect(() => {
-    const onChange = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{ teamId: string | null; path: string }>
-      ).detail;
-      if (detail.teamId !== team?.id || !path) return;
-      const changedResource = detail.path.split("/")[3];
-      const currentResource = path.split("/")[3]?.split("?")[0];
-      if (
-        currentResource === changedResource ||
-        [
-          "overview",
-          "analytics",
-          "activity",
-          "notifications",
-          "search",
-        ].includes(currentResource)
-      )
-        refresh();
-    };
-    window.addEventListener("recruitmentos:data-changed", onChange);
-    return () =>
-      window.removeEventListener("recruitmentos:data-changed", onChange);
-  }, [team, path, refresh]);
-  useEffect(() => {
-    let active = true;
-    if (!path || !team) return;
-    requestJson<T>(team.id, path)
-      .then((value) => {
-        if (active) setState({ key, revision, data: value, error: "" });
-      })
-      .catch((error: unknown) => {
-        if (active)
-          setState((previous) =>
-            failedResourceState(previous, key, revision, error),
-          );
-      });
-    return () => {
-      active = false;
-    };
-  }, [team, path, key, revision]);
-  const setData = (data: T | null) =>
-    setState({ key, revision, data, error: "" });
-  return {
-    ...resourceSnapshot(state, key, revision, !!path && !!team),
-    refresh,
-    setData,
-  };
+  return useCachedQuery<T>(path);
+}
+/** The signed-in user and active team, for cache calls outside a hook. */
+export function useCacheIdentity(): CacheIdentity | null {
+  const { user, team } = useWorkspace();
+  return team ? { userId: user.id, teamId: team.id } : null;
+}
+const NO_PENDING: ReadonlySet<string> = new Set();
+/** Records whose quick action is still saving; their controls stay disabled. */
+export function usePendingKeys(): ReadonlySet<string> {
+  return useSyncExternalStore(
+    dataCache.subscribePending,
+    dataCache.pendingKeys,
+    () => NO_PENDING,
+  );
 }
 export function useDebounced<T>(value: T, delay = 250) {
   const [settled, setSettled] = useState(value);
@@ -165,7 +396,9 @@ export function useDebounced<T>(value: T, delay = 250) {
   }, [value, delay]);
   return settled;
 }
+/** An aborted request is never an error to show, so it gives an empty message. */
 export function humanError(error: unknown) {
+  if (isAbortError(error)) return "";
   if (error instanceof ClientError && error.status === 409)
     return `${error.message} Your draft is retained. Close this editor to refresh the record before trying again.`;
   if (error instanceof ClientError && error.status === 429)

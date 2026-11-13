@@ -6,34 +6,34 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
 } from "react";
 import { Copy, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
-import { SCOPES, roleScopes, type Role, type Scope } from "@/lib/permissions";
+import {
+  API_TOKEN_SCOPES,
+  roleScopes,
+  type Role,
+  type Scope,
+} from "@/lib/permissions";
+import { scopeDescriptions } from "@/lib/scope-descriptions";
 import type { TokenDto } from "@/lib/api-tokens";
 import {
   humanError,
+  isAbortError,
   requestJson,
   useWorkspace,
 } from "@/components/workspace/client";
-import { SettingsNavigation } from "./settings-navigation";
+import { formatDate } from "@/components/workspace/helpers";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import {
+  SettingsNavigation,
+  useAdminPortalLink,
+  useManagedGroupsLink,
+} from "./settings-navigation";
 
-const scopeDescriptions: Record<Scope, string> = {
-  "candidates:read": "Read candidate facts",
-  "candidates:write": "Create and edit candidates",
-  "recruitment:read": "Read jobs, pipeline and tasks",
-  "recruitment:write": "Manage recruitment records",
-  "cvs:read": "Read CVs and private download links",
-  "cvs:write": "Upload CVs",
-  "imports:write": "Import legacy identifiers and source evidence",
-};
 const date = (value: string | null) =>
-  value
-    ? new Date(value).toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-    : "Never";
+  value ? formatDate(value, true) : "Never";
 
 export function TokenSettings() {
   const { team } = useWorkspace();
@@ -42,6 +42,8 @@ export function TokenSettings() {
 
 function TokenSettingsContent() {
   const { team, user, role } = useWorkspace();
+  const adminPortal = useAdminPortalLink();
+  const managedGroups = useManagedGroupsLink();
   const [tokens, setTokens] = useState<TokenDto[]>([]);
   const [all, setAll] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -54,6 +56,12 @@ function TokenSettingsContent() {
   const [secret, setSecret] = useState("");
   const secretRef = useRef<HTMLTextAreaElement>(null);
   const [now, setNow] = useState(0);
+  const { confirm, dialog } = useConfirm();
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => "",
+  );
   const admin = role === "owner" || role === "admin";
   const available =
     role && ["owner", "admin", "recruiter", "viewer"].includes(role)
@@ -128,6 +136,7 @@ function TokenSettingsContent() {
       );
       requestAnimationFrame(() => secretRef.current?.focus());
     } catch (e) {
+      if (isAbortError(e)) return;
       setError(
         `${humanError(e)} If the connection was interrupted, refresh the token list before creating another token. Your form is retained.`,
       );
@@ -139,9 +148,12 @@ function TokenSettingsContent() {
     if (
       !team ||
       busy ||
-      !window.confirm(
-        `Revoke “${token.name}”? Integrations using this token will lose access.`,
-      )
+      !(await confirm({
+        title: "Revoke token?",
+        message: `Revoke “${token.name}”? Integrations using this token will lose access.`,
+        confirmLabel: "Revoke token",
+        destructive: true,
+      }))
     )
       return;
     setBusy(token.id);
@@ -189,7 +201,11 @@ function TokenSettingsContent() {
         </div>
         <KeyRound aria-hidden="true" size={28} />
       </header>
-      <SettingsNavigation active="api-tokens" />
+      <SettingsNavigation
+        active="api-tokens"
+        adminPortal={adminPortal}
+        managedGroups={managedGroups}
+      />
       {error && (
         <div className="notice error" role="alert">
           {error}
@@ -252,49 +268,67 @@ function TokenSettingsContent() {
               </div>
             </section>
           )}
-          <section className="panel">
-            <h2>Create a personal token</h2>
-            <p className="muted">
-              Team: <strong>{team.name}</strong>. Access follows your current
-              role and stops if your membership is removed. Default expiry is 30
-              days.
-            </p>
-            <form className="stack" onSubmit={create}>
-              <div className="form-grid">
-                <label className="field">
-                  <span>Token name</span>
-                  <input
-                    required
-                    maxLength={100}
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g. Candidate import assistant"
-                    autoComplete="off"
-                  />
-                </label>
-                <label className="field">
-                  <span>Expires in days</span>
-                  <input
-                    required
-                    type="number"
-                    min={1}
-                    max={365}
-                    value={days}
-                    onChange={(e) => setDays(Number(e.target.value))}
-                  />
-                </label>
+          {!user.twoStepEnabled ? (
+            <section className="panel">
+              <h2>Create a personal token</h2>
+              <p>
+                Turn on two-step sign-in in your profile before creating API
+                tokens or connecting apps.
+              </p>
+              <div>
+                <Link
+                  className="button"
+                  href="/two-step-setup?next=/app/settings/api-tokens"
+                >
+                  Turn on two-step sign-in
+                </Link>
               </div>
-              <fieldset
-                style={{
-                  border: "1px solid var(--border, #e2e4eb)",
-                  borderRadius: 10,
-                  padding: 16,
-                }}
-              >
-                <legend>Permissions</legend>
+            </section>
+          ) : (
+            <section className="panel">
+              <h2>Create a personal token</h2>
+              <p className="muted">
+                Team: <strong>{team.name}</strong>. Access follows your current
+                role and stops if your membership is removed. Default expiry is
+                30 days.
+              </p>
+              <form className="stack" onSubmit={create}>
                 <div className="form-grid">
-                  {SCOPES.filter((scope) => available.includes(scope)).map(
-                    (scope) => (
+                  <label className="field">
+                    <span>Token name</span>
+                    <input
+                      required
+                      maxLength={100}
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="e.g. Candidate import assistant"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Expires in days</span>
+                    <input
+                      required
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={days}
+                      onChange={(e) => setDays(Number(e.target.value))}
+                    />
+                  </label>
+                </div>
+                <fieldset
+                  style={{
+                    border: "1px solid var(--border, #e2e4eb)",
+                    borderRadius: 10,
+                    padding: 16,
+                  }}
+                >
+                  <legend>Permissions</legend>
+                  <div className="form-grid">
+                    {API_TOKEN_SCOPES.filter((scope) =>
+                      available.includes(scope),
+                    ).map((scope) => (
                       <label
                         key={scope}
                         style={{
@@ -323,36 +357,37 @@ function TokenSettingsContent() {
                           </span>
                         </span>
                       </label>
-                    ),
+                    ))}
+                  </div>
+                </fieldset>
+                <p className="muted">
+                  <ShieldCheck
+                    size={16}
+                    aria-hidden="true"
+                    style={{ verticalAlign: "middle" }}
+                  />{" "}
+                  Tokens cannot administer users, teams, roles or other tokens.
+                  Read and write scopes are selected separately.
+                </p>
+                <div>
+                  <button
+                    type="submit"
+                    className="button"
+                    disabled={!!busy || scopes.length === 0 || !!secret}
+                  >
+                    {busy === "create" ? "Creating token…" : "Create token"}
+                  </button>
+                  {secret && (
+                    <span className="muted">
+                      {" "}
+                      Save and dismiss the previous token before creating
+                      another.
+                    </span>
                   )}
                 </div>
-              </fieldset>
-              <p className="muted">
-                <ShieldCheck
-                  size={16}
-                  aria-hidden="true"
-                  style={{ verticalAlign: "middle" }}
-                />{" "}
-                Tokens cannot administer users, teams, roles or other tokens.
-                Read and write scopes are selected separately.
-              </p>
-              <div>
-                <button
-                  type="submit"
-                  className="button"
-                  disabled={!!busy || scopes.length === 0 || !!secret}
-                >
-                  {busy === "create" ? "Creating token…" : "Create token"}
-                </button>
-                {secret && (
-                  <span className="muted">
-                    {" "}
-                    Save and dismiss the previous token before creating another.
-                  </span>
-                )}
-              </div>
-            </form>
-          </section>
+              </form>
+            </section>
+          )}
           <section className="panel">
             <div className="row" style={{ justifyContent: "space-between" }}>
               <div>
@@ -424,7 +459,11 @@ function TokenSettingsContent() {
                           <td>
                             <strong>{token.name}</strong>
                             <br />
-                            <code>{token.prefix}…</code>
+                            {token.oauthClient ? (
+                              <span className="badge">OAuth app</span>
+                            ) : (
+                              <code>{token.prefix}…</code>
+                            )}
                           </td>
                           {all && (
                             <td>
@@ -490,7 +529,14 @@ function TokenSettingsContent() {
               <code>POST /api/v1/candidates</code> with{" "}
               <code>candidates:write</code> and a stable{" "}
               <code>Idempotency-Key</code>. CVs use a three-step private upload:
-              request a form, upload to S3, then complete validation.
+              reserve an upload, send the file to the configured private
+              storage, then complete validation.
+            </p>
+            <p>
+              AI assistants such as Claude connect to{" "}
+              <code>{origin}/api/mcp</code>, either with an API token sent as an
+              Authorization header (Claude Code) or by signing in through the
+              connector (Claude.ai). Connected apps appear in this list.
             </p>
             <a
               className="button secondary"
@@ -503,6 +549,7 @@ function TokenSettingsContent() {
           </section>
         </>
       )}
+      {dialog}
     </div>
   );
 }

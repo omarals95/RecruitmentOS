@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Archive,
@@ -14,8 +22,6 @@ import {
   FileText,
   Filter,
   FolderOpen,
-  LayoutGrid,
-  List,
   LoaderCircle,
   Mail,
   MessageSquare,
@@ -32,60 +38,82 @@ import {
   kindToResource,
   APPLICATION_STAGES,
   CANDIDATE_STATUSES,
+  REVIEW_STATUSES,
+  safeExternalUrl,
+  type FieldConfig,
   type RecordDto,
   type ResourceName,
   type ReferenceField,
 } from "@/domain/records";
+import type { KindSchemaBody } from "@/domain/config";
+import { screenFor, shownGroups } from "@/domain/screens";
 import { CvUpload } from "@/components/cv-upload";
+import { downloadVerifiedCv, saveCvBytes } from "@/components/cv-transfer";
 import { BulkCvImport } from "./bulk-cv-import";
+import { DisplayModeToggle, type DisplayMode } from "./display-mode-toggle";
 import { Dialog } from "@/components/ui/dialog";
+import { tabKeys } from "@/components/ui/tab-keys";
 import { RecordEditor, ReferencePicker } from "./editor";
 import { OfferStats } from "./metrics";
-import { personalStateMutation } from "./mutation";
 import {
+  activeFilterCount,
+  addFilterTag,
+  checklistProgress,
+  hasFilterTag,
   dataOf,
   display,
+  exportSummary,
+  isFiltered,
+  loadAllPages,
   recordLabel,
+  referenceText,
+  roleDifferences,
+  roleSnapshot,
   initials,
   formatDate,
+  formatField,
+  formatNumber,
+  commentAuthor,
   badgeTone,
-  saveCsv,
+  saveBlob,
+  type ListResponse,
 } from "./helpers";
 import {
+  ClientError,
+  dataCache,
+  teamRequester,
   useApi,
+  useCacheIdentity,
+  useCachedQuery,
   useDebounced,
+  usePendingKeys,
+  useUnsavedWork,
   useWorkspace,
+  requestExport,
   requestJson,
   humanError,
 } from "./client";
+import { kindSchemaBodyOf } from "./mutation";
+import { moveRecord, saveFollowup, updateRecord } from "./optimistic";
+import { useTeamMembers, type TeamMember } from "./team-members";
+import { startSpeedTimer, useReadyTiming } from "./speed-log";
+import type { SpeedTab } from "@/domain/speed";
 
-export interface ListResponse {
-  data: RecordDto[];
-  pagination: {
-    page: number;
-    pageSize: number;
-    total: number;
-    totalPages: number;
-  };
-}
-function tabKeys(event: React.KeyboardEvent<HTMLDivElement>) {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  const buttons = [
-    ...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-  ];
-  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-  if (index < 0) return;
-  event.preventDefault();
-  const next =
-    event.key === "Home"
-      ? 0
-      : event.key === "End"
-        ? buttons.length - 1
-        : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) %
-          buttons.length;
-  buttons[next].focus();
-  buttons[next].click();
-}
+import { Loading } from "./skeleton";
+import {
+  BUCKETS_PATH,
+  CANDIDATE_SUGGESTIONS_PATH,
+  TASK_BOARDS_PATH,
+  defaultListQuery,
+  listPath,
+  listSearchParams,
+  screenDefinitions,
+  viewsPath,
+} from "./tab-requests";
+
+export type { ListResponse } from "./helpers";
+export { screenDefinitions } from "./tab-requests";
+export { Loading } from "./skeleton";
 const tableColumns: Partial<Record<ResourceName, string[]>> = {
   candidates: [
     "name",
@@ -114,64 +142,163 @@ const tableColumns: Partial<Record<ResourceName, string[]>> = {
   buckets: ["name", "position"],
   "task-fields": ["name", "type", "required"],
 };
-export const screenDefinitions: Record<
-  string,
-  { title: string; description: string; resource: ResourceName }
-> = {
-  candidates: {
-    title: "Candidates",
-    description: "Your talent directory, with the source details that matter.",
-    resource: "candidates",
-  },
-  shortlist: {
-    title: "My shortlist",
-    description: "Candidates you have personally saved for a closer look.",
-    resource: "candidates",
-  },
-  vacancies: {
-    title: "Open vacancies",
-    description: "A clear view of the roles your team is working to fill.",
-    resource: "vacancies",
-  },
-  roles: {
-    title: "Job roles",
-    description: "Reusable role descriptions to start your next vacancy.",
-    resource: "job-roles",
-  },
-  pipeline: {
-    title: "Applications",
-    description:
-      "Move every conversation forward, one considered step at a time.",
-    resource: "applications",
-  },
-  tasks: {
-    title: "Recruitment tasks",
-    description: "Your workflow, your buckets, your next steps.",
-    resource: "tasks",
-  },
-  interviews: {
-    title: "Interviews",
-    description: "Plan conversations and keep the whole team in the loop.",
-    resource: "interviews",
-  },
-  offers: {
-    title: "Offers",
-    description:
-      "Track the details between a good conversation and a decision.",
-    resource: "offers",
-  },
-  onboarding: {
-    title: "Onboarding",
-    description: "Give every new starter a thoughtful beginning.",
-    resource: "onboarding",
-  },
-  "source-review": {
-    title: "Source review",
-    description:
-      "Resolve missing or ambiguous source information without guessing.",
-    resource: "candidates",
-  },
-};
+/** Most applications the whole-vacancy board loads; above it the board is replaced by a message. */
+const BOARD_LIMIT = 1000;
+/**
+ * Every application matching `query` (no page), kept in the workspace cache: shown at once on
+ * return and refreshed in the background. Application writes patch it in place.
+ */
+function useWholePipeline(query: string | null) {
+  const { team } = useWorkspace();
+  const teamId = team?.id;
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      const fetchPage = (page: number) =>
+        requestJson<ListResponse>(
+          teamId!,
+          `/api/v1/applications?${query}&page=${page}&pageSize=100`,
+          { signal },
+        );
+      let loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      // The pipeline changed between pages; one more pass usually settles it.
+      if (!loaded.tooMany && !loaded.complete)
+        loaded = await loadAllPages(fetchPage, BOARD_LIMIT);
+      return loaded;
+    },
+    [teamId, query],
+  );
+  return useCachedQuery<Awaited<ReturnType<typeof loadAllPages>>>(
+    query ? `/api/v1/applications?${query}#board` : null,
+    load,
+  );
+}
+
+/**
+ * The address without the import link parameter, so a reload or a shared address does not open
+ * Import CVs again.
+ */
+export function withoutImportLink(href: string): string {
+  const url = new URL(href);
+  url.searchParams.delete("import");
+  return url.toString();
+}
+
+/**
+ * The list's Export button; Assigned to me and a task board other than All buckets are list-only
+ * filters that an export refuses.
+ */
+export function ExportControl({
+  exporting,
+  loading,
+  assignedToMe,
+  board = false,
+  onExport,
+}: {
+  exporting: boolean;
+  loading: boolean;
+  assignedToMe: boolean;
+  /** Tasks only: a task board other than All buckets is chosen. */
+  board?: boolean;
+  onExport: () => void;
+}) {
+  const noteId = useId();
+  const note = [
+    assignedToMe ? "Turn off Assigned to me to export." : "",
+    board ? "Choose All buckets to export." : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <>
+      <button
+        className="button secondary"
+        disabled={exporting || loading || !!note}
+        aria-describedby={note ? noteId : undefined}
+        onClick={onExport}
+      >
+        {exporting ? (
+          <LoaderCircle className="spin" size={16} aria-hidden="true" />
+        ) : (
+          <Download size={16} aria-hidden="true" />
+        )}
+        Export
+      </button>
+      {note && (
+        <small id={noteId} className="muted">
+          {note}
+        </small>
+      )}
+    </>
+  );
+}
+
+/** A published task board as GET /api/v1/task-boards lists it; its filter stays on the server. */
+export interface TaskBoardOption {
+  id: string;
+  key: string;
+  name: string;
+  columns: string[];
+}
+/**
+ * The chosen board among the published ones, or null for All buckets: none chosen, or a chosen
+ * board that is no longer listed (retired), which is then unavailable.
+ */
+export function taskBoardChoice(
+  boards: TaskBoardOption[] | null,
+  chosen: string,
+): { board: TaskBoardOption | null; unavailable: boolean } {
+  const board = boards?.find((item) => item.id === chosen) ?? null;
+  return { board, unavailable: !!chosen && !!boards && !board };
+}
+/**
+ * A board's Kanban columns: its bucket ids in board order, mapped onto the active buckets, so an
+ * archived or deleted bucket has no column. All buckets keeps every active bucket in position order.
+ */
+export function boardBuckets(
+  buckets: RecordDto[],
+  board: TaskBoardOption | null,
+): RecordDto[] {
+  return board
+    ? board.columns.flatMap((id) =>
+        buckets.filter((bucket) => bucket.id === id),
+      )
+    : buckets;
+}
+/** The Tasks screen's board switcher: All buckets first, then the team's published boards by name. */
+export function TaskBoardSwitcher({
+  boards,
+  value,
+  onChange,
+}: {
+  boards: TaskBoardOption[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <select
+      aria-label="Task board"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">All buckets</option>
+      {boards.map((board) => (
+        <option key={board.id} value={board.id}>
+          {board.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+export const BOARD_UNAVAILABLE =
+  "The task board you chose is no longer available, so All buckets is shown.";
+/** Announces that a chosen board was retired and the screen fell back to All buckets. */
+export function TaskBoardNotice({ unavailable }: { unavailable: boolean }) {
+  return unavailable ? (
+    <p className="notice" role="status">
+      {BOARD_UNAVAILABLE}
+    </p>
+  ) : null;
+}
 
 export function RecordsScreen({ section }: { section: string }) {
   const searchParams = useSearchParams();
@@ -181,24 +308,41 @@ export function RecordsScreen({ section }: { section: string }) {
   const resource = config.resource;
   const { team, role } = useWorkspace();
   const canWrite = !!team && role !== "viewer";
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [category, setCategory] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
-  const [skills, setSkills] = useState<string[]>([]);
-  const [shortlisted, setShortlisted] = useState(section === "shortlist");
-  const [reviewStatus, setReviewStatus] = useState("");
-  const [emirate, setEmirate] = useState("");
-  const [degree, setDegree] = useState("");
-  const [vacancy, setVacancy] = useState("");
-  const [archived, setArchived] = useState(false);
-  const [sort, setSort] = useState(
-    resource === "candidates" ? "name" : "updatedAt",
+  // The same defaults tab-requests.ts prefetches, so a prefetched list is this screen's first key.
+  const [initial] = useState(() => defaultListQuery(section));
+  const [search, setSearch] = useState(initial.search);
+  const [status, setStatus] = useState(initial.status);
+  const [category, setCategory] = useState(initial.category);
+  const [categories, setCategories] = useState<string[]>(initial.categories);
+  const [skills, setSkills] = useState<string[]>(initial.skills);
+  const [certifications, setCertifications] = useState<string[]>(
+    initial.certifications,
   );
-  const [direction, setDirection] = useState("asc");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-  const [mode, setMode] = useState<"table" | "cards" | "board">(
+  const [shortlisted, setShortlisted] = useState(initial.shortlisted);
+  const [reviewStatus, setReviewStatus] = useState(initial.reviewStatus);
+  const [emirate, setEmirate] = useState(initial.emirate);
+  const [degree, setDegree] = useState(initial.degree);
+  const [education, setEducation] = useState(initial.education);
+  const [minYears, setMinYears] = useState(initial.minYears);
+  const [maxYears, setMaxYears] = useState(initial.maxYears);
+  const [vacancy, setVacancy] = useState(initial.vacancy);
+  const [assignedToMe, setAssignedToMe] = useState(!!initial.assignedToMe);
+  // Tasks only: the chosen task board's id, kept in this screen only; empty is All buckets.
+  const [chosenBoard, setChosenBoard] = useState("");
+  const boards = useApi<{ data: TaskBoardOption[] }>(
+    resource === "tasks" ? TASK_BOARDS_PATH : null,
+  );
+  const { board: taskBoard, unavailable: boardUnavailable } = taskBoardChoice(
+    boards.data?.data ?? null,
+    chosenBoard,
+  );
+  const boardId = boardUnavailable ? "" : chosenBoard;
+  const [archived, setArchived] = useState(initial.archived);
+  const [sort, setSort] = useState(initial.sort);
+  const [direction, setDirection] = useState(initial.direction);
+  const [page, setPage] = useState(initial.page);
+  const [pageSize, setPageSize] = useState(initial.pageSize);
+  const [mode, setMode] = useState<DisplayMode>(
     resource === "tasks" || resource === "applications"
       ? "board"
       : resource === "vacancies" || resource === "job-roles"
@@ -206,6 +350,9 @@ export function RecordsScreen({ section }: { section: string }) {
         : "table",
   );
   const [selected, setSelected] = useState<string[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
+  const experienceHelpId = useId();
   const [editor, setEditor] = useState<{
     resource: ResourceName;
     record?: RecordDto;
@@ -214,62 +361,106 @@ export function RecordsScreen({ section }: { section: string }) {
   } | null>(null);
   const [detail, setDetail] = useState<RecordDto | null>(null);
   const [bulk, setBulk] = useState(false);
-  const [bulkCv, setBulkCv] = useState(false);
+  // open_bulk_import_page links to /app/candidates?import=cvs: it opens Import CVs once for a
+  // member who could open it with the button; everyone else sees the page as usual.
+  const importLink =
+    resource === "candidates" && searchParams.get("import") === "cvs";
+  const [bulkCv, setBulkCv] = useState(() => importLink && canWrite);
   const [settings, setSettings] = useState(false);
   const [saveView, setSaveView] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [conflict, setConflict] = useState<{
+    record: RecordDto;
+    target: string;
+  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const debounced = useDebounced(search);
-  const params = useMemo(() => {
-    const p = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-      search: debounced,
+  const params = useMemo(
+    () =>
+      listSearchParams(section, {
+        page,
+        pageSize,
+        search: debounced,
+        sort,
+        direction,
+        archived,
+        status,
+        reviewStatus,
+        category,
+        emirate,
+        degree,
+        vacancy,
+        shortlisted,
+        categories,
+        skills,
+        certifications,
+        education,
+        minYears,
+        maxYears,
+        assignedToMe,
+        board: boardId,
+      }),
+    [
+      page,
+      pageSize,
+      debounced,
       sort,
       direction,
-    });
-    if (archived) p.set("includeArchived", "true");
-    if (status) p.set(resource === "applications" ? "stage" : "status", status);
-    if (reviewStatus) p.set("reviewStatus", reviewStatus);
-    if (category) p.set("folderCategory", category);
-    if (emirate) p.set("residenceEmirate", emirate);
-    if (degree) p.set("degreeLevel", degree);
-    if (vacancy) p.set("vacancyId", vacancy);
-    if (shortlisted) p.set("shortlisted", "true");
-    if (categories.length) p.set("categories", JSON.stringify(categories));
-    if (skills.length) p.set("skills", JSON.stringify(skills));
-    if (section === "source-review") p.set("needsReview", "true");
-    return p;
-  }, [
-    page,
-    pageSize,
-    debounced,
-    sort,
-    direction,
-    archived,
-    status,
-    category,
-    emirate,
-    degree,
-    vacancy,
-    resource,
-    section,
-    categories,
-    skills,
-    shortlisted,
-    reviewStatus,
-  ]);
-  const result = useApi<ListResponse>(`/api/v1/${resource}?${params}`);
+      archived,
+      status,
+      category,
+      emirate,
+      degree,
+      vacancy,
+      section,
+      categories,
+      skills,
+      certifications,
+      education,
+      minYears,
+      maxYears,
+      shortlisted,
+      reviewStatus,
+      assignedToMe,
+      boardId,
+    ],
+  );
+  const result = useApi<ListResponse>(listPath(resource, params));
+  // Tasks only: member names for the board's and the profile's assignees, loaded once per screen.
+  const members = useTeamMembers(team?.id ?? null, resource === "tasks");
+  // The interviews tab is timed by its calendar, which shows this list only on request.
+  useReadyTiming(
+    section === "interviews" ? null : `tab.${section as SpeedTab}`,
+    !!result.data,
+  );
+  // With a vacancy selected, the application board covers the whole pipeline in a stable order.
+  const boardQuery = useMemo(() => {
+    if (resource !== "applications" || mode !== "board" || !vacancy)
+      return null;
+    const query = new URLSearchParams(params);
+    query.delete("page");
+    query.delete("pageSize");
+    query.set("sort", "createdAt");
+    query.set("direction", "asc");
+    return query.toString();
+  }, [resource, mode, vacancy, params]);
+  const board = useWholePipeline(boardQuery);
   const buckets = useApi<ListResponse>(
-    resource === "tasks"
-      ? "/api/v1/buckets?pageSize=100&sort=position&direction=asc"
-      : null,
+    resource === "tasks" ? BUCKETS_PATH : null,
   );
   const views = useApi<ListResponse>(
     resource === "candidates" || resource === "applications"
-      ? `/api/v1/views?pageSize=100&area=${resource === "candidates" ? "directory" : "applications"}`
+      ? viewsPath(resource)
       : null,
+  );
+  // Skill and certification suggestions load on the first focus of either input, not with the tab.
+  const [suggesting, setSuggesting] = useState(false);
+  const suggest = useCallback(() => setSuggesting(true), []);
+  const suggestions = useApi<{
+    data: { skills: string[]; certifications: string[] };
+  }>(
+    resource === "candidates" && suggesting ? CANDIDATE_SUGGESTIONS_PATH : null,
   );
   // A changed server-side query invalidates page-local selection and pagination together.
   useEffect(() => {
@@ -289,8 +480,14 @@ export function RecordsScreen({ section }: { section: string }) {
     pageSize,
     categories,
     skills,
+    certifications,
+    education,
+    minYears,
+    maxYears,
     shortlisted,
     reviewStatus,
+    assignedToMe,
+    boardId,
   ]);
   useEffect(() => {
     let active = true;
@@ -309,40 +506,83 @@ export function RecordsScreen({ section }: { section: string }) {
       active = false;
     };
   }, [team, resource, linkedRecord]);
+  useEffect(() => {
+    if (importLink)
+      window.history.replaceState(
+        window.history.state,
+        "",
+        withoutImportLink(window.location.href),
+      );
+  }, [importLink]);
+  // A background revalidation: the current records stay on screen while it runs.
   const refresh = () => {
     result.refresh();
+    board.refresh();
     buckets.refresh();
+    boards.refresh();
     views.refresh();
     setSelected([]);
   };
   const saved = (record: RecordDto) => {
+    const edited = !!editor?.record;
     setEditor(null);
     setNotice(
       `${RESOURCE_CONFIG[kindToResource[record.kind]].singular} saved.`,
     );
     if (detail?.id === record.id) setDetail(record);
-    refresh();
+    // An edit is already patched into every cached copy; a create still refreshes the lists.
+    if (!edited) refresh();
   };
-  const move = async (record: RecordDto, value: string) => {
-    if (!team) return;
+  const move = (record: RecordDto, value: string) => {
+    if (!team || (resource !== "tasks" && resource !== "applications")) return;
+    if (
+      value ===
+      (resource === "tasks" ? record.bucketId : String(dataOf(record).stage))
+    )
+      return;
+    setError("");
+    setNotice("");
+    setConflict(null);
+    const saved = startSpeedTimer(
+      resource === "tasks" ? "task.move" : "application.stage",
+    );
+    // The card moves at once; a failed save puts it back and rereads only this record.
+    void moveRecord(dataCache, teamRequester(team.id), {
+      teamId: team.id,
+      resource,
+      record,
+      target: value,
+      label: `Moving ${recordLabel(record)} to ${moveTargetName(value)}`,
+    }).then((outcome) => {
+      if (outcome.ok) saved();
+      if (outcome.ok)
+        setNotice(
+          resource === "tasks" ? "Task moved." : "Application stage updated.",
+        );
+      else if (outcome.conflict) setConflict({ record, target: value });
+      else if (outcome.message) setError(outcome.message);
+    });
+  };
+  const moveAgain = async () => {
+    if (!team || !conflict) return;
+    const { record, target } = conflict;
+    setConflict(null);
     setError("");
     try {
-      await requestJson(team.id, `/api/v1/${resource}/${record.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          version: record.version,
-          ...(resource === "tasks"
-            ? { bucketId: value }
-            : { data: { stage: value } }),
-        }),
-      });
-      refresh();
-      setNotice(
-        resource === "tasks" ? "Task moved." : "Application stage updated.",
+      // Never reuse the stale version; fetch the current one first.
+      const latest = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/${resource}/${record.id}`,
       );
+      move(latest.data, target);
     } catch (e) {
       setError(humanError(e));
     }
+  };
+  const moveTargetName = (target: string) => {
+    if (resource !== "tasks") return target;
+    const bucket = buckets.data?.data.find((item) => item.id === target);
+    return bucket ? recordLabel(bucket) : "the chosen bucket";
   };
   const applyView = (view: RecordDto) => {
     const q = dataOf(view).query as Record<string, unknown>;
@@ -353,8 +593,12 @@ export function RecordsScreen({ section }: { section: string }) {
         q.degreeLevel ||
         q.reviewStatus ||
         q.shortlisted ||
+        q.education ||
+        q.minYearsExperience !== undefined ||
+        q.maxYearsExperience !== undefined ||
         (Array.isArray(q.categories) && q.categories.length) ||
-        (Array.isArray(q.skills) && q.skills.length))
+        (Array.isArray(q.skills) && q.skills.length) ||
+        (Array.isArray(q.certifications) && q.certifications.length))
     ) {
       setError(
         "This saved application view contains candidate-only filters. Edit the view to remove those filters before applying it.",
@@ -365,10 +609,27 @@ export function RecordsScreen({ section }: { section: string }) {
     setCategory(String(q.category || ""));
     setCategories(Array.isArray(q.categories) ? q.categories.map(String) : []);
     setSkills(Array.isArray(q.skills) ? q.skills.map(String) : []);
+    setCertifications(
+      Array.isArray(q.certifications) ? q.certifications.map(String) : [],
+    );
     setShortlisted(q.shortlisted === true || section === "shortlist");
-    setReviewStatus(String(q.reviewStatus || ""));
+    // Source review already shows only records that need review.
+    setReviewStatus(
+      section === "source-review" ? "" : String(q.reviewStatus || ""),
+    );
     setEmirate(String(q.emirate || ""));
     setDegree(String(q.degreeLevel || ""));
+    setEducation(String(q.education || ""));
+    setMinYears(
+      typeof q.minYearsExperience === "number"
+        ? String(q.minYearsExperience)
+        : "",
+    );
+    setMaxYears(
+      typeof q.maxYearsExperience === "number"
+        ? String(q.maxYearsExperience)
+        : "",
+    );
     setStatus(String(q.stage || q.status || ""));
     setVacancy(String(q.vacancyId || ""));
     setArchived(!!q.includeArchived);
@@ -376,47 +637,56 @@ export function RecordsScreen({ section }: { section: string }) {
     setDirection(String(q.direction || "asc"));
     setPageSize(Number(q.pageSize) || 25);
   };
+  const filters = {
+    status,
+    category,
+    categories,
+    skills,
+    certifications,
+    shortlisted,
+    reviewStatus,
+    emirate,
+    degree,
+    education,
+    minYears,
+    maxYears,
+    vacancy,
+    archived,
+    assignedToMe,
+  };
+  const clearFilters = () => {
+    setSearch("");
+    setStatus("");
+    setCategory("");
+    setCategories([]);
+    setSkills([]);
+    setCertifications([]);
+    setReviewStatus("");
+    setShortlisted(section === "shortlist");
+    setEmirate("");
+    setDegree("");
+    setEducation("");
+    setMinYears("");
+    setMaxYears("");
+    setVacancy("");
+    setAssignedToMe(false);
+    setArchived(false);
+  };
   const exportAll = async () => {
     if (!team) return;
     setExporting(true);
     setError("");
+    setNotice("");
     try {
-      const rows: RecordDto[] = [];
-      let current = 1;
-      let total = 1;
-      do {
-        const query = new URLSearchParams(params);
-        query.set("page", String(current));
-        query.set("pageSize", "100");
-        const response = await requestJson<ListResponse>(
-          team.id,
-          `/api/v1/${resource}?${query}`,
-        );
-        rows.push(...response.data);
-        total = response.pagination.totalPages;
-        current++;
-        if (rows.length > 100000)
-          throw new Error("This export is too large. Narrow your filters.");
-      } while (current <= total);
-      const fields = RESOURCE_CONFIG[resource].fields;
-      saveCsv(
-        `RecruitmentOS-${resource}.csv`,
-        [
-          "Record ID",
-          ...fields.map((f) => f.label),
-          "Created at",
-          "Updated at",
-        ],
-        rows.map((r) => [
-          r.id,
-          ...fields.map((f) => dataOf(r)[f.key]),
-          r.createdAt,
-          r.updatedAt,
-        ]),
+      const query = new URLSearchParams(params);
+      query.delete("page");
+      query.delete("pageSize");
+      const file = await requestExport(
+        team.id,
+        `/api/v1/${resource}/export?${query}`,
       );
-      setNotice(
-        `Exported ${rows.length} records matching the current filters.`,
-      );
+      saveBlob(file.filename, file.blob);
+      setNotice(exportSummary(file.rows, file.rows).notice);
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -426,6 +696,17 @@ export function RecordsScreen({ section }: { section: string }) {
   const columns =
     tableColumns[resource] ||
     RESOURCE_CONFIG[resource].fields.slice(0, 5).map((field) => field.key);
+  const columnField = (key: string) =>
+    RESOURCE_CONFIG[resource].fields.find((f) => f.key === key);
+  const columnLabel = (key: string) => columnField(key)?.label || key;
+  const cellText = (key: string, record: RecordDto) =>
+    formatField(columnField(key) || { key, type: "text" }, dataOf(record));
+  const filterCount = activeFilterCount(filters, section === "shortlist");
+  const filtered = isFiltered(search, filters, section === "shortlist");
+  const columnBuckets = boardBuckets(buckets.data?.data || [], taskBoard);
+  // A chosen board whose every bucket is archived or deleted has no column to show.
+  const noActiveColumns =
+    !!taskBoard && !!buckets.data && !columnBuckets.length;
   const stateOptions =
     resource === "applications"
       ? APPLICATION_STAGES
@@ -445,7 +726,7 @@ export function RecordsScreen({ section }: { section: string }) {
             {config.title}
             {result.data && (
               <span className="heading-count">
-                {result.data.pagination.total.toLocaleString()}
+                {formatNumber(result.data.pagination.total)}
               </span>
             )}
           </h1>
@@ -496,6 +777,29 @@ export function RecordsScreen({ section }: { section: string }) {
       {error && (
         <div className="notice error" role="alert">
           {error}
+        </div>
+      )}
+      <TaskBoardNotice unavailable={boardUnavailable} />
+      {conflict && (
+        <div className="notice error" role="alert">
+          {recordLabel(conflict.record)} was changed by someone else, so your
+          move to {moveTargetName(conflict.target)} was not saved and has been
+          undone. The board now shows the latest version.
+          <div className="row">
+            <button
+              className="button small"
+              disabled={!canWrite}
+              onClick={moveAgain}
+            >
+              Move to {moveTargetName(conflict.target)} again
+            </button>
+            <button
+              className="button secondary small"
+              onClick={() => setConflict(null)}
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
       {resource === "candidates" && (
@@ -556,43 +860,25 @@ export function RecordsScreen({ section }: { section: string }) {
                 Save view
               </button>
             )}
-            <button
-              className="button secondary"
-              disabled={exporting || result.loading}
-              onClick={exportAll}
-            >
-              {exporting ? (
-                <LoaderCircle className="spin" size={16} aria-hidden="true" />
-              ) : (
-                <Download size={16} aria-hidden="true" />
-              )}
-              Export
-            </button>
-            <div className="view-toggle" aria-label="Display mode">
-              {(resource === "applications" || resource === "tasks") && (
-                <button
-                  aria-label="Board view"
-                  aria-pressed={mode === "board"}
-                  onClick={() => setMode("board")}
-                >
-                  <LayoutGrid size={17} />
-                </button>
-              )}
-              <button
-                aria-label="Table view"
-                aria-pressed={mode === "table"}
-                onClick={() => setMode("table")}
-              >
-                <List size={18} />
-              </button>
-              <button
-                aria-label="Card view"
-                aria-pressed={mode === "cards"}
-                onClick={() => setMode("cards")}
-              >
-                <LayoutGrid size={17} />
-              </button>
-            </div>
+            {resource === "tasks" && (
+              <TaskBoardSwitcher
+                boards={boards.data?.data ?? []}
+                value={boardId}
+                onChange={setChosenBoard}
+              />
+            )}
+            <ExportControl
+              exporting={exporting}
+              loading={result.loading}
+              assignedToMe={assignedToMe}
+              board={!!taskBoard}
+              onExport={exportAll}
+            />
+            <DisplayModeToggle
+              board={resource === "applications" || resource === "tasks"}
+              mode={mode}
+              onChange={setMode}
+            />
             <button
               className="icon-button"
               aria-label="Refresh records"
@@ -600,9 +886,21 @@ export function RecordsScreen({ section }: { section: string }) {
             >
               <RefreshCw size={17} />
             </button>
+            <button
+              className="button secondary filters-toggle"
+              aria-expanded={filtersOpen}
+              aria-controls={filtersId}
+              onClick={() => setFiltersOpen((open) => !open)}
+            >
+              <Filter size={16} aria-hidden="true" />
+              {filterCount > 0 ? `Filters (${filterCount})` : "Filters"}
+            </button>
           </div>
         </div>
-        <div className="filter-bar">
+        <div
+          className={`filter-bar${filtersOpen ? " is-open" : ""}`}
+          id={filtersId}
+        >
           {stateOptions.length > 0 && (
             <label>
               Status
@@ -678,7 +976,56 @@ export function RecordsScreen({ section }: { section: string }) {
                 label="All of these skills"
                 values={skills}
                 onChange={setSkills}
+                suggestions={suggestions.data?.data.skills ?? []}
+                onFocus={suggest}
               />
+              <FilterTags
+                label="All of these certifications"
+                values={certifications}
+                onChange={setCertifications}
+                suggestions={suggestions.data?.data.certifications ?? []}
+                onFocus={suggest}
+              />
+              <label>
+                Education contains
+                <input
+                  value={education}
+                  maxLength={300}
+                  placeholder="Degree, major or university"
+                  onChange={(e) => setEducation(e.target.value)}
+                />
+              </label>
+              <label>
+                Minimum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={minYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMinYears(e.target.value)}
+                />
+              </label>
+              <label>
+                Maximum stated experience (years)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={maxYears}
+                  aria-describedby={
+                    minYears || maxYears ? experienceHelpId : undefined
+                  }
+                  onChange={(e) => setMaxYears(e.target.value)}
+                />
+              </label>
+              {(minYears || maxYears) && (
+                <p className="muted small-text" id={experienceHelpId}>
+                  Candidates without stated experience are not included.
+                </p>
+              )}
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -688,14 +1035,18 @@ export function RecordsScreen({ section }: { section: string }) {
                 />
                 My shortlist only
               </label>
-              {section === "source-review" && (
+              {section !== "source-review" && (
                 <label>
                   Review status
-                  <input
+                  <select
                     value={reviewStatus}
-                    placeholder="Any review status"
                     onChange={(e) => setReviewStatus(e.target.value)}
-                  />
+                  >
+                    <option value="">Any review status</option>
+                    {REVIEW_STATUSES.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
                 </label>
               )}
             </>
@@ -733,6 +1084,16 @@ export function RecordsScreen({ section }: { section: string }) {
               <option value="desc">Descending</option>
             </select>
           </label>
+          {resource === "tasks" && (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={assignedToMe}
+                onChange={(e) => setAssignedToMe(e.target.checked)}
+              />
+              Assigned to me
+            </label>
+          )}
           <label className="checkbox-label">
             <input
               type="checkbox"
@@ -741,33 +1102,8 @@ export function RecordsScreen({ section }: { section: string }) {
             />
             Include archived
           </label>
-          {(search ||
-            status ||
-            category ||
-            emirate ||
-            degree ||
-            vacancy ||
-            archived ||
-            categories.length > 0 ||
-            skills.length > 0 ||
-            shortlisted ||
-            reviewStatus) && (
-            <button
-              className="text-link"
-              onClick={() => {
-                setSearch("");
-                setStatus("");
-                setCategory("");
-                setCategories([]);
-                setSkills([]);
-                setReviewStatus("");
-                setShortlisted(section === "shortlist");
-                setEmirate("");
-                setDegree("");
-                setVacancy("");
-                setArchived(false);
-              }}
-            >
+          {filtered && (
+            <button className="text-link" onClick={clearFilters}>
               Clear filters
             </button>
           )}
@@ -796,24 +1132,41 @@ export function RecordsScreen({ section }: { section: string }) {
           <LoadError message={result.error} retry={result.refresh} />
         ) : result.loading ? (
           <Loading />
-        ) : !result.data?.data.length ? (
+        ) : mode === "board" && noActiveColumns ? (
+          <EmptyState
+            title="None of this board's buckets is active"
+            description="Its buckets were archived or deleted. Choose another board, or All buckets."
+          />
+        ) : !result.data ||
+          !(boardQuery
+            ? result.data.pagination.total
+            : result.data.data.length) ? (
           <EmptyState
             title={
-              search || status || category || emirate
+              filtered
                 ? "No records match these filters"
                 : section === "shortlist"
                   ? "Your shortlist is ready for a first candidate"
-                  : `Your ${config.title.toLowerCase()} start here`
+                  : section === "source-review"
+                    ? "Nothing needs source review"
+                    : `Your ${config.title.toLowerCase()} start here`
             }
             description={
-              search || status || category || emirate
+              filtered
                 ? "Try a broader search or clear your filters."
                 : section === "shortlist"
                   ? "Open a candidate profile and select “Add to my shortlist”."
-                  : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
+                  : section === "source-review"
+                    ? "Every candidate's source information has been reviewed."
+                    : `Add your first ${RESOURCE_CONFIG[resource].singular.toLowerCase()} to get started.`
             }
             action={
-              section === "shortlist" ? (
+              filtered ? (
+                <button className="button secondary" onClick={clearFilters}>
+                  Clear filters
+                </button>
+              ) : section === "source-review" ? undefined : section ===
+                "shortlist" ? (
                 <Link href="/app/candidates" className="button">
                   Browse candidates
                   <ArrowRight size={16} aria-hidden="true" />
@@ -830,14 +1183,53 @@ export function RecordsScreen({ section }: { section: string }) {
               )
             }
           />
+        ) : boardQuery ? (
+          board.error ? (
+            <LoadError message={board.error} retry={board.refresh} />
+          ) : !board.data ? (
+            <Loading />
+          ) : board.data.tooMany ? (
+            <div className="notice" role="status">
+              <p>
+                This vacancy has {formatNumber(board.data.total)} matching
+                applications, more than the board shows at once (1,000). Use the
+                table or narrow the filters.
+              </p>
+              <button
+                className="button secondary small"
+                onClick={() => setMode("table")}
+              >
+                Show as table
+              </button>
+            </div>
+          ) : (
+            <>
+              {!board.data.complete && (
+                <p className="notice" role="status">
+                  The pipeline changed while it loaded. Refresh to see every
+                  application.
+                </p>
+              )}
+              <Kanban
+                resource={resource}
+                records={board.data.rows}
+                buckets={[]}
+                onOpen={setDetail}
+                onMove={move}
+                canWrite={canWrite}
+                emptyText="No matching applications"
+              />
+            </>
+          )
         ) : mode === "board" ? (
           <Kanban
             resource={resource}
             records={result.data.data}
-            buckets={buckets.data?.data || []}
+            buckets={columnBuckets}
             onOpen={setDetail}
             onMove={move}
             canWrite={canWrite}
+            members={members.members}
           />
         ) : mode === "cards" ? (
           <div className="record-card-grid">
@@ -883,11 +1275,7 @@ export function RecordsScreen({ section }: { section: string }) {
                   ) && <th>Application</th>}
                   {resource === "onboarding" && <th>Checklist progress</th>}
                   {columns.map((key) => (
-                    <th key={key}>
-                      {RESOURCE_CONFIG[resource].fields.find(
-                        (f) => f.key === key,
-                      )?.label || key}
-                    </th>
+                    <th key={key}>{columnLabel(key)}</th>
                   ))}
                   <th>
                     <span className="sr-only">Actions</span>
@@ -901,7 +1289,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     className={record.archivedAt ? "is-archived" : ""}
                   >
                     {resource === "candidates" && (
-                      <td>
+                      <td data-label="Select">
                         <input
                           type="checkbox"
                           aria-label={`Select ${recordLabel(record)}`}
@@ -918,16 +1306,16 @@ export function RecordsScreen({ section }: { section: string }) {
                     )}
                     {resource === "applications" && (
                       <>
-                        <td>
-                          <ReferenceLabel
-                            resource="candidates"
-                            id={record.candidateId}
+                        <td data-label="Candidate">
+                          <ApplicationReference
+                            record={record}
+                            field="candidate"
                           />
                         </td>
-                        <td>
-                          <ReferenceLabel
-                            resource="vacancies"
-                            id={record.vacancyId}
+                        <td data-label="Vacancy">
+                          <ApplicationReference
+                            record={record}
+                            field="vacancy"
                           />
                         </td>
                       </>
@@ -935,7 +1323,7 @@ export function RecordsScreen({ section }: { section: string }) {
                     {["interviews", "offers", "onboarding"].includes(
                       resource,
                     ) && (
-                      <td>
+                      <td data-label="Application">
                         <ReferenceLabel
                           resource="applications"
                           id={record.applicationId}
@@ -943,12 +1331,12 @@ export function RecordsScreen({ section }: { section: string }) {
                       </td>
                     )}
                     {resource === "onboarding" && (
-                      <td>
+                      <td data-label="Checklist progress">
                         <OnboardingProgress id={record.id} />
                       </td>
                     )}
                     {columns.map((key, index) => (
-                      <td key={key}>
+                      <td key={key} data-label={columnLabel(key)}>
                         {index === 0 ? (
                           <button
                             className="table-record-button"
@@ -960,7 +1348,7 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                             <span>
-                              <strong>{display(dataOf(record)[key])}</strong>
+                              <strong>{cellText(key, record)}</strong>
                               {resource === "candidates" && (
                                 <small>
                                   {String(
@@ -992,10 +1380,8 @@ export function RecordsScreen({ section }: { section: string }) {
                               </span>
                             )}
                           </div>
-                        ) : key.endsWith("Date") || key === "startAt" ? (
-                          formatDate(dataOf(record)[key], key === "startAt")
                         ) : (
-                          display(dataOf(record)[key])
+                          cellText(key, record)
                         )}
                       </td>
                     ))}
@@ -1014,7 +1400,15 @@ export function RecordsScreen({ section }: { section: string }) {
             </table>
           </div>
         )}
-        {result.data && (
+        {result.data && boardQuery ? (
+          <div className="pagination">
+            <span className="muted">
+              {board.data && !board.data.tooMany
+                ? `${formatNumber(board.data.rows.length)} matching applications${board.data.complete ? " · board shows all of them" : ""}`
+                : `${formatNumber(board.data?.total ?? result.data.pagination.total)} matching applications`}
+            </span>
+          </div>
+        ) : result.data ? (
           <div className="pagination">
             <div className="row">
               <label>
@@ -1029,8 +1423,12 @@ export function RecordsScreen({ section }: { section: string }) {
                 </select>
               </label>
               <span className="muted">
-                {result.data.pagination.total.toLocaleString()} matching records
-                {mode === "board" ? " · board shows this page" : ""}
+                {formatNumber(result.data.pagination.total)} matching records
+                {mode === "board"
+                  ? resource === "applications"
+                    ? " · board shows this page; choose a vacancy to see its whole pipeline"
+                    : " · board shows this page"
+                  : ""}
               </span>
             </div>
             <div className="row">
@@ -1057,7 +1455,7 @@ export function RecordsScreen({ section }: { section: string }) {
               </button>
             </div>
           </div>
-        )}
+        ) : null}
       </section>
       {detail && (
         <RecordDetail
@@ -1083,10 +1481,8 @@ export function RecordsScreen({ section }: { section: string }) {
           onCreate={(nextResource, refs, prefill) =>
             setEditor({ resource: nextResource, references: refs, prefill })
           }
-          onUpdated={(record) => {
-            setDetail(record);
-            refresh();
-          }}
+          onUpdated={setDetail}
+          {...(resource === "tasks" ? { members: members.members } : {})}
         />
       )}
       {bulkCv && (
@@ -1107,11 +1503,11 @@ export function RecordsScreen({ section }: { section: string }) {
         <BulkAssign
           candidateIds={selected}
           onClose={() => setBulk(false)}
-          onSaved={() => {
+          onSaved={({ created, skipped }) => {
             setBulk(false);
             refresh();
             setNotice(
-              "Candidate assignments saved. Existing active assignments were retained.",
+              `Assignments saved: ${created} created, ${skipped} already had an active application for this vacancy.`,
             );
           }}
         />
@@ -1132,9 +1528,13 @@ export function RecordsScreen({ section }: { section: string }) {
             category,
             categories,
             skills,
+            certifications,
             shortlisted,
             emirate,
             degreeLevel: degree,
+            education,
+            minYearsExperience: minYears === "" ? undefined : Number(minYears),
+            maxYearsExperience: maxYears === "" ? undefined : Number(maxYears),
             ...(resource === "applications"
               ? { stage: status || undefined, vacancyId: vacancy || undefined }
               : { status, reviewStatus }),
@@ -1157,16 +1557,29 @@ export function RecordsScreen({ section }: { section: string }) {
 export function Badge({ value }: { value: unknown }) {
   return <span className={`badge ${badgeTone(value)}`}>{display(value)}</span>;
 }
-function FilterTags({
+/**
+ * Filter values as removable tags. With `suggestions`, the input offers them in a native datalist,
+ * leaving out values already chosen; `onFocus` lets the screen load them on first use.
+ */
+export function FilterTags({
   label,
   values,
   onChange,
+  suggestions,
+  onFocus,
 }: {
   label: string;
   values: string[];
   onChange: (values: string[]) => void;
+  suggestions?: string[];
+  onFocus?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  const listId = useId();
+  const add = () => {
+    onChange(addFilterTag(values, draft));
+    setDraft("");
+  };
   return (
     <div className="filter-tags">
       <label>
@@ -1176,26 +1589,31 @@ function FilterTags({
             value={draft}
             placeholder="Add a value"
             aria-label={label}
+            list={suggestions ? listId : undefined}
+            onFocus={onFocus}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                if (draft.trim()) {
-                  onChange([...new Set([...values, draft.trim()])]);
-                  setDraft("");
-                }
+                if (draft.trim()) add();
               }
             }}
           />
+          {suggestions && (
+            <datalist id={listId}>
+              {suggestions
+                .filter((value) => !hasFilterTag(values, value))
+                .map((value) => (
+                  <option key={value} value={value} />
+                ))}
+            </datalist>
+          )}
           <button
             className="icon-button"
             aria-label={`Add ${label.toLowerCase()} filter`}
             type="button"
             disabled={!draft.trim()}
-            onClick={() => {
-              onChange([...new Set([...values, draft.trim()])]);
-              setDraft("");
-            }}
+            onClick={add}
           >
             <Plus size={15} />
           </button>
@@ -1217,14 +1635,6 @@ function FilterTags({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-export function Loading() {
-  return (
-    <div className="loading-state" role="status">
-      <LoaderCircle size={25} className="spin" aria-hidden="true" />
-      <span>Loading your workspace…</span>
     </div>
   );
 }
@@ -1268,22 +1678,29 @@ export function EmptyState({
   );
 }
 export function NoTeam() {
+  const { canCreateTeam } = useWorkspace();
   return (
     <section className="panel">
       <EmptyState
         title="A workspace for your team"
-        description="Create your first team or accept an invitation to start managing recruitment."
+        description={
+          canCreateTeam
+            ? "Create your first team or accept an invitation to start managing recruitment."
+            : "You have not joined a team yet. Accept the email invitation from your team owner."
+        }
         action={
-          <Link className="button" href="/app/settings/team">
-            <Users size={17} aria-hidden="true" />
-            Create or join a team
-          </Link>
+          canCreateTeam ? (
+            <Link className="button" href="/app/settings/team">
+              <Users size={17} aria-hidden="true" />
+              Create or join a team
+            </Link>
+          ) : undefined
         }
       />
     </section>
   );
 }
-function RecordCard({
+export function RecordCard({
   record,
   onOpen,
 }: {
@@ -1357,13 +1774,15 @@ function RecordCard({
     </article>
   );
 }
-function Kanban({
+export function Kanban({
   resource,
   records,
   buckets,
   onOpen,
   onMove,
   canWrite,
+  emptyText = "No records on this page",
+  members = null,
 }: {
   resource: ResourceName;
   records: RecordDto[];
@@ -1371,7 +1790,12 @@ function Kanban({
   onOpen: (r: RecordDto) => void;
   onMove: (r: RecordDto, value: string) => void;
   canWrite: boolean;
+  emptyText?: string;
+  /** Tasks only: the team's members, to name the assignees. */
+  members?: TeamMember[] | null;
 }) {
+  // A card whose move is still saving cannot be moved again with a stale version.
+  const pending = usePendingKeys();
   const columns =
     resource === "tasks"
       ? buckets.map((b) => ({
@@ -1403,7 +1827,7 @@ function Kanban({
     <div
       className="kanban"
       aria-label={
-        resource === "tasks" ? "Recruitment task board" : "Application pipeline"
+        resource === "tasks" ? "Team task board" : "Application pipeline"
       }
     >
       {columns.map((column) => {
@@ -1425,7 +1849,8 @@ function Kanban({
                 "text/recruitmentos-record",
               );
               const record = records.find((r) => r.id === id);
-              if (record && canWrite) onMove(record, column.id);
+              if (record && canWrite && !pending.has(record.id))
+                onMove(record, column.id);
             }}
           >
             <h2 style={{ borderTopColor: column.color }}>
@@ -1436,7 +1861,9 @@ function Kanban({
               {cards.map((record) => (
                 <article
                   className="kanban-card"
-                  draggable={canWrite && !record.archivedAt}
+                  draggable={
+                    canWrite && !record.archivedAt && !pending.has(record.id)
+                  }
                   onDragStart={(e) =>
                     e.dataTransfer.setData(
                       "text/recruitmentos-record",
@@ -1447,9 +1874,9 @@ function Kanban({
                 >
                   <button className="card-title" onClick={() => onOpen(record)}>
                     {resource === "applications" ? (
-                      <ReferenceLabel
-                        resource="candidates"
-                        id={record.candidateId}
+                      <ApplicationReference
+                        record={record}
+                        field="candidate"
                         plain
                       />
                     ) : (
@@ -1458,9 +1885,9 @@ function Kanban({
                   </button>
                   {resource === "applications" && (
                     <div className="muted">
-                      <ReferenceLabel
-                        resource="vacancies"
-                        id={record.vacancyId}
+                      <ApplicationReference
+                        record={record}
+                        field="vacancy"
                         plain
                       />
                     </div>
@@ -1470,6 +1897,9 @@ function Kanban({
                       Owner: {String(dataOf(record).owner)}
                     </p>
                   ) : null}
+                  {resource === "tasks" && (
+                    <TaskAssignment record={record} members={members} />
+                  )}
                   {resource === "tasks" && (
                     <div className="row space-between">
                       <Badge value={dataOf(record).priority} />
@@ -1487,7 +1917,11 @@ function Kanban({
                       </span>
                       <select
                         aria-label={`Move ${recordLabel(record)} to`}
-                        disabled={!canWrite || !!record.archivedAt}
+                        disabled={
+                          !canWrite ||
+                          !!record.archivedAt ||
+                          pending.has(record.id)
+                        }
                         value={
                           resource === "tasks"
                             ? record.bucketId || ""
@@ -1512,15 +1946,76 @@ function Kanban({
                   </footer>
                 </article>
               ))}
-              {!cards.length && (
-                <p className="board-empty">No records on this page</p>
-              )}
+              {!cards.length && <p className="board-empty">{emptyText}</p>}
             </div>
           </section>
         );
       })}
     </div>
   );
+}
+/**
+ * A task's assignees by name and its linked record, as the board card and the task profile show
+ * them. An assignee who is no longer a member reads "Former member", never an id; until the names
+ * load, only the count shows.
+ */
+export function TaskAssignment({
+  record,
+  members,
+}: {
+  record: RecordDto;
+  members: TeamMember[] | null;
+}) {
+  const ids = dataOf(record).assigneeIds;
+  const assignees = Array.isArray(ids) ? (ids as string[]) : [];
+  const names = members
+    ? assignees.map(
+        (userId) =>
+          members.find((member) => member.userId === userId)?.name ??
+          "Former member",
+      )
+    : null;
+  return (
+    <>
+      {assignees.length > 0 && (
+        <p className="muted">
+          Assigned:{" "}
+          {names
+            ? names.join(", ")
+            : `${assignees.length} ${assignees.length === 1 ? "member" : "members"}`}
+        </p>
+      )}
+      {record.parentRecordId && (
+        <p className="muted">
+          Linked record:{" "}
+          {record.parentKind
+            ? `${RESOURCE_CONFIG[kindToResource[record.parentKind]].singular} · ${record.parentLabel}`
+            : "Unavailable record"}
+        </p>
+      )}
+    </>
+  );
+}
+/**
+ * An application's candidate or vacancy name from the list itself (candidateLabel, vacancyLabel),
+ * so a board or table sends no request per card. A missing label reads as a refused read does.
+ */
+export function ApplicationReference({
+  record,
+  field,
+  plain = false,
+}: {
+  record: RecordDto;
+  field: "candidate" | "vacancy";
+  plain?: boolean;
+}) {
+  const id = field === "candidate" ? record.candidateId : record.vacancyId;
+  const label =
+    field === "candidate" ? record.candidateLabel : record.vacancyLabel;
+  if (!id) return <span className="muted">Not linked</span>;
+  if (!label) return <span>Unavailable record</span>;
+  if (plain || field !== "candidate") return <span>{label}</span>;
+  return <Link href={`/app/candidates/${id}`}>{label}</Link>;
 }
 export function ReferenceLabel({
   resource,
@@ -1535,13 +2030,13 @@ export function ReferenceLabel({
     id ? `/api/v1/${resource}/${id}` : null,
   );
   if (!id) return <span className="muted">Not linked</span>;
-  const label = result.data
-    ? recordLabel(result.data.data)
-    : result.loading
-      ? "Loading…"
-      : `Record ${id.slice(0, 8)}`;
-  if (plain || resource !== "candidates")
-    return <span title={id}>{label}</span>;
+  const label = referenceText({
+    data: result.data?.data ?? null,
+    loading: result.loading,
+    status: result.status,
+  });
+  if (plain || resource !== "candidates" || !result.data)
+    return <span>{label}</span>;
   return <Link href={`/app/candidates/${id}`}>{label}</Link>;
 }
 function OnboardingProgress({ id }: { id: string }) {
@@ -1552,31 +2047,27 @@ function OnboardingProgress({ id }: { id: string }) {
     return <small className="muted">Loading checklist…</small>;
   if (result.error)
     return <small className="field-error">Checklist unavailable</small>;
-  const items = result.data?.data || [];
-  if (!items.length)
-    return <small className="muted">Checklist not configured</small>;
+  const { done, total } = checklistProgress(result.data?.data || []);
+  if (!total) return <small className="muted">Checklist not configured</small>;
   if ((result.data?.pagination.total || 0) > 100)
     return (
       <small className="muted">
         {result.data!.pagination.total} items · open checklist for details
       </small>
     );
-  const complete = items.filter((item) =>
-    ["Complete", "Waived"].includes(String(dataOf(item).status)),
-  ).length;
   return (
     <div className="onboarding-progress">
       <span>
-        {complete} / {items.length} complete or waived
+        {done} / {total} complete or waived
       </span>
-      <progress
-        aria-label="Checklist progress"
-        value={complete}
-        max={items.length}
-      />
+      <progress aria-label="Checklist progress" value={done} max={total} />
     </div>
   );
 }
+const customFieldTypes: Record<string, string> = {
+  Date: "date",
+  Number: "number",
+};
 function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
   const fields = useApi<ListResponse>(
     "/api/v1/task-fields?pageSize=100&includeArchived=true&sort=position",
@@ -1605,7 +2096,16 @@ function TaskCustomDetails({ values }: { values: Record<string, unknown> }) {
                   ? value
                     ? "Yes"
                     : "No"
-                  : display(value)}
+                  : formatField(
+                      {
+                        key,
+                        type:
+                          (field &&
+                            customFieldTypes[String(dataOf(field).type)]) ||
+                          "text",
+                      },
+                      values,
+                    )}
               </dd>
             </div>
           );
@@ -1628,6 +2128,8 @@ export function RecordDetail({
   inline = false,
   initialTab = "details",
   focusChecklistId,
+  members,
+  schema,
 }: {
   record: RecordDto;
   onClose: () => void;
@@ -1642,41 +2144,118 @@ export function RecordDetail({
   inline?: boolean;
   initialTab?: "details" | "checklist";
   focusChecklistId?: string;
+  /** Tasks only: the team's members when the screen has them; otherwise the profile loads them. */
+  members?: TeamMember[] | null;
+  /** The kind schema to render from; a configurable kind defaults to its compiled default. */
+  schema?: KindSchemaBody;
 }) {
   const { team, role } = useWorkspace();
+  const loaded = useTeamMembers(
+    team?.id ?? null,
+    record.kind === "task" && members === undefined,
+  );
   const [tab, setTab] = useState<string>(initialTab);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const busy = usePendingKeys().has(record.id);
   const [archiveDestination, setArchiveDestination] = useState("");
+  const [roleReview, setRoleReview] = useState(false);
   const canWrite = role !== "viewer";
   const resource = kindToResource[record.kind];
   const data = dataOf(record);
-  const archive = async () => {
-    if (!team) return;
-    setBusy(true);
+  // A configurable kind shows the view screen of its kind schema for a record with no type (R2b-07):
+  // its groups and field order, without hidden fields.
+  const body = kindSchemaBodyOf(record.kind, schema);
+  const groups: { label?: string; fields: FieldConfig[] }[] = body
+    ? shownGroups(screenFor(body, null, "view")).map((group) => ({
+        label: group.label,
+        fields: group.fields.flatMap(({ key }) => {
+          const field = body.fields.find((field) => field.key === key);
+          return field?.system ? [field] : [];
+        }),
+      }))
+    : [{ fields: RESOURCE_CONFIG[resource].fields }];
+  const shown = new Map(
+    groups.flatMap((group) =>
+      group.fields.map((field): [string, string] => [field.key, field.label]),
+    ),
+  );
+  const sourceKeys = ["rawSource", "evidence", "sourceReviews"].filter((key) =>
+    shown.has(key),
+  );
+  // An unlabelled first group shares the facts with the references, as before screens.
+  const first = groups[0]?.label ? undefined : groups[0];
+  const rest = first ? groups.slice(1) : groups;
+  const facts = (fields: FieldConfig[]) =>
+    fields
+      .filter(
+        (field) =>
+          !field.readOnly &&
+          field.key !== "legacyAuthorLabel" &&
+          field.key !== "customValues" &&
+          // Assignees show above by name, never as ids.
+          field.key !== "assigneeIds",
+      )
+      .map((field) => (
+        <div
+          key={field.key}
+          className={
+            field.type === "textarea" || field.type === "json"
+              ? "full-width"
+              : ""
+          }
+        >
+          <dt>{field.label}</dt>
+          <dd
+            className={
+              field.type === "json" ? "pre-wrap code-input" : "pre-wrap"
+            }
+          >
+            {field.type === "tags" ? (
+              <div className="tag-list">
+                {((data[field.key] as string[]) || []).map((tag) => (
+                  <span className="tag" key={tag}>
+                    {tag}
+                  </span>
+                ))}
+                {!((data[field.key] as string[]) || []).length &&
+                  "Not recorded"}
+              </div>
+            ) : (
+              formatField(field, data)
+            )}
+          </dd>
+        </div>
+      ));
+  // The write schema allows only http(s), but a stored value is rechecked before it becomes a link.
+  const meetingUrl = safeExternalUrl(data.meetingUrl);
+  const archive = () => {
+    if (!team || busy) return;
     setError("");
-    try {
-      const response = await requestJson<{ data: RecordDto }>(
-        team.id,
-        `/api/v1/${resource}/${record.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            version: record.version,
-            archived: !record.archivedAt,
-            ...(record.kind === "bucket" && archiveDestination
-              ? { moveToBucketId: archiveDestination }
-              : {}),
-          }),
-        },
-      );
-      onUpdated(response.data);
-      onRefresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusy(false);
-    }
+    const archived = !record.archivedAt;
+    void updateRecord(dataCache, teamRequester(team.id), {
+      teamId: team.id,
+      resource,
+      record,
+      next: {
+        ...record,
+        archivedAt: archived ? new Date().toISOString() : null,
+      },
+      body: {
+        version: record.version,
+        archived,
+        ...(record.kind === "bucket" && archiveDestination
+          ? { moveToBucketId: archiveDestination }
+          : {}),
+      },
+      label: `${archived ? "Archiving" : "Restoring"} ${recordLabel(record)}`,
+      local: (value) => {
+        if (value) onUpdated(value);
+      },
+    }).then((outcome) => {
+      if (!outcome.ok) setError(outcome.message);
+      // Archiving a bucket also moves its tasks on the server.
+      else if (record.kind === "bucket") onRefresh();
+    });
   };
   const details = (
     <>
@@ -1729,7 +2308,15 @@ export function RecordDetail({
         {[
           "details",
           ...(record.kind === "candidate"
-            ? ["resumes", "follow-up", "applications"]
+            ? [
+                "resumes",
+                "follow-up",
+                "applications",
+                "tasks",
+                "interviews",
+                "offers",
+                "onboarding",
+              ]
             : record.kind === "vacancy"
               ? ["applications"]
               : []),
@@ -1771,10 +2358,10 @@ export function RecordDetail({
         {tab === "details" && (
           <div className="stack">
             <div className="row detail-actions">
-              {record.kind === "interview" && data.meetingUrl ? (
+              {record.kind === "interview" && meetingUrl ? (
                 <a
                   className="button"
-                  href={String(data.meetingUrl)}
+                  href={meetingUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -1843,6 +2430,16 @@ export function RecordDetail({
                   Add candidate
                 </button>
               )}
+              {record.kind === "vacancy" && record.jobRoleId && (
+                <button
+                  className="button secondary"
+                  disabled={!canWrite || !!record.archivedAt}
+                  onClick={() => setRoleReview(true)}
+                >
+                  <RefreshCw size={16} aria-hidden="true" />
+                  Review changes from role
+                </button>
+              )}
               {record.kind === "job-role" && (
                 <button
                   className="button"
@@ -1852,7 +2449,7 @@ export function RecordDetail({
                       "vacancies",
                       { jobRoleId: record.id },
                       {
-                        ...data,
+                        ...roleSnapshot(data),
                         status: "Draft",
                         openings: 1,
                         requisitionId: "",
@@ -1911,6 +2508,12 @@ export function RecordDetail({
                 </button>
               )}
             </div>
+            {record.kind === "task" && shown.has("assigneeIds") && (
+              <TaskAssignment
+                record={record}
+                members={members === undefined ? loaded.members : members}
+              />
+            )}
             <div className="detail-facts">
               {Object.entries(record)
                 .filter(
@@ -1918,6 +2521,8 @@ export function RecordDetail({
                     key.endsWith("Id") &&
                     key !== "legacyId" &&
                     key !== "privateOwnerId" &&
+                    // A task's linked record shows above, by its kind and label.
+                    !(record.kind === "task" && key === "parentRecordId") &&
                     value,
                 )
                 .map(([key, value]) => (
@@ -1945,64 +2550,25 @@ export function RecordDetail({
                     </dd>
                   </div>
                 ))}
-              {RESOURCE_CONFIG[resource].fields
-                .filter(
-                  (field) =>
-                    !field.readOnly &&
-                    field.key !== "legacyAuthorLabel" &&
-                    field.key !== "customValues",
-                )
-                .map((field) => (
-                  <div
-                    key={field.key}
-                    className={
-                      field.type === "textarea" || field.type === "json"
-                        ? "full-width"
-                        : ""
-                    }
-                  >
-                    <dt>{field.label}</dt>
-                    <dd
-                      className={
-                        field.type === "json"
-                          ? "pre-wrap code-input"
-                          : "pre-wrap"
-                      }
-                    >
-                      {field.type === "tags" ? (
-                        <div className="tag-list">
-                          {((data[field.key] as string[]) || []).map((tag) => (
-                            <span className="tag" key={tag}>
-                              {tag}
-                            </span>
-                          ))}
-                          {!((data[field.key] as string[]) || []).length &&
-                            "Not recorded"}
-                        </div>
-                      ) : (
-                        display(data[field.key])
-                      )}
-                    </dd>
-                  </div>
-                ))}
+              {first && facts(first.fields)}
             </div>
-            {record.kind === "task" && (
+            {rest.map((group, index) => (
+              <Fragment key={index}>
+                {group.label && <h3>{group.label}</h3>}
+                <div className="detail-facts">{facts(group.fields)}</div>
+              </Fragment>
+            ))}
+            {record.kind === "task" && shown.has("customValues") && (
               <TaskCustomDetails
                 values={data.customValues as Record<string, unknown>}
               />
             )}
-            {record.kind === "candidate" && (
+            {record.kind === "candidate" && sourceKeys.length > 0 && (
               <details className="source-details">
                 <summary>Original source information & evidence</summary>
-                {["rawSource", "evidence", "sourceReviews"].map((key) => (
+                {sourceKeys.map((key) => (
                   <div key={key}>
-                    <h3>
-                      {
-                        RESOURCE_CONFIG.candidates.fields.find(
-                          (field) => field.key === key,
-                        )?.label
-                      }
-                    </h3>
+                    <h3>{shown.get(key)}</h3>
                     <pre>{display(data[key])}</pre>
                   </div>
                 ))}
@@ -2058,6 +2624,7 @@ export function RecordDetail({
           "offers",
           "onboarding",
           "checklist",
+          "tasks",
         ].includes(tab) && (
           <RelatedRecords
             resource={tab as ResourceName}
@@ -2073,9 +2640,27 @@ export function RecordDetail({
             }
             focusId={tab === "checklist" ? focusChecklistId : undefined}
             onCreate={onCreate}
+            {...(record.kind === "candidate" &&
+            ["interviews", "offers", "onboarding"].includes(tab)
+              ? {
+                  queryKey: "applicationCandidateId",
+                  addNote:
+                    "Add these from one of the candidate's applications.",
+                }
+              : {})}
           />
         )}
       </div>
+      {roleReview && (
+        <RoleRefresh
+          vacancy={record}
+          onClose={() => setRoleReview(false)}
+          onUpdated={(value) => {
+            setRoleReview(false);
+            onUpdated(value);
+          }}
+        />
+      )}
     </>
   );
   return inline ? (
@@ -2087,6 +2672,143 @@ export function RecordDetail({
         <button className="button secondary" onClick={onClose}>
           Close
         </button>
+      </footer>
+    </Dialog>
+  );
+}
+/** Lists the role facts that now differ from the vacancy; only ticked fields are copied. */
+function RoleRefresh({
+  vacancy,
+  onClose,
+  onUpdated,
+}: {
+  vacancy: RecordDto;
+  onClose: () => void;
+  onUpdated: (record: RecordDto) => void;
+}) {
+  const { team } = useWorkspace();
+  const [current, setCurrent] = useState(vacancy);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const role = useApi<{ data: RecordDto }>(
+    `/api/v1/job-roles/${vacancy.jobRoleId}`,
+  );
+  const differences = role.data
+    ? roleDifferences(dataOf(current), dataOf(role.data.data))
+    : [];
+  const apply = async () => {
+    if (!team || !role.data || saving) return;
+    setSaving(true);
+    setError("");
+    const snapshot = roleSnapshot(dataOf(role.data.data));
+    try {
+      const response = await requestJson<{ data: RecordDto }>(
+        team.id,
+        `/api/v1/vacancies/${current.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            version: current.version,
+            data: Object.fromEntries(
+              selected.map((key) => [
+                key,
+                snapshot[key as keyof typeof snapshot],
+              ]),
+            ),
+          }),
+        },
+      );
+      onUpdated(response.data);
+    } catch (e) {
+      setError(humanError(e));
+      if (e instanceof ClientError && e.status === 409) {
+        // Compare again against the latest vacancy and role.
+        setSelected([]);
+        role.refresh();
+        try {
+          const latest = await requestJson<{ data: RecordDto }>(
+            team.id,
+            `/api/v1/vacancies/${current.id}`,
+          );
+          setCurrent(latest.data);
+        } catch (reload) {
+          setError(humanError(reload));
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      title="Review changes from role"
+      wide
+      onClose={onClose}
+      busy={saving}
+    >
+      <div className="dialog-body stack">
+        {error && (
+          <p className="notice error" role="alert">
+            {error}
+          </p>
+        )}
+        {role.error ? (
+          <LoadError message={role.error} retry={role.refresh} />
+        ) : !role.data ? (
+          <Loading />
+        ) : role.data.data.archivedAt ? (
+          <p className="notice">
+            The source role is archived. Its details can no longer be copied.
+          </p>
+        ) : !differences.length ? (
+          <p className="notice">This vacancy already matches its role.</p>
+        ) : (
+          <fieldset className="editor-fieldset stack" disabled={saving}>
+            <legend>
+              These role details differ from {recordLabel(current)}. Tick the
+              ones to copy into the vacancy; nothing else changes.
+            </legend>
+            {differences.map((item) => (
+              <label className="checkbox-label role-difference" key={item.key}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(item.key)}
+                  onChange={(e) =>
+                    setSelected((old) =>
+                      e.target.checked
+                        ? [...old, item.key]
+                        : old.filter((key) => key !== item.key),
+                    )
+                  }
+                />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>Vacancy now: {display(item.vacancy)}</small>
+                  <small>Role now: {display(item.role)}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+      </div>
+      <footer className="dialog-footer">
+        <button
+          className="button secondary"
+          disabled={saving}
+          onClick={onClose}
+        >
+          Cancel
+        </button>
+        {role.data && !role.data.data.archivedAt && differences.length > 0 && (
+          <button
+            className="button"
+            disabled={saving || !selected.length}
+            onClick={apply}
+          >
+            {saving ? "Applying…" : "Apply selected changes"}
+          </button>
+        )}
       </footer>
     </Dialog>
   );
@@ -2105,6 +2827,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       status: string;
       sourcePath?: string;
       createdAt: string;
+      downloadProtocol: string | null;
     }[];
     pagination: {
       page: number;
@@ -2113,23 +2836,40 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
       totalPages: number;
     };
   }>(`/api/v1/candidates/${candidateId}/cvs?page=${page}&pageSize=${pageSize}`);
+  const canUpload = Boolean(team) && role !== "viewer";
+  // Environment-only readiness; a failed check keeps the controls and the server still refuses.
+  const capability = useApi<{ data: { storageConfigured: boolean } }>(
+    canUpload ? "/api/v1/cvs/bulk-capabilities" : null,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const setPage = (next: number) => setPagination({ candidateId, page: next });
-  const download = async (id: string) => {
+  const download = async (cv: {
+    id: string;
+    downloadProtocol: string | null;
+  }) => {
     if (!team) return;
-    setBusy(id);
+    setBusy(cv.id);
     setError("");
     try {
-      const response = await requestJson<{ url: string }>(
-        team.id,
-        `/api/v1/cvs/${id}/download`,
-      );
-      const anchor = document.createElement("a");
-      anchor.href = response.url;
-      anchor.rel = "noopener noreferrer";
-      anchor.target = "_blank";
-      anchor.click();
+      if (cv.downloadProtocol === "s3-url-v1") {
+        const response = await requestJson<{ url: string }>(
+          team.id,
+          `/api/v1/cvs/${cv.id}/download`,
+        );
+        const anchor = document.createElement("a");
+        anchor.href = response.url;
+        anchor.rel = "noopener noreferrer";
+        anchor.target = "_blank";
+        anchor.click();
+      } else if (cv.downloadProtocol === "blob-chunks-v1") {
+        // Bytes and the object URL stay local to this call and never enter React state.
+        const file = await downloadVerifiedCv(team.id, cv.id);
+        saveCvBytes(file.bytes, file.originalName);
+      } else
+        throw new Error(
+          "This CV uses a download method this page does not support. Refresh the page and try again.",
+        );
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -2143,7 +2883,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           CV files & versions
           {result.data && (
             <span className="heading-count">
-              {result.data.pagination.total.toLocaleString()} file records
+              {formatNumber(result.data.pagination.total)} file records
             </span>
           )}
         </h3>
@@ -2188,7 +2928,7 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
               <button
                 className="button secondary"
                 disabled={cv.status !== "ready" || busy === cv.id}
-                onClick={() => download(cv.id)}
+                onClick={() => download(cv)}
               >
                 <Download size={16} aria-hidden="true" />
                 {busy === cv.id ? "Preparing…" : "Open CV"}
@@ -2217,8 +2957,8 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
         <nav className="pagination" aria-label="CV file pages">
           <span>
             {result.data.data.length > 0
-              ? `Showing ${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, result.data.pagination.total).toLocaleString()} of ${result.data.pagination.total.toLocaleString()} file records`
-              : `0 records on this page · ${result.data.pagination.total.toLocaleString()} total file records`}
+              ? `Showing ${formatNumber((page - 1) * pageSize + 1)}–${formatNumber(Math.min(page * pageSize, result.data.pagination.total))} of ${formatNumber(result.data.pagination.total)} file records`
+              : `0 records on this page · ${formatNumber(result.data.pagination.total)} total file records`}
           </span>
           <div className="row">
             <button
@@ -2243,10 +2983,11 @@ export function CandidateCvs({ candidateId }: { candidateId: string }) {
           </div>
         </nav>
       )}
-      {team && role !== "viewer" && (
+      {team && canUpload && !capability.loading && (
         <CvUpload
           teamId={team.id}
           candidateId={candidateId}
+          storageConfigured={capability.data?.data.storageConfigured !== false}
           onComplete={() => {
             setPage(1);
             result.refresh();
@@ -2264,39 +3005,33 @@ interface PersonalState {
 }
 function CandidateFollowup({ candidateId }: { candidateId: string }) {
   const { team, role } = useWorkspace();
-  const result = useApi<{ data: PersonalState }>(
-    `/api/v1/candidates/${candidateId}/state`,
-  );
+  const identity = useCacheIdentity();
+  const path = `/api/v1/candidates/${candidateId}/state`;
+  const result = useApi<{ data: PersonalState }>(path);
   const [draft, setDraft] = useState<PersonalState | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
+  const saving = usePendingKeys().has(path);
   const [saved, setSaved] = useState(false);
+  useUnsavedWork(dirty);
   const current = draft ?? result.data?.data ?? null;
-  const save = async (e: React.FormEvent) => {
+  const save = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!current || !team || saving) return;
-    setSaving(true);
+    if (!current || !team || !identity || saving) return;
     setError("");
-    setSaved(false);
-    try {
-      const response = await requestJson<{ data: PersonalState }>(
-        team.id,
-        `/api/v1/candidates/${candidateId}/state`,
-        {
-          method: "PATCH",
-          body: JSON.stringify(personalStateMutation(current)),
-        },
-      );
-      setDraft(response.data);
-      setDirty(false);
-      setSaved(true);
-      result.refresh();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setSaving(false);
-    }
+    // Shown as saved at once; on failure the draft stays, marked unsaved, with the reason.
+    void saveFollowup(dataCache, teamRequester(team.id), {
+      identity,
+      candidateId,
+      draft: current,
+      form: (state) => {
+        setDraft(state.draft);
+        setDirty(state.dirty);
+        setSaved(!state.dirty);
+      },
+    }).then((outcome) => {
+      if (!outcome.ok && outcome.message) setError(outcome.message);
+    });
   };
   if (result.error && !current)
     return <LoadError message={result.error} retry={result.refresh} />;
@@ -2387,12 +3122,18 @@ function RelatedRecords({
   resource,
   parentId,
   parentKey,
+  queryKey = parentKey,
+  addNote,
   onCreate,
   focusId,
 }: {
   resource: ResourceName;
   parentId: string;
   parentKey: ReferenceField;
+  /** The list filter naming the parent; defaults to parentKey. */
+  queryKey?: string;
+  /** Shown instead of the Add button, for records that cannot be added from this parent. */
+  addNote?: string;
   focusId?: string;
   onCreate: (
     resource: ResourceName,
@@ -2402,7 +3143,7 @@ function RelatedRecords({
   const { team, role } = useWorkspace();
   const [page, setPage] = useState(1);
   const result = useApi<ListResponse>(
-    `/api/v1/${resource}?${parentKey}=${parentId}&pageSize=100&page=${page}`,
+    `/api/v1/${resource}?${queryKey}=${parentId}&pageSize=100&page=${page}`,
   );
   const [edit, setEdit] = useState<RecordDto | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<RecordDto | null>(null);
@@ -2431,10 +3172,7 @@ function RelatedRecords({
       active = false;
     };
   }, [team, resource, focusId, parentKey, parentId]);
-  const completed =
-    result.data?.data.filter((r) =>
-      ["Complete", "Waived"].includes(String(dataOf(r).status)),
-    ).length || 0;
+  const progress = checklistProgress(result.data?.data || []);
   return (
     <div className="stack">
       {linkedError && (
@@ -2444,31 +3182,39 @@ function RelatedRecords({
       )}
       <div className="row space-between">
         <h3>{RESOURCE_CONFIG[resource].label}</h3>
-        <button
-          className="button secondary"
-          disabled={role === "viewer"}
-          onClick={() => onCreate(resource, { [parentKey]: parentId })}
-        >
-          <Plus size={16} aria-hidden="true" />
-          Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
-        </button>
+        {addNote ? (
+          <p className="muted">{addNote}</p>
+        ) : (
+          <button
+            className="button secondary"
+            disabled={role === "viewer"}
+            onClick={() => onCreate(resource, { [parentKey]: parentId })}
+          >
+            <Plus size={16} aria-hidden="true" />
+            Add {RESOURCE_CONFIG[resource].singular.toLowerCase()}
+          </button>
+        )}
       </div>
       {resource === "checklist" &&
-      result.data?.data.length &&
+      result.data &&
       result.data.pagination.total <= 100 ? (
-        <div>
-          <div className="row space-between">
-            <strong>Checklist progress</strong>
-            <span>
-              {completed} / {result.data.data.length}
-            </span>
+        progress.total ? (
+          <div>
+            <div className="row space-between">
+              <strong>Checklist progress</strong>
+              <span>
+                {progress.done} / {progress.total}
+              </span>
+            </div>
+            <progress
+              aria-label="Checklist progress"
+              value={progress.done}
+              max={progress.total}
+            />
           </div>
-          <progress
-            aria-label="Checklist progress"
-            value={completed}
-            max={result.data.data.length}
-          />
-        </div>
+        ) : (
+          <p className="muted">Checklist not configured</p>
+        )
       ) : null}
       {result.error ? (
         <LoadError message={result.error} retry={result.refresh} />
@@ -2484,15 +3230,37 @@ function RelatedRecords({
             >
               <span>
                 <strong>{recordLabel(record)}</strong>
-                <small>
-                  {String(dataOf(record).stage || dataOf(record).status || "")}{" "}
-                  ·{" "}
-                  {formatDate(
-                    dataOf(record).dueDate ||
-                      dataOf(record).startAt ||
-                      record.createdAt,
+                {queryKey === "applicationCandidateId" &&
+                  (resource === "interviews" || resource === "offers") && (
+                    <small>
+                      For{" "}
+                      <ReferenceLabel
+                        resource="applications"
+                        id={record.applicationId}
+                        plain
+                      />
+                    </small>
                   )}
-                </small>
+                {resource === "tasks" ? (
+                  <small>
+                    {String(dataOf(record).priority)} ·{" "}
+                    {dataOf(record).dueDate
+                      ? `Due ${formatDate(dataOf(record).dueDate)}`
+                      : "No due date"}
+                  </small>
+                ) : (
+                  <small>
+                    {String(
+                      dataOf(record).stage || dataOf(record).status || "",
+                    )}{" "}
+                    ·{" "}
+                    {formatDate(
+                      dataOf(record).dueDate ||
+                        dataOf(record).startAt ||
+                        record.createdAt,
+                    )}
+                  </small>
+                )}
               </span>
               <ArrowUpRight size={17} aria-hidden="true" />
             </button>
@@ -2534,10 +3302,7 @@ function RelatedRecords({
           onEdit={() => setEdit(selectedRecord)}
           onCreate={onCreate}
           onRefresh={result.refresh}
-          onUpdated={(value) => {
-            setSelectedRecord(value);
-            result.refresh();
-          }}
+          onUpdated={setSelectedRecord}
         />
       )}
       {edit && (
@@ -2546,9 +3311,9 @@ function RelatedRecords({
           record={edit}
           onClose={() => setEdit(null)}
           onSaved={(value) => {
+            // The saved record is already patched into this list.
             setEdit(null);
             setSelectedRecord(value);
-            result.refresh();
           }}
         />
       )}
@@ -2563,6 +3328,7 @@ function Discussion({ recordId }: { recordId: string }) {
   const [body, setBody] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  useUnsavedWork(body !== "");
   const key = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2604,10 +3370,7 @@ function Discussion({ recordId }: { recordId: string }) {
       {result.data?.data.map((comment) => (
         <article className="comment" key={comment.id}>
           <header>
-            <strong>
-              {String(dataOf(comment).legacyAuthorLabel || comment.createdBy)}
-              {dataOf(comment).legacyAuthorLabel ? " · imported label" : ""}
-            </strong>
+            <strong>{commentAuthor(comment)}</strong>
             <time>{formatDate(comment.createdAt, true)}</time>
           </header>
           <p className="pre-wrap">{String(dataOf(comment).body)}</p>
@@ -2657,7 +3420,7 @@ function BulkAssign({
 }: {
   candidateIds: string[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (counts: { created: number; skipped: number }) => void;
 }) {
   const { team } = useWorkspace();
   const [vacancy, setVacancy] = useState("");
@@ -2665,22 +3428,34 @@ function BulkAssign({
   const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const idempotency = useRef(new Map<string, string>());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!team || saving) return;
     setSaving(true);
     setError("");
     try {
-      await requestJson(team.id, "/api/v1/applications/bulk", {
-        method: "POST",
-        body: JSON.stringify({
-          candidateIds,
-          vacancyId: vacancy,
-          stage,
-          owner,
-        }),
+      const serialized = JSON.stringify({
+        candidateIds,
+        vacancyId: vacancy,
+        stage,
+        owner,
       });
-      onSaved();
+      let key = idempotency.current.get(serialized);
+      if (!key) {
+        key = crypto.randomUUID();
+        idempotency.current.set(serialized, key);
+      }
+      const response = await requestJson<{ created: number; skipped: number }>(
+        team.id,
+        "/api/v1/applications/bulk",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: serialized,
+        },
+      );
+      onSaved({ created: response.created, skipped: response.skipped });
     } catch (e) {
       setError(humanError(e));
     } finally {
@@ -2801,7 +3576,7 @@ function WorkflowSettings({ onClose }: { onClose: () => void }) {
                     ? "Archived"
                     : tab === "task-fields"
                       ? `${dataOf(record).type}${dataOf(record).required ? " · Required" : ""}`
-                      : `Position ${dataOf(record).position}`}
+                      : `Position ${dataOf(record).position}${dataOf(record).completed ? " · Counts as completed" : ""}`}
                 </small>
               </span>
               <div className="row">
@@ -2878,6 +3653,7 @@ function SaveView({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [manage, setManage] = useState<RecordDto | null>(null);
+  const pending = usePendingKeys();
   const allViews = useApi<ListResponse>(
     `/api/v1/views?pageSize=100&includeArchived=true&area=${resource === "candidates" ? "directory" : "applications"}`,
   );
@@ -2948,29 +3724,26 @@ function SaveView({
                       <button
                         type="button"
                         className="button secondary small"
-                        disabled={saving}
-                        onClick={async () => {
+                        disabled={saving || pending.has(view.id)}
+                        onClick={() => {
                           if (!team || saving) return;
-                          setSaving(true);
                           setError("");
-                          try {
-                            await requestJson(
-                              team.id,
-                              `/api/v1/views/${view.id}`,
-                              {
-                                method: "PATCH",
-                                body: JSON.stringify({
-                                  version: view.version,
-                                  archived: !view.archivedAt,
-                                }),
-                              },
-                            );
-                            allViews.refresh();
-                          } catch (e) {
-                            setError(humanError(e));
-                          } finally {
-                            setSaving(false);
-                          }
+                          const archived = !view.archivedAt;
+                          void updateRecord(dataCache, teamRequester(team.id), {
+                            teamId: team.id,
+                            resource: "views",
+                            record: view,
+                            next: {
+                              ...view,
+                              archivedAt: archived
+                                ? new Date().toISOString()
+                                : null,
+                            },
+                            body: { version: view.version, archived },
+                            label: `${archived ? "Archiving" : "Restoring"} ${recordLabel(view)}`,
+                          }).then((outcome) => {
+                            if (!outcome.ok) setError(outcome.message);
+                          });
                         }}
                       >
                         {view.archivedAt ? "Restore" : "Archive"}

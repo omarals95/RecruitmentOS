@@ -31,18 +31,29 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { versionLabel } from "@/lib/app-version";
 import { useTheme, type Theme } from "@/components/theme-provider";
 import { Dialog } from "@/components/ui/dialog";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
+  abortTeamRequests,
+  clearWorkspaceCache,
+  dataCache,
+  hasUnsavedWork,
+  hasWritesInFlight,
+  setSwitchNotice,
   useApi,
   useDebounced,
+  useSwitchNotice,
   useWorkspace,
   WorkspaceProvider,
   type WorkspaceIdentity,
 } from "./client";
 import { initials } from "./helpers";
+import { markNavigation } from "./speed-log";
+import { NOTIFICATIONS_PATH, prefetchTabs } from "./tab-requests";
 
-const navigation: {
+export const navigation: {
   label: string;
   href: string;
   icon: LucideIcon;
@@ -80,7 +91,7 @@ const navigation: {
     group: "Recruitment",
   },
   {
-    label: "Recruitment tasks",
+    label: "Team tasks",
     href: "/app/tasks",
     icon: CheckCheck,
     group: "Recruitment",
@@ -140,6 +151,55 @@ const navigation: {
     group: "Workspace tools",
   },
 ];
+/** The ids of the caller's archived teams, read once per team (a team switch clears the cache). */
+const ARCHIVED_TEAMS_PATH = "/api/v1/me/archived-teams";
+const NO_TEAMS: string[] = [];
+/** A select cannot show a badge, so an archived team says so in its option text. */
+export function teamOptionLabel(name: string, archived: boolean) {
+  return archived ? `${name} (Archived)` : name;
+}
+/** The team switcher's options: the user's teams, and the active team when the list lacks it. */
+export function TeamOptions({
+  team,
+  teams,
+  archivedIds,
+  canCreateTeam,
+}: {
+  team: { id: string; name: string } | null;
+  teams: { id: string; name: string }[];
+  archivedIds: readonly string[];
+  canCreateTeam: boolean;
+}) {
+  return (
+    <>
+      {!team && (
+        <option value="">
+          {canCreateTeam ? "Create or join a team" : "No team yet"}
+        </option>
+      )}
+      {teams.map((item) => (
+        <option key={item.id} value={item.id}>
+          {teamOptionLabel(item.name, archivedIds.includes(item.id))}
+        </option>
+      ))}
+      {team && !teams.some((item) => item.id === team.id) && (
+        <option value={team.id}>
+          {teamOptionLabel(team.name, archivedIds.includes(team.id))}
+        </option>
+      )}
+    </>
+  );
+}
+/** Above the page content while the active team is archived, so a refused save is no surprise. */
+export function ArchivedTeamNotice({ archived }: { archived: boolean }) {
+  if (!archived) return null;
+  return (
+    <p className="notice" role="status" style={{ marginBottom: 16 }}>
+      This team is archived. You can read everything, but changes are turned off
+      until a team owner restores it.
+    </p>
+  );
+}
 export function Brand() {
   return (
     <span className="brand">
@@ -175,12 +235,17 @@ function Shell({ children }: { children: React.ReactNode }) {
   const [search, setSearch] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
+  const switchNotice = useSwitchNotice();
   const { theme, setTheme } = useTheme();
   const notifications = useApi<{
     data?: { read: boolean }[];
     notifications?: { read: boolean }[];
     unreadCount?: number;
-  }>("/api/v1/notifications");
+  }>(NOTIFICATIONS_PATH);
+  const archivedTeams = useApi<{ data: { teamIds: string[] } }>(
+    team ? ARCHIVED_TEAMS_PATH : null,
+  );
+  const archivedIds = archivedTeams.data?.data.teamIds ?? NO_TEAMS;
   const unread =
     notifications.data?.unreadCount ??
     (
@@ -188,6 +253,32 @@ function Shell({ children }: { children: React.ReactNode }) {
       notifications.data?.notifications ||
       []
     ).filter((item) => !item.read).length;
+  // Once per team, in idle time: the daily tabs' first reads, so opening them is instant.
+  const teamId = team?.id;
+  useEffect(() => {
+    if (!teamId) return;
+    const identity = { userId: user.id, teamId };
+    let cancelled = false;
+    const start = () => {
+      if (!cancelled)
+        void prefetchTabs(
+          (path) => dataCache.prefetch(identity, path),
+          (path) => dataCache.has(identity, path),
+        );
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(start, { timeout: 3000 });
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback(handle);
+      };
+    }
+    const timer = window.setTimeout(start, 1000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [user.id, teamId]);
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -226,7 +317,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         >
           <Brand />
         </Link>
-        <TeamSwitcher />
+        <TeamSwitcher archivedIds={archivedIds} />
         <nav onClick={() => setMobile(false)}>
           {navigation.map((item, index) => {
             const Icon = item.icon;
@@ -239,6 +330,7 @@ function Shell({ children }: { children: React.ReactNode }) {
                 <Link
                   className={`nav-link ${pathname === item.href || (item.href !== "/app" && pathname.startsWith(item.href + "/")) ? "active" : ""}`}
                   href={item.href}
+                  onClick={markNavigation}
                   aria-current={pathname === item.href ? "page" : undefined}
                 >
                   <Icon size={18} aria-hidden="true" />
@@ -285,7 +377,11 @@ function Shell({ children }: { children: React.ReactNode }) {
             <strong>{current?.label || "Settings"}</strong>
           </div>
           <div className="topbar-actions">
-            <button className="search-launcher" onClick={() => setSearch(true)}>
+            <button
+              className="search-launcher"
+              aria-label="Search your workspace"
+              onClick={() => setSearch(true)}
+            >
               <Search size={17} aria-hidden="true" />
               <span>Search your workspace</span>
               <kbd>⌘ K</kbd>
@@ -330,6 +426,7 @@ function Shell({ children }: { children: React.ReactNode }) {
                     throw new Error(
                       result.error.message || "Unable to sign out",
                     );
+                  clearWorkspaceCache();
                   router.push("/sign-in");
                   router.refresh();
                 } catch (e) {
@@ -348,6 +445,36 @@ function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main id="main-content" className="workspace-main">
+          <ArchivedTeamNotice
+            archived={!!team && archivedIds.includes(team.id)}
+          />
+          {team && switchNotice?.toTeamId === team.id && (
+            <div
+              className="notice"
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 16,
+              }}
+            >
+              <span>
+                Switched to {team.name}. Unsaved changes in{" "}
+                {switchNotice.fromTeam} were discarded. A save that was in
+                progress may or may not have completed; review{" "}
+                {switchNotice.fromTeam} before redoing it.
+              </span>
+              <button
+                className="icon-button"
+                aria-label="Dismiss notification"
+                onClick={() => setSwitchNotice(null)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
           {accountError && (
             <p className="notice error" role="alert">
               {accountError}
@@ -357,6 +484,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         </main>
         <footer className="workspace-footer">
           <span>RecruitmentOS · Your team&apos;s recruitment workspace</span>
+          <span>{versionLabel()}</span>
           <span>Dates and times: Asia/Dubai (UTC+4)</span>
         </footer>
       </div>
@@ -364,12 +492,13 @@ function Shell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-function TeamSwitcher() {
-  const { team } = useWorkspace();
+function TeamSwitcher({ archivedIds }: { archivedIds: readonly string[] }) {
+  const { team, canCreateTeam } = useWorkspace();
   const router = useRouter();
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const { confirm, dialog } = useConfirm();
   useEffect(() => {
     authClient.organization
       .list()
@@ -390,14 +519,41 @@ function TeamSwitcher() {
           value={team?.id || ""}
           disabled={busy || !teams.length}
           onChange={async (event) => {
+            const next = event.target.value;
+            const pending =
+              !!team && (hasUnsavedWork(team.id) || hasWritesInFlight(team.id));
+            if (
+              team &&
+              pending &&
+              !(await confirm({
+                title: "Switch team?",
+                message: `Unsaved changes in ${team.name} will be discarded. A save that is still in progress may or may not complete; check ${team.name} before redoing it.`,
+                confirmLabel: "Switch team",
+                cancelLabel: `Stay in ${team.name}`,
+                destructive: true,
+              }))
+            )
+              return;
             setBusy(true);
             setError("");
             try {
               const result = await authClient.organization.setActive({
-                organizationId: event.target.value,
+                organizationId: next,
               });
               if (result.error)
                 throw new Error(result.error.message || "Cannot switch team");
+              if (team) {
+                // Only after the server switched: drop the old team's work.
+                const discarded =
+                  pending ||
+                  hasUnsavedWork(team.id) ||
+                  hasWritesInFlight(team.id);
+                setSwitchNotice(
+                  discarded ? { fromTeam: team.name, toTeamId: next } : null,
+                );
+                abortTeamRequests(team.id);
+              }
+              clearWorkspaceCache();
               router.refresh();
             } catch (e) {
               setError(e instanceof Error ? e.message : "Cannot switch team");
@@ -406,19 +562,17 @@ function TeamSwitcher() {
             }
           }}
         >
-          {!team && <option value="">Create or join a team</option>}
-          {teams.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
-            </option>
-          ))}
-          {team && !teams.some((item) => item.id === team.id) && (
-            <option value={team.id}>{team.name}</option>
-          )}
+          <TeamOptions
+            team={team}
+            teams={teams}
+            archivedIds={archivedIds}
+            canCreateTeam={canCreateTeam}
+          />
         </select>
         <small>{busy ? "Switching…" : "Recruitment workspace"}</small>
       </label>
       {error && <p role="alert">{error}</p>}
+      {dialog}
     </div>
   );
 }

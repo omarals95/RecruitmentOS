@@ -10,7 +10,11 @@ import {
   safeResolve,
   validateWorkbookZip,
 } from "../scripts/legacy/files";
-import { applyPlan, validateApiUrl } from "../scripts/legacy/apply";
+import {
+  applyPlan,
+  validateApiUrl,
+  type ApplyResult,
+} from "../scripts/legacy/apply";
 
 const folders: string[] = [];
 async function temp() {
@@ -314,6 +318,50 @@ describe("legacy migration planning", () => {
     expect(plan.stats.candidateRecords).toBe(1);
     expect(plan.stats.sourceRows).toBe(2);
   });
+  it("maps legacy review status text to the two controlled values and keeps the original", () => {
+    const source = input();
+    const master = source.workbooks["Resume_Master.xlsx"].Master;
+    master[5].push("Source review status");
+    master[6].push("Verified");
+    master.push([
+      "c_2",
+      "Fictional Second Example",
+      "second@example.test",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "Pending HR",
+    ]);
+    source.workbooks["Recruitment_Operations.xlsx"]["Saved Views"].push(
+      ["q_2", "Verified", "directory", '{"reviewStatus":"Verified"}'],
+      ["q_3", "Pending", "directory", '{"reviewStatus":"Pending HR"}'],
+    );
+    const plan = buildPlan(source);
+    expect(plan.issues.filter((v) => v.severity === "error")).toEqual([]);
+    const candidates = plan.records.filter((v) => v.resource === "candidates");
+    expect(candidates.map((v) => v.data)).toEqual([
+      expect.objectContaining({
+        reviewStatus: "Reviewed",
+        rawSource: expect.objectContaining({
+          "Source review status": "Verified",
+        }),
+      }),
+      expect.objectContaining({
+        reviewStatus: "Needs review",
+        rawSource: expect.objectContaining({
+          "Source review status": "Pending HR",
+        }),
+      }),
+    ]);
+    expect(
+      plan.records
+        .filter((v) => v.resource === "views")
+        .map((v) => (v.data.query as { reviewStatus?: string }).reviewStatus),
+    ).toEqual(["", "Reviewed", "Needs review"]);
+  });
   it("blocks duplicate identities and missing parents rather than merging or guessing", () => {
     const source = input();
     source.workbooks["Resume_Master.xlsx"].Master.push(["c_1", "Duplicate"]);
@@ -504,9 +552,14 @@ describe("legacy API apply", () => {
     ])
       expect(() => validateApiUrl(url)).toThrow();
   });
-  it("applies references topologically and reruns without duplicating or overwriting user edits", async () => {
-    const plan = buildPlan(input()),
-      store: Record<string, Record<string, unknown>[]> = {},
+  /**
+   * An in-memory target API that lists, creates and patches records and already holds the fictional
+   * private state. `fail` answers a matching write with HTTP 500 and stores nothing.
+   */
+  function fakeTarget(
+    fail?: (resource: string, body: Record<string, unknown>) => boolean,
+  ) {
+    const store: Record<string, Record<string, unknown>[]> = {},
       requests: { path: string; body: Record<string, unknown> }[] = [];
     let sequence = 0;
     const fakeFetch: typeof fetch = async (request, options) => {
@@ -542,6 +595,8 @@ describe("legacy API apply", () => {
         });
       const body = JSON.parse(String(options.body));
       requests.push({ path: url.pathname, body });
+      if (fail?.(resource, body))
+        return Response.json({ code: "fictional_failure" }, { status: 500 });
       if (options.method === "PATCH") {
         const row = store[resource].find((v) => v.id === id)!;
         Object.assign(row, body);
@@ -556,6 +611,52 @@ describe("legacy API apply", () => {
       store[resource].push(row);
       return Response.json({ data: row });
     };
+    return { fakeFetch, store, requests };
+  }
+  const targetOptions = (fetchImpl: typeof fetch) => ({
+    apiUrl: "https://recruit.example.test",
+    teamId: "team",
+    token: "fictional-token",
+    fetchImpl,
+  });
+  /** Every planned item has exactly one outcome in its category. */
+  function expectBalanced({ reconciliation }: ApplyResult) {
+    const { records, states, files } = reconciliation;
+    expect(
+      records.created +
+        records.updated +
+        records.skipped +
+        records.conflicts +
+        records.failed,
+    ).toBe(records.planned);
+    expect(
+      states.imported + states.unchanged + states.conflicts + states.failed,
+    ).toBe(states.planned);
+    expect(files.ready + files.skipped + files.failed).toBe(files.planned);
+  }
+  /** Plan B: c_1 renamed, checklist k_1 (no dependants) dropped, candidate c_2 added. */
+  function changedInput(): LegacyInputs {
+    const changed = input();
+    const master = changed.workbooks["Resume_Master.xlsx"].Master;
+    master[6][1] = "Fictional Example Revised";
+    master.push([
+      "c_2",
+      "Fictional Newcomer",
+      "newcomer@example.test",
+      "Finance",
+      "Not stated",
+      1,
+      "",
+      "",
+      "",
+    ]);
+    changed.workbooks["Recruitment_Operations.xlsx"].Checklist.splice(1, 1);
+    return changed;
+  }
+
+  it("applies references topologically and reruns without duplicating or overwriting user edits", async () => {
+    const plan = buildPlan(input());
+    const { fakeFetch, store, requests } = fakeTarget();
     const opts = {
       apiUrl: "https://recruit.example.test",
       teamId: "team",
@@ -586,6 +687,99 @@ describe("legacy API apply", () => {
     expect((store.candidates[0].data as { name: string }).name).toBe(
       "Manually corrected",
     );
+  });
+  it("accounts for a changed plan without overwriting or deleting target records", async () => {
+    const planA = buildPlan(input()),
+      planB = buildPlan(changedInput());
+    expect(planB.issues.filter((v) => v.severity === "error")).toEqual([]);
+    const { fakeFetch, store } = fakeTarget();
+    const first = await applyPlan(planA, targetOptions(fakeFetch));
+    expect(first.missing).toEqual([]);
+    expectBalanced(first);
+    const result = await applyPlan(planB, targetOptions(fakeFetch));
+    expect(result.errors).toEqual([]);
+    expect(result.conflicts).toEqual(["candidates:c_1"]);
+    expect(result.missing).toEqual(["checklist:k_1"]);
+    expect(result.reconciliation.records).toEqual({
+      planned: planB.records.length,
+      created: 1,
+      updated: 0,
+      skipped: planB.records.length - 2,
+      conflicts: 1,
+      failed: 0,
+      missing: 1,
+    });
+    expect(result.reconciliation.states).toEqual({
+      planned: 1,
+      imported: 0,
+      unchanged: 1,
+      conflicts: 0,
+      failed: 0,
+    });
+    expect(result.reconciliation.files).toEqual({
+      planned: planB.sources.length,
+      ready: 0,
+      skipped: planB.sources.length,
+      failed: 0,
+    });
+    expectBalanced(result);
+    expect(store.checklist.map((row) => row.legacyId)).toEqual(["k_1"]);
+    expect(
+      store.candidates.map((row) => [
+        row.legacyId,
+        (row.data as { name: string }).name,
+      ]),
+    ).toEqual([
+      ["c_1", "Fictional Example"],
+      ["c_2", "Fictional Newcomer"],
+    ]);
+  });
+  it("updates the changed record only with updateExisting and still reports the missing one", async () => {
+    const planB = buildPlan(changedInput());
+    const { fakeFetch, store } = fakeTarget();
+    await applyPlan(buildPlan(input()), targetOptions(fakeFetch));
+    const result = await applyPlan(planB, {
+      ...targetOptions(fakeFetch),
+      updateExisting: true,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.missing).toEqual(["checklist:k_1"]);
+    expect(result.reconciliation.records).toEqual({
+      planned: planB.records.length,
+      created: 1,
+      updated: 1,
+      skipped: planB.records.length - 2,
+      conflicts: 0,
+      failed: 0,
+      missing: 1,
+    });
+    expectBalanced(result);
+    expect(store.checklist.map((row) => row.legacyId)).toEqual(["k_1"]);
+    expect((store.candidates[0].data as { name: string }).name).toBe(
+      "Fictional Example Revised",
+    );
+  });
+  it("counts a record the API refuses as failed and keeps the totals balanced", async () => {
+    const plan = buildPlan(input());
+    const { fakeFetch, store } = fakeTarget(
+      (resource) => resource === "comments",
+    );
+    const result = await applyPlan(plan, targetOptions(fakeFetch));
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        location: "comments:m_1",
+        code: "fictional_failure",
+      }),
+    );
+    expect(result.reconciliation.records).toMatchObject({
+      planned: plan.records.length,
+      created: plan.records.length - 1,
+      failed: 1,
+      missing: 0,
+    });
+    expectBalanced(result);
+    expect(store.comments).toEqual([]);
   });
   it("stops before mutation when target permissions are denied", async () => {
     let writes = 0;
@@ -640,6 +834,13 @@ describe("legacy API apply", () => {
       fetchImpl: fakeFetch,
     });
     expect(result.errors).toEqual([]);
+    expect(result.reconciliation.states).toEqual({
+      planned: 1,
+      imported: 1,
+      unchanged: 0,
+      conflicts: 0,
+      failed: 0,
+    });
     expect(stateBody).toMatchObject({
       note: "Private note with original whitespace",
       importMeta: {
@@ -702,9 +903,12 @@ describe("legacy API apply", () => {
             status: "pending",
           },
           upload: {
+            protocol: "s3-form-v1",
+            method: "POST",
             url: "https://bucket.s3.eu-west-1.amazonaws.com/",
             fields: { policy: "fictional-policy" },
             expiresAt: "2030-01-01",
+            maxBytes: info.size,
           },
         });
       if (options?.method === "POST")
@@ -721,6 +925,14 @@ describe("legacy API apply", () => {
     expect(storageCalls).toBe(1);
     expect(completeCalls).toBe(1);
     expect(result.uploadsReady).toBe(1);
+    expect(result.reconciliation.files).toEqual({
+      planned: 1,
+      ready: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(result.reconciliation.states.planned).toBe(0);
+    expectBalanced(result);
   });
   it("rejects an offsite upload ticket before opening any local CV", async () => {
     const plan = buildPlan(input());
@@ -756,7 +968,12 @@ describe("legacy API apply", () => {
             ...JSON.parse(String(options?.body)),
             status: "pending",
           },
-          upload: { url: "https://untrusted.example.test/", fields: {} },
+          upload: {
+            protocol: "s3-form-v1",
+            method: "POST",
+            url: "https://untrusted.example.test/",
+            fields: {},
+          },
         });
       if (options?.method === "POST")
         return Response.json({ data: { id: candidateId } });
@@ -772,5 +989,170 @@ describe("legacy API apply", () => {
       expect.objectContaining({ code: "INVALID_UPLOAD_TICKET" }),
     );
     expect(offsiteCalls).toBe(0);
+  });
+
+  /** One fictional CV source and an API that answers its reservation with the given ticket. */
+  async function importWithTicket(upload: (size: number) => unknown) {
+    const root = await temp();
+    await writeFile(join(root, "fictional.pdf"), "%PDF-1.7\nfictional blob");
+    const { stat } = await import("node:fs/promises");
+    const info = await stat(join(root, "fictional.pdf"));
+    const plan = buildPlan(input());
+    plan.root = root;
+    plan.records = plan.records.filter((r) => r.resource === "candidates");
+    plan.states = [];
+    plan.notificationReads = [];
+    plan.sources = [
+      {
+        id: "s_1",
+        row: {},
+        candidateIds: ["c_1"],
+        relativePath: "fictional.pdf",
+        sizeBytes: info.size,
+        mtimeMs: info.mtimeMs,
+        uploadable: true,
+        mimeType: "application/pdf",
+      },
+    ];
+    const candidateId = "00000000-0000-4000-8000-000000000001",
+      cvId = "00000000-0000-4000-8000-000000000002";
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fakeFetch: typeof fetch = async (url, options) => {
+      const parsed = new URL(String(url));
+      calls.push({ url: String(url), init: options });
+      if (parsed.hostname !== "recruit.example.test")
+        return new Response(null, { status: 200 });
+      if (parsed.pathname.endsWith("/complete"))
+        return Response.json({ data: { id: cvId, status: "ready" } });
+      if (parsed.pathname.endsWith("/cvs/uploads"))
+        return Response.json({
+          data: {
+            id: cvId,
+            candidateId,
+            ...JSON.parse(String(options?.body)),
+            status: "pending",
+          },
+          upload: upload(info.size),
+        });
+      if (options?.method === "POST")
+        return Response.json({ data: { id: candidateId } });
+      return Response.json({ data: [], pagination: { totalPages: 1 } });
+    };
+    const result = await applyPlan(plan, {
+      apiUrl: "https://recruit.example.test",
+      teamId: "team",
+      token: "never-send-this-to-blob",
+      fetchImpl: fakeFetch,
+    });
+    const offsite = calls.filter(
+      (call) => new URL(call.url).hostname !== "recruit.example.test",
+    );
+    const completions = calls.filter((call) => call.url.endsWith("/complete"));
+    return { result, offsite, completions, calls };
+  }
+  const blobUrl =
+    "https://vercel.com/api/blob/?pathname=teams%2Ft%2Fcvs%2Fc%2Fu%2Ffictional.pdf&vercel-blob-signature=fictional_signature_0001";
+  const blobUpload = (size: number, extra: Record<string, unknown> = {}) => ({
+    protocol: "blob-put-v1",
+    method: "PUT",
+    url: blobUrl,
+    headers: { "content-type": "application/pdf" },
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    maxBytes: size,
+    ...extra,
+  });
+
+  it("PUTs fictional CV bytes to a tagged Blob ticket without the API token, then completes", async () => {
+    const { result, offsite, completions, calls } = await importWithTicket(
+      (size) => blobUpload(size),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.uploadsReady).toBe(1);
+    expect(offsite).toHaveLength(1);
+    const [put] = offsite;
+    expect(put.url).toBe(blobUrl);
+    expect(put.url.startsWith("https://vercel.com/api/blob/?")).toBe(true);
+    expect(put.init?.method).toBe("PUT");
+    expect(put.init?.redirect).toBe("error");
+    expect(put.init?.credentials).toBe("omit");
+    const headers = new Headers(put.init?.headers);
+    expect([...headers.keys()]).toEqual(["content-type"]);
+    expect(headers.get("content-type")).toBe("application/pdf");
+    expect(new TextDecoder().decode(put.init?.body as Uint8Array)).toBe(
+      "%PDF-1.7\nfictional blob",
+    );
+    expect(completions).toHaveLength(1);
+    expect(calls.indexOf(completions[0])).toBeGreaterThan(calls.indexOf(put));
+  });
+
+  it("records an error and sends no CV bytes for an unsupported or unsafe upload ticket", async () => {
+    const cases: [string, (size: number) => unknown][] = [
+      [
+        "UNSUPPORTED_UPLOAD_PROTOCOL",
+        (size) => blobUpload(size, { protocol: "ftp-v1" }),
+      ],
+      [
+        "UNSUPPORTED_UPLOAD_PROTOCOL",
+        () => ({
+          url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          fields: { policy: "fictional-policy" },
+        }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            url: blobUrl.replace("vercel.com", "blob.example.test"),
+          }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) => blobUpload(size, { maxBytes: size + 1 }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          }),
+      ],
+      ["INVALID_UPLOAD_TICKET", (size) => blobUpload(size, { method: "POST" })],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) =>
+          blobUpload(size, {
+            headers: {
+              "content-type": "application/pdf",
+              authorization: "Bearer fictional",
+            },
+          }),
+      ],
+      [
+        "INVALID_UPLOAD_TICKET",
+        (size) => ({
+          ...blobUpload(size),
+          protocol: "s3-form-v1",
+          method: "PUT",
+          url: "https://bucket.s3.eu-west-1.amazonaws.com/",
+          fields: {},
+        }),
+      ],
+    ];
+    for (const [code, upload] of cases) {
+      const { result, offsite, completions } = await importWithTicket(upload);
+      expect(result.errors, code).toEqual([
+        expect.objectContaining({ location: "CV:s_1", code }),
+      ]);
+      expect(result.uploadsReady).toBe(0);
+      expect(result.reconciliation.files).toEqual({
+        planned: 1,
+        ready: 0,
+        skipped: 0,
+        failed: 1,
+      });
+      expectBalanced(result);
+      expect(offsite).toHaveLength(0);
+      expect(completions).toHaveLength(0);
+    }
   });
 });

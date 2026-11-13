@@ -1,314 +1,37 @@
 import { z } from "zod";
+import { CONFIGURABLE_KINDS, type ConfigurableKind } from "./config";
+import {
+  DEFAULT_KIND_SCHEMAS,
+  KIND_LABELS,
+  systemFieldConfig,
+} from "./config-defaults";
+import {
+  APPLICATION_STAGES,
+  CANDIDATE_STATUSES,
+  jsonObject,
+  optionalDay,
+  recordDataSchemas,
+  text,
+  uuidSchema,
+} from "./record-schemas";
 
-export const APPLICATION_STAGES = [
-  "Sourced",
-  "Screening",
-  "Interview",
-  "Offer",
-  "Hired",
-  "Rejected",
-  "Withdrawn",
-] as const;
-export const CANDIDATE_STATUSES = [
-  "New",
-  "To contact",
-  "Contacted",
-  "Interviewing",
-  "On hold",
-  "Closed",
-] as const;
-export const TASK_FIELD_TYPES = [
-  "Text",
-  "Number",
-  "Date",
-  "Dropdown",
-  "Checkbox",
-] as const;
-export type ApplicationStage = (typeof APPLICATION_STAGES)[number];
-export const uuidSchema = z.uuid();
-const text = (max = 200) => z.string().trim().max(max).default("");
-const requiredText = (max = 200) => z.string().trim().min(1).max(max);
-const tags = z
-  .array(requiredText(200))
-  .max(300)
-  .default([])
-  .transform((values) => [...new Set(values)]);
-export const daySchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine(
-    (value) =>
-      !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
-      new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value,
-    "Invalid calendar date",
-  );
-const optionalDay = z.union([daySchema, z.literal("")]).default("");
-const notes = () => text(10000);
-type JsonValue = z.output<ReturnType<typeof z.json>>;
-function boundedJson(value: unknown): value is JsonValue {
-  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
-  const visited = new Set<object>();
-  let nodes = 0;
-  while (stack.length) {
-    const item = stack.pop()!;
-    if (++nodes > 30000 || item.depth > 20) return false;
-    if (
-      item.value === null ||
-      ["string", "boolean"].includes(typeof item.value)
-    )
-      continue;
-    if (typeof item.value === "number") {
-      if (!Number.isFinite(item.value)) return false;
-      continue;
-    }
-    if (typeof item.value !== "object" || visited.has(item.value)) return false;
-    if (
-      !Array.isArray(item.value) &&
-      ![Object.prototype, null].includes(Object.getPrototypeOf(item.value))
-    )
-      return false;
-    visited.add(item.value);
-    for (const child of Object.values(item.value))
-      stack.push({ value: child, depth: item.depth + 1 });
-  }
-  return true;
-}
-const jsonValue = z.custom<JsonValue>(
-  boundedJson,
-  "Source metadata must be plain JSON with at most 20 nesting levels",
-);
-const jsonObject = z
-  .record(z.string().max(200), jsonValue)
-  .refine(
-    (value) =>
-      new TextEncoder().encode(JSON.stringify(value)).byteLength <= 200000,
-    "Source metadata is too large",
-  );
-const savedQuery = z
-  .object({
-    search: text(500),
-    category: text(),
-    categories: z.array(requiredText()).max(100).optional(),
-    skills: z.array(requiredText()).max(100).optional(),
-    emirate: text(),
-    degreeLevel: text(),
-    status: text(),
-    stage: z.enum(APPLICATION_STAGES).optional(),
-    vacancyId: uuidSchema.optional(),
-    reviewStatus: text(),
-    shortlisted: z.boolean().optional(),
-    needsReview: z.boolean().optional(),
-    includeArchived: z.boolean().optional(),
-    sort: z
-      .enum(["name", "title", "createdAt", "updatedAt", "yearsExperience"])
-      .optional(),
-    direction: z.enum(["asc", "desc"]).optional(),
-    pageSize: z.number().int().min(1).max(100).optional(),
-  })
-  .strict();
+export {
+  APPLICATION_STAGES,
+  BULK_INTAKE_MAX_FILES,
+  BULK_INTAKE_RECOVERY_HOURS,
+  CANDIDATE_DUPLICATE_LIMIT,
+  CANDIDATE_STATUSES,
+  REVIEW_STATUSES,
+  SENSITIVE_CANDIDATE_FIELDS,
+  TASK_FIELD_TYPES,
+  daySchema,
+  recordDataSchemas,
+  reviewStatusValue,
+  systemFieldKeys,
+  uuidSchema,
+  type ApplicationStage,
+} from "./record-schemas";
 
-export const recordDataSchemas = {
-  candidate: z
-    .object({
-      name: requiredText(300),
-      email: z.union([z.email().max(320), z.literal("")]).default(""),
-      phone: text(100),
-      university: text(500),
-      degreeLevel: text(100),
-      degreeName: text(500),
-      gpa: text(100),
-      major: text(500),
-      yearsExperience: z.number().min(0).max(100).nullable().default(null),
-      documentedYearsEstimate: z
-        .number()
-        .min(0)
-        .max(100)
-        .nullable()
-        .default(null),
-      employer: text(500),
-      jobTitle: text(500),
-      nationalServiceStatus: text(200),
-      explicitGender: text(100),
-      residenceEmirate: text(100),
-      folderCategories: tags,
-      skills: tags,
-      certifications: tags,
-      languages: tags,
-      educationStatus: text(300),
-      educationDates: text(500),
-      latestRoleDates: text(500),
-      roleStatus: text(300),
-      experienceBasis: text(1000),
-      experienceWording: text(2000),
-      reviewStatus: text(300),
-      sourceNotes: notes(),
-      rawSource: jsonObject.default({}),
-      evidence: z.array(jsonObject).max(1000).default([]),
-      sourceReviews: z.array(jsonValue).max(1000).default([]),
-    })
-    .strict(),
-  "job-role": z
-    .object({
-      title: requiredText(),
-      department: text(),
-      location: text(300),
-      employmentType: text(100),
-      workMode: text(100),
-      description: notes(),
-      requirements: notes(),
-      skills: tags,
-    })
-    .strict(),
-  vacancy: z
-    .object({
-      title: requiredText(),
-      requisitionId: text(100),
-      department: text(),
-      location: text(300),
-      employmentType: text(100),
-      workMode: text(100),
-      description: notes(),
-      requirements: notes(),
-      skills: tags,
-      openings: z.number().int().min(1).max(10000).default(1),
-      status: z
-        .enum(["Draft", "Open", "On hold", "Filled", "Closed"])
-        .default("Draft"),
-      hiringManager: text(),
-      recruiter: text(),
-      targetDate: optionalDay,
-    })
-    .strict(),
-  application: z
-    .object({
-      stage: z.enum(APPLICATION_STAGES).default("Sourced"),
-      source: text(),
-      owner: text(),
-      notes: notes(),
-      appliedDate: optionalDay,
-    })
-    .strict(),
-  bucket: z
-    .object({
-      name: requiredText(120),
-      color: z
-        .string()
-        .regex(/^#[0-9a-fA-F]{6}$/)
-        .default("#4338CA"),
-      position: z.number().int().min(0).max(10000).default(0),
-    })
-    .strict(),
-  "task-field": z
-    .object({
-      name: requiredText(120),
-      type: z.enum(TASK_FIELD_TYPES).default("Text"),
-      options: z.array(requiredText(200)).max(100).default([]),
-      required: z.boolean().default(false),
-      position: z.number().int().min(0).max(10000).default(0),
-    })
-    .strict(),
-  task: z
-    .object({
-      title: requiredText(),
-      context: text(2000),
-      owner: text(),
-      dueDate: optionalDay,
-      priority: z.enum(["Low", "Normal", "High", "Urgent"]).default("Normal"),
-      description: notes(),
-      customValues: z
-        .record(
-          uuidSchema,
-          z.union([
-            z.string().max(4000),
-            z.number().finite(),
-            z.boolean(),
-            z.null(),
-          ]),
-        )
-        .default({}),
-    })
-    .strict(),
-  interview: z
-    .object({
-      title: requiredText(),
-      startAt: z.iso
-        .datetime({ offset: true })
-        .transform((value) => new Date(value).toISOString()),
-      minutes: z.number().int().min(15).max(480).default(60),
-      interviewer: text(),
-      location: text(300),
-      meetingUrl: z
-        .union([z.url({ protocol: /^https?$/ }).max(2000), z.literal("")])
-        .default(""),
-      status: z
-        .enum(["Scheduled", "Completed", "Cancelled", "No show"])
-        .default("Scheduled"),
-      notes: notes(),
-    })
-    .strict(),
-  offer: z
-    .object({
-      title: requiredText(),
-      amount: z
-        .string()
-        .regex(/^(?:0|[1-9]\d{0,9})(?:\.\d{1,2})?$/)
-        .refine((value) => Number(value) <= 1000000000)
-        .nullable()
-        .default(null),
-      currency: z
-        .string()
-        .regex(/^[A-Z]{3}$/)
-        .default("AED"),
-      payPeriod: z
-        .enum(["Monthly", "Annual", "Hourly", "One-time"])
-        .default("Monthly"),
-      sentDate: optionalDay,
-      expiryDate: optionalDay,
-      status: z
-        .enum(["Draft", "Sent", "Accepted", "Declined", "Withdrawn", "Expired"])
-        .default("Draft"),
-      declineReason: text(2000),
-      notes: notes(),
-    })
-    .strict(),
-  onboarding: z
-    .object({
-      startDate: optionalDay,
-      owner: text(),
-      status: z
-        .enum(["Planned", "In progress", "Completed", "On hold"])
-        .default("Planned"),
-      notes: notes(),
-    })
-    .strict(),
-  checklist: z
-    .object({
-      title: requiredText(),
-      category: z
-        .enum(["Document", "Orientation", "Training", "Other"])
-        .default("Other"),
-      dueDate: optionalDay,
-      owner: text(),
-      status: z
-        .enum(["Pending", "In progress", "Complete", "Waived"])
-        .default("Pending"),
-      notes: notes(),
-    })
-    .strict(),
-  "saved-view": z
-    .object({
-      name: requiredText(120),
-      area: z.enum(["directory", "applications"]),
-      query: savedQuery,
-    })
-    .strict(),
-  comment: z
-    .object({
-      body: requiredText(4000),
-      legacyAuthorLabel: z.string().trim().max(200).optional(),
-    })
-    .strict(),
-} as const;
 export type RecordKind = keyof typeof recordDataSchemas;
 export type RecordDataMap = {
   [K in RecordKind]: z.output<(typeof recordDataSchemas)[K]>;
@@ -358,7 +81,30 @@ export interface RecordDto<
   privateOwnerId: string | null;
   importMeta?: Record<string, unknown>;
   label?: string;
+  /** Applications only: the candidate's name, left out without candidates:read. */
+  candidateLabel?: string;
+  /** Applications only: the vacancy's title. */
+  vacancyLabel?: string;
+  authorName?: string | null;
+  /** Vacancies with an org unit only: the unit and its "Name (CODE)". */
+  orgUnitId?: string;
+  orgUnitLabel?: string | null;
+  /** Tasks linked to a record the caller may see only: its kind and label. */
+  parentKind?: RecordKind;
+  parentLabel?: string;
 }
+/**
+ * The record kinds a task may link to through parentRecordId. An allowlist, so a new kind is refused
+ * until it is added. Candidate erasure never deletes these kinds; linking the kinds it deletes waits
+ * for an erasure change (R2a-20, owner decision A1, option B).
+ */
+export const TASK_LINK_KINDS: readonly RecordKind[] = [
+  "job-role",
+  "vacancy",
+  "bucket",
+  "task-field",
+  "task",
+];
 export const referencesByKind: Record<
   RecordKind,
   Partial<
@@ -381,6 +127,7 @@ export const referencesByKind: Record<
     bucketId: { kind: "bucket", required: true },
     candidateId: { kind: "candidate" },
     vacancyId: { kind: "vacancy" },
+    parentRecordId: { kind: "*" },
   },
   interview: {
     applicationId: { kind: "application", required: true, immutable: true },
@@ -400,6 +147,9 @@ export const referencesByKind: Record<
 const referenceShape = Object.fromEntries(
   referenceFields.map((key) => [key, uuidSchema.nullable().optional()]),
 ) as { [K in ReferenceField]: z.ZodOptional<z.ZodNullable<typeof uuidSchema>> };
+/** A vacancy's org unit, or null to clear it; every other kind refuses the key. */
+const orgUnitShape = (kind: string) =>
+  kind === "vacancy" ? { orgUnitId: uuidSchema.nullable().optional() } : {};
 export const createRecordSchemas = Object.fromEntries(
   Object.entries(recordDataSchemas).map(([kind, data]) => [
     kind,
@@ -407,6 +157,7 @@ export const createRecordSchemas = Object.fromEntries(
       .object({
         data,
         ...referenceShape,
+        ...orgUnitShape(kind),
         legacyId: z.string().trim().min(1).max(200).optional(),
         importMeta: jsonObject.optional(),
         archived: z.boolean().optional(),
@@ -414,11 +165,13 @@ export const createRecordSchemas = Object.fromEntries(
       .strict(),
   ]),
 ) as unknown as Record<RecordKind, z.ZodType>;
-function partialDataSchema(data: z.ZodObject) {
-  // Zod 4 applies defaults inside optional fields. Retain only submitted keys so
-  // a partial save cannot reset an existing stage, field type or factual value.
+/**
+ * The object schema's checks, defaults and transforms, returning only the keys the value sent, so a
+ * default never stands for a field the caller named.
+ */
+export function sentFieldsSchema(data: z.ZodObject) {
   return z.record(z.string(), z.unknown()).transform((value, context) => {
-    const result = data.partial().safeParse(value);
+    const result = data.safeParse(value);
     if (!result.success) {
       for (const issue of result.error.issues)
         context.addIssue({
@@ -434,6 +187,11 @@ function partialDataSchema(data: z.ZodObject) {
     );
   });
 }
+function partialDataSchema(data: z.ZodObject) {
+  // Zod 4 applies defaults inside optional fields. Retain only submitted keys so
+  // a partial save cannot reset an existing stage, field type or factual value.
+  return sentFieldsSchema(data.partial());
+}
 export const updateRecordSchemas = Object.fromEntries(
   Object.entries(recordDataSchemas).map(([kind, data]) => [
     kind,
@@ -442,6 +200,7 @@ export const updateRecordSchemas = Object.fromEntries(
         version: z.number().int().min(1),
         data: partialDataSchema(data).optional(),
         ...referenceShape,
+        ...orgUnitShape(kind),
         archived: z.boolean().optional(),
         moveToBucketId: uuidSchema.optional(),
         importMeta: jsonObject.optional(),
@@ -500,6 +259,18 @@ export function factualText(value: unknown): string {
     return Object.values(value).map(factualText).join(" ");
   return String(value).toLocaleLowerCase();
 }
+/** An absolute http(s) URL to link to, or null; stored values stay untrusted when rendered. */
+export function safeExternalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 export function matchesSearch(value: unknown, query: string): boolean {
   const haystack = factualText(value);
   return searchTerms(query).every((term) =>
@@ -533,128 +304,40 @@ export interface ResourceConfig {
   singular: string;
   fields: FieldConfig[];
 }
-const labels: Record<RecordKind, [string, string]> = {
-  candidate: ["Candidates", "Candidate"],
-  "job-role": ["Job roles", "Job role"],
-  vacancy: ["Vacancies", "Vacancy"],
-  application: ["Applications", "Application"],
-  bucket: ["Workflow buckets", "Bucket"],
-  "task-field": ["Custom task fields", "Custom field"],
-  task: ["Recruitment tasks", "Task"],
-  interview: ["Interviews", "Interview"],
-  offer: ["Offers", "Offer"],
-  onboarding: ["Onboarding", "Onboarding"],
-  checklist: ["Checklist items", "Checklist item"],
-  "saved-view": ["Saved views", "Saved view"],
-  comment: ["Comments", "Comment"],
-};
-const enumOptions: Record<string, readonly string[]> = {
-  "application.stage": APPLICATION_STAGES,
-  "vacancy.status": ["Draft", "Open", "On hold", "Filled", "Closed"],
-  "task-field.type": TASK_FIELD_TYPES,
-  "task.priority": ["Low", "Normal", "High", "Urgent"],
-  "interview.status": ["Scheduled", "Completed", "Cancelled", "No show"],
-  "offer.status": [
-    "Draft",
-    "Sent",
-    "Accepted",
-    "Declined",
-    "Withdrawn",
-    "Expired",
-  ],
-  "offer.payPeriod": ["Monthly", "Annual", "Hourly", "One-time"],
-  "onboarding.status": ["Planned", "In progress", "Completed", "On hold"],
-  "checklist.status": ["Pending", "In progress", "Complete", "Waived"],
-  "checklist.category": ["Document", "Orientation", "Training", "Other"],
-  "saved-view.area": ["directory", "applications"],
-};
-const fieldLabels: Record<string, string> = {
-  explicitGender: "Gender (explicitly stated)",
-  nationalServiceStatus: "UAE national service (as stated)",
-  folderCategories: "Folder-derived categories",
-  yearsExperience: "CV-stated years of experience",
-  documentedYearsEstimate: "Documented estimate (years)",
-  rawSource: "Original source fields",
-  sourceReviews: "Source reviews",
-  gpa: "GPA",
-  requisitionId: "Requisition ID",
-  startAt: "Start time (Dubai)",
-  customValues: "Custom task values",
-  meetingUrl: "Meeting URL",
-  privateOwnerId: "Owner",
-};
+// The configurable kinds take their entries from the compiled default kind schemas; buckets,
+// task fields, saved views and comments are not configurable and use the same field builder.
+function resourceConfig(kind: RecordKind): ResourceConfig {
+  if ((CONFIGURABLE_KINDS as readonly RecordKind[]).includes(kind)) {
+    const { label, singular, fields } =
+      DEFAULT_KIND_SCHEMAS[kind as ConfigurableKind].body;
+    return {
+      kind,
+      label,
+      singular,
+      fields: fields.map(
+        ({ key, label, type, options, required, readOnly }) => ({
+          key,
+          label,
+          type,
+          options,
+          required,
+          readOnly,
+        }),
+      ),
+    };
+  }
+  return {
+    kind,
+    label: KIND_LABELS[kind][0],
+    singular: KIND_LABELS[kind][1],
+    fields: Object.keys(recordDataSchemas[kind].shape).map((key) =>
+      systemFieldConfig(kind, key),
+    ),
+  };
+}
 export const RESOURCE_CONFIG = Object.fromEntries(
   Object.entries(resourceToKind).map(([resource, kind]) => [
     resource,
-    {
-      kind,
-      label: labels[kind][0],
-      singular: labels[kind][1],
-      fields: Object.keys(recordDataSchemas[kind].shape).map((key) => {
-        const options = enumOptions[`${kind}.${key}`];
-        const type: FieldType = options
-          ? "select"
-          : [
-                "skills",
-                "certifications",
-                "languages",
-                "folderCategories",
-                "options",
-              ].includes(key)
-            ? "tags"
-            : [
-                  "rawSource",
-                  "evidence",
-                  "sourceReviews",
-                  "query",
-                  "customValues",
-                ].includes(key)
-              ? "json"
-              : ["required"].includes(key)
-                ? "checkbox"
-                : [
-                      "yearsExperience",
-                      "documentedYearsEstimate",
-                      "openings",
-                      "position",
-                      "minutes",
-                    ].includes(key)
-                  ? "number"
-                  : [
-                        "targetDate",
-                        "appliedDate",
-                        "dueDate",
-                        "sentDate",
-                        "expiryDate",
-                        "startDate",
-                      ].includes(key)
-                    ? "date"
-                    : key === "startAt"
-                      ? "datetime-local"
-                      : [
-                            "description",
-                            "requirements",
-                            "notes",
-                            "body",
-                            "sourceNotes",
-                            "experienceWording",
-                            "declineReason",
-                          ].includes(key)
-                        ? "textarea"
-                        : "text";
-        return {
-          key,
-          label:
-            fieldLabels[key] ||
-            key
-              .replace(/([A-Z])/g, " $1")
-              .replace(/^./, (c) => c.toUpperCase()),
-          type,
-          options,
-          required: ["name", "title", "body", "startAt"].includes(key),
-          readOnly: ["rawSource", "evidence", "sourceReviews"].includes(key),
-        };
-      }),
-    },
+    resourceConfig(kind),
   ]),
 ) as Record<ResourceName, ResourceConfig>;

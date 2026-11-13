@@ -1,8 +1,18 @@
+import type { PGlite } from "@electric-sql/pglite";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as app from "./schema";
 import * as auth from "./auth-schema";
 import { ApiError } from "../lib/errors";
+import {
+  assertTenantContextKey,
+  installTenantContextKey,
+} from "../lib/tenant-context";
+import {
+  countPgClientRoundTrips,
+  countPgliteRoundTrips,
+} from "../lib/server-timing";
 import { runtimeRoleSafetyQuery } from "./runtime-role";
+import { assertStorageSchema } from "./storage-schema";
 import {
   dataRoleBoundaryQuery,
   identityRoleBoundaryQuery,
@@ -32,11 +42,41 @@ export function getDb(): Promise<AppDb> {
     });
   return singleton;
 }
+/** Closes the local PGlite client behind getDb() so a script can exit; the pair and test database stay. */
+export async function closeDb(): Promise<void> {
+  const pending = singleton;
+  if (!pending) return;
+  const db = await pending.catch(() => undefined);
+  if (db) await (db as unknown as { $client: PGlite }).$client.close();
+  if (singleton === pending) singleton = undefined;
+}
 export function getIdentityDb(): Promise<AppDb> {
   if (testDatabase) return testDatabase;
   if (hostedOrProduction() || process.env.IDENTITY_DATABASE_URL)
     return getDbPair().then((pair) => pair.identity);
   return getDb();
+}
+
+/**
+ * A server can end a pooled connection (for example a transaction timeout), and pg emits that on
+ * the pool or a checked-out client; unhandled, it would crash the process instead of failing one
+ * request. Log only a fixed category and the SQLSTATE; pg-pool discards the broken client.
+ */
+function logConnectionErrors(pool: Pool): Pool {
+  const log = (category: string) => (error: unknown) => {
+    const code = (error as { code?: unknown } | null)?.code;
+    const sqlState =
+      typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
+        ? ` sqlstate=${code}`
+        : "";
+    console.error(`database_connection_error category=${category}${sqlState}`);
+  };
+  pool.on("error", log("pool"));
+  // Every checked-out client, and so every pool query, counts its round trips for Server-Timing.
+  pool.on("connect", (client) =>
+    countPgClientRoundTrips(client).on("error", log("client")),
+  );
+  return pool;
 }
 
 function getDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
@@ -48,13 +88,36 @@ function getDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
   return identityPair;
 }
 
-async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+/** Synchronous refusals shared by createDbPair and hosted sign-in readiness; never opens a pool. */
+export function prepareDbPairTargets(): {
+  dataUrl: string;
+  identityUrl: string;
+} {
   if (process.env.DATABASE_MODE === "pglite")
     throw new ApiError(
       503,
       "local_db_disabled",
       "Local database mode is not available for isolated production pools.",
     );
+  if (hostedOrProduction()) {
+    if (process.env.ALLOW_LOCAL_DB === "true")
+      throw new ApiError(
+        503,
+        "local_db_disabled",
+        "Local database settings are not available in a hosted deployment.",
+      );
+    if (
+      process.env.DEV_MAIL_MODE === "console" ||
+      process.env.DEV_SEED_PASSWORD
+    )
+      throw new ApiError(
+        503,
+        "development_setting_refused",
+        "Development mail and seed settings are not available in a hosted deployment.",
+      );
+    // Startup proves the key is set and well formed; tenant_context.install rejects an uninstalled key per transaction.
+    assertTenantContextKey();
+  }
   const dataUrl = process.env.DATABASE_URL;
   const identityUrl = process.env.IDENTITY_DATABASE_URL;
   if (!dataUrl || !identityUrl)
@@ -63,28 +126,27 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       "unsafe_database_connections",
       "Configure separate database connections for recruitment data and identity.",
     );
-  const targets = prepareConnectionTargets(dataUrl, identityUrl);
-  // Remove only after trusted tenant policies and identity workflows pass end-to-end review.
-  if (hostedOrProduction())
-    throw new ApiError(
-      503,
-      "tenant_isolation_pending",
-      "The database identity boundary is not ready for deployment.",
-    );
+  return prepareConnectionTargets(dataUrl, identityUrl);
+}
+
+async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
+  const targets = prepareDbPairTargets();
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
   function makePool(connectionString: string) {
     const url = new URL(connectionString);
     const local = isLoopbackHost(url.hostname);
     if (!local) url.searchParams.set("sslmode", "verify-full");
-    return new Pool({
-      connectionString: url.toString(),
-      max: 5,
-      idleTimeoutMillis: 10000,
-      connectionTimeoutMillis: 10000,
-      allowExitOnIdle: true,
-      ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
-    });
+    return logConnectionErrors(
+      new Pool({
+        connectionString: url.toString(),
+        max: 5,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 10000,
+        allowExitOnIdle: true,
+        ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
+      }),
+    );
   }
   const dataPool = makePool(targets.dataUrl);
   const identityPool = makePool(targets.identityUrl);
@@ -145,6 +207,7 @@ async function createDbPair(): Promise<{ data: AppDb; identity: AppDb }> {
       { ...data, canAssumeOther: dataMembership.rows[0]?.member },
       { ...identity, canAssumeOther: identityMembership.rows[0]?.member },
     );
+    await assertStorageSchema(dataPool);
     if (process.env.VERCEL) {
       const { attachDatabasePool } = await import("@vercel/functions");
       attachDatabasePool(dataPool);
@@ -173,10 +236,18 @@ async function createDb(): Promise<AppDb> {
     const { PGlite } = await import("@electric-sql/pglite");
     const { drizzle } = await import("drizzle-orm/pglite");
     const { resolve } = await import("node:path");
-    const client = new PGlite(
-      resolve(process.cwd(), process.env.PGLITE_DATA_DIR || ".local/database"),
+    const client = countPgliteRoundTrips(
+      new PGlite(
+        resolve(
+          process.cwd(),
+          process.env.PGLITE_DATA_DIR || ".local/database",
+        ),
+      ),
     );
     await applyMigrations(client);
+    // The PGlite process is the owner here; other databases get the key from db:migrate.
+    await installTenantContextKey(client);
+    await assertStorageSchema(client);
     return drizzle(client, { schema }) as unknown as AppDb;
   }
   if (!process.env.DATABASE_URL)
@@ -190,16 +261,18 @@ async function createDb(): Promise<AppDb> {
   const url = new URL(process.env.DATABASE_URL);
   const local = isLoopbackHost(url.hostname);
   if (!local) url.searchParams.set("sslmode", "verify-full");
-  const pool = new Pool({
-    connectionString: url.toString(),
-    max: 5,
-    idleTimeoutMillis: 10000,
-    connectionTimeoutMillis: 10000,
-    allowExitOnIdle: true,
-    ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
-  });
-  if (process.env.NODE_ENV === "production") {
-    try {
+  const pool = logConnectionErrors(
+    new Pool({
+      connectionString: url.toString(),
+      max: 5,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+      ...(!local ? { ssl: { rejectUnauthorized: true } } : {}),
+    }),
+  );
+  try {
+    if (process.env.NODE_ENV === "production") {
       const result = await pool.query<{ unsafe: boolean }>(
         runtimeRoleSafetyQuery,
       );
@@ -209,10 +282,11 @@ async function createDb(): Promise<AppDb> {
           "unsafe_database_role",
           "Configure a restricted database runtime role without ownership or elevated privileges.",
         );
-    } catch (error) {
-      await pool.end();
-      throw error;
     }
+    await assertStorageSchema(pool);
+  } catch (error) {
+    await pool.end();
+    throw error;
   }
   if (process.env.VERCEL) {
     const { attachDatabasePool } = await import("@vercel/functions");
@@ -220,17 +294,25 @@ async function createDb(): Promise<AppDb> {
   }
   return drizzle(pool, { schema });
 }
-export async function applyMigrations(client: {
-  exec: (query: string) => Promise<unknown>;
-}) {
+/** `through` (tests only) stops after the named file; production callers apply every file. */
+export async function applyMigrations(
+  client: {
+    exec: (query: string) => Promise<unknown>;
+  },
+  through?: string,
+) {
   const { readFile, readdir } = await import("node:fs/promises");
   const { join } = await import("node:path");
   await client.exec(
     "CREATE TABLE IF NOT EXISTS public.recruitment_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
   );
-  const files = (await readdir(join(process.cwd(), "drizzle")))
+  const all = (await readdir(join(process.cwd(), "drizzle")))
     .filter((f) => /^\d{4}.*\.sql$/.test(f))
     .sort();
+  if (through !== undefined && !all.includes(through))
+    throw new Error("Unknown migration file.");
+  const files =
+    through === undefined ? all : all.slice(0, all.indexOf(through) + 1);
   // The adapter only needs exec; a transactional DO block avoids applying an already tracked migration.
   for (const file of files) {
     const body = await readFile(join(process.cwd(), "drizzle", file), "utf8");

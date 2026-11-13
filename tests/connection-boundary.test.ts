@@ -4,13 +4,16 @@ import { describe, expect, it, vi } from "vitest";
 import { applyMigrations } from "../src/db";
 import {
   dataRoleBoundaryQuery,
+  dataRoleHelpers,
   identityRoleBoundaryQuery,
+  identityRoleHelpers,
   markerRoleBoundaryQuery,
   isLoopbackHost,
   prepareConnectionTargets,
   verifyConnectionTargets,
   verifyPoolPair,
 } from "../src/db/connection-boundary";
+import { createSplitRoleDb, splitRoles } from "./helpers/db";
 
 describe("database identity separation", () => {
   it("recognizes parsed IPv6 and IPv4 loopback hosts without trusting lookalike hosts", () => {
@@ -129,6 +132,292 @@ describe("database identity separation", () => {
       await pg.exec("RESET ROLE");
     } finally {
       await pg.close();
+    }
+  });
+
+  it("allows only the exact tenant-context helpers each split role needs", async () => {
+    const harness = await createSplitRoleDb();
+    try {
+      async function unsafe(role: "data" | "identity") {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        const result = await harness.client.query<{ unsafe: boolean }>(
+          role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+        );
+        return result.rows[0].unsafe;
+      }
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      // One install overload, three arguments, allowlisted for both roles (0029).
+      for (const helpers of [dataRoleHelpers, identityRoleHelpers])
+        expect(
+          helpers.filter((helper) =>
+            helper.startsWith("tenant_context.install("),
+          ),
+        ).toEqual(["tenant_context.install(text,text,text[])"]);
+      await harness.asSuperuser();
+      expect(
+        (
+          await harness.client.query<{ args: string }>(
+            "SELECT pg_get_function_identity_arguments(p.oid) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'install'",
+          )
+        ).rows,
+      ).toEqual([{ args: "payload text, signature text, cached text[]" }]);
+      // A multi-word type is matched in catalog spelling (0030): the granted history helper passes,
+      // a same-name overload with another argument type does not.
+      expect(dataRoleHelpers).toContain(
+        "tenant_context.config_history(uuid,timestamp with time zone,integer)",
+      );
+      expect(
+        (
+          await harness.client.query<{ args: string }>(
+            "SELECT pg_catalog.oidvectortypes(p.proargtypes) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'tenant_context' AND p.proname = 'config_history'",
+          )
+        ).rows,
+      ).toEqual([{ args: "uuid, timestamp with time zone, integer" }]);
+      await harness.asOwner();
+      await harness.client.exec(`
+        CREATE FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) RETURNS text
+          LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 'extra' $$;
+        REVOKE ALL ON FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer) TO ${splitRoles.data};`);
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        "DROP FUNCTION tenant_context.config_history(uuid, timestamp without time zone, integer)",
+      );
+      expect(await unsafe("data")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(`
+        CREATE FUNCTION tenant_context.extra_helper() RETURNS text LANGUAGE sql
+          SECURITY DEFINER SET search_path = pg_catalog AS $$ SELECT 'extra' $$;
+        REVOKE ALL ON FUNCTION tenant_context.extra_helper() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION tenant_context.extra_helper() TO ${splitRoles.data};`);
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec("DROP FUNCTION tenant_context.extra_helper()");
+      expect(await unsafe("data")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION tenant_context.audit_token(text,text) TO ${splitRoles.data}`,
+      );
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION tenant_context.audit_token(text,text) FROM ${splitRoles.data};
+        GRANT EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text,text) TO ${splitRoles.data}`,
+      );
+      expect(await unsafe("data")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION tenant_context.audit_grant_reuse(text,text) FROM ${splitRoles.data};
+        GRANT EXECUTE ON FUNCTION tenant_context.allows(text,text,text) TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the five record-scope helpers, with and without arguments, and never the identity role (0038)", async () => {
+    const helpers = [
+      "tenant_context.scope_is_all()",
+      "tenant_context.in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+      "tenant_context.record_in_scope(text,uuid)",
+      "tenant_context.candidate_in_scope(text,uuid)",
+      "tenant_context.context_actor_key()",
+    ];
+    expect(dataRoleHelpers.slice(-5)).toEqual(helpers);
+    for (const helper of helpers)
+      expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      for (const helper of [
+        "scope_is_all()",
+        "in_scope(text,text,uuid,uuid,uuid,uuid,uuid,text,uuid,uuid)",
+      ]) {
+        await harness.asOwner();
+        await harness.client.exec(
+          `GRANT EXECUTE ON FUNCTION tenant_context.${helper} TO ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(true);
+        await harness.asOwner();
+        await harness.client.exec(
+          `REVOKE EXECUTE ON FUNCTION tenant_context.${helper} FROM ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(false);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the workspace team list and never the identity role (0041)", async () => {
+    const helper = "tenant_context.workspace_team_list()";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the workspace people helper and never the identity role (0042)", async () => {
+    const helper =
+      "tenant_context.workspace_people(text,text,text,text,text,text)";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the two team archive helpers and never the identity role (0044)", async () => {
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      for (const helper of [
+        "tenant_context.set_team_archived(text,boolean)",
+        "tenant_context.member_archived_teams()",
+      ]) {
+        expect(dataRoleHelpers).toContain(helper);
+        expect(identityRoleHelpers).not.toContain(helper);
+        await harness.asOwner();
+        await harness.client.exec(
+          `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(true);
+        await harness.asOwner();
+        await harness.client.exec(
+          `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+        );
+        expect(await unsafe("identity"), helper).toBe(false);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the workspace person helper and never the identity role (0046)", async () => {
+    const helper = "tenant_context.workspace_person(text)";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("allows the data role the field usage count and never the identity role (0055)", async () => {
+    const helper = "tenant_context.field_usage(text,uuid)";
+    expect(dataRoleHelpers).toContain(helper);
+    expect(identityRoleHelpers).not.toContain(helper);
+    const harness = await createSplitRoleDb();
+    try {
+      const unsafe = async (role: "data" | "identity") => {
+        await harness[role === "data" ? "dataDb" : "identityDb"]();
+        return (
+          await harness.client.query<{ unsafe: boolean }>(
+            role === "data" ? dataRoleBoundaryQuery : identityRoleBoundaryQuery,
+          )
+        ).rows[0].unsafe;
+      };
+      expect(await unsafe("data")).toBe(false);
+      expect(await unsafe("identity")).toBe(false);
+      await harness.asOwner();
+      await harness.client.exec(
+        `GRANT EXECUTE ON FUNCTION ${helper} TO ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(true);
+      await harness.asOwner();
+      await harness.client.exec(
+        `REVOKE EXECUTE ON FUNCTION ${helper} FROM ${splitRoles.identity}`,
+      );
+      expect(await unsafe("identity")).toBe(false);
+    } finally {
+      await harness.close();
     }
   });
 

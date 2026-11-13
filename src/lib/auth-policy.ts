@@ -28,6 +28,36 @@ export function requireVerifiedIdentity<
   return value;
 }
 
+/** Better Auth's session freshAge and the fresh-session check for sensitive admin changes. */
+export const SESSION_FRESH_AGE_SECONDS = 60 * 15;
+
+export const TWO_STEP_SETUP_MESSAGE =
+  "Set up two-step sign-in to continue. Owners and admins must use it.";
+/**
+ * Owners and admins in any team, and company owners and admins with an unsuspended row, must use
+ * two-step sign-in; callers pass live values only (companyAuthority from companyAuthorityHeld).
+ */
+export function twoStepSetupRequired(
+  twoFactorEnabled: boolean | null | undefined,
+  roles: readonly string[],
+  companyAuthority: boolean,
+): boolean {
+  return (
+    !twoFactorEnabled &&
+    (roles.some((role) => role === "owner" || role === "admin") ||
+      companyAuthority)
+  );
+}
+
+export type TeamRole = "owner" | "admin" | "recruiter" | "viewer";
+
+/** The team roles the caller may give: only an owner gives Owner. */
+export function rolesFor(role: string | null): TeamRole[] {
+  return role === "owner"
+    ? ["owner", "admin", "recruiter", "viewer"]
+    : ["admin", "recruiter", "viewer"];
+}
+
 export function validateInvitationRole(
   role: string,
 ): "owner" | "admin" | "recruiter" | "viewer" {
@@ -39,6 +69,17 @@ export function validateInvitationRole(
   )
     throw new ApiError(400, "INVALID_ROLE", "Choose a supported team role.");
   return role;
+}
+
+/** Only the initial administrator and owners of an existing team may create a team. */
+export function canCreateTeam(
+  user: { emailVerified: boolean; initialAdmin?: boolean | null },
+  roles: readonly string[],
+): boolean {
+  return (
+    user.emailVerified === true &&
+    (user.initialAdmin === true || roles.includes("owner"))
+  );
 }
 
 export function isUsableAuthSecret(secret?: string): boolean {
