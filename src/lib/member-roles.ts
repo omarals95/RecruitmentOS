@@ -1,5 +1,5 @@
 import { isAPIError } from "@better-auth/core/utils/is-api-error";
-import { DrizzleQueryError, and, eq, sql } from "drizzle-orm";
+import { DrizzleQueryError, and, eq, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getIdentityDb, type TeamTx } from "@/db";
 import { member } from "@/db/auth-schema";
@@ -23,18 +23,33 @@ export type MemberRoles = {
     roleName: string | null;
     available: boolean;
   }[];
-  roles: {
+  roles: AssignableRole[];
+  /**
+   * Every role a current group gives in the active team that reaches a member of it who is not a
+   * team owner, one row per member and group, by member then group name.
+   */
+  groupRoles: {
+    userId: string;
     roleObjectId: string;
-    name: string;
-    membership: Exclude<RoleBody["membership"], "owner">;
+    roleName: string | null;
+    groupId: string;
+    groupName: string;
   }[];
+};
+export type AssignableRole = {
+  roleObjectId: string;
+  name: string;
+  membership: Exclude<RoleBody["membership"], "owner">;
 };
 export type RoleAssignmentChange = {
   occurredAt: string;
   action: string;
-  affectedUserId: string;
+  /** Null for a group role row, which names no person. */
+  affectedUserId: string | null;
   roleName: string | null;
   actorName: string | null;
+  /** The current name of the group a group role row names; null for every other row. */
+  groupName: string | null;
 };
 
 const assignmentForbidden = () =>
@@ -71,6 +86,60 @@ async function inRoles<T>(
     if (code === "42501") throw assignmentForbidden();
     throw error;
   }
+}
+
+/**
+ * A role a company owner may give: one whose current published version is in force for this context
+ * and is a valid role body, the rule tenant_context.install applies. 404 not_found for no role of the
+ * workspace, 409 role_not_published and 409 role_invalid otherwise.
+ */
+export async function assignableRole(
+  tx: TeamTx,
+  access: TenantAccess,
+  roleObjectId: string,
+): Promise<{
+  roleVersionId: string;
+  body: z.output<typeof roleBodySchema>;
+}> {
+  const versionId = Object.hasOwn(access.versions, roleObjectId)
+    ? access.versions[roleObjectId]
+    : undefined;
+  const document = versionId ? access.documents[versionId] : undefined;
+  if (document?.type !== "role") {
+    // Only to tell a role without a published version from no role at all.
+    const { rows } = await tx.execute<{ id: string }>(
+      sql`select id from app.config_objects where id = ${roleObjectId}::uuid and workspace_id = ${access.workspaceId}::uuid and type = 'role' and archived_at is null`,
+    );
+    if (rows[0] && !versionId)
+      throw new ApiError(
+        409,
+        "role_not_published",
+        "Publish this role before assigning it.",
+      );
+    throw new ApiError(404, "not_found", "Role not found.");
+  }
+  const parsed = roleBodySchema.safeParse(document.body);
+  if (!parsed.success)
+    throw new ApiError(
+      409,
+      "role_invalid",
+      "This role's published version is not a valid role. Publish a corrected version before assigning it.",
+    );
+  return { roleVersionId: document.versionId, body: parsed.data };
+}
+
+/** The roles assignableRole accepts, by name. */
+export function assignableRoles(access: TenantAccess): AssignableRole[] {
+  const assignable: AssignableRole[] = [];
+  for (const [objectId, versionId] of Object.entries(access.versions)) {
+    const document = access.documents[versionId];
+    if (document?.type !== "role") continue;
+    const parsed = roleBodySchema.safeParse(document.body);
+    if (!parsed.success) continue;
+    const { name, membership } = parsed.data;
+    assignable.push({ roleObjectId: objectId, name, membership });
+  }
+  return assignable.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -136,34 +205,11 @@ export async function assignMemberRole(
       );
       return null;
     }
-    const versionId = Object.hasOwn(access.versions, roleObjectId)
-      ? access.versions[roleObjectId]
-      : undefined;
-    const document = versionId ? access.documents[versionId] : undefined;
-    if (document?.type !== "role") {
-      // Only to tell a role without a published version from no role at all.
-      const { rows } = await tx.execute<{ id: string }>(
-        sql`select id from app.config_objects where id = ${roleObjectId}::uuid and workspace_id = ${access.workspaceId}::uuid and type = 'role' and archived_at is null`,
-      );
-      if (rows[0] && !versionId)
-        throw new ApiError(
-          409,
-          "role_not_published",
-          "Publish this role before assigning it.",
-        );
-      throw new ApiError(404, "not_found", "Role not found.");
-    }
-    const parsed = roleBodySchema.safeParse(document.body);
-    if (!parsed.success)
-      throw new ApiError(
-        409,
-        "role_invalid",
-        "This role's published version is not a valid role. Publish a corrected version before assigning it.",
-      );
+    const role = await assignableRole(tx, access, roleObjectId);
     await tx.execute(
       sql`insert into app.member_roles(team_id, user_id, role_object_id) values (${p.teamId}, ${userId}, ${roleObjectId}::uuid) on conflict (team_id, user_id) do update set role_object_id = excluded.role_object_id`,
     );
-    return { roleVersionId: document.versionId, body: parsed.data };
+    return role;
   });
   if (!assigned)
     return {
@@ -208,24 +254,29 @@ export async function assignMemberRole(
 }
 
 /**
- * Company owners, signed in: the configured role of each member of the active team, and the roles
- * that can be assigned. A role can be assigned, and an assignment is available, only when its
- * current published version is in force for this context and is a valid role, the rule
- * tenant_context.install applies; roleName is the last published name, else the draft's.
+ * Company owners, signed in: the configured role of each member of the active team, the roles that
+ * can be assigned, and the roles current groups give members of the team who are not team owners. A
+ * role can be assigned, and an assignment is available, only when its current published version is
+ * in force for this context and is a valid role, the rule tenant_context.install applies; roleName is
+ * the last published name, else the draft's.
  */
 export async function listMemberRoles(p: Principal): Promise<MemberRoles> {
+  const db = await getIdentityDb();
+  const members = new Set(
+    (
+      await db
+        .select({ userId: member.userId })
+        .from(member)
+        .where(
+          and(eq(member.organizationId, p.teamId), ne(member.role, "owner")),
+        )
+    ).map((row) => row.userId),
+  );
   return inRoles(p, async (tx, access) => {
     if (p.authType !== "session" || access.companyLevel !== "owner")
       throw assignmentForbidden();
-    const assignable = new Map<string, MemberRoles["roles"][number]>();
-    for (const [objectId, versionId] of Object.entries(access.versions)) {
-      const document = access.documents[versionId];
-      if (document?.type !== "role") continue;
-      const parsed = roleBodySchema.safeParse(document.body);
-      if (!parsed.success) continue;
-      const { name, membership } = parsed.data;
-      assignable.set(objectId, { roleObjectId: objectId, name, membership });
-    }
+    const roles = assignableRoles(access);
+    const assignable = new Set(roles.map((role) => role.roleObjectId));
     const { rows } = await tx.execute<{
       userId: string;
       roleObjectId: string;
@@ -233,21 +284,30 @@ export async function listMemberRoles(p: Principal): Promise<MemberRoles> {
     }>(
       sql`select r.user_id as "userId", r.role_object_id as "roleObjectId", coalesce(c.body->>'name', d.body->>'name') as "roleName" from app.member_roles r left join app.config_objects o on o.id = r.role_object_id left join app.config_versions c on c.id = o.current_version_id left join app.config_versions d on d.id = o.draft_version_id where r.team_id = ${p.teamId} order by r.user_id`,
     );
+    const { rows: granted } = await tx.execute<
+      MemberRoles["groupRoles"][number]
+    >(
+      sql`select e.user_id as "userId", r.role_object_id as "roleObjectId", coalesce(c.body->>'name', d.body->>'name') as "roleName", g.id as "groupId", g.name as "groupName"
+        from app.group_roles r join app.groups g on g.id = r.group_id and g.archived_at is null
+        join app.group_effective_members e on e.group_id = g.id
+        left join app.config_objects o on o.id = r.role_object_id left join app.config_versions c on c.id = o.current_version_id left join app.config_versions d on d.id = o.draft_version_id
+        where r.team_id = ${p.teamId} and g.workspace_id = ${access.workspaceId}::uuid order by e.user_id, lower(g.name), g.id`,
+    );
     return {
       assignments: rows.map((row) => ({
         ...row,
         available: assignable.has(row.roleObjectId),
       })),
-      roles: [...assignable.values()].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      ),
+      roles,
+      groupRoles: granted.filter((row) => members.has(row.userId)),
     };
   });
 }
 
 /**
- * Company owners only: role assignments and clears of every team in the workspace, newest first,
- * for the owners' home screen (R2a-11). Action, time, member, role name and actor name only.
+ * Company owners only: role assignments and clears of every team in the workspace, and roles given
+ * to and removed from groups, newest first, for the owners' home screen (R2a-11). Action, time,
+ * member, role name, actor name and group name only.
  */
 export async function listRoleAssignmentChanges(
   p: Principal,
@@ -258,7 +318,7 @@ export async function listRoleAssignmentChanges(
     if (p.authType !== "session" || access.companyLevel !== "owner")
       throw assignmentForbidden();
     const { rows } = await tx.execute<RoleAssignmentChange>(
-      sql`select occurred_at as "occurredAt", action, affected_user_id as "affectedUserId", role_name as "roleName", actor_name as "actorName" from tenant_context.role_assignment_changes(${before?.toISOString() ?? null}::timestamptz, ${pageSize}::integer)`,
+      sql`select occurred_at as "occurredAt", action, affected_user_id as "affectedUserId", role_name as "roleName", actor_name as "actorName", group_name as "groupName" from tenant_context.role_assignment_changes(${before?.toISOString() ?? null}::timestamptz, ${pageSize}::integer)`,
     );
     return rows;
   });

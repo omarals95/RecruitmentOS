@@ -608,10 +608,12 @@ describe("Admin portal routes under the split runtime roles", () => {
         affectedUserIds: [recruiter.userId],
         roleName: null,
         actorName: "Fictional Test User",
+        groupName: null,
       });
       expect(body.data[1]).toMatchObject({
         roleName: "Fictional narrowed recruiter",
         actorName: "Fictional Test User",
+        groupName: null,
       });
       const times = body.data.map((row: { occurredAt: string }) =>
         new Date(row.occurredAt).getTime(),

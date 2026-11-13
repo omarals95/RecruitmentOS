@@ -60,6 +60,8 @@ type Team = {
   team: string;
   teamRole: string | null;
   configuredRole: string | null;
+  roleGroup: string | null;
+  roleConflict: boolean;
 };
 type Row = {
   userId: string | null;
@@ -332,7 +334,13 @@ describe("the workspace people list under the split runtime roles", () => {
         company_level: "owner",
         two_step: true,
         teams: [
-          { team: "Fictional A Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional A Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
         sort_key: "fictional people owner",
         row_key: "people-owner",
@@ -354,8 +362,16 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional A Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
-          { team: "Fictional B Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional B Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
       });
       expect(byEmail.get("people-recruiter@example.test")!.teams).toEqual([
@@ -363,6 +379,8 @@ describe("the workspace people list under the split runtime roles", () => {
           team: "Fictional A Team",
           teamRole: "recruiter",
           configuredRole: "Fictional Sourcer",
+          roleGroup: null,
+          roleConflict: false,
         },
       ]);
       expect(byEmail.get("people-invitee@example.test")).toEqual({
@@ -374,11 +392,15 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional A Team",
             teamRole: "recruiter",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
           {
             team: "Fictional C Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
         company_level: null,
@@ -389,7 +411,13 @@ describe("the workspace people list under the split runtime roles", () => {
         row_key: "invitation:people-invitee@example.test",
       });
       expect(byEmail.get("people-unrecorded@example.test")!.teams).toEqual([
-        { team: "Fictional B Team", teamRole: null, configuredRole: null },
+        {
+          team: "Fictional B Team",
+          teamRole: null,
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        },
       ]);
     }
   });
@@ -417,7 +445,13 @@ describe("the workspace people list under the split runtime roles", () => {
         name: "Fictional People Owner",
         email: "people-owner@example.test",
         teams: [
-          { team: "Fictional A Team", teamRole: "owner", configuredRole: null },
+          {
+            team: "Fictional A Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
         ],
         companyLevel: "owner",
         status: "active",
@@ -499,6 +533,8 @@ describe("the workspace people list under the split runtime roles", () => {
           team: "Fictional A Team",
           teamRole: "recruiter",
           configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
         },
       ]);
     }
@@ -506,11 +542,27 @@ describe("the workspace people list under the split runtime roles", () => {
     expect(body.data.map((row: Row) => [row.email, row.teams])).toEqual([
       [
         "people-both@example.test",
-        [{ team: "Fictional D Team", teamRole: "admin", configuredRole: null }],
+        [
+          {
+            team: "Fictional D Team",
+            teamRole: "admin",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
+        ],
       ],
       [
         "people-owner-d@example.test",
-        [{ team: "Fictional D Team", teamRole: "owner", configuredRole: null }],
+        [
+          {
+            team: "Fictional D Team",
+            teamRole: "owner",
+            configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
+          },
+        ],
       ],
       [
         "people-second-invitee@example.test",
@@ -519,6 +571,8 @@ describe("the workspace people list under the split runtime roles", () => {
             team: "Fictional D Team",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
       ],
@@ -729,6 +783,8 @@ describe("paging and filters over a few hundred fictional people", () => {
           team: "Fictional F Team",
           teamRole: "recruiter",
           configuredRole: "Fictional Bulk Sourcer",
+          roleGroup: null,
+          roleConflict: false,
         },
       ],
       companyLevel: null,
@@ -744,8 +800,16 @@ describe("paging and filters over a few hundred fictional people", () => {
         team: "Fictional E Team",
         teamRole: "viewer",
         configuredRole: "Fictional Bulk Screener",
+        roleGroup: null,
+        roleConflict: false,
       },
-      { team: "Fictional G Team", teamRole: "recruiter", configuredRole: null },
+      {
+        team: "Fictional G Team",
+        teamRole: "recruiter",
+        configuredRole: null,
+        roleGroup: null,
+        roleConflict: false,
+      },
     ]);
   });
 
@@ -901,7 +965,14 @@ describe("one workspace person under the split runtime roles", () => {
     "authoritySince",
     "events",
   ].sort();
-  const TEAM_KEYS = ["configuredRole", "slug", "team", "teamRole"];
+  const TEAM_KEYS = [
+    "configuredRole",
+    "roleConflict",
+    "roleGroup",
+    "slug",
+    "team",
+    "teamRole",
+  ];
   const EVENT_KEYS = [
     "action",
     "actorId",
@@ -1323,12 +1394,16 @@ describe("one workspace person under the split runtime roles", () => {
             slug: "fictional-a",
             teamRole: "recruiter",
             configuredRole: "Fictional Person Sourcer",
+            roleGroup: null,
+            roleConflict: false,
           },
           {
             team: "Fictional B Team",
             slug: "fictional-b",
             teamRole: "viewer",
             configuredRole: null,
+            roleGroup: null,
+            roleConflict: false,
           },
         ],
         company_level: "admin",
@@ -1505,6 +1580,8 @@ describe("one workspace person under the split runtime roles", () => {
           slug: "fictional-d",
           teamRole: "admin",
           configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
         },
       ],
       company_level: "admin",
@@ -1567,5 +1644,181 @@ describe("one workspace person under the split runtime roles", () => {
       expect(body.error.code).toBe("invalid_input");
       expect(pools.data.mock.calls.length).toBe(calls);
     }
+  });
+});
+
+// ADM-14 (job 103): the role in force in each team, a group's role named with the group, and two
+// group roles that cancel out.
+describe("roles through groups in the people helpers", () => {
+  let harness: Harness;
+  let owner: Principal;
+  let sourcer: string, screener: string;
+  const groups = {
+    sourcing: "00000000-0000-4000-a000-000000001431",
+    screening: "00000000-0000-4000-a000-000000001432",
+    archived: "00000000-0000-4000-a000-000000001433",
+  };
+  const teamsOf = (rows: Row[], userId: string) =>
+    rows.find((row) => row.userId === userId)?.teams;
+  async function person(userId: string) {
+    signIn(owner);
+    const response = await personRoute(
+      new Request(`${ORIGIN}/api/v1/admin/users/${userId}`, {
+        headers: { origin: ORIGIN, "x-team-id": owner.teamId },
+      }),
+      { params: Promise.resolve({ user: userId }) },
+    );
+    expect(response.status).toBe(200);
+    return (await response.json()).data.teams as (Team & { slug: string })[];
+  }
+
+  beforeAll(async () => {
+    harness = await createSplitRoleDb();
+    pools.data.mockImplementation(harness.dataDb);
+    pools.identity.mockImplementation(harness.identityDb);
+    const db: AppDb = await harness.asOwner();
+    owner = await seedIdentity(db, {
+      userId: "via-owner",
+      teamId: "via-team-a",
+    });
+    for (const userId of ["via-grouped", "via-chosen", "via-plain"])
+      await seedIdentity(db, {
+        userId,
+        teamId: "via-team-a",
+        role: "recruiter",
+      });
+    // Torn starts in team B only, so two roles for team A conflict with nothing yet.
+    await seedIdentity(db, {
+      userId: "via-torn",
+      teamId: "via-team-b",
+      role: "recruiter",
+    });
+    sourcer = await publishRole(
+      harness,
+      owner,
+      "via-sourcer",
+      "Fictional Via Sourcer",
+    );
+    screener = await publishRole(
+      harness,
+      owner,
+      "via-screener",
+      "Fictional Via Screener",
+    );
+    // The owner's own SQL: the guards admit it and the two-roles check runs.
+    await harness.asOwner();
+    await harness.client.exec(`
+      UPDATE auth.organization SET name = 'Fictional Via ' || upper(split_part(id, '-', 3)), slug = 'fictional-via-' || split_part(id, '-', 3) WHERE id LIKE 'via-team-%';
+      INSERT INTO app.groups(id, workspace_id, name) VALUES
+        ('${groups.sourcing}', '${COMPANY}', 'Fictional Sourcing Group'),
+        ('${groups.screening}', '${COMPANY}', 'Fictional Screening Group'),
+        ('${groups.archived}', '${COMPANY}', 'Fictional Old Group');
+      INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES
+        ('${groups.sourcing}', '${COMPANY}', 'via-grouped'),
+        ('${groups.sourcing}', '${COMPANY}', 'via-chosen'),
+        ('${groups.sourcing}', '${COMPANY}', 'via-torn'),
+        ('${groups.sourcing}', '${COMPANY}', 'via-owner'),
+        ('${groups.screening}', '${COMPANY}', 'via-chosen'),
+        ('${groups.screening}', '${COMPANY}', 'via-torn'),
+        ('${groups.archived}', '${COMPANY}', 'via-plain');
+      INSERT INTO app.group_roles(group_id, workspace_id, team_id, role_object_id) VALUES
+        ('${groups.sourcing}', '${COMPANY}', 'via-team-a', '${sourcer}'),
+        ('${groups.sourcing}', '${COMPANY}', 'via-team-b', '${sourcer}'),
+        ('${groups.archived}', '${COMPANY}', 'via-team-a', '${screener}');
+      UPDATE app.groups SET archived_at = now() WHERE id = '${groups.archived}';
+      INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('via-team-a', 'via-chosen', '${screener}');
+      INSERT INTO app.group_roles(group_id, workspace_id, team_id, role_object_id) VALUES
+        ('${groups.screening}', '${COMPANY}', 'via-team-a', '${screener}');`);
+    // Joining team A afterwards gives Torn two roles there: a conflict no check saw.
+    await seedIdentity(await harness.asOwner(), {
+      userId: "via-torn",
+      teamId: "via-team-a",
+      role: "recruiter",
+    });
+  });
+  afterAll(async () => harness?.close());
+
+  it("names the role in force, the group that gives it and a conflict, in the list and the detail", async () => {
+    const rows = await walk(owner);
+    expect(teamsOf(rows, "via-grouped")).toEqual([
+      {
+        team: "Fictional Via A",
+        teamRole: "recruiter",
+        configuredRole: "Fictional Via Sourcer",
+        roleGroup: "Fictional Sourcing Group",
+        roleConflict: false,
+      },
+    ]);
+    // A role chosen in the team wins, and names no group.
+    expect(teamsOf(rows, "via-chosen")).toEqual([
+      {
+        team: "Fictional Via A",
+        teamRole: "recruiter",
+        configuredRole: "Fictional Via Screener",
+        roleGroup: null,
+        roleConflict: false,
+      },
+    ]);
+    // Two group roles in team A cancel out; team B has the one.
+    expect(teamsOf(rows, "via-torn")).toEqual([
+      {
+        team: "Fictional Via A",
+        teamRole: "recruiter",
+        configuredRole: null,
+        roleGroup: null,
+        roleConflict: true,
+      },
+      {
+        team: "Fictional Via B",
+        teamRole: "recruiter",
+        configuredRole: "Fictional Via Sourcer",
+        roleGroup: "Fictional Sourcing Group",
+        roleConflict: false,
+      },
+    ]);
+    // An archived group's role and a team owner's group give nothing.
+    for (const userId of ["via-plain", "via-owner"])
+      expect(teamsOf(rows, userId), userId).toEqual([
+        expect.objectContaining({
+          configuredRole: null,
+          roleGroup: null,
+          roleConflict: false,
+        }),
+      ]);
+    expect(await person("via-torn")).toEqual([
+      {
+        team: "Fictional Via A",
+        slug: "fictional-via-a",
+        teamRole: "recruiter",
+        configuredRole: null,
+        roleGroup: null,
+        roleConflict: true,
+      },
+      {
+        team: "Fictional Via B",
+        slug: "fictional-via-b",
+        teamRole: "recruiter",
+        configuredRole: "Fictional Via Sourcer",
+        roleGroup: "Fictional Sourcing Group",
+        roleConflict: false,
+      },
+    ]);
+    expect((await person("via-grouped"))[0]).toMatchObject({
+      configuredRole: "Fictional Via Sourcer",
+      roleGroup: "Fictional Sourcing Group",
+    });
+  });
+
+  it("filters by the role in force, a group's role included and a conflict excluded", async () => {
+    const ids = async (filters: Record<string, string>) =>
+      (await walk(owner, filters)).map((row) => row.userId).sort();
+    expect(await ids({ role: "via-sourcer" })).toEqual([
+      "via-grouped",
+      "via-torn",
+    ]);
+    expect(await ids({ role: "via-sourcer", team: "fictional-via-a" })).toEqual(
+      ["via-grouped"],
+    );
+    expect(await ids({ role: "via-screener" })).toEqual(["via-chosen"]);
   });
 });

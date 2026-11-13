@@ -53,6 +53,8 @@ export const levels: Record<string, string> = {
   owner: "Company owner",
   admin: "Company admin",
 };
+/** A team where the person's groups give two different roles and none is chosen for them there. */
+export const ROLE_CONFLICT = "Two roles through groups; neither applies";
 export const usersPath = (filters: UserFilters, cursor?: string) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters))
@@ -400,7 +402,10 @@ export function UsersPanel({
                             {item.teamRole === null
                               ? "Role not recorded"
                               : (teamRoles[item.teamRole] ?? item.teamRole)}
-                            {item.configuredRole && ` · ${item.configuredRole}`}
+                            {item.roleConflict
+                              ? ` · ${ROLE_CONFLICT}`
+                              : item.configuredRole &&
+                                ` · ${item.configuredRole}${item.roleGroup ? ` (through ${item.roleGroup})` : ""}`}
                           </div>
                         ))}
                       </td>

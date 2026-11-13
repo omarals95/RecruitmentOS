@@ -10,17 +10,25 @@ export const groupInput = z
   .strict();
 export const groupApproval = z.object({ approval: z.boolean() }).strict();
 /**
- * What replaces an archived group in each parent group that uses it: another group, or null to
- * remove it from that parent.
+ * What replaces an archived group in each place that uses it: in a parent group, or for the role it
+ * gives in a team, another group, or null to remove it there.
  */
 export const groupReplacements = z
   .array(
-    z
-      .object({
-        parentGroupId: z.uuid(),
-        replacementGroupId: z.uuid().nullable(),
-      })
-      .strict(),
+    z.union([
+      z
+        .object({
+          parentGroupId: z.uuid(),
+          replacementGroupId: z.uuid().nullable(),
+        })
+        .strict(),
+      z
+        .object({
+          teamId: z.string().min(1).max(128),
+          replacementGroupId: z.uuid().nullable(),
+        })
+        .strict(),
+    ]),
   )
   .max(200);
 /** One change per request: a rename (with an optional description) or an archive. */
@@ -38,6 +46,14 @@ export const groupMember = z.union([
   z.object({ userId: z.string().min(1).max(128) }).strict(),
   z.object({ childGroupId: z.uuid() }).strict(),
 ]);
+/** The configured role a group gives its members in one team. */
+export const groupRoleGrant = z
+  .object({ teamId: z.string().min(1).max(128), roleObjectId: z.uuid() })
+  .strict();
+/** The team whose group role is removed. */
+export const groupRoleTeam = z
+  .object({ teamId: z.string().min(1).max(128) })
+  .strict();
 /** A person by user id: a delegated manager, or a member a manager removes. */
 export const groupPerson = z
   .object({ userId: z.string().min(1).max(128) })

@@ -19,6 +19,7 @@ import type {
   GroupMembers,
   GroupRef,
   GroupReplacement,
+  GroupRoleChoices,
   GroupUse,
 } from "@/lib/groups";
 import {
@@ -74,9 +75,14 @@ export const WHERE_USED_EMPTY = "Nothing uses this group.";
 /** The heading of each source of Where used; a later item adds its own. */
 export const USE_SOURCES: Record<GroupUse["source"], string> = {
   "parent-group": "Parent groups",
+  "role-grant": "Role grants",
 };
 /** The archive dialog's choice that removes the group from a parent instead of replacing it. */
 export const REMOVE_FROM_PARENT = "remove";
+export const ROLES_HELP =
+  "Everyone in this group, and in the groups inside it, who is a member of the team holds the role there. A role chosen for a person in the team's Members tab wins. A role never gives more than the person's team role allows.";
+export const NO_ROLES = "This group gives no roles.";
+export const ROLES_OWNER_ONLY = "Only a company owner can give a group a role.";
 
 /** A direct member: a person or a child group. */
 export type GroupMember = { userId: string } | { childGroupId: string };
@@ -87,9 +93,14 @@ export type GroupChange =
   | { kind: "add"; member: GroupMember }
   | { kind: "remove"; member: GroupMember }
   | { kind: "add-manager"; userId: string }
-  | { kind: "remove-manager"; userId: string };
+  | { kind: "remove-manager"; userId: string }
+  | { kind: "grant-role"; teamId: string; roleObjectId: string }
+  | { kind: "remove-role"; teamId: string };
+/** The Give a role form: the chosen team and role, "" for none. */
+export type RoleGrantDraft = { teamId: string; roleObjectId: string };
+export const NO_ROLE_GRANT: RoleGrantDraft = { teamId: "", roleObjectId: "" };
 /**
- * The archive dialog of a group in use: per parent group id, REMOVE_FROM_PARENT or the replacing
+ * The archive dialog of a group in use: per use (archiveKey), REMOVE_FROM_PARENT or the replacing
  * group's id ("" while unchosen), and the refusal it shows.
  */
 export type ArchiveDraft = { choices: Record<string, string>; error: string };
@@ -163,10 +174,22 @@ export async function sendGroupChange(
               method: change.kind === "add-manager" ? "POST" : "DELETE",
               body: JSON.stringify({ userId: change.userId }),
             })
-          : requestJson(teamId, `${path}/members`, {
-              method: change.kind === "add" ? "POST" : "DELETE",
-              body: JSON.stringify(change.member),
-            });
+          : change.kind === "grant-role" || change.kind === "remove-role"
+            ? requestJson(teamId, `${path}/roles`, {
+                method: change.kind === "grant-role" ? "POST" : "DELETE",
+                body: JSON.stringify(
+                  change.kind === "grant-role"
+                    ? {
+                        teamId: change.teamId,
+                        roleObjectId: change.roleObjectId,
+                      }
+                    : { teamId: change.teamId },
+                ),
+              })
+            : requestJson(teamId, `${path}/members`, {
+                method: change.kind === "add" ? "POST" : "DELETE",
+                body: JSON.stringify(change.member),
+              });
   return (await withFreshSession(send)) !== REAUTH_CANCELLED;
 }
 
@@ -184,6 +207,7 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
   });
   const [add, setAdd] = useState<AddDraft>(NO_ADD_DRAFT);
   const [manager, setManager] = useState("");
+  const [grant, setGrant] = useState<RoleGrantDraft>(NO_ROLE_GRANT);
   const [archiving, setArchiving] = useState<ArchiveDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState({ error: "", notice: "" });
@@ -226,6 +250,12 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
     teamId && editable ? "/api/v1/admin/groups" : null,
   );
   const people = usePersonChoices(teamId, editable);
+  // Only a company owner gives a current group a role; viewing the choices never needs a recent sign-in.
+  const roleChoices = useApi<{ data: GroupRoleChoices }>(
+    teamId && companyLevel === "owner" && group?.status === "active"
+      ? `/api/v1/admin/groups/${encodeURIComponent(groupId)}/roles`
+      : null,
+  );
 
   async function change(step: GroupChange, ask?: ConfirmOptions) {
     if (!teamId || !group || busy) return;
@@ -244,6 +274,7 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
         setOutcome({ error: "", notice: changeNotice(step) });
         if (step.kind === "add") setAdd({ ...NO_ADD_DRAFT, kind: add.kind });
         if (step.kind === "add-manager") setManager("");
+        if (step.kind === "grant-role") setGrant(NO_ROLE_GRANT);
         setRun((value) => value + 1);
         groups.refresh();
       }
@@ -369,6 +400,26 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
             },
           )
         }
+        grant={grant}
+        roleChoices={roleChoices.data?.data ?? null}
+        roleChoicesError={roleChoices.error}
+        onGrant={setGrant}
+        onSubmitGrant={(event) => {
+          event.preventDefault();
+          if (grant.teamId && grant.roleObjectId)
+            void change({ kind: "grant-role", ...grant });
+        }}
+        onRemoveRole={(teamId, role, teamName) =>
+          void change(
+            { kind: "remove-role", teamId },
+            {
+              title: `Remove ${role} in ${teamName}?`,
+              message: removeRoleMessage(group.name, role, teamName),
+              confirmLabel: "Remove",
+              destructive: true,
+            },
+          )
+        }
       />
       {archiving && (
         <ArchiveDialogView
@@ -377,12 +428,12 @@ export function GroupDetail({ groupId, companyLevel, tab }: GroupDetailProps) {
           listError={groups.error}
           draft={archiving}
           busy={busy}
-          onChoose={(parentId, value) =>
+          onChoose={(key, value) =>
             setArchiving(
               (draft) =>
                 draft && {
                   ...draft,
-                  choices: { ...draft.choices, [parentId]: value },
+                  choices: { ...draft.choices, [key]: value },
                 },
             )
           }
@@ -509,22 +560,42 @@ export function replacementChoices(
     .map(({ id, name }) => ({ id, name }));
 }
 
+/** The archive dialog's key for one use: the parent group's id, or team:<id> for a role grant. */
+export const archiveKey = (use: GroupUse) =>
+  use.source === "parent-group" ? use.group.id : `team:${use.team.id}`;
+
 /** The archive body's replacements, one per use, or null while a use has no choice. */
 export function archiveReplacements(
   uses: GroupUse[],
   choices: Record<string, string>,
 ): GroupReplacement[] | null {
-  const replacements = uses.map((use) => {
-    const choice = choices[use.group.id] ?? "";
-    return choice
-      ? {
-          parentGroupId: use.group.id,
-          replacementGroupId: choice === REMOVE_FROM_PARENT ? null : choice,
-        }
-      : null;
+  const replacements = uses.map((use): GroupReplacement | null => {
+    const choice = choices[archiveKey(use)] ?? "";
+    if (!choice) return null;
+    const replacementGroupId = choice === REMOVE_FROM_PARENT ? null : choice;
+    return use.source === "parent-group"
+      ? { parentGroupId: use.group.id, replacementGroupId }
+      : { teamId: use.team.id, replacementGroupId };
   });
   return replacements.every((item) => item !== null) ? replacements : null;
 }
+
+/** The current teams a group gives no role in yet, by name. */
+export function grantTeamChoices(
+  group: Pick<GroupData, "whereUsed">,
+  choices: GroupRoleChoices,
+) {
+  const given = new Set(
+    group.whereUsed.flatMap((use) =>
+      use.source === "role-grant" ? [use.team.id] : [],
+    ),
+  );
+  return choices.teams.filter((team) => !given.has(team.id));
+}
+
+/** What removing a group's role means, in the confirmation. */
+export const removeRoleMessage = (group: string, role: string, team: string) =>
+  `${group} no longer gives ${role} in ${team}. Its members keep any role chosen for them in that team.`;
 
 /** The member the Add form names, or null when nothing is chosen. */
 export function addTarget(draft: AddDraft): GroupMember | null {
@@ -544,7 +615,11 @@ function changeNotice(step: GroupChange) {
           ? "Added as a manager."
           : step.kind === "remove-manager"
             ? "Removed as a manager."
-            : "Removed from the group.";
+            : step.kind === "grant-role"
+              ? "The group now gives this role."
+              : step.kind === "remove-role"
+                ? "The group no longer gives this role."
+                : "Removed from the group.";
 }
 
 /** A group that did not load: the no-access sentence on 403, not found on 404, else the error. */
@@ -599,6 +674,11 @@ export function groupAuditLabel(row: GroupAuditRow) {
       return `Added manager ${name}`;
     case "group.manager_removed":
       return `Removed manager ${name}`;
+    case "group.role_granted":
+    case "group.role_removed": {
+      const names = target?.kind === "role" ? target : null;
+      return `${row.action === "group.role_granted" ? "Gave" : "Removed"} the role ${names?.role ?? "Not recorded"} in ${names?.team ?? "Not recorded"}`;
+    }
     default:
       return "Changed what the group grants";
   }
@@ -608,7 +688,7 @@ const count = (n: number, one: string, many: string) =>
   `${n} ${n === 1 ? one : many}`;
 
 /**
- * The loaded group: name, description, the five tabs and the open tab's panel, and the rename and
+ * The loaded group: name, description, the six tabs and the open tab's panel, and the rename and
  * archive controls for a caller who may change it.
  */
 export function GroupDetailView({
@@ -635,6 +715,12 @@ export function GroupDetailView({
   onManager = () => {},
   onSubmitManager = (event) => event.preventDefault(),
   onRemoveManager = () => {},
+  grant = NO_ROLE_GRANT,
+  roleChoices = null,
+  roleChoicesError = "",
+  onGrant = () => {},
+  onSubmitGrant = (event) => event.preventDefault(),
+  onRemoveRole = () => {},
 }: {
   group: GroupData;
   tab: GroupDetailTab;
@@ -663,6 +749,14 @@ export function GroupDetailView({
   onManager?: (userId: string) => void;
   onSubmitManager?: (event: FormEvent) => void;
   onRemoveManager?: (userId: string, name: string) => void;
+  /** The Give a role form. */
+  grant?: RoleGrantDraft;
+  /** Null while the choices load. */
+  roleChoices?: GroupRoleChoices | null;
+  roleChoicesError?: string;
+  onGrant?: (draft: RoleGrantDraft) => void;
+  onSubmitGrant?: (event: FormEvent) => void;
+  onRemoveRole?: (teamId: string, role: string, team: string) => void;
 }) {
   const [current, setCurrent] = useState(tab);
   const editable = canChange(group, companyOwner);
@@ -758,6 +852,19 @@ export function GroupDetailView({
             onShowMorePeople={onShowMorePeople}
             onSubmitManager={onSubmitManager}
             onRemoveManager={onRemoveManager}
+          />
+        ) : current === "roles" ? (
+          <RolesTab
+            group={group}
+            editable={group.status === "active" && companyOwner}
+            companyOwner={companyOwner}
+            busy={busy}
+            grant={grant}
+            choices={roleChoices}
+            choicesError={roleChoicesError}
+            onGrant={onGrant}
+            onSubmitGrant={onSubmitGrant}
+            onRemoveRole={onRemoveRole}
           />
         ) : current === "where-used" ? (
           <WhereUsedTab group={group} />
@@ -1219,14 +1326,163 @@ function ManagersTab({
   );
 }
 
+/**
+ * The roles the group gives, by team name, with Remove and the Give a role form for a company owner
+ * on a current group; anyone else reads them only.
+ */
+function RolesTab({
+  group,
+  editable,
+  companyOwner,
+  busy,
+  grant,
+  choices,
+  choicesError,
+  onGrant,
+  onSubmitGrant,
+  onRemoveRole,
+}: {
+  group: GroupData;
+  editable: boolean;
+  companyOwner: boolean;
+  busy: boolean;
+  grant: RoleGrantDraft;
+  choices: GroupRoleChoices | null;
+  choicesError: string;
+  onGrant: (draft: RoleGrantDraft) => void;
+  onSubmitGrant: (event: FormEvent) => void;
+  onRemoveRole: (teamId: string, role: string, team: string) => void;
+}) {
+  const grants = group.whereUsed.flatMap((use) =>
+    use.source === "role-grant" ? [use] : [],
+  );
+  const teams = choices ? grantTeamChoices(group, choices) : null;
+  return (
+    <section className="panel stack">
+      <h3>Roles</h3>
+      <p className="muted">{ROLES_HELP}</p>
+      {!companyOwner && <p className="muted">{ROLES_OWNER_ONLY}</p>}
+      {!grants.length ? (
+        <p className="muted">{NO_ROLES}</p>
+      ) : (
+        <div className="records-panel">
+          <div className="table-wrap">
+            <table className="data-table compact">
+              <caption className="sr-only">
+                Roles this group gives, by team
+              </caption>
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Team</th>
+                  {editable && (
+                    <th>
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {grants.map((use) => (
+                  <tr key={use.team.id}>
+                    <td data-label="Role">{use.role.name}</td>
+                    <td data-label="Team">{use.team.name}</td>
+                    {editable && (
+                      <td data-label="Actions">
+                        <button
+                          type="button"
+                          className="button secondary"
+                          disabled={busy}
+                          aria-label={`Remove ${use.role.name} in ${use.team.name}`}
+                          onClick={() =>
+                            onRemoveRole(
+                              use.team.id,
+                              use.role.name,
+                              use.team.name,
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {editable && (
+        <form
+          className="stack"
+          aria-label="Give a role"
+          onSubmit={onSubmitGrant}
+        >
+          <h3>Give a role</h3>
+          <label className="field">
+            <span>Team</span>
+            <select
+              required
+              value={grant.teamId}
+              onChange={(e) => onGrant({ ...grant, teamId: e.target.value })}
+            >
+              <option value="">
+                {teams ? "Choose a team" : "Loading teams…"}
+              </option>
+              {(teams ?? []).map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Role</span>
+            <select
+              required
+              value={grant.roleObjectId}
+              onChange={(e) =>
+                onGrant({ ...grant, roleObjectId: e.target.value })
+              }
+            >
+              <option value="">
+                {choices ? "Choose a role" : "Loading roles…"}
+              </option>
+              {(choices?.roles ?? []).map((role) => (
+                <option key={role.roleObjectId} value={role.roleObjectId}>
+                  {role.name} ({role.membership})
+                </option>
+              ))}
+            </select>
+          </label>
+          {choicesError && (
+            <p className="notice error" role="alert">
+              Could not load the teams and roles. {choicesError}
+            </p>
+          )}
+          <div className="row">
+            <button type="submit" className="button" disabled={busy}>
+              Give role
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 /** Every current use of the group, one section per source that has any; read-only. */
 function WhereUsedTab({ group }: { group: GroupData }) {
-  const sections = (Object.keys(USE_SOURCES) as GroupUse["source"][])
-    .map((source) => ({
-      source,
-      uses: group.whereUsed.filter((use) => use.source === source),
-    }))
-    .filter((section) => section.uses.length);
+  const parents = group.whereUsed.flatMap((use) =>
+    use.source === "parent-group" ? [use] : [],
+  );
+  const grants = group.whereUsed.flatMap((use) =>
+    use.source === "role-grant" ? [use] : [],
+  );
+  const sections = (Object.keys(USE_SOURCES) as GroupUse["source"][]).filter(
+    (source) => (source === "parent-group" ? parents : grants).length,
+  );
   return (
     <section className="panel stack">
       <h3>Where used</h3>
@@ -1236,7 +1492,7 @@ function WhereUsedTab({ group }: { group: GroupData }) {
       {!sections.length ? (
         <p className="muted">{WHERE_USED_EMPTY}</p>
       ) : (
-        sections.map(({ source, uses }) => (
+        sections.map((source) => (
           <div key={source} className="stack">
             <h4>{USE_SOURCES[source]}</h4>
             <div className="records-panel">
@@ -1245,28 +1501,49 @@ function WhereUsedTab({ group }: { group: GroupData }) {
                   <caption className="sr-only">
                     {USE_SOURCES[source]} that use this group
                   </caption>
-                  <thead>
-                    <tr>
-                      <th>Group</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {uses.map((use) => (
-                      <tr key={use.group.id}>
-                        <td data-label="Group">
-                          <Link
-                            href={`/app/admin/groups/${encodeURIComponent(use.group.id)}`}
-                          >
-                            {use.group.name}
-                          </Link>
-                        </td>
-                        <td data-label="Status">
-                          {groupStatuses[use.group.status]}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
+                  {source === "parent-group" ? (
+                    <>
+                      <thead>
+                        <tr>
+                          <th>Group</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parents.map((use) => (
+                          <tr key={use.group.id}>
+                            <td data-label="Group">
+                              <Link
+                                href={`/app/admin/groups/${encodeURIComponent(use.group.id)}`}
+                              >
+                                {use.group.name}
+                              </Link>
+                            </td>
+                            <td data-label="Status">
+                              {groupStatuses[use.group.status]}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </>
+                  ) : (
+                    <>
+                      <thead>
+                        <tr>
+                          <th>Role</th>
+                          <th>Team</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grants.map((use) => (
+                          <tr key={use.team.id}>
+                            <td data-label="Role">{use.role.name}</td>
+                            <td data-label="Team">{use.team.name}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </>
+                  )}
                 </table>
               </div>
             </div>
@@ -1278,9 +1555,9 @@ function WhereUsedTab({ group }: { group: GroupData }) {
 }
 
 /**
- * Archiving a group in use: one labelled choice per parent group, removal or a replacement, none
- * chosen at first; Archive group stays disabled until every use has one, and a refusal shows here
- * with the choices kept.
+ * Archiving a group in use: one labelled choice per parent group and per role grant, removal or a
+ * replacement, none chosen at first; Archive group stays disabled until every use has one, and a
+ * refusal shows here with the choices kept.
  */
 export function ArchiveDialogView({
   group,
@@ -1298,7 +1575,8 @@ export function ArchiveDialogView({
   listError: string;
   draft: ArchiveDraft;
   busy: boolean;
-  onChoose: (parentId: string, value: string) => void;
+  /** The use's key (archiveKey) and the choice. */
+  onChoose: (key: string, value: string) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -1313,8 +1591,8 @@ export function ArchiveDialogView({
     >
       <div className="dialog-body stack">
         <p id={description}>
-          {group.name} is in the groups below. Choose what replaces it in each
-          one, or remove it from that group. {ARCHIVE_MESSAGE}
+          {group.name} is used below. Choose what replaces it in each place, or
+          remove it. {ARCHIVE_MESSAGE}
         </p>
         {draft.error && (
           <p className="notice error" role="alert">
@@ -1326,32 +1604,47 @@ export function ArchiveDialogView({
             Could not load the groups. {listError}
           </p>
         )}
-        {group.whereUsed.map((use) => (
-          <label key={use.group.id} className="field">
-            <span>In {use.group.name}</span>
-            <select
-              required
-              value={draft.choices[use.group.id] ?? ""}
-              disabled={busy}
-              onChange={(e) => onChoose(use.group.id, e.target.value)}
-            >
-              <option value="">
-                {list ? "Choose what replaces it" : "Loading groups…"}
-              </option>
-              <option value={REMOVE_FROM_PARENT}>
-                Remove from {use.group.name}
-              </option>
-              {(list
-                ? replacementChoices(group.id, use.group.id, list)
-                : []
-              ).map((row) => (
-                <option key={row.id} value={row.id}>
-                  Replace with {row.name}
+        {group.whereUsed.map((use) => {
+          const key = archiveKey(use);
+          const replacements = !list
+            ? []
+            : use.source === "parent-group"
+              ? replacementChoices(group.id, use.group.id, list)
+              : list.data
+                  .filter(
+                    (row) => row.status === "active" && row.id !== group.id,
+                  )
+                  .map(({ id, name }) => ({ id, name }));
+          return (
+            <label key={key} className="field">
+              <span>
+                {use.source === "parent-group"
+                  ? `In ${use.group.name}`
+                  : `Role grant: ${use.role.name} in ${use.team.name}`}
+              </span>
+              <select
+                required
+                value={draft.choices[key] ?? ""}
+                disabled={busy}
+                onChange={(e) => onChoose(key, e.target.value)}
+              >
+                <option value="">
+                  {list ? "Choose what replaces it" : "Loading groups…"}
                 </option>
-              ))}
-            </select>
-          </label>
-        ))}
+                <option value={REMOVE_FROM_PARENT}>
+                  {use.source === "parent-group"
+                    ? `Remove from ${use.group.name}`
+                    : "Remove the grant"}
+                </option>
+                {replacements.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    Replace with {row.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
       </div>
       <footer className="dialog-footer">
         <button

@@ -1037,13 +1037,13 @@ export function GET() {
     ),
   };
   const memberRolesShape =
-    "{data:{assignments:[{userId, roleObjectId, roleName, available}], roles:[{roleObjectId, name, membership}]}}";
+    "{data:{assignments:[{userId, roleObjectId, roleName, available}], roles:[{roleObjectId, name, membership}], groupRoles:[{userId, roleObjectId, roleName, groupId, groupName}]}}";
   paths["/api/v1/teams/member-roles"] = {
     get: operation(
       [],
       {
         summary: "List the active team's configured roles",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, including team owners and admins without company authority and company admins, gets 403 role_assignment_forbidden. assignments lists each member of the active team who holds a configured role, with the role's last published name (else its draft's, else null) and available: true only when the role's current published version is in force and is a valid role, the rule the request context applies; a member whose role is not available is refused everything until it is reassigned or cleared. roles lists the roles that can be assigned, by the same rule and of any record scope, ordered by name. Nothing is audited. Returns ${memberRolesShape}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, including team owners and admins without company authority and company admins, gets 403 role_assignment_forbidden. assignments lists each member of the active team who holds a configured role, with the role's last published name (else its draft's, else null) and available: true only when the role's current published version is in force and is a valid role, the rule the request context applies; a member whose role is not available is refused everything until it is reassigned or cleared. roles lists the roles that can be assigned, by the same rule and of any record scope, ordered by name. groupRoles lists every role a current company group gives in the active team that reaches a member of it who is not a team owner, directly or through a nested group, one row per member and group, by member then group name; a role chosen here wins over it, and two different group roles with none chosen here give neither. Nothing is audited. Returns ${memberRolesShape}.`,
       },
       { "200": { description: memberRolesShape } },
       { sessionOnly: true },
@@ -1243,13 +1243,13 @@ export function GET() {
     ),
   };
   const accessChangesShape =
-    '{data:[{occurredAt, kind:"role-assignment"|"home-units", action, affectedUserIds, roleName, actorName}], truncated}';
+    '{data:[{occurredAt, kind:"role-assignment"|"home-units", action, affectedUserIds, roleName, actorName, groupName}], truncated}';
   paths["/api/v1/access-changes"] = {
     get: operation(
       [],
       {
         summary: "List the access changes of the last seven days",
-        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 role_assignment_forbidden. Lists the role assignments and clears (role.assigned, role.cleared) and the home-unit changes (scope.home_units_changed) of every team in the workspace from the last seven days, newest first: time, kind, action, the affected user ids, the role name (null for home-unit changes) and the actor's display name only. At most the latest 100 of each kind are read; truncated is true when 100 of a kind were read and the oldest of them is still inside the seven days. It takes no query parameters: any query key returns 400 invalid_input. Returns ${accessChangesShape}.`,
+        description: `Session only: a signed-in company owner; Bearer tokens get 403 session_required, and anyone else, company admins and team owners included, gets 403 role_assignment_forbidden. Lists the role assignments and clears (role.assigned, role.cleared), the roles given to and removed from company groups (group.role_granted, group.role_removed, kind role-assignment) and the home-unit changes (scope.home_units_changed) of every team in the workspace from the last seven days, newest first: time, kind, action, the affected user ids (empty for a group role row, which reaches everyone in the group who is in the team), the role name (null for home-unit changes), the actor's display name and, for a group role row only, the group's current name (null for every other row). At most the latest 100 of each kind are read; truncated is true when 100 of a kind were read and the oldest of them is still inside the seven days. It takes no query parameters: any query key returns 400 invalid_input. Returns ${accessChangesShape}.`,
       },
       { "200": { description: accessChangesShape } },
       { sessionOnly: true },
@@ -1314,13 +1314,13 @@ export function GET() {
     ),
   };
   const peopleShape =
-    '{data:[{userId, name, email, teams:[{team, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, status:"active"|"invited"|"deactivated", lastSignInAt, twoStep}], roles:[{key, name}], pagination:{pageSize, hasMore, nextCursor}}';
+    '{data:[{userId, name, email, teams:[{team, teamRole, configuredRole, roleGroup, roleConflict}], companyLevel:"owner"|"admin"|null, status:"active"|"invited"|"deactivated", lastSignInAt, twoStep}], roles:[{key, name}], pagination:{pageSize, hasMore, nextCursor}}';
   paths["/api/v1/admin/users"] = {
     get: operation(
       [],
       {
         summary: "List the people of every team for the Admin portal",
-        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active, or deactivated when the person is deactivated in the company) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and configured role name, the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active, invited or deactivated), level (owner, admin or none), role (a configured role key; invited rows never match it) and group (a company group id: only the group's effective members, direct or through a nested group; invited rows never match it); an unknown slug, key or group, or another company's group, returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Lists, through the owner-run helper tenant_context.workspace_people, everyone with a membership in a team of the workspace (status active, or deactivated when the person is deactivated in the company) and each email with a pending, unexpired invitation to a team of the workspace that belongs to no member (status invited), ordered by name (email for invited rows). Each row gives the user id, name, email, the person's teams in this workspace only with the team role and the configured role in force (configuredRole: the role chosen for them in the team, else the one role their current company groups give there, else null; roleGroup: the first such group by name, null for a role chosen in the team or none; roleConflict: true when no role is chosen in the team and their groups give two different roles there, so neither applies), the company level (null without company authority), the status, lastSignInAt (the start of the newest stored session, null when none is stored) and whether two-step sign-in is on; an invited row has no user id, name, company level or last sign-in. It never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret. Filters, combined: team (a team slug), status (active, invited or deactivated), level (owner, admin or none), role (a configured role key, matched against the role in force; invited rows never match it) and group (a company group id: only the group's effective members, direct or through a nested group; invited rows never match it); an unknown slug, key or group, or another company's group, returns no rows. Pages hold 25 rows; when hasMore is true, send nextCursor as cursor for the next page with the same filters. roles lists the workspace's published, unarchived configured roles by name, for the role filter. Any other query key or a bad value returns 400 invalid_input. Nothing is audited. Returns ${peopleShape}.`,
       },
       { "200": { description: peopleShape } },
       {
@@ -1369,13 +1369,13 @@ export function GET() {
     ),
   };
   const personShape =
-    '{data:{userId, name, email, status:"active"|"deactivated", lastSignInAt, twoStep, signedInDevices, teams:[{team, slug, teamRole, configuredRole}], companyLevel:"owner"|"admin"|null, companyAreas, planAccess, authoritySuspended, authoritySince, events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]}}';
+    '{data:{userId, name, email, status:"active"|"deactivated", lastSignInAt, twoStep, signedInDevices, teams:[{team, slug, teamRole, configuredRole, roleGroup, roleConflict}], companyLevel:"owner"|"admin"|null, companyAreas, planAccess, authoritySuspended, authoritySince, events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]}}';
   paths["/api/v1/admin/users/{user}"] = {
     get: operation(
       [],
       {
         summary: "Read one person of the company for the Admin portal",
-        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Reads, through the owner-run helper tenant_context.workspace_person, one person with a membership in a team of the workspace; anyone else, an unknown id or a person only in another company included, gets 404 user_not_found. It gives the user id, name, email, status (deactivated when the person is deactivated in the company, else active), lastSignInAt (the start of the newest stored session, null when none is stored), whether two-step sign-in is on, signedInDevices (the person's sessions that have not expired), the person's teams in this workspace only with slug, team role and configured role name, and the person's company authority in this workspace (level, areas, plan access, whether it is suspended and since when; all null without company authority). events lists, newest first and at most 50, the configuration changes the person made and the configured role, home unit, company authority, two-step reset, deactivation, reactivation, sign out everywhere and sign-in lockout changes made to them, each with its time, action code, actor id and name, the configuration type and key (configuration rows only) and the configured role name (role rows only). It never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body. It takes no query parameters: any query key returns 400 invalid_input, and so does an id longer than 128 characters. Nothing is audited. Returns ${personShape}.`,
+        description: `Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Reads, through the owner-run helper tenant_context.workspace_person, one person with a membership in a team of the workspace; anyone else, an unknown id or a person only in another company included, gets 404 user_not_found. It gives the user id, name, email, status (deactivated when the person is deactivated in the company, else active), lastSignInAt (the start of the newest stored session, null when none is stored), whether two-step sign-in is on, signedInDevices (the person's sessions that have not expired), the person's teams in this workspace only with slug, team role and the configured role in force (configuredRole, roleGroup and roleConflict, as in the users list), and the person's company authority in this workspace (level, areas, plan access, whether it is suspended and since when; all null without company authority). events lists, newest first and at most 50, the configuration changes the person made and the configured role, home unit, company authority, two-step reset, deactivation, reactivation, sign out everywhere and sign-in lockout changes made to them, each with its time, action code, actor id and name, the configuration type and key (configuration rows only) and the configured role name (role rows only). It never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body. It takes no query parameters: any query key returns 400 invalid_input, and so does an id longer than 128 characters. Nothing is audited. Returns ${personShape}.`,
       },
       { "200": { description: personShape } },
       {
@@ -1485,7 +1485,7 @@ export function GET() {
     "Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 people_forbidden. Viewing never needs a recent sign-in. Nothing is audited.";
   const groupWriteRule =
     "Session only: a signed-in company owner, or a company admin holding the people area; Bearer tokens get 403 session_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 group_forbidden.";
-  const grantingGroupRule = `A group that grants something (it, or a group it is nested in, is an approval group: tenant_context.group_grants) is changed only by a company owner: a company admin gets 403 group_owner_required. For it, a company owner ${freshSessionRule.charAt(0).toLowerCase()}${freshSessionRule.slice(1)} A group that grants nothing needs neither. The database refusal stays the real control. Each change writes one group activity row, with ids only, to your team.`;
+  const grantingGroupRule = `A group that grants something (it, or a group it is nested in, is an approval group or gives a configured role: tenant_context.group_grants) is changed only by a company owner: a company admin gets 403 group_owner_required ("Only a company owner can change a group that grants access, or a group nested in one."). For it, a company owner ${freshSessionRule.charAt(0).toLowerCase()}${freshSessionRule.slice(1)} A group that grants nothing needs neither. The database refusal stays the real control. Each change writes one group activity row, with ids only, to your team. A change that would give someone two configured roles in one team (two different roles from groups, with none chosen for them in the team) returns 409 group_role_conflict, naming up to five of the people affected and the team in plain words, and writes nothing; the database refuses it too.`;
   const groupPath = {
     name: "group",
     in: "path",
@@ -1532,13 +1532,13 @@ export function GET() {
     ),
   };
   const groupDetailShape =
-    '{data:{id, name, description, status, grants, people, members:{people:[{userId, name, email}], groups:[{id, name, status, people:[...], groups:[...]}]}, memberOf:[{id, name, status, via}], managers:[{userId, name, email}], whereUsed:[{source:"parent-group", group:{id, name, status}}], audit:[{occurredAt, action, actorName, target:{kind:"person"|"group"|"parent", name}|{kind:"replacement", parent, replaced, replacement}|null}]}}';
+    '{data:{id, name, description, status, grants, people, members:{people:[{userId, name, email}], groups:[{id, name, status, people:[...], groups:[...]}]}, memberOf:[{id, name, status, via}], managers:[{userId, name, email}], whereUsed:[{source:"parent-group", group:{id, name, status}}|{source:"role-grant", team:{id, name}, role:{id, name}}], audit:[{occurredAt, action, actorName, target:{kind:"person"|"group"|"parent", name}|{kind:"replacement", parent, replaced, replacement}|{kind:"role", role, team}|null}]}}';
   paths["/api/v1/admin/groups/{group}"] = {
     get: operation(
       [],
       {
         summary: "Read one company group",
-        description: `${groupReadRule} Reads one group of the company; an unknown id or another company's group returns 404 not_found. members is the tree of direct people (user id, name, email) and direct child groups, each with its own people and child groups, down to the 3-level limit; people is the effective member count. memberOf lists every group that contains it, at any depth, direct ones first; via is null when direct, else the name of the group in between. managers lists its delegated managers by name. whereUsed lists every current use of the group by id, by source: today only the active groups it is directly in (source parent-group), by name; it is what an archive must replace. audit lists, newest first and at most 50, the group activity rows written from your current team about this group, about it being added to or removed from another group, or about it replacing or being replaced in another group, with the actor's name and the person or group the change names by name (null when it cannot be resolved; a replacement names the parent, the replaced group and the replacement); changes made from another team are shown in that team. It never returns an activity id, a raw user id outside the userId of a member entry, a record or any team data. group must be a uuid and it takes no query parameters: anything else returns 400 invalid_input. Returns ${groupDetailShape}.`,
+        description: `${groupReadRule} Reads one group of the company; an unknown id or another company's group returns 404 not_found. members is the tree of direct people (user id, name, email) and direct child groups, each with its own people and child groups, down to the 3-level limit; people is the effective member count. memberOf lists every group that contains it, at any depth, direct ones first; via is null when direct, else the name of the group in between. managers lists its delegated managers by name. whereUsed lists every current use of the group by id, by source: the active groups it is directly in (source parent-group), by name, and the configured roles it gives (source role-grant), by team name, with the team and the role's current published name (else its draft's); it is what an archive must replace. audit lists, newest first and at most 50, the group activity rows written from your current team about this group, about it being added to or removed from another group, or about it replacing or being replaced in another group, with the actor's name and the person or group the change names by name (null when it cannot be resolved; a replacement names the parent, the replaced group and the replacement; a role given or removed names the role in the version it recorded and the team); changes made from another team are shown in that team. It never returns an activity id, a raw user id outside the userId of a member entry, a record or any team data. group must be a uuid and it takes no query parameters: anything else returns 400 invalid_input. Returns ${groupDetailShape}.`,
       },
       { "200": { description: groupDetailShape } },
       { sessionOnly: true, params: [groupPath] },
@@ -1547,7 +1547,7 @@ export function GET() {
       [],
       {
         summary: "Rename or archive a company group",
-        description: `${groupWriteRule} Send exactly one of {name, description?} to rename (references are by id, so members, parents and effective membership are unchanged; a description left out stays, an empty one clears it) or {archived:true, replacements?} to archive for good (it keeps its members; it cannot be restored), at most 32 KiB; anything else, both together or any query key returns 400 invalid_input. replacements holds, for each current use in whereUsed, {parentGroupId, replacementGroupId}: replacementGroupId is the group that takes its place in that parent, or null to remove it from that parent; at most 200. A group nothing uses archives with {archived:true}; a group in use without replacements returns 409 group_in_use, and parent ids that are not exactly its current uses 409 group_uses_changed, with nothing written. Every replacement (one group.child_replaced row with groupId, childGroupId and replacedGroupId, ids only), every removal (one group.child_removed row) and the archive (one group.archived row) are applied in one transaction: a replacement that is the group itself or already a direct child of that parent returns 409 group_member_exists, an archived one 409 group_archived, an unknown or another company's one 404 not_found, and one that makes a cycle or nests deeper than 3 levels 409 group_cycle or group_depth, and any refusal leaves everything unchanged. ${grantingGroupRule} The rule applies to the group and to each parent named. An unknown or another company's group returns 404 not_found, an archived group 409 group_archived, and a name another current group uses, ignoring case, 409 group_name_exists. An archived group takes no new member, child group or manager and is no group's new child. Returns ${groupShape}.`,
+        description: `${groupWriteRule} Send exactly one of {name, description?} to rename (references are by id, so members, parents and effective membership are unchanged; a description left out stays, an empty one clears it) or {archived:true, replacements?} to archive for good (it keeps its members; it cannot be restored), at most 32 KiB; anything else, both together or any query key returns 400 invalid_input. replacements holds, for each current use in whereUsed, {parentGroupId, replacementGroupId} for a parent group or {teamId, replacementGroupId} for a role grant: replacementGroupId is the group that takes its place in that parent, or that gives the same role in that team, or null to remove it from that parent or remove the grant; at most 200. A group nothing uses archives with {archived:true}; a group in use without replacements returns 409 group_in_use, and parent or team ids that are not exactly its current uses 409 group_uses_changed, with nothing written. Every replacement in a parent (one group.child_replaced row with groupId, childGroupId and replacedGroupId, ids only), every removal from a parent (one group.child_removed row), every grant removed (one group.role_removed row) and given to the replacement (one group.role_granted row) and the archive (one group.archived row) are applied in one transaction: a replacement that is the group itself or already a direct child of that parent returns 409 group_member_exists, a role replacement that is the group itself or already gives a role in that team 409 group_role_exists, an archived one 409 group_archived, an unknown or another company's one 404 not_found, one that makes a cycle or nests deeper than 3 levels 409 group_cycle or group_depth, and one that gives someone two roles in one team 409 group_role_conflict, and any refusal leaves everything unchanged. ${grantingGroupRule} The rule applies to the group and to each parent named. An unknown or another company's group returns 404 not_found, an archived group 409 group_archived, and a name another current group uses, ignoring case, 409 group_name_exists. An archived group takes no new member, child group or manager and is no group's new child. Returns ${groupShape}.`,
         requestBody: jsonBody(
           {
             oneOf: [
@@ -1570,16 +1570,36 @@ export function GET() {
                     type: "array",
                     maxItems: 200,
                     items: {
-                      type: "object",
-                      required: ["parentGroupId", "replacementGroupId"],
-                      additionalProperties: false,
-                      properties: {
-                        parentGroupId: { type: "string", format: "uuid" },
-                        replacementGroupId: {
-                          type: ["string", "null"],
-                          format: "uuid",
+                      oneOf: [
+                        {
+                          type: "object",
+                          required: ["parentGroupId", "replacementGroupId"],
+                          additionalProperties: false,
+                          properties: {
+                            parentGroupId: { type: "string", format: "uuid" },
+                            replacementGroupId: {
+                              type: ["string", "null"],
+                              format: "uuid",
+                            },
+                          },
                         },
-                      },
+                        {
+                          type: "object",
+                          required: ["teamId", "replacementGroupId"],
+                          additionalProperties: false,
+                          properties: {
+                            teamId: {
+                              type: "string",
+                              minLength: 1,
+                              maxLength: 128,
+                            },
+                            replacementGroupId: {
+                              type: ["string", "null"],
+                              format: "uuid",
+                            },
+                          },
+                        },
+                      ],
                     },
                   },
                 },
@@ -1650,7 +1670,7 @@ export function GET() {
       [],
       {
         summary: "Name a delegated manager of a company group",
-        description: `${groupWriteRule} Send {userId}, a person in a team of the company, at most 1 KiB; anything else or any query key returns 400 invalid_input. A manager adds and removes the group's direct people from Groups I manage in personal settings (/api/v1/me/groups), and nothing else. A group that grants something (it, or a group it is nested in, is an approval group: tenant_context.group_grants) cannot have managers, for a company owner too: 409 group_grants_no_managers, and the database refuses it, so naming one never needs a recent sign-in. An archived group returns 409 group_archived, a person already a manager 409 group_manager_exists, a person in no team of the company 404 user_not_found, and an unknown or another company's group 404 not_found. Writes one group.manager_added activity row, with ids only, to your team. Returns {data:{added:true}} with 201.`,
+        description: `${groupWriteRule} Send {userId}, a person in a team of the company, at most 1 KiB; anything else or any query key returns 400 invalid_input. A manager adds and removes the group's direct people from Groups I manage in personal settings (/api/v1/me/groups), and nothing else. A group that grants something (it, or a group it is nested in, is an approval group or gives a configured role: tenant_context.group_grants) cannot have managers, for a company owner too: 409 group_grants_no_managers, and the database refuses it, so naming one never needs a recent sign-in. An archived group returns 409 group_archived, a person already a manager 409 group_manager_exists, a person in no team of the company 404 user_not_found, and an unknown or another company's group 404 not_found. Writes one group.manager_added activity row, with ids only, to your team. Returns {data:{added:true}} with 201.`,
         requestBody: groupUserBody,
       },
       { "201": { description: "{data:{added:true}}." } },
@@ -1667,10 +1687,68 @@ export function GET() {
       { sessionOnly: true, params: [groupPath] },
     ),
   };
+  // Groups as role grantees (ADM-14): company owners only, here and in app.guard_group_role.
+  const groupRoleRule =
+    "Session only: a signed-in company owner; Bearer tokens get 403 session_required, a company admin holding the people area gets 403 group_owner_required, and anyone else, company admins without people and team owners and admins without company authority included, gets 403 group_forbidden. An unknown or another company's group returns 404 not_found.";
+  const groupRoleChoicesShape =
+    "{data:{teams:[{id, name}], roles:[{roleObjectId, name, membership}]}}";
+  const groupRoleTeamBody = {
+    type: "object",
+    required: ["teamId"],
+    additionalProperties: false,
+    properties: { teamId: { type: "string", minLength: 1, maxLength: 128 } },
+  };
+  paths["/api/v1/admin/groups/{group}/roles"] = {
+    get: operation(
+      [],
+      {
+        summary: "List what a company group can be given",
+        description: `${groupRoleRule} Lists the current teams of the company by name and the configured roles that can be given, by name: the roles the team's Members tab offers (a current published version in force that is a valid role). The roles the group gives are its whereUsed role-grant entries. Viewing never needs a recent sign-in. It takes no query parameters: any query key returns 400 invalid_input. Nothing is audited. Returns ${groupRoleChoicesShape}.`,
+      },
+      { "200": { description: groupRoleChoicesShape } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+    post: operation(
+      [],
+      {
+        summary: "Give a company group a configured role in one team",
+        description: `${groupRoleRule} ${freshSessionRule} Send {teamId, roleObjectId}, at most 1 KiB; anything else or any query key returns 400 invalid_input. Everyone in the group, and in the groups nested in it, who is a member of that team and not a team owner holds the role there, narrowed to their team role and never above it; a role chosen for them in the team's Members tab wins. From then on the group, and every group nested in it, is changed only by a company owner with a recent sign-in and has no managers. An archived group returns 409 group_archived, a team that is not a current team of the company 404 not_found ("Team not found."), an unknown role 404 not_found, an unpublished one 409 role_not_published, a published body that is not a valid role 409 role_invalid, a group that already gives a role in that team 409 group_role_exists ("This group already gives a role in this team. Remove it first."), and a grant that would give someone two configured roles in that team 409 group_role_conflict, naming the people affected and the team; nothing is written on a refusal, and the database refuses the same. Writes one group.role_granted activity row, with ids only, to your team. Returns {data:{granted:true}} with 201.`,
+        requestBody: jsonBody(
+          {
+            type: "object",
+            required: ["teamId", "roleObjectId"],
+            additionalProperties: false,
+            properties: {
+              teamId: { type: "string", minLength: 1, maxLength: 128 },
+              roleObjectId: { type: "string", format: "uuid" },
+            },
+          },
+          {
+            teamId: "fictional-team-id",
+            roleObjectId: "00000000-0000-4000-a000-000000000010",
+          },
+        ),
+      },
+      { "201": { description: "{data:{granted:true}}." } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+    delete: operation(
+      [],
+      {
+        summary: "Remove the role a company group gives in one team",
+        description: `${groupRoleRule} ${freshSessionRule} Send {teamId}, at most 1 KiB; anything else or any query key returns 400 invalid_input. Its members keep any role chosen for them in that team. A group that gives no role in that team returns 404 not_found. Writes one group.role_removed activity row, with ids only, to your team. Returns {data:{removed:true}}.`,
+        requestBody: jsonBody(groupRoleTeamBody, {
+          teamId: "fictional-team-id",
+        }),
+      },
+      { "200": { description: "{data:{removed:true}}." } },
+      { sessionOnly: true, params: [groupPath] },
+    ),
+  };
   // Groups I manage (ADM-13): any signed-in member, through the manager policies of 0056.
   const managedRule =
     "Session only: any signed-in member, in the current team's company; Bearer tokens get 403 session_required. What you see and change is decided by the database's manager policies (tenant_context.manages_group): only the current groups you are named a manager of, and only their direct people. A manager never changes a group that grants something, so nothing here needs a recent sign-in.";
-  const managedWriteRule = `${managedRule} A group you do not manage, an unknown one or another company's returns 404 not_found; a group that grants something (it, or a group it is nested in, is an approval group), including one that started granting after you were named, returns 403 group_owner_required ("Only a company owner can change this group now, because it or a group it is in grants access."), and the database refuses it too; an archived group returns 409 group_archived. Each change writes one group activity row, with ids only, to your team.`;
+  const managedWriteRule = `${managedRule} A group you do not manage, an unknown one or another company's returns 404 not_found; a group that grants something (it, or a group it is nested in, is an approval group or gives a configured role), including one that started granting after you were named, returns 403 group_owner_required ("Only a company owner can change this group now, because it or a group it is in grants access."), and the database refuses it too; an archived group returns 409 group_archived. Each change writes one group activity row, with ids only, to your team.`;
   const managedShape =
     "{data:[{id, name, description, grants, people:[{userId, name, email}]}]}";
   paths["/api/v1/me/groups"] = {

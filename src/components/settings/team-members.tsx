@@ -212,6 +212,34 @@ export function MemberActions({
 }
 
 type MemberRoleAssignment = MemberRoles["assignments"][number];
+type MemberGroupRole = MemberRoles["groupRoles"][number];
+
+/**
+ * The roles a member's groups give in this team, in plain words: the one role and its groups when
+ * no role is chosen here, the groups' roles that a role chosen here overrides, or two roles that
+ * cancel out. Null when no group gives them a role.
+ */
+export function groupRoleLine(
+  chosenHere: boolean,
+  groupRoles: MemberGroupRole[],
+): string | null {
+  const byRole = new Map<string, { role: string; groups: string[] }>();
+  for (const row of groupRoles) {
+    const entry = byRole.get(row.roleObjectId) ?? {
+      role: row.roleName ?? "Not recorded",
+      groups: [],
+    };
+    entry.groups.push(row.groupName);
+    byRole.set(row.roleObjectId, entry);
+  }
+  const parts = [...byRole.values()].map(
+    ({ role, groups }) => `${role} through ${groups.join(", ")}`,
+  );
+  if (!parts.length) return null;
+  if (chosenHere) return `Also ${parts.join("; ")}; the role chosen here wins.`;
+  if (parts.length === 1) return parts[0];
+  return `Two roles through groups (${parts.join("; ")}), so neither applies. Choose a role here, or change the groups.`;
+}
 
 /** Above the members table for a company owner: a load error, if any. */
 export function ConfiguredRolesNotice({ error }: { error: string }) {
@@ -224,13 +252,15 @@ export function ConfiguredRolesNotice({ error }: { error: string }) {
 
 /**
  * A company owner's configured-role control for one member row. Team owners keep the Owner role;
- * an assigned role that is no longer available is named, with reassign and clear.
+ * an assigned role that is no longer available is named, with reassign and clear; the roles the
+ * member's groups give here are named below the control.
  */
 export function MemberRoleControl({
   name,
   teamOwner,
   assignment,
   roles,
+  groupRoles = [],
   busy,
   onSave,
 }: {
@@ -238,6 +268,8 @@ export function MemberRoleControl({
   teamOwner: boolean;
   assignment: MemberRoleAssignment | null;
   roles: MemberRoles["roles"];
+  /** The member's rows of MemberRoles.groupRoles. */
+  groupRoles?: MemberGroupRole[];
   busy: boolean;
   onSave: (roleObjectId: string | null) => void;
 }) {
@@ -245,6 +277,7 @@ export function MemberRoleControl({
   const [choice, setChoice] = useState(assignment?.available ? current : "");
   if (teamOwner)
     return <span className="muted">Team owners keep the Owner role</span>;
+  const throughGroups = groupRoleLine(!!assignment, groupRoles);
   return (
     <div className="stack" style={{ gap: 8 }}>
       {assignment && !assignment.available && (
@@ -288,6 +321,7 @@ export function MemberRoleControl({
           </button>
         )}
       </div>
+      {throughGroups && <span className="muted">{throughGroups}</span>}
     </div>
   );
 }
@@ -389,6 +423,9 @@ export function MembersTable({
                         teamOwner={person.role === "owner"}
                         assignment={assignmentOf(person)}
                         roles={memberRoles.data.roles}
+                        groupRoles={memberRoles.data.groupRoles.filter(
+                          (item) => item.userId === person.userId,
+                        )}
                         busy={busy}
                         onSave={(roleObjectId) =>
                           onSaveMemberRole(person, roleObjectId)

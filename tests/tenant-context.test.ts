@@ -2294,4 +2294,228 @@ describe("signed tenant context under separate nonowner data and identity roles"
       });
     });
   });
+
+  // Groups as role grantees (ADM-14, 0057): with no direct row, install takes the one role the
+  // member's current groups give for the team, through the same role path, in the same statement.
+  describe("taking the role a group gives (ADM-14)", () => {
+    let grouped: Principal, nested: Principal, direct: Principal;
+    let viewer: Principal, outsider: Principal, twice: Principal;
+    let compared: Principal, joiner: Principal;
+    let narrowRole: { objectId: string; versionId: string };
+    let otherRole: { objectId: string; versionId: string };
+    let adminRole: { objectId: string; versionId: string };
+    const narrowScopes = roleScopes("recruiter").filter(
+      (scope) => scope !== "cvs:write",
+    );
+    const ids = {
+      group: "00000000-0000-4000-a000-000000001401",
+      child: "00000000-0000-4000-a000-000000001402",
+      viewers: "00000000-0000-4000-a000-000000001403",
+      second: "00000000-0000-4000-a000-000000001404",
+      archived: "00000000-0000-4000-a000-000000001405",
+      third: "00000000-0000-4000-a000-000000001406",
+    };
+    async function publish(key: string, body: unknown) {
+      const { objectId, versionId } = await createConfigDraft(ownerA, {
+        type: "role",
+        key,
+        body,
+      });
+      await publishConfigVersion(ownerA, versionId);
+      return { objectId, versionId };
+    }
+    /** The owner's own SQL: no context row, so the guards admit it and the two-roles check runs. */
+    async function asOwnerSql(statement: string) {
+      await harness.asOwner();
+      await harness.client.exec(statement);
+    }
+    const grant = (group: string, team: string, role: string) =>
+      asOwnerSql(
+        `INSERT INTO app.group_roles(group_id, workspace_id, team_id, role_object_id) VALUES ('${group}', '${COMPANY}', '${team}', '${role}')`,
+      );
+    /** A committed install of the member's own session; the result and the stored row. */
+    async function installAs(p: Principal) {
+      const client = await asData();
+      await client.exec("BEGIN");
+      let result: unknown, xid: string;
+      try {
+        const claim = await claimFor(p);
+        xid = claim.xid;
+        result = await installed(claim, "{}");
+        await client.exec("COMMIT");
+      } catch (error) {
+        await client.exec("ROLLBACK");
+        throw error;
+      }
+      await harness.asSuperuser();
+      const { rows } = await harness.client.query<{
+        scopes: string[];
+        role_version_id: string | null;
+        record_scope: unknown;
+      }>(
+        "SELECT scopes, role_version_id, record_scope FROM tenant_context.contexts WHERE xid::text = $1",
+        [xid],
+      );
+      return { result: result as Record<string, unknown>, stored: rows[0] };
+    }
+
+    beforeAll(async () => {
+      const db = await harness.asOwner();
+      const seed = (
+        userId: string,
+        role: "recruiter" | "viewer" = "recruiter",
+      ) => seedIdentity(db, { userId, teamId: "ctx-a", role });
+      grouped = await seed("ctx-group-direct-member");
+      nested = await seed("ctx-group-nested-member");
+      direct = await seed("ctx-group-direct-role");
+      viewer = await seed("ctx-group-viewer", "viewer");
+      twice = await seed("ctx-group-same-role");
+      compared = await seed("ctx-group-compared");
+      // In team B only, so a grant for team A reaches nobody here.
+      outsider = await seedIdentity(db, {
+        userId: "ctx-group-outsider",
+        teamId: "ctx-b",
+        role: "recruiter",
+      });
+      joiner = await seedIdentity(db, {
+        userId: "ctx-group-joiner",
+        teamId: "ctx-b",
+        role: "recruiter",
+      });
+      narrowRole = await publish("ctx-group-narrow", {
+        ...structuredClone(RECRUITER_ROLE.body),
+        name: "Fictional group recruiter",
+        scopes: narrowScopes,
+      });
+      otherRole = await publish("ctx-group-other", {
+        ...structuredClone(RECRUITER_ROLE.body),
+        name: "Fictional other group recruiter",
+      });
+      adminRole = await publish("ctx-group-admin", {
+        ...structuredClone(ADMIN_ROLE.body),
+        name: "Fictional group admin role",
+      });
+      await asOwnerSql(`INSERT INTO app.groups(id, workspace_id, name) VALUES
+        ('${ids.group}', '${COMPANY}', 'Fictional Context Group'),
+        ('${ids.child}', '${COMPANY}', 'Fictional Context Child'),
+        ('${ids.viewers}', '${COMPANY}', 'Fictional Context Viewers'),
+        ('${ids.second}', '${COMPANY}', 'Fictional Context Second'),
+        ('${ids.archived}', '${COMPANY}', 'Fictional Context Archived')`);
+      await asOwnerSql(`INSERT INTO app.group_members(group_id, workspace_id, child_group_id) VALUES ('${ids.group}', '${COMPANY}', '${ids.child}');
+        INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES
+          ('${ids.group}', '${COMPANY}', '${grouped.userId}'),
+          ('${ids.group}', '${COMPANY}', '${direct.userId}'),
+          ('${ids.group}', '${COMPANY}', '${ownerA.userId}'),
+          ('${ids.group}', '${COMPANY}', '${outsider.userId}'),
+          ('${ids.group}', '${COMPANY}', '${twice.userId}'),
+          ('${ids.child}', '${COMPANY}', '${nested.userId}'),
+          ('${ids.viewers}', '${COMPANY}', '${viewer.userId}'),
+          ('${ids.second}', '${COMPANY}', '${twice.userId}'),
+          ('${ids.archived}', '${COMPANY}', '${grouped.userId}'),
+          ('${ids.group}', '${COMPANY}', '${joiner.userId}')`);
+      await grant(ids.group, "ctx-a", narrowRole.objectId);
+      // The same role from a second group is no conflict.
+      await grant(ids.second, "ctx-a", narrowRole.objectId);
+      await grant(ids.viewers, "ctx-a", adminRole.objectId);
+      // A direct row wins over the group's role.
+      await asOwnerSql(
+        `INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('ctx-a', '${direct.userId}', '${otherRole.objectId}')`,
+      );
+      // An archived group gives nothing, so its other role conflicts with no one; only the owner's
+      // own SQL can leave a grant on one.
+      await asOwnerSql(
+        `UPDATE app.groups SET archived_at = now() WHERE id = '${ids.archived}'`,
+      );
+      await grant(ids.archived, "ctx-a", otherRole.objectId);
+    });
+
+    it("gives a direct member and a member of a nested group the role, narrowed to the asserted scopes", async () => {
+      for (const p of [grouped, nested, twice]) {
+        const { result, stored } = await installAs(p);
+        expect(result, p.userId).toMatchObject({
+          scopes: narrowScopes,
+          memberRole: "recruiter",
+          roleVersionId: narrowRole.versionId,
+        });
+        expect(stored, p.userId).toEqual({
+          scopes: narrowScopes,
+          role_version_id: narrowRole.versionId,
+          record_scope: { pipeline: "all", candidates: "all", tasks: "all" },
+        });
+      }
+      // Exactly as the same role assigned directly narrows another recruiter.
+      await asOwnerSql(
+        `INSERT INTO app.member_roles(team_id, user_id, role_object_id) VALUES ('ctx-a', '${compared.userId}', '${narrowRole.objectId}')`,
+      );
+      expect((await installAs(compared)).stored).toEqual(
+        (await installAs(grouped)).stored,
+      );
+      expect((await installAs(grouped)).stored.scopes).not.toContain(
+        "cvs:write",
+      );
+    });
+
+    it("keeps a direct role, a team owner, a member of another team and an archived group's grant out of it", async () => {
+      expect((await installAs(direct)).result).toMatchObject({
+        scopes: roleScopes("recruiter"),
+        roleVersionId: otherRole.versionId,
+      });
+      expect((await installAs(ownerA)).result).toMatchObject({
+        scopes: [...SCOPES],
+        memberRole: "owner",
+        roleVersionId: "00000000-0000-4000-8000-000000000101",
+      });
+      expect((await installAs(outsider)).result).toMatchObject({
+        scopes: roleScopes("recruiter"),
+        roleVersionId: RECRUITER_ROLE.versionId,
+      });
+    });
+
+    it("never lifts a viewer above the viewer ceiling with an admin-membership group role", async () => {
+      const { result, stored } = await installAs(viewer);
+      expect(result).toMatchObject({
+        memberRole: "viewer",
+        roleVersionId: adminRole.versionId,
+      });
+      for (const scope of stored.scopes as string[])
+        expect(roleScopes("viewer"), scope).toContain(scope);
+      expect(stored.scopes).toEqual(roleScopes("viewer"));
+      await dataTransaction(async () => {
+        await expect(
+          install(await claimFor(viewer, { scopes: roleScopes("recruiter") })),
+        ).rejects.toMatchObject(denied);
+      });
+    });
+
+    it("fails closed when two group roles meet outside the checks, and takes the one role again once the other grant is removed", async () => {
+      // The joiner is in team B only, so a second role for team A conflicts with nothing yet.
+      await asOwnerSql(`INSERT INTO app.groups(id, workspace_id, name) VALUES ('${ids.third}', '${COMPANY}', 'Fictional Context Third');
+        INSERT INTO app.group_members(group_id, workspace_id, user_id) VALUES ('${ids.third}', '${COMPANY}', '${joiner.userId}')`);
+      await grant(ids.third, "ctx-a", otherRole.objectId);
+      // Joining team A afterwards gives them two roles there: neither applies.
+      const joined = await seedIdentity(await harness.asOwner(), {
+        userId: joiner.userId,
+        teamId: "ctx-a",
+        role: "recruiter",
+      });
+      const closed = await installAs(joined);
+      expect(closed.result).toMatchObject({
+        scopes: [],
+        roleVersionId: null,
+        recordScope: null,
+      });
+      expect(closed.stored).toEqual({
+        scopes: [],
+        role_version_id: null,
+        record_scope: null,
+      });
+      await asOwnerSql(
+        `DELETE FROM app.group_roles WHERE group_id = '${ids.third}'`,
+      );
+      expect((await installAs(joined)).result).toMatchObject({
+        scopes: narrowScopes,
+        roleVersionId: narrowRole.versionId,
+      });
+    });
+  });
 });

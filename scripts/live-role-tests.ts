@@ -92,7 +92,11 @@
  *   Company groups (0052): the team B owner made a company admin with the people area cannot add a
  *   member to an approval group by direct SQL (42501), while the company owner's session can (rolled
  *   back); the data role cannot insert, update or delete app.group_effective_members, even under
- *   the company owner's session, which reads the fixture's effective row.
+ *   the company owner's session, which reads the fixture's effective row. Once a group gives a
+ *   configured role (0057), that company admin cannot add a member to it, nor give or remove a
+ *   group role, by direct SQL (42501); the team B owner without company authority cannot give
+ *   one (42501) and reaches no grant to remove; the company owner's session removes it (rolled
+ *   back).
  *   Field usage (0055): the team B owner, who holds no company authority, the team B owner made a
  *   company admin with the organisation area only, and an API token of the company owner holding
  *   every scope cannot call tenant_context.field_usage (42501), while the team A owner's company
@@ -162,7 +166,12 @@
  *   first also briefly makes the team B owner a company admin with the people area. The manager
  *   check instead writes one plain group named by the run prefix with the team A member as its
  *   manager and flags it as an approval group half way, removing the group, which cascades the
- *   manager row, in that check; the member's inserts there are rolled back.
+ *   manager row, in that check; the member's inserts there are rolled back. The group role check
+ *   writes one plain group named by the run prefix, with the team A owner as its member, that
+ *   gives the published fixture role in team B (the owner's own SQL writes no activity row), and
+ *   briefly makes the team B owner a company admin with the people area, removing the group,
+ *   which cascades the grant, and the admin row in that check; every data-role write there is
+ *   rolled back.
  *   It never changes budgets, keys, roles, grants, policies, migrations or settings beyond
  *   transaction-local deadlines.
  * - Cleanup runs after any failure once writing has started. One owner transaction lifts FORCE
@@ -6533,6 +6542,127 @@ async function runChecks(run: Run) {
     }
     probe.at("end-state");
     return pass && probe.all(["end-state", await groupsGone()]);
+  });
+
+  // Groups as role grantees (0057): once a plain owner-written group gives the fixture role in
+  // team B (a team its only member, the team A owner, is not in, so it reaches nobody), it is
+  // company owner only. Under the team B owner made a company admin with people, a user member
+  // insert into it and a grant insert and delete are 42501 (app.guard_group_write, the
+  // app.group_roles insert policy and app.guard_group_role); under the team B owner with no company
+  // authority the grant insert is 42501 and the delete reaches no row (row-level security hides
+  // the grants). The company owner's grant delete is the positive control (rolled back).
+  await check("groups-role-granting-insert-denied", async (probe) => {
+    probe.at("setup");
+    const group = (
+      await owner.query(
+        "INSERT INTO app.groups(workspace_id,name) VALUES($1::uuid,$2) RETURNING id::text AS id",
+        [COMPANY_WORKSPACE, `${f.prefix}-group-role`],
+      )
+    ).rows[0].id as string;
+    let pass: boolean;
+    try {
+      await owner.query(memberSql, [group, COMPANY_WORKSPACE, f.users.a1]);
+      const given = await owner.query(
+        "INSERT INTO app.group_roles(group_id,workspace_id,team_id,role_object_id) VALUES($1::uuid,$2::uuid,$3,$4::uuid)",
+        [group, COMPANY_WORKSPACE, f.teams.b, roleObject],
+      );
+      const grantWrites = async () => [
+        await attempt(
+          data,
+          "INSERT INTO app.group_roles(group_id,workspace_id,team_id,role_object_id) VALUES($1::uuid,$2::uuid,$3,$4::uuid)",
+          [group, COMPANY_WORKSPACE, f.teams.a, roleObject],
+        ),
+        await attempt(
+          data,
+          "DELETE FROM app.group_roles WHERE group_id = $1::uuid",
+          [group],
+        ),
+      ];
+      probe.at("outcome");
+      const teamOnly = await transaction(data, async () => {
+        const { access } = await installAs(data, signer, p.ownerB);
+        return { access, outcomes: await grantWrites() };
+      });
+      const granted = await owner.query(
+        "INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES($1::uuid,$2,'admin','{people}')",
+        [COMPANY_WORKSPACE, f.users.b1],
+      );
+      let admin;
+      try {
+        admin = await transaction(data, async () => {
+          const { access } = await installAs(data, signer, p.ownerB);
+          return {
+            access,
+            member: await attempt(data, memberSql, [
+              group,
+              COMPANY_WORKSPACE,
+              f.users.a2,
+            ]),
+            outcomes: await grantWrites(),
+          };
+        });
+      } finally {
+        await owner.query(
+          "DELETE FROM app.workspace_admins WHERE workspace_id = $1::uuid AND user_id = $2",
+          [COMPANY_WORKSPACE, f.users.b1],
+        );
+      }
+      probe.at("positive-control");
+      const control = await transaction(data, async () => {
+        await installAs(data, signer, p.ownerA);
+        return attempt(
+          data,
+          "DELETE FROM app.group_roles WHERE group_id = $1::uuid",
+          [group],
+        );
+      });
+      probe.at("end-state");
+      const rows = await count(
+        owner,
+        "SELECT (SELECT count(*) FROM app.group_roles WHERE group_id = $1::uuid) + (SELECT count(*) FROM app.group_members WHERE group_id = $1::uuid) AS n",
+        [group],
+      );
+      const [teamInsert, teamDelete] = teamOnly.outcomes;
+      const [adminInsert, adminDelete] = admin.outcomes;
+      pass = probe.all(
+        [
+          "setup",
+          given.rowCount === 1 &&
+            granted.rowCount === 1 &&
+            teamOnly.access.companyLevel === null &&
+            admin.access.companyLevel === "admin" &&
+            admin.access.companyAreas.join(",") === "people",
+        ],
+        failsWith(admin.member, "42501"),
+        failsWith(adminInsert, "42501"),
+        failsWith(adminDelete, "42501"),
+        failsWith(teamInsert, "42501"),
+        leftAlone(teamDelete),
+        outcomeIs(
+          control.ok && control.count === 1,
+          control,
+          "positive-control",
+        ),
+        ["end-state", rows === 2],
+      );
+    } finally {
+      await owner
+        .query("DELETE FROM app.groups WHERE id = $1::uuid", [group])
+        .catch(() => {});
+    }
+    probe.at("end-state");
+    return (
+      pass &&
+      probe.all([
+        "end-state",
+        (await groupsGone()) &&
+          (await count(
+            owner,
+            "SELECT count(*)::int AS n FROM app.workspace_admins WHERE user_id = $1",
+            [f.users.b1],
+          )) === 0,
+      ])
+    );
   });
 }
 

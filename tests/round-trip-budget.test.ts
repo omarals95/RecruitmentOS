@@ -11,6 +11,7 @@ import {
   publishConfigVersion,
 } from "@/lib/config-store";
 import { withTeam } from "@/lib/db-team";
+import { addGroupMember, createGroup, grantGroupRole } from "@/lib/groups";
 import { assignMemberRole } from "@/lib/member-roles";
 import { roleScopes } from "@/lib/permissions";
 import { brandingPalette } from "@/domain/branding";
@@ -406,6 +407,56 @@ describe("database round trips per request", () => {
         owner,
         { userId: member.userId, roleObjectId: role.objectId },
         new Headers(),
+      );
+      const signIn = (p: Principal) =>
+        vi.mocked(getVerifiedSession).mockResolvedValue({
+          user: { id: p.userId, twoFactorEnabled: true },
+          session: { activeOrganizationId: p.teamId },
+        } as never);
+      signIn(member);
+      try {
+        const access = await withTeam(member, (tx, state) =>
+          Promise.resolve(state),
+        );
+        expect(access.roleVersionId).toBe(role.versionId);
+        expect(access.scopes).not.toContain("cvs:write");
+        expect(await measure(() => configBodyCache.clear())).toEqual([
+          6, 6, 11, 11, 6, 15,
+        ]);
+        expect(await measure(() => {})).toEqual([6, 6, 11, 11, 6, 15]);
+      } finally {
+        signIn(owner);
+      }
+    });
+
+    // A role a group gives (ADM-14): install takes it in the same statement, so the counts hold.
+    it("keeps every request within budget for a member whose role comes only from a group", async () => {
+      const member = await seedIdentity(fixture.db, {
+        userId: "budget-group-recruiter",
+        teamId: owner.teamId,
+        role: "recruiter",
+      });
+      const role = await createConfigDraft(owner, {
+        type: "role",
+        key: "budget-group-role",
+        body: {
+          ...structuredClone(RECRUITER_ROLE.body),
+          name: "Fictional budget group role",
+          scopes: roleScopes("recruiter").filter((s) => s !== "cvs:write"),
+        },
+      });
+      await publishConfigVersion(owner, role.versionId);
+      const group = await createGroup(owner, {
+        name: "Fictional budget group",
+      });
+      await addGroupMember(owner, group.id, { userId: member.userId });
+      await grantGroupRole(
+        { ...owner, sessionCreatedAt: new Date() },
+        group.id,
+        {
+          teamId: owner.teamId,
+          roleObjectId: role.objectId,
+        },
       );
       const signIn = (p: Principal) =>
         vi.mocked(getVerifiedSession).mockResolvedValue({

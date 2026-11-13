@@ -52,6 +52,8 @@ export interface AccessChange {
   affectedUserIds: string[];
   roleName: string | null;
   actorName: string | null;
+  /** The group a role was given to or removed from; null for every other row. */
+  groupName: string | null;
 }
 export interface AccessChanges {
   data: AccessChange[];
@@ -81,6 +83,8 @@ export const objectTypes: Record<string, string> = {
 const accessActions: Record<string, string> = {
   "role.assigned": "Role assigned",
   "role.cleared": "Role cleared",
+  "group.role_granted": "Role given to a group",
+  "group.role_removed": "Role removed from a group",
   "scope.home_units_changed": "Home units changed",
 };
 export const plain = (labels: Record<string, string>, value: string) =>
@@ -494,18 +498,22 @@ export function AccessChangesPanel({
   members: ReadonlyMap<string, string>;
   error: string;
 }) {
-  const affected = (ids: string[]) =>
-    ids.length
-      ? ids
-          .map((id) => members.get(id) ?? "A member of another team")
-          .join(", ")
-      : "Not recorded";
+  const affected = (row: AccessChange) =>
+    row.action === "group.role_granted" || row.action === "group.role_removed"
+      ? row.groupName
+        ? `Everyone in ${row.groupName} in the team`
+        : "Not recorded"
+      : row.affectedUserIds.length
+        ? row.affectedUserIds
+            .map((id) => members.get(id) ?? "A member of another team")
+            .join(", ")
+        : "Not recorded";
   return (
     <section className="panel stack">
       <h2>Recent access changes (last 7 days)</h2>
       <p className="muted">
-        Role assignments and home-unit changes in every team of the workspace,
-        newest first. Only company owners see this list.
+        Role assignments, roles given to groups and home-unit changes in every
+        team of the workspace, newest first. Only company owners see this list.
       </p>
       {error ? (
         <p className="notice error" role="alert">
@@ -537,9 +545,7 @@ export function AccessChangesPanel({
                   <td data-label="Change">
                     {plain(accessActions, row.action)}
                   </td>
-                  <td data-label="Members affected">
-                    {affected(row.affectedUserIds)}
-                  </td>
+                  <td data-label="Members affected">{affected(row)}</td>
                   <td data-label="Role">
                     {row.roleName ??
                       (row.kind === "home-units"

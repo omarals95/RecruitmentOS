@@ -822,7 +822,7 @@ describe("OpenAPI contract", () => {
     for (const text of [
       "people_forbidden",
       "invalid_input",
-      "userId, name, email, teams:[{team, teamRole, configuredRole}]",
+      "userId, name, email, teams:[{team, teamRole, configuredRole, roleGroup, roleConflict}]",
       "lastSignInAt, twoStep",
       "nextCursor",
       "never returns a team id, member count, record, candidate, upload, storage figure, activity, token, session or two-step secret",
@@ -840,7 +840,7 @@ describe("OpenAPI contract", () => {
       "user_not_found",
       "invalid_input",
       "tenant_context.workspace_person",
-      "signedInDevices, teams:[{team, slug, teamRole, configuredRole}]",
+      "signedInDevices, teams:[{team, slug, teamRole, configuredRole, roleGroup, roleConflict}]",
       "events:[{occurredAt, action, actorId, actorName, objectType, objectKey, roleName}]",
       "never returns a team id, record, candidate, upload, storage figure, token, session id, IP address, user agent, change summary or change body",
       '"name":"user","in":"path"',
@@ -1081,6 +1081,76 @@ describe("OpenAPI contract", () => {
         expect(JSON.stringify(operation), text).toContain(text);
     for (const text of ["user_not_found", '"maxLength":254'])
       expect(JSON.stringify(mineMembers.post), text).toContain(text);
+  });
+
+  it("documents groups as role grantees: the roles operations, the role-grant use and replacement, holders through groups and the access-change rows (ADM-14)", () => {
+    const roles = document.paths["/api/v1/admin/groups/{group}/roles"];
+    expect(Object.keys(roles)).toEqual(["get", "post", "delete"]);
+    for (const operation of [roles.get, roles.post, roles.delete]) {
+      expect(operation["x-session-only"]).toBe(true);
+      expect(operation["x-required-scopes"]).toEqual([]);
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(["400", "401", "403", "404", "409", "500"]),
+      );
+      for (const text of [
+        "session_required",
+        "group_owner_required",
+        "group_forbidden",
+        "not_found",
+      ])
+        expect(JSON.stringify(operation), text).toContain(text);
+    }
+    expect(JSON.stringify(roles.get)).not.toContain("SESSION_NOT_FRESH");
+    expect(JSON.stringify(roles.get)).toContain(
+      "{data:{teams:[{id, name}], roles:[{roleObjectId, name, membership}]}}",
+    );
+    for (const text of [
+      "SESSION_NOT_FRESH",
+      "group_archived",
+      "role_not_published",
+      "role_invalid",
+      "group_role_exists",
+      "group_role_conflict",
+      "group.role_granted",
+      '"required":["teamId","roleObjectId"]',
+    ])
+      expect(JSON.stringify(roles.post), text).toContain(text);
+    for (const text of ["SESSION_NOT_FRESH", "group.role_removed"])
+      expect(JSON.stringify(roles.delete), text).toContain(text);
+    const group = document.paths["/api/v1/admin/groups/{group}"];
+    for (const text of [
+      'source:\\"role-grant\\", team:{id, name}, role:{id, name}',
+      'kind:\\"role\\", role, team',
+    ])
+      expect(JSON.stringify(group.get), text).toContain(text);
+    for (const text of [
+      '"required":["teamId","replacementGroupId"]',
+      "group_role_exists",
+      "group_role_conflict",
+      "group_in_use",
+      "group_uses_changed",
+    ])
+      expect(JSON.stringify(group.patch), text).toContain(text);
+    for (const operation of [
+      group.patch,
+      document.paths["/api/v1/admin/groups/{group}/members"].post,
+    ])
+      expect(JSON.stringify(operation)).toContain("group_role_conflict");
+    expect(
+      JSON.stringify(document.paths["/api/v1/teams/member-roles"].get),
+    ).toContain(
+      "groupRoles:[{userId, roleObjectId, roleName, groupId, groupName}]",
+    );
+    expect(
+      JSON.stringify(document.paths["/api/v1/access-changes"].get),
+    ).toContain("group.role_granted");
+    expect(
+      JSON.stringify(document.paths["/api/v1/access-changes"].get),
+    ).toContain("actorName, groupName}");
+    for (const path of ["/api/v1/admin/users", "/api/v1/admin/users/{user}"])
+      expect(JSON.stringify(document.paths[path].get), path).toContain(
+        "configuredRole, roleGroup, roleConflict}",
+      );
   });
 
   it("documents team archive and restore, the archived teams read and team_archived (ADM-05)", () => {
@@ -1441,7 +1511,7 @@ describe("OpenAPI contract", () => {
     );
   });
 
-  it("documents the recent sign-in rule on exactly the thirteen sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12, ADM-13)", () => {
+  it("documents the recent sign-in rule on exactly the fifteen sensitive admin changes (ADM-06, ADM-09, ADM-25, ADM-10, ADM-12, ADM-13, ADM-14)", () => {
     const guarded = [
       "POST /api/v1/salary-brackets/{versionId}/publish",
       "POST /api/v1/roles/{id}/publish",
@@ -1458,6 +1528,9 @@ describe("OpenAPI contract", () => {
       "DELETE /api/v1/admin/groups/{group}/members",
       // ADM-13: removing a manager from a group that grants something.
       "DELETE /api/v1/admin/groups/{group}/managers",
+      // ADM-14: giving a group a role and removing it.
+      "POST /api/v1/admin/groups/{group}/roles",
+      "DELETE /api/v1/admin/groups/{group}/roles",
     ];
     for (const label of guarded) {
       const { operation } = operations.find((item) => item.label === label)!;
@@ -1541,6 +1614,9 @@ describe("OpenAPI contract", () => {
         "DELETE /api/v1/admin/groups/{group}/members",
         "POST /api/v1/admin/groups/{group}/managers",
         "DELETE /api/v1/admin/groups/{group}/managers",
+        "GET /api/v1/admin/groups/{group}/roles",
+        "POST /api/v1/admin/groups/{group}/roles",
+        "DELETE /api/v1/admin/groups/{group}/roles",
         "GET /api/v1/me/groups",
         "POST /api/v1/me/groups/{group}/members",
         "DELETE /api/v1/me/groups/{group}/members",

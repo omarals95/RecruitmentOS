@@ -133,6 +133,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.groups TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.group_members TO recruitmentos_data;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.group_managers TO recruitmentos_data;
 GRANT SELECT ON TABLE app.group_effective_members TO recruitmentos_data;
+-- Group role grants under app.guard_group_role: company owner sessions give and remove them (0057).
+GRANT SELECT, INSERT, DELETE ON TABLE app.group_roles TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.connection_marker TO recruitmentos_data;
 GRANT SELECT ON TABLE db_boundary.storage_schema TO recruitmentos_data;
 GRANT EXECUTE ON FUNCTION tenant_context.install(text, text, text[]) TO recruitmentos_data;

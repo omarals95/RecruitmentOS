@@ -6,16 +6,26 @@ import { ApiError } from "./errors";
 import type { Principal } from "./principal";
 import type { TenantAccess } from "./tenant-context";
 
+/**
+ * A person's configured role in force in one team: the direct role's name, else the name of the one
+ * role their current groups give there (roleGroup names the first such group by name), else null.
+ * roleConflict is true when there is no direct role and their groups give two different roles, so
+ * neither applies.
+ */
+export type TeamRoleInForce = {
+  configuredRole: string | null;
+  roleGroup: string | null;
+  roleConflict: boolean;
+};
 /** One row of the Admin portal's Users list: a member of a workspace team or a pending invitation. */
 export type WorkspacePersonRow = {
   userId: string | null;
   name: string | null;
   email: string;
-  teams: {
+  teams: (TeamRoleInForce & {
     team: string;
     teamRole: string | null;
-    configuredRole: string | null;
-  }[];
+  })[];
   companyLevel: "owner" | "admin" | null;
   status: "active" | "invited" | "deactivated";
   lastSignInAt: string | null;
@@ -60,12 +70,11 @@ export type WorkspacePerson = {
   /** Sessions that have not expired. */
   signedInDevices: number;
   /** The person's teams in this workspace only. */
-  teams: {
+  teams: (TeamRoleInForce & {
     team: string;
     slug: string;
     teamRole: string | null;
-    configuredRole: string | null;
-  }[];
+  })[];
   /** The company authority fields are null without an app.workspace_admins row. */
   companyLevel: "owner" | "admin" | null;
   companyAreas: string[] | null;
