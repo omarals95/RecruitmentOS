@@ -49,6 +49,15 @@ export function twoStepSetupRequired(
   );
 }
 
+export type TeamRole = "owner" | "admin" | "recruiter" | "viewer";
+
+/** The team roles the caller may give: only an owner gives Owner. */
+export function rolesFor(role: string | null): TeamRole[] {
+  return role === "owner"
+    ? ["owner", "admin", "recruiter", "viewer"]
+    : ["admin", "recruiter", "viewer"];
+}
+
 export function validateInvitationRole(
   role: string,
 ): "owner" | "admin" | "recruiter" | "viewer" {

@@ -182,7 +182,7 @@ export function AdminPortalView({
             {!current ? (
               <AdminHome tabs={tabs} />
             ) : current.key === "users" ? (
-              <UsersTab />
+              <UsersTab owner={access.companyLevel === "owner"} />
             ) : current.key === "groups" ? (
               <GroupsTab />
             ) : current.key === "teams" ? (

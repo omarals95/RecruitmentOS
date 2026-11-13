@@ -514,6 +514,7 @@ const COMPANY_ACTIVITY_KINDS = [
   "workspace-authority",
   "employee-erasure",
   "org-import",
+  "user-import",
   "user-account",
   "salary-brackets",
   "user-anonymisation",
