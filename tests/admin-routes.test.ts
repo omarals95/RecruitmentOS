@@ -73,6 +73,8 @@ import {
   isAdminTab,
   type AdminTabKey,
 } from "@/components/settings/admin-tabs";
+import { FieldDetailPortal } from "@/components/settings/field-detail";
+import { fieldDetailTab } from "@/components/settings/field-detail-tabs";
 import { GroupDetailPortal } from "@/components/settings/group-detail";
 import { groupDetailTab } from "@/components/settings/group-detail-tabs";
 import { TeamDetailPortal } from "@/components/settings/team-detail";
@@ -93,13 +95,17 @@ import {
 } from "@/app/api/v1/admin/fields/route";
 import { PUT as editDraft } from "@/app/api/v1/admin/fields/drafts/[versionId]/route";
 import { POST as publishDraft } from "@/app/api/v1/admin/fields/drafts/[versionId]/publish/route";
+import { GET as fieldUsageRoute } from "@/app/api/v1/admin/fields/usage/route";
+import { createRecord } from "@/lib/records";
 import { createSplitRoleDb, seedIdentity } from "./helpers/db";
+import { customField, kindBody } from "./helpers/kind-schemas";
 
 // Fictional data only: one company workspace with two fictional teams.
 const COMPANY = "00000000-0000-4000-a000-000000000001";
 const DETAIL = "teams/[team]/page.tsx";
 const USER_DETAIL = "users/[user]/page.tsx";
 const GROUP_DETAIL = "groups/[group]/page.tsx";
+const FIELD_DETAIL = "fields/[kind]/[field]/page.tsx";
 const FICTIONAL_GROUP = "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d";
 const ADMIN_DIR = join(process.cwd(), "src/app/app/admin");
 const KEYS = ADMIN_TABS.map((tab) => tab.key);
@@ -185,7 +191,9 @@ async function open(
             ? { user }
             : page === GROUP_DETAIL
               ? { group }
-              : {};
+              : page === FIELD_DETAIL
+                ? { kind: "candidate", field: "name" }
+                : {};
     const search: Record<string, string> = tab === undefined ? {} : { tab };
     element = await render({
       params: Promise.resolve(params),
@@ -242,6 +250,20 @@ async function open(
     });
     expect(markup).toContain("<h1>Admin portal</h1>");
     expect(markup).toContain('<p role="status">Loading this group…</p>');
+    expect(markup).not.toContain(NO_ACCESS);
+    return "allowed";
+  }
+  if (result.type === FieldDetailPortal) {
+    // The kind and field in the URL and the caller's company level; the field loads in the browser.
+    expect(result.props).toEqual({
+      kind: "candidate",
+      fieldKey: "name",
+      companyLevel: expect.stringMatching(/^(owner|admin)$/),
+      // An unknown key opens Contexts & options.
+      tab: fieldDetailTab(tab),
+    });
+    expect(markup).toContain("<h1>Admin portal</h1>");
+    expect(markup).toContain('<p role="status">Loading this field…</p>');
     expect(markup).not.toContain(NO_ACCESS);
     return "allowed";
   }
@@ -573,6 +595,40 @@ describe("admin pages check access on the server (TST-002)", () => {
     expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
   });
 
+  // ADM-29 (job 100): a field's detail page is a sub-page of Fields and opens for exactly its
+  // callers, on every tab, through one access check in the active team.
+  it("opens field detail for company owners and the company admin with fields only, on every tab (ADM-29)", async () => {
+    for (const tab of [undefined, "contexts", "where-used", "general"])
+      for (const [name, outcome] of [
+        ["company admin", "allowed"],
+        ["company owner and team owner", "allowed"],
+        ["company owner as recruiter", "allowed"],
+        ["team owner", "refused"],
+        ["team A owner", "refused"],
+        ["team admin", "refused"],
+        ["recruiter", "refused"],
+        ["viewer", "refused"],
+        ["company admin with organisation", "refused"],
+        ["company admin with people", "refused"],
+        ["company admin with no area", "refused"],
+        ["no team", "refused"],
+        ["anonymous", "sign-in"],
+        ["bearer", "sign-in"],
+      ] as const) {
+        vi.mocked(withTeam).mockClear();
+        const label = `${name} ?tab=${tab ?? ""}`;
+        expect(
+          await open(callers[name], FIELD_DETAIL, "fields", undefined, tab),
+          label,
+        ).toBe(outcome);
+        expect(withTeam, label).toHaveBeenCalledTimes(
+          outcome === "sign-in" || name === "no team" ? 0 : 1,
+        );
+      }
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
   // ADM-40 (job 098): Domain is a company owner page only (D20), whatever the team role or areas.
   it("opens Domain for company owners only (ADM-40)", async () => {
     for (const [name, outcome] of [
@@ -751,6 +807,127 @@ describe("admin pages check access on the server (TST-002)", () => {
         expect(answer.status, input.kind).toBe(400);
         expect(answer.body.error?.code, input.kind).toBe("invalid_input");
       }
+    });
+
+    // ADM-29 (job 100): option edits and the usage count follow the same matrix.
+    it("refuses option edits and the usage count to everyone but a company owner and the company admin with fields, and counts only published custom fields", async () => {
+      const owner = "company owner and team owner";
+      const level = customField("Fictional route level", "dropdown", {
+        options: [
+          { id: "fictional-yes", label: "Fictional yes" },
+          { id: "fictional-no", label: "Fictional no" },
+        ],
+      });
+      const published = kindBody("candidate", [level]);
+      nameOf.current = owner;
+      const created = await call(
+        owner,
+        createField as never,
+        "/api/v1/admin/fields",
+        {
+          method: "POST",
+          body: { kind: "candidate", body: published },
+        },
+      );
+      const first = (created.body.data as { versionId: string }).versionId;
+      expect((await routes(first, "candidate")[3]()).body.data).toMatchObject({
+        number: 2,
+      });
+      await createRecord(principals[owner], "candidates", {
+        data: {
+          name: "Fictional Route Holder",
+          customValues: { [level.key]: "fictional-yes" },
+        },
+      });
+      // An option renamed and one disabled, in a new draft that only the two writers may change.
+      const renamed = structuredClone(published);
+      Object.assign(
+        renamed.fields.find((field) => field.key === level.key)!,
+        {
+          options: [
+            { id: "fictional-yes", label: "Fictional yes renamed" },
+            { id: "fictional-no", label: "Fictional no", disabled: true },
+          ],
+        },
+      );
+      const draft = (
+        (
+          await call(owner, createField as never, "/api/v1/admin/fields", {
+            method: "POST",
+            body: { kind: "candidate", body: published },
+          })
+        ).body.data as { versionId: string }
+      ).versionId;
+      const usage = (query: string) => `/api/v1/admin/fields/usage?${query}`;
+      const counted = usage(`kind=candidate&fieldId=${level.key}`);
+      for (const [name, status, code] of [
+        ["anonymous", 401, "UNAUTHENTICATED"],
+        ["bearer", 403, "session_required"],
+        ["team owner", 403, "config_forbidden"],
+        ["team A owner", 403, "config_forbidden"],
+        ["team admin", 403, "config_forbidden"],
+        ["company admin with no area", 403, "config_forbidden"],
+        ["company admin with organisation", 403, "config_forbidden"],
+        ["company admin with people", 403, "config_forbidden"],
+      ] as const) {
+        for (const answer of [
+          await call(
+            name,
+            editDraft as never,
+            `/api/v1/admin/fields/drafts/${draft}`,
+            { method: "PUT", body: { body: renamed }, versionId: draft },
+          ),
+          await call(name, fieldUsageRoute as never, counted),
+        ]) {
+          expect(answer.status, name).toBe(status);
+          expect(answer.body.error?.code, name).toBe(code);
+        }
+      }
+      expect(authenticateApiToken).not.toHaveBeenCalled();
+      for (const [query, status, code] of [
+        ["kind=comment&fieldId=" + level.key, 400, "invalid_input"],
+        ["kind=candidate&fieldId=not-a-uuid", 400, "invalid_input"],
+        ["kind=candidate", 400, "invalid_input"],
+        [
+          `kind=candidate&fieldId=${level.key}&team=route-team-a`,
+          400,
+          "invalid_input",
+        ],
+        [`kind=candidate&fieldId=${UNKNOWN}`, 404, "not_found"],
+        [`kind=vacancy&fieldId=${level.key}`, 404, "not_found"],
+      ] as const) {
+        const answer = await call(
+          owner,
+          fieldUsageRoute as never,
+          usage(query),
+        );
+        expect(answer.status, query).toBe(status);
+        expect(answer.body.error?.code, query).toBe(code);
+      }
+      for (const name of [owner, "company admin"])
+        expect(
+          await call(name, fieldUsageRoute as never, counted),
+          name,
+        ).toEqual({
+          status: 200,
+          body: { data: { count: 1 } },
+        });
+      // The company admin with fields renames and disables, and publishes.
+      const edited = await call(
+        "company admin",
+        editDraft as never,
+        `/api/v1/admin/fields/drafts/${draft}`,
+        { method: "PUT", body: { body: renamed }, versionId: draft },
+      );
+      expect(edited.status).toBe(200);
+      nameOf.current = "company admin";
+      expect((await routes(draft, "candidate")[3]()).body.data).toMatchObject({
+        number: 3,
+      });
+      expect(await call(owner, fieldUsageRoute as never, counted)).toEqual({
+        status: 200,
+        body: { data: { count: 1 } },
+      });
     });
   });
 

@@ -730,11 +730,12 @@ const isEmpty = (value: unknown) =>
  * Checks the custom values of a configurable kind against the kind schema version the write pins
  * (architecture 1.5), after the strict parse. Only an added or changed value is checked, so a value
  * carried over unchanged never blocks an unrelated edit; an archived field's value can be neither
- * changed nor removed unless the write is imported. Then the mandatory rules: a create needs every
- * mandatory field of the default create screen (records get no type on create until R2b-11), and an
- * edit may not empty a filled one of the edit screen for the stored record's type. A task's team
- * task-field keys are left to checkCustomValues. It runs no statement and returns the added or
- * changed values for checkFieldReferences.
+ * changed nor removed unless the write is imported. A filled added or changed value must fit the
+ * field's record types, and outside an import may not add a disabled option. Then the mandatory
+ * rules: a create needs every mandatory field of the default create screen (records get no type on
+ * create until R2b-11), and an edit may not empty a filled one of the edit screen for the stored
+ * record's type. A task's team task-field keys are left to checkCustomValues. It runs no statement
+ * and returns the added or changed values for checkFieldReferences.
  */
 function checkKindValues(
   schema: KindSchema,
@@ -781,6 +782,33 @@ function checkKindValues(
       "invalid_custom_value",
       `Invalid value for ${fields.get(String(parsed.error.issues[0].path[0]))!.label}.`,
     );
+  // A filled value the write adds or changes must fit the field's context (records get no type on
+  // create until R2b-11), and unless imported may not bring in an option disabled since (ADM-29).
+  const typeId = existing?.typeId ?? null;
+  for (const [key, value] of Object.entries(changed)) {
+    const field = fields.get(key)!;
+    if (field.system || isEmpty(value)) continue;
+    if (field.types && (typeId === null || !field.types.includes(typeId)))
+      throw new ApiError(
+        400,
+        "invalid_custom_value",
+        `${field.label} does not apply to this record type.`,
+      );
+    if (importing || !("options" in field)) continue;
+    const held = new Set([oldValues[key]].flat());
+    const disabled = field.options.find(
+      (option) =>
+        option.disabled &&
+        !held.has(option.id) &&
+        [value].flat().includes(option.id),
+    );
+    if (disabled)
+      throw new ApiError(
+        400,
+        "invalid_custom_value",
+        `${field.label} no longer offers ${disabled.label}.`,
+      );
+  }
   for (const key of Object.keys(oldValues))
     if (!importing && archived.has(key) && !Object.hasOwn(values, key))
       throw new ApiError(

@@ -169,8 +169,18 @@ const phoneSchema = z
   .string()
   .regex(/^\+?[0-9 ().-]{3,40}$/)
   .refine((value) => (value.match(/[0-9]/g)?.length ?? 0) >= 3);
+// An option keeps its id for good: a rename changes its label, and a disabled option (absent means
+// enabled) is no longer offered for new values but stays valid in stored ones (FLD-022).
 const options = z
-  .array(z.object({ id: configOptionValue, label: configOptionValue }).strict())
+  .array(
+    z
+      .object({
+        id: configOptionValue,
+        label: configOptionValue,
+        disabled: z.boolean().optional(),
+      })
+      .strict(),
+  )
   .min(1)
   .max(100)
   .superRefine((list, ctx) => {
@@ -294,6 +304,22 @@ const checked = <S extends z.ZodType<CustomField>>(schema: S) =>
         message: "The default must be a valid value of the field.",
         when: noIssues,
       },
+    )
+    .refine(
+      (field: CustomField) => {
+        if (!("options" in field) || field.default === undefined) return true;
+        const chosen = Array.isArray(field.default)
+          ? field.default
+          : [field.default];
+        return !field.options.some(
+          (option) => option.disabled && chosen.includes(option.id),
+        );
+      },
+      {
+        path: ["default"],
+        message: "The default cannot be a disabled option.",
+        when: noIssues,
+      },
     );
 /**
  * One custom field definition (architecture §1.5): a uuid key, a cleaned label and help, and only
@@ -301,11 +327,24 @@ const checked = <S extends z.ZodType<CustomField>>(schema: S) =>
  */
 export const customFieldSchema = checked(customFieldShape);
 /**
- * A custom field as a kind schema holds it: its definition and the company owner's sensitive mark,
- * absent meaning false (R2b-09).
+ * A custom field as a kind schema holds it: its definition, the company owner's sensitive mark,
+ * absent meaning false (R2b-09), and its context's record types (ADM-29, FLD-020). The context is
+ * the body's kind and, when `types` is given, only those of its types; absent means every record of
+ * the kind. A context is never per team, so there is no team key.
  */
 export const kindSchemaCustomFieldSchema = checked(
-  definitions({ sensitive: z.boolean().optional() }),
+  definitions({
+    sensitive: z.boolean().optional(),
+    types: z
+      .array(uuidSchema)
+      .min(1)
+      .max(30)
+      .refine(
+        (types) => new Set(types).size === types.length,
+        "A record type can be listed only once.",
+      )
+      .optional(),
+  }),
 );
 
 // One non-empty value of the field. Person, org unit, file and lookup check the shape only; their

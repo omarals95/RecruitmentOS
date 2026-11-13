@@ -842,7 +842,7 @@ describe("branding under the split runtime roles", () => {
       },
     ]);
     expect(dataRoleHelpers).toContain("tenant_context.public_branding()");
-    expect(dataRoleHelpers).toHaveLength(49);
+    expect(dataRoleHelpers).toHaveLength(50);
   });
 
   it("writes the published tokens as custom properties in one style element of the root layout", async () => {

@@ -33,6 +33,7 @@ vi.mock("../src/components/workspace/client", async (original) => {
 import {
   clearWorkspaceCache,
   dataCache,
+  requestJson,
   TeamScope,
   WorkspaceProvider,
 } from "../src/components/workspace/client";
@@ -42,7 +43,13 @@ import {
   adminTabs,
   type AdminTabKey,
 } from "../src/components/settings/admin-tabs";
-import { ADMIN_AREAS, CONFIGURABLE_KINDS } from "../src/domain/config";
+import {
+  ADMIN_AREAS,
+  CONFIGURABLE_KINDS,
+  type KindSchemaBody,
+} from "../src/domain/config";
+import { fieldWhereUsed } from "../src/domain/field-where-used";
+import { ConfirmDialog } from "../src/components/ui/confirm-dialog";
 import {
   FIELD_TYPES,
   type CustomField,
@@ -55,16 +62,40 @@ import {
   OWNER_MUST_PUBLISH,
   PublishDialog,
   WizardStep,
+  archiveConfirm,
   canMove,
+  confirmArchive,
   emptyInputs,
+  fieldPath,
   kindLabels,
   kindView,
   moveField,
   moveToGroup,
   newWizard,
+  savedNotice,
+  sendKindDraft,
   wizardIssues,
   type WizardState,
 } from "../src/components/settings/fields-tab";
+import {
+  BUILT_IN_OPTIONS,
+  DRAFT_ONLY_COUNT,
+  FieldDetailPortal,
+  FieldDetailView,
+  NOTHING_USES,
+  NO_OPTIONS,
+  ONE_DEFINITION,
+  SYSTEM_COUNT,
+  UsageCount,
+  countsUsage,
+  optionIssues,
+  usagePath,
+  withOptions,
+} from "../src/components/settings/field-detail";
+import {
+  FIELD_DETAIL_TABS,
+  fieldDetailTab,
+} from "../src/components/settings/field-detail-tabs";
 import { customField, kindBody } from "./helpers/kind-schemas";
 import {
   AccessChangesPanel,
@@ -6507,6 +6538,600 @@ describe("fields page", () => {
       mandatory: true,
     });
     expect(body).toEqual(kindBody("task", [notice]));
+  });
+});
+
+// ADM-29 (job 100): a field's detail page, its Contexts & options and Where used tabs, the archive
+// confirm and the usage count.
+describe("field detail", () => {
+  const level = customField("Fictional detail level", "dropdown", {
+    options: [
+      { id: "fictional-low", label: "Fictional low" },
+      { id: "fictional-mid", label: "Fictional mid" },
+      { id: "fictional-high", label: "Fictional high", disabled: true },
+    ],
+    default: "fictional-mid",
+  });
+  const note = customField("Fictional detail note", "short-text");
+  const unused = customField("Fictional unused note", "long-text");
+  const secret = customField("Fictional detail secret", "number", {
+    sensitive: true,
+  });
+  const fresh = customField("Fictional fresh note", "short-text");
+  const typed = customField("Fictional typed note", "short-text", {
+    types: ["00000000-0000-4000-a000-0000000000c1"],
+  });
+  // A fictional record holding a value; no part of it reaches the page.
+  const record = {
+    name: "Fictional Detail Record Person",
+    value: "Fictional detail record value",
+  };
+  /** The level on the edit and view screens only, the note on all three, the rest on none. */
+  const published = kindBody(
+    "candidate",
+    [level, note, unused, secret, typed],
+    {
+      create: [note.key],
+      edit: [level.key, note.key],
+      view: [level.key, note.key],
+    },
+  );
+  const state = (draft?: KindSchemaBody): KindSchemaState => ({
+    kind: "candidate",
+    current: {
+      versionId: "00000000-0000-4000-8000-0000000009b1",
+      number: 2,
+      body: published,
+    },
+    draft: draft
+      ? {
+          versionId: "00000000-0000-4000-8000-0000000009b2",
+          body: draft as unknown as Record<string, unknown>,
+          note: null,
+          createdAt: "2026-11-13T08:00:00.000Z",
+        }
+      : null,
+  });
+  const withFresh = () => {
+    const body = structuredClone(published);
+    body.fields.push(fresh);
+    return body;
+  };
+  const fieldOf = (body: KindSchemaBody, key: string) =>
+    body.fields.find((field) => field.key === key)!;
+  const plain = (markup: string) => markup.replaceAll("<!-- -->", "");
+  const detail = (
+    key: string,
+    props: Partial<Parameters<typeof FieldDetailView>[0]> = {},
+    view = kindView(state()),
+  ) =>
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <AdminPortalView
+          tab="fields"
+          access={access("owner", "owner")}
+          denied={false}
+          error=""
+          detail={
+            <FieldDetailView
+              view={view}
+              field={fieldOf(view.body, key)}
+              tab="contexts"
+              owner
+              {...props}
+            />
+          }
+        />
+      </WorkspaceProvider>,
+    );
+  const tabpanel = (markup: string) =>
+    markup.slice(markup.indexOf('<div role="tabpanel"'));
+  const controlsOf = (markup: string) =>
+    [...markup.matchAll(/<(button|input|select|textarea)\b[^>]*>/g)].map(
+      (match) => match[0],
+    );
+
+  it("shows Back to Fields, the field's name, key, type, kind and badges, and the two tabs with keyboard movement", () => {
+    const markup = detail(level.key);
+    expect(sidebar(markup)).toContain(
+      '<a aria-current="page" href="/app/admin/fields">Fields</a>',
+    );
+    expect(plain(content(markup))).toContain(
+      `<p><a href="/app/admin/fields">Back to Fields</a></p><h2>${level.label}</h2><p class="muted">Key <code>${level.key}</code>. Type: Dropdown. Record kind: Candidate.</p><span class="tag-list"><span class="tag">Custom</span></span>`,
+    );
+    expect(markup).toContain(
+      '<div class="tabs" role="tablist" aria-label="Field details">',
+    );
+    const found = [
+      ...markup.matchAll(/<button [^>]*role="tab"[^>]*>([^<]+)<\/button>/g),
+    ];
+    expect(found.map((match) => match[1])).toEqual([
+      "Contexts &amp; options",
+      "Where used",
+    ]);
+    FIELD_DETAIL_TABS.forEach((tab, index) =>
+      expect(found[index][0]).toBe(
+        `<button type="button" role="tab" id="field-tab-${tab.key}" aria-controls="field-panel-${tab.key}" tabindex="${index ? -1 : 0}" aria-selected="${!index}">${tab.label.replace("&", "&amp;")}</button>`,
+      ),
+    );
+    for (const tab of FIELD_DETAIL_TABS) {
+      expect(fieldDetailTab(tab.key)).toBe(tab.key);
+      expect(detail(level.key, { tab: tab.key })).toContain(
+        `<div role="tabpanel" id="field-panel-${tab.key}" aria-labelledby="field-tab-${tab.key}" tabindex="0" class="stack">`,
+      );
+    }
+    for (const value of [undefined, "", "general", "delete", ["where-used"]])
+      expect(fieldDetailTab(value), String(value)).toBe("contexts");
+    const source = readFileSync(
+      new URL("../src/components/settings/field-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /role="tablist"\s+aria-label="Field details"\s+onKeyDown=\{tabKeys\}/,
+    );
+    // The page gates like the list: it opens only when the caller's admin tabs hold Fields.
+    const page = readFileSync(
+      new URL(
+        "../src/app/app/admin/fields/[kind]/[field]/page.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(page).toContain(
+      'if (!access || !adminTabs(access).some((item) => item.key === "fields"))',
+    );
+    expect(page).toContain(
+      'return <AdminPortalView tab="fields" access={null} denied error="" />;',
+    );
+    // A secret field keeps its badge; the list links each name to its detail page.
+    expect(content(detail(secret.key))).toContain(
+      '<span class="badge warning">Sensitive</span>',
+    );
+    const list = renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <FieldsPanel kinds={[state()]} error="" owner />
+      </WorkspaceProvider>,
+    );
+    for (const field of published.fields)
+      expect(list).toContain(
+        `<a href="/app/admin/fields/candidate/${field.key}">${field.label}</a>`,
+      );
+    expect(fieldPath("job-role", "title")).toBe(
+      "/app/admin/fields/job-role/title",
+    );
+  });
+
+  it("shows the record kind and All candidate records with no team or type control, and one definition per field", () => {
+    const panel = tabpanel(detail(note.key));
+    expect(plain(panel)).toContain(
+      `<h3>Context</h3><p class="muted">${ONE_DEFINITION}</p><p>Record kind: Candidate</p><p>All candidate records</p>`,
+    );
+    expect(ONE_DEFINITION).toBe(
+      "A field has one definition for the whole company. It is never set per team.",
+    );
+    expect(panel).toContain(`<h3>Options</h3><p>${NO_OPTIONS}</p>`);
+    expect(NO_OPTIONS).toBe("This field type has no options.");
+    // No control at all on a text field: no team, type or context picker.
+    expect(controlsOf(panel)).toEqual([]);
+    expect(panel).not.toMatch(/Default context|Add context|Remove context/);
+    // A context limited to some types lists them read only.
+    const types = tabpanel(detail(typed.key));
+    expect(types).toContain(
+      '<p>Applies to these record types only:</p><ul style="margin:0;padding-left:18px"><li><code>00000000-0000-4000-a000-0000000000c1</code></li></ul>',
+    );
+    expect(types).not.toContain("All candidate records");
+    expect(controlsOf(types)).toEqual([]);
+  });
+
+  it("edits a dropdown's options by id: rename, Move up and Move down disabled at the ends, Disable or Enable, New option and Save options", () => {
+    const panel = tabpanel(detail(level.key));
+    const rows = [...panel.matchAll(/<li class="row"[^>]*>([\s\S]*?)<\/li>/g)];
+    expect(rows).toHaveLength(3);
+    const labels = ["Fictional low", "Fictional mid", "Fictional high"];
+    rows.forEach(([, row], index) => {
+      expect(plain(row)).toContain(
+        `<label class="field"><span>Option ${index + 1}</span><input maxLength="200" value="${labels[index]}"/></label>`,
+      );
+      expect(row).toMatch(
+        new RegExp(
+          `<button type="button" id="[^"]+-up" class="button secondary small"${index === 0 ? ' disabled=""' : ""} aria-label="Move up ${labels[index]}">Move up</button>`,
+        ),
+      );
+      expect(row).toMatch(
+        new RegExp(
+          `<button type="button" id="[^"]+-down" class="button secondary small"${index === 2 ? ' disabled=""' : ""} aria-label="Move down ${labels[index]}">Move down</button>`,
+        ),
+      );
+    });
+    expect(rows[2][1]).toContain('<span class="tag">Disabled</span>');
+    expect(rows[2][1]).toContain(
+      'aria-label="Enable Fictional high">Enable</button>',
+    );
+    expect(rows[0][1]).not.toContain("Disabled");
+    expect(rows[0][1]).toContain(
+      'aria-label="Disable Fictional low">Disable</button>',
+    );
+    expect(panel).toContain(
+      '<form class="row" style="flex-wrap:wrap;overflow-wrap:normal;align-items:end" aria-label="Add an option"><label class="field"><span>New option</span><input maxLength="200" value=""/></label><button type="submit" class="button secondary" disabled="">Add</button></form>',
+    );
+    expect(panel).toContain(
+      '<button type="button" class="button">Save options</button>',
+    );
+    // No per-option count, sort, delete or bin.
+    expect(panel).not.toMatch(/Sort|Delete|Remove|\bbin\b|\d+ records?/i);
+  });
+
+  it("refuses a blank or duplicate label and a disabled default before any request, and saves options with one PUT, or a POST without a draft", async () => {
+    const field = fieldOf(published, level.key);
+    const options = (level as Extract<CustomField, { type: "dropdown" }>)
+      .options;
+    const fetched = vi.spyOn(globalThis, "fetch");
+    expect(
+      optionIssues(field, [
+        ...options,
+        { id: "fictional-copy", label: "Fictional low" },
+      ]),
+    ).toEqual(["Options: Option labels must be unique."]);
+    expect(
+      optionIssues(
+        field,
+        options.map((option) =>
+          option.id === "fictional-mid"
+            ? { ...option, disabled: true }
+            : option,
+        ),
+      ),
+    ).toEqual(["Default: The default cannot be a disabled option."]);
+    expect(
+      optionIssues(field, [...options, { id: "fictional-blank", label: " " }]),
+    ).toHaveLength(1);
+    expect(fetched).not.toHaveBeenCalled();
+    fetched.mockRestore();
+    // Renamed, moved and a new option: the body keeps every id and changes only this field.
+    const next = [
+      { ...options[1], label: "Fictional middle" },
+      options[0],
+      options[2],
+      { id: "fictional-new", label: "Fictional new" },
+    ];
+    expect(optionIssues(field, next)).toEqual([]);
+    const body = withOptions(published, field, next);
+    expect(fieldOf(body, level.key)).toEqual({ ...level, options: next });
+    expect(body.screens).toEqual(published.screens);
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string, init: RequestInit) => {
+        sent.push({
+          method: init.method ?? "GET",
+          path,
+          body: JSON.parse(String(init.body)),
+        });
+        return new Response(
+          JSON.stringify({
+            data: { versionId: "00000000-0000-4000-8000-0000000009b3" },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    try {
+      const drafted = await sendKindDraft(
+        "fictional-team",
+        state(published),
+        body,
+      );
+      expect(sent).toEqual([
+        {
+          method: "PUT",
+          path: "/api/v1/admin/fields/drafts/00000000-0000-4000-8000-0000000009b2",
+          body: { body },
+        },
+      ]);
+      expect(drafted.draft?.body).toEqual(body);
+      sent.length = 0;
+      const created = await sendKindDraft("fictional-team", state(), body);
+      expect(sent).toEqual([
+        {
+          method: "POST",
+          path: "/api/v1/admin/fields",
+          body: { kind: "candidate", body },
+        },
+      ]);
+      expect(created.draft?.versionId).toBe(
+        "00000000-0000-4000-8000-0000000009b3",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const notice = savedNotice(published);
+    expect(notice).toBe(
+      "Saved to the Candidate draft. Publish it to apply the change.",
+    );
+    expect(detail(level.key, { notice })).toContain(
+      `<p tabindex="-1" class="notice success" role="status">${notice}</p>`,
+    );
+    expect(
+      detail(level.key, {
+        refusal: ["Options: Option labels must be unique."],
+      }),
+    ).toContain(
+      '<div class="notice error" role="alert"><p style="margin:0">Options: Option labels must be unique.</p></div>',
+    );
+  });
+
+  it("lists a system select's options read only, says a text field has no options, and leaves disabled options out of the editor's default", () => {
+    const panel = tabpanel(detail("reviewStatus"));
+    expect(panel).toContain(
+      `<h3>Options</h3><ul style="margin:0;padding-left:18px"><li>Needs review</li><li>Reviewed</li></ul><p class="muted">${BUILT_IN_OPTIONS}</p>`,
+    );
+    expect(BUILT_IN_OPTIONS).toBe("Built-in options cannot be changed.");
+    expect(controlsOf(panel)).toEqual([]);
+    const editor = renderToStaticMarkup(
+      <FieldEditor
+        body={published}
+        field={fieldOf(published, level.key)}
+        labels={kindLabels([kindView(state())])}
+        owner
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    expect(editor).toContain(
+      '<option value="Fictional low">Fictional low</option>',
+    );
+    expect(editor).toContain(
+      '<option value="Fictional mid" selected="">Fictional mid</option>',
+    );
+    expect(editor).not.toContain("Fictional high");
+    // The editor still edits no option.
+    expect(editor).not.toContain(">Options</span>");
+  });
+
+  it("lists exactly the screens that use the field in Where used, marks hidden ones, and shows no other source", () => {
+    const panel = tabpanel(detail(level.key, { tab: "where-used" }));
+    expect(panel).toContain(
+      '<ul style="margin:0;padding-left:18px"><li>Edit screen</li><li>View screen</li></ul>',
+    );
+    for (const text of [
+      "Workflow",
+      "Template",
+      "Notification",
+      "Create screen",
+    ])
+      expect(panel, text).not.toContain(text);
+    expect(panel).toContain(
+      `aria-label="Archive ${level.label} (Candidate)">Archive</button>`,
+    );
+    const nothing = tabpanel(detail(unused.key, { tab: "where-used" }));
+    expect(nothing).toContain(`<p>${NOTHING_USES}</p>`);
+    expect(NOTHING_USES).toBe("Nothing uses this field.");
+    expect(nothing).not.toMatch(/Workflow|Template|Notification|<li>/);
+    // System and archived fields have no Archive.
+    expect(tabpanel(detail("name", { tab: "where-used" }))).not.toContain(
+      ">Archive<",
+    );
+    const archived = structuredClone(published);
+    Object.assign(fieldOf(archived, note.key), { archived: true });
+    expect(
+      tabpanel(
+        detail(
+          note.key,
+          { tab: "where-used" },
+          kindView({
+            ...state(),
+            current: { ...state().current, body: archived },
+          }),
+        ),
+      ),
+    ).not.toContain(">Archive<");
+    // The pure list: one source today, each entry labelled, hidden listings marked.
+    const hidden = structuredClone(published);
+    hidden.screens
+      .find((screen) => screen.action === "view")!
+      .groups[0].fields.find((entry) => entry.key === level.key)!.hidden = true;
+    expect(fieldWhereUsed(hidden, level.key)).toEqual([
+      { source: "screen", label: "Edit screen", hidden: false },
+      { source: "screen", label: "View screen", hidden: true },
+    ]);
+    expect(fieldWhereUsed(published, unused.key)).toEqual([]);
+    expect(
+      tabpanel(
+        detail(
+          level.key,
+          { tab: "where-used" },
+          kindView({
+            ...state(),
+            current: { ...state().current, body: hidden },
+          }),
+        ),
+      ),
+    ).toContain("<li>Edit screen</li><li>View screen (hidden)</li>");
+  });
+
+  it("starts the archive confirm with Where used, from the list and the tab, with Cancel first and nothing sent before confirm", async () => {
+    const field = fieldOf(published, level.key);
+    const options = archiveConfirm(published, field);
+    expect(options.message).toBe(
+      `Where used: Edit screen, View screen. Archive ${level.label}? It is no longer required, and every value already stored in it is kept. The field stays in this list as Archived; it cannot be deleted.`,
+    );
+    expect(
+      archiveConfirm(published, fieldOf(published, unused.key)).message,
+    ).toMatch(
+      /^Where used: nothing\. Archive Fictional unused note\? It is no longer required/,
+    );
+    const dialog = renderToStaticMarkup(
+      <ConfirmDialog {...options} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    expect(dialog).toContain(`<p id="`);
+    expect(dialog).toContain(`${options.message}</p>`);
+    expect(dialog.indexOf(">Cancel</button>")).toBeLessThan(
+      dialog.indexOf(">Archive field</button>"),
+    );
+    const fetched = vi.spyOn(globalThis, "fetch");
+    const asked: string[] = [];
+    expect(
+      await confirmArchive(
+        async (shown) => {
+          asked.push(shown.message);
+          expect(fetched).not.toHaveBeenCalled();
+          return false;
+        },
+        published,
+        field,
+      ),
+    ).toBeNull();
+    const archived = await confirmArchive(async () => true, published, field);
+    expect(fieldOf(archived!, level.key)).toEqual({ ...level, archived: true });
+    expect(archived!.fields).toHaveLength(published.fields.length);
+    expect(
+      await confirmArchive(
+        async () => true,
+        published,
+        fieldOf(published, "name"),
+      ),
+    ).toBeNull();
+    expect(asked).toEqual([options.message]);
+    expect(fetched).not.toHaveBeenCalled();
+    fetched.mockRestore();
+    // The list and the detail page archive through the same confirm.
+    const list = readFileSync(
+      new URL("../src/components/settings/fields-tab.tsx", import.meta.url),
+      "utf8",
+    );
+    const page = readFileSync(
+      new URL("../src/components/settings/field-detail.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(list).toContain(
+      "const next = await confirmArchive(confirm, view.body, field);",
+    );
+    expect(list).toContain("onClick={() => void archive(view, field)}");
+    expect(page).toContain(
+      "onArchive={() => void changes.archive(view, field)}",
+    );
+  });
+
+  it("shows the usage count of a published custom field only, the same for a sensitive one, and reads only the access, the fields and the count", async () => {
+    const view = kindView(state(withFresh()));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ data: { count: 3 } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    let count: number;
+    try {
+      count = (
+        await requestJson<{ data: { count: number } }>(
+          "fictional-team",
+          usagePath(view, fieldOf(view.body, level.key)),
+        )
+      ).data.count;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    for (const key of [level.key, secret.key])
+      expect(
+        renderToStaticMarkup(
+          <UsageCount
+            view={view}
+            field={fieldOf(view.body, key)}
+            usage={{ count, error: "" }}
+          />,
+        ),
+        key,
+      ).toBe(
+        "<p>Records with a value: 3 (across every team of the company)</p>",
+      );
+    expect(
+      renderToStaticMarkup(
+        <UsageCount
+          view={view}
+          field={fieldOf(view.body, level.key)}
+          usage={{ count: null, error: "The request could not be completed." }}
+        />,
+      ),
+    ).toBe(
+      '<p class="notice error" role="alert">Records with a value: The request could not be completed.</p>',
+    );
+    expect(content(detail("name", {}, view))).toContain(
+      `<p class="muted">${SYSTEM_COUNT}</p>`,
+    );
+    expect(SYSTEM_COUNT).toBe(
+      "Record counts are shown for custom fields only.",
+    );
+    expect(content(detail(fresh.key, {}, view))).toContain(
+      `<p class="muted">${DRAFT_ONLY_COUNT}</p>`,
+    );
+    expect(DRAFT_ONLY_COUNT).toBe(
+      "Not published yet, so no record holds a value.",
+    );
+    expect(countsUsage(view, fieldOf(view.body, "name"))).toBe(false);
+    expect(countsUsage(view, fieldOf(view.body, fresh.key))).toBe(false);
+    expect(countsUsage(view, fieldOf(view.body, secret.key))).toBe(true);
+    // Reads: the access and the fields for the page, the count for a published custom field only.
+    reads.length = 0;
+    renderToStaticMarkup(
+      <WorkspaceProvider value={workspace}>
+        <FieldDetailPortal
+          kind="candidate"
+          fieldKey={level.key}
+          companyLevel="owner"
+          tab="contexts"
+        />
+      </WorkspaceProvider>,
+    );
+    for (const key of ["name", fresh.key, level.key, secret.key])
+      detail(key, {}, view);
+    const usage = (key: string) =>
+      `/api/v1/admin/fields/usage?kind=candidate&fieldId=${key}`;
+    expect([...new Set(reads.map((read) => read.path))].sort()).toEqual(
+      [
+        "/api/v1/admin/fields",
+        "/api/v1/me/access",
+        usage(level.key),
+        usage(secret.key),
+      ].sort(),
+    );
+    for (const key of [level.key, secret.key, "name", fresh.key]) {
+      const markup = detail(key, {}, view);
+      for (const value of Object.values(record))
+        expect(markup).not.toContain(value);
+    }
+  });
+
+  it("shows the kind's draft with Publish, opens the existing publish summary with an option change under Other changes, and tells an admin when an owner must publish", () => {
+    const changed = withOptions(published, fieldOf(published, level.key), [
+      { id: "fictional-low", label: "Fictional lower" },
+      { id: "fictional-mid", label: "Fictional mid" },
+      { id: "fictional-high", label: "Fictional high", disabled: true },
+    ]);
+    const view = kindView(state(changed));
+    const markup = detail(level.key, {}, view);
+    expect(plain(content(markup))).toContain(
+      '<section class="stack" style="border:1px solid var(--border, #e2e4eb);border-radius:10px;padding:16px;min-width:0"><div class="row" style="flex-wrap:wrap;overflow-wrap:normal"><span><strong>Candidates</strong>: Draft in progress. Version 2 is in force.</span><button type="button" class="button">Publish Candidate changes</button></div></section>',
+    );
+    const summary = renderToStaticMarkup(
+      <PublishDialog view={view} onCancel={() => {}} onPublish={() => {}} />,
+    );
+    expect(plain(summary)).toContain(
+      `<h3>Other changes</h3><ul style="margin:0;padding-left:18px"><li>${level.label} <code>${level.key}</code></li></ul>`,
+    );
+    expect(summary).not.toContain("<h3>Renamed</h3>");
+    // An admin's draft that changes a sensitive mark is published by a company owner only.
+    const marked = structuredClone(changed);
+    Object.assign(fieldOf(marked, note.key), { sensitive: true });
+    const admin = detail(level.key, { owner: false }, kindView(state(marked)));
+    expect(admin).toContain(OWNER_MUST_PUBLISH);
+    expect(plain(admin)).not.toContain(">Publish Candidate changes</button>");
+    expect(detail(level.key, {}, kindView(state()))).not.toContain(
+      "Draft in progress",
+    );
   });
 });
 

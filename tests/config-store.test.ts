@@ -17,6 +17,7 @@ import {
   type KindSchemaBody,
 } from "@/domain/config";
 import type { CustomField } from "@/domain/field-types";
+import { exportTable } from "@/domain/export";
 import { kindSchemaChanges } from "@/domain/kind-schema-changes";
 import {
   archiveConfigObject,
@@ -41,7 +42,7 @@ import {
 } from "@/domain/config-defaults";
 import { SCOPES } from "@/lib/permissions";
 import type { Principal } from "@/lib/principal";
-import { createRecord } from "@/lib/records";
+import { createRecord, getRecord, updateRecord } from "@/lib/records";
 import { installTenantContext, type TenantAccess } from "@/lib/tenant-context";
 import { createSplitRoleDb, seedApiToken, seedIdentity } from "./helpers/db";
 import { contactBody, customField, kindBody } from "./helpers/kind-schemas";
@@ -1866,6 +1867,332 @@ describe("versioned configuration store under the split runtime roles", () => {
         "invalid_input",
         "kind: a kind schema's kind is its key, checklist.",
       );
+    });
+
+    // ADM-29 (job 100): a field's context is its kind and optionally some of its types, never a
+    // team; options change by id, and stored values keep their option ids.
+    describe("field contexts and options (ADM-29)", () => {
+      const TYPE = "00000000-0000-4000-a000-0000000000c1";
+      const options = [
+        { id: "fictional-low", label: "Fictional low" },
+        { id: "fictional-mid", label: "Fictional mid" },
+        { id: "fictional-high", label: "Fictional high" },
+      ];
+      const level = customField("Fictional context level", "dropdown", {
+        options,
+      });
+      const typed = customField("Fictional typed note", "short-text", {
+        types: [TYPE],
+      });
+      const candidates = async () =>
+        (
+          await look<{ n: number }>(
+            "SELECT count(*)::int AS n FROM app.records WHERE kind = 'candidate'",
+          )
+        )[0].n;
+      const stored = async (recordId: string) =>
+        (
+          await look<{ data: string }>(
+            "SELECT data::text AS data FROM app.records WHERE id = $1",
+            [recordId],
+          )
+        )[0].data;
+      /** The candidate in force with the level field's options replaced. */
+      const withLevel = async (
+        next: Record<string, unknown>[],
+        extra: Record<string, unknown> = {},
+      ) => {
+        const body = await inForce("candidate");
+        Object.assign(fieldOf(body, level.key), { options: next, ...extra });
+        return body;
+      };
+      // The candidate in force makes employer required (see the system field case above).
+      const create = (
+        p: Principal,
+        name: string,
+        values: Record<string, unknown>,
+      ) =>
+        run(() =>
+          createRecord(p, "candidates", {
+            data: {
+              name,
+              employer: "Fictional Employer",
+              customValues: values,
+            },
+          }),
+        );
+      let first = "";
+      let second = "";
+      let auditFrom = 0;
+
+      it("saves and publishes a field limited to a record type, and refuses a team, a second context and a duplicate type", async () => {
+        auditFrom = (await audits()).length;
+        const body = await inForce("candidate");
+        body.fields.push(level, typed);
+        for (const screen of body.screens)
+          screen.groups[0].fields.push({ key: level.key }, { key: typed.key });
+        const { versionId } = await run(save(fieldsAdmin, "candidate", body));
+        expect(
+          await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+        ).toBe(5);
+        const now = await inForce("candidate");
+        expect(fieldOf(now, typed.key)).toEqual(typed);
+        expect(fieldOf(now, level.key)).not.toHaveProperty("types");
+        const base = await inForce("candidate");
+        const change = (edit: (body: KindSchemaBody) => void) => {
+          const copy = structuredClone(base);
+          edit(copy);
+          return copy;
+        };
+        for (const [body, message] of [
+          [
+            change((copy) =>
+              Object.assign(fieldOf(copy, typed.key), { types: [TYPE, TYPE] }),
+            ),
+            /fields\.\d+\.types: A record type can be listed only once\./,
+          ],
+          [
+            change((copy) =>
+              Object.assign(fieldOf(copy, "employer"), { types: [TYPE] }),
+            ),
+            /fields\.\d+: Unrecognized key: "types"/,
+          ],
+          ...["team", "teamId", "teams", "contexts"].map(
+            (key) =>
+              [
+                change((copy) =>
+                  Object.assign(fieldOf(copy, level.key), {
+                    [key]: key === "teams" || key === "contexts" ? [] : "x",
+                  }),
+                ),
+                new RegExp(`fields\\.\\d+: Unrecognized key: "${key}"`),
+              ] as const,
+          ),
+          [
+            change((copy) =>
+              copy.fields.push({ ...level, label: "Fictional second context" }),
+            ),
+            /fields\.\d+\.key: Field keys must be unique\./,
+          ],
+        ] as const)
+          await refusedWith(
+            save(fieldsAdmin, "candidate", body),
+            400,
+            "invalid_input",
+            message,
+          );
+        // Records have no type until R2b-11, so a type-limited field takes no new value.
+        const count = await candidates();
+        await expect(
+          create(owner, "Fictional Typed Candidate", {
+            [typed.key]: "Fictional typed value",
+          }),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "invalid_custom_value",
+          message: `${typed.label} does not apply to this record type.`,
+        });
+        expect(await candidates()).toBe(count);
+      });
+
+      it("adds, renames, reorders and disables options by id, keeping every stored value, and refuses removing one", async () => {
+        first = (
+          await create(owner, "Fictional Option Holder", {
+            [level.key]: "fictional-mid",
+          })
+        ).id;
+        second = (
+          await create(owner, "Fictional Disabled Holder", {
+            [level.key]: "fictional-high",
+          })
+        ).id;
+        const before = await stored(first);
+        // Added, renamed, the last option moved first and disabled: one draft, one publish.
+        const edited = [
+          { id: "fictional-high", label: "Fictional high", disabled: true },
+          { id: "fictional-low", label: "Fictional low" },
+          { id: "fictional-mid", label: "Fictional middle" },
+          { id: "fictional-new", label: "Fictional new" },
+        ];
+        const { versionId } = await run(
+          save(fieldsAdmin, "candidate", await withLevel(edited)),
+        );
+        // Removing an option, or changing its id, is refused at save.
+        const removed = `${level.key}: an option cannot be removed; disable it instead.`;
+        for (const next of [
+          edited.slice(1),
+          [{ ...edited[0], id: "fictional-top" }, ...edited.slice(1)],
+        ]) {
+          const body = await withLevel(next);
+          await refusedWith(
+            () => updateConfigDraft(fieldsAdmin, versionId, { body }),
+            400,
+            "invalid_input",
+            removed,
+          );
+        }
+        expect(
+          await run(() => publishConfigVersion(fieldsAdmin, versionId)),
+        ).toBe(6);
+        expect(fieldOf(await inForce("candidate"), level.key)).toMatchObject({
+          options: edited,
+        });
+        // The record created before the rename holds the same id, byte for byte.
+        expect(await stored(first)).toBe(before);
+        expect(
+          (await run(() => getRecord(owner, "candidates", first))).data,
+        ).toMatchObject({ customValues: { [level.key]: "fictional-mid" } });
+        // And at publish, for a draft the owner wrote through SQL.
+        const sqlId = await sqlDraft(await withLevel(edited.slice(0, 3)));
+        await refusedWith(
+          () => publishConfigVersion(owner, sqlId),
+          400,
+          "invalid_input",
+          removed,
+        );
+        await dropDraft(sqlId);
+        // A disabled option is no default.
+        await refusedWith(
+          save(
+            fieldsAdmin,
+            "candidate",
+            await withLevel(edited, { default: "fictional-high" }),
+          ),
+          400,
+          "invalid_input",
+          /fields\.\d+\.default: The default cannot be a disabled option\./,
+        );
+      });
+
+      it("refuses a disabled option on new values, keeps it on records that hold it, and exports its id", async () => {
+        const offered =
+          "Fictional context level no longer offers Fictional high.";
+        const count = await candidates();
+        await expect(
+          create(owner, "Fictional New Holder", {
+            [level.key]: "fictional-high",
+          }),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "invalid_custom_value",
+          message: offered,
+        });
+        expect(await candidates()).toBe(count);
+        const firstBefore = await stored(first);
+        await expect(
+          run(() =>
+            updateRecord(owner, "candidates", first, {
+              version: 1,
+              data: { customValues: { [level.key]: "fictional-high" } },
+            }),
+          ),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "invalid_custom_value",
+          message: offered,
+        });
+        expect(await stored(first)).toBe(firstBefore);
+        // The record that held it before it was disabled: another field, then the same value again.
+        const phone = await run(() =>
+          updateRecord(owner, "candidates", second, {
+            version: 1,
+            data: { phone: "+971 50 222 2222" },
+          }),
+        );
+        expect(phone.data).toMatchObject({
+          customValues: { [level.key]: "fictional-high" },
+        });
+        await run(() =>
+          updateRecord(owner, "candidates", second, {
+            version: phone.version,
+            data: { customValues: { [level.key]: "fictional-high" } },
+          }),
+        );
+        const got = await run(() => getRecord(owner, "candidates", second));
+        expect(got.data).toMatchObject({
+          customValues: { [level.key]: "fictional-high" },
+        });
+        const body = await inForce("candidate");
+        const table = exportTable("candidates", [got], new Set(), body);
+        expect(table.rows[0][table.headers.indexOf(level.label)]).toBe(
+          "fictional-high",
+        );
+        // An enabled option, renamed or new, is accepted on create and edit.
+        await create(owner, "Fictional New Option Holder", {
+          [level.key]: "fictional-new",
+        });
+        const moved = await run(() =>
+          updateRecord(owner, "candidates", first, {
+            version: 1,
+            data: { customValues: { [level.key]: "fictional-low" } },
+          }),
+        );
+        expect(moved.data).toMatchObject({
+          customValues: { [level.key]: "fictional-low" },
+        });
+      });
+
+      it("refuses an option change to team owners, team admins and company admins without fields", async () => {
+        const current = fieldOf(
+          await inForce("candidate"),
+          level.key,
+        ) as Extract<Field, { type: "dropdown" }>;
+        const next = await withLevel(
+          current.options.map((option) => ({
+            ...option,
+            label: `${option.label} renamed`,
+          })),
+        );
+        const { versionId } = await run(save(owner, "candidate", next));
+        await harness.asOwner();
+        await harness.client.exec(
+          `INSERT INTO app.workspace_admins(workspace_id,user_id,level,areas) VALUES ('${COMPANY}','cfg-recruiter-a','admin','{organisation}')`,
+        );
+        try {
+          for (const p of [ownerB, adminA, recruiterA])
+            await refusedWith(
+              () => updateConfigDraft(p, versionId, { body: next }),
+              403,
+              "config_forbidden",
+              "You do not have company authority to change this configuration.",
+            );
+        } finally {
+          await harness.asOwner();
+          await harness.client.exec(
+            `DELETE FROM app.workspace_admins WHERE user_id = 'cfg-recruiter-a'`,
+          );
+        }
+        await dropDraft(versionId);
+      });
+
+      it("audits the context and option changes only as draft_created and published, with ids and numbers", async () => {
+        const rows = (await audits()).slice(auditFrom);
+        expect([...new Set(rows.map((row) => row.action))].sort()).toEqual([
+          "config.draft_created",
+          "config.published",
+        ]);
+        for (const row of rows) {
+          expect(Object.keys(row.metadata).sort()).toEqual([
+            "fromVersionId",
+            "key",
+            "number",
+            "objectId",
+            "type",
+            "versionId",
+            "workspaceId",
+          ]);
+          const text = JSON.stringify(row);
+          for (const label of [
+            ...options.map((option) => option.label),
+            "Fictional middle",
+            "Fictional new",
+            level.label,
+            typed.label,
+            "Fictional Option Holder",
+          ])
+            expect(text).not.toContain(label);
+        }
+      });
     });
   });
 
