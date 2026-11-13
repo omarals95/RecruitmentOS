@@ -422,6 +422,7 @@ describe("admin pages check access on the server (TST-002)", () => {
       "roles",
       "organisation",
       "fields",
+      "domain",
       "history",
     ];
     allowed["no team"] = [];
@@ -566,6 +567,31 @@ describe("admin pages check access on the server (TST-002)", () => {
       ["bearer", "sign-in"],
     ] as const)
       expect(await open(callers[name], "[tab]/page.tsx", "fields"), name).toBe(
+        outcome,
+      );
+    expect(authenticateApiToken).not.toHaveBeenCalled();
+    expect(authenticateOAuthAccessToken).not.toHaveBeenCalled();
+  });
+
+  // ADM-40 (job 098): Domain is a company owner page only (D20), whatever the team role or areas.
+  it("opens Domain for company owners only (ADM-40)", async () => {
+    for (const [name, outcome] of [
+      ["company owner and team owner", "allowed"],
+      ["company owner as recruiter", "allowed"],
+      ["team owner", "refused"],
+      ["team A owner", "refused"],
+      ["team admin", "refused"],
+      ["recruiter", "refused"],
+      ["viewer", "refused"],
+      ["company admin", "refused"],
+      ["company admin with organisation", "refused"],
+      ["company admin with people", "refused"],
+      ["company admin with no area", "refused"],
+      ["no team", "refused"],
+      ["anonymous", "sign-in"],
+      ["bearer", "sign-in"],
+    ] as const)
+      expect(await open(callers[name], "[tab]/page.tsx", "domain"), name).toBe(
         outcome,
       );
     expect(authenticateApiToken).not.toHaveBeenCalled();

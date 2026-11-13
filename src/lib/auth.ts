@@ -60,21 +60,32 @@ export type AuthOptions = {
   publicSignup: boolean;
   bootstrapConfigured: boolean;
 };
-export function getAuthOptions(): AuthOptions {
+/**
+ * Whether sign-in accepts this BETTER_AUTH_URL: an origin with nothing after it, on https, or on
+ * http for localhost or 127.0.0.1 when not hosted. The Domain page shows the same answer.
+ */
+export function usableAuthURL(value: string | undefined): boolean {
   const hosted =
     process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
-  let validURL = false;
   try {
-    const url = new URL(process.env.BETTER_AUTH_URL ?? "");
-    validURL =
+    const url = new URL(value ?? "");
+    return (
       url.origin === url.href.replace(/\/$/, "") &&
       (url.protocol === "https:" ||
         (!hosted &&
           url.protocol === "http:" &&
-          ["localhost", "127.0.0.1"].includes(url.hostname)));
+          ["localhost", "127.0.0.1"].includes(url.hostname)))
+    );
   } catch {
     /* Public pages remain available before setup. */
+    return false;
   }
+}
+
+export function getAuthOptions(): AuthOptions {
+  const hosted =
+    process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  const validURL = usableAuthURL(process.env.BETTER_AUTH_URL);
   let database = false;
   if (hosted) {
     try {

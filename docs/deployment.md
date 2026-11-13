@@ -110,6 +110,8 @@ Company groups (build item ADM-11, job 092) add migration `0052_company_groups.s
 
 Branding (build item ADM-36, job 097) adds migration `0053_branding.sql`. It adds the configuration type `branding` and the grantable company area `branding`: the `config_objects_type_check` and `workspace_admins_areas_check` constraints, the runtime `context_*` policies of the three `app.config_*` tables, `tenant_context.audit_config`, `publish_config_version`, `retire_config_version`, `allows_workspace` and `set_workspace_authority` accept it, each re-bodied with the same signature, owner and grants. It adds one owner-run helper, `tenant_context.public_branding()` (`SECURITY DEFINER`, `STABLE`, fixed `search_path`, PUBLIC `EXECUTE` revoked), which returns, with no tenant context, only the public token set of the published company branding for the root layout and the sign-in page. It rewrites no row. The role template gains `EXECUTE` on the helper for the data role only. The owner must apply `0053` after `0052` on Preview, rerun the updated role template, then rerun `scripts/db-role-evidence.ts` (zero drift) and `npm run test:live-roles`, directly and through the pooler. This release requires storage schema 31: until `0053` is applied, hosted startup refuses with 503 `storage_schema_mismatch`. Until the template is rerun every page renders, with the product look: the root layout's branding read is refused with `42501`, logged as `branding_read_failed` and read as no branding.
 
+The Domain page (build item ADM-40, job 098) adds migration `0054_domain_audit.sql`. It gives `tenant_context.allows_workspace` the owner-only area `domain` (same signature, owner and grants; every other area answers as before), recreates the `app.activity` insert policy with a `domain` branch that admits `domain.url_recorded` and `domain.url_changed` rows only from a company owner session for its own workspace, and adds the read policy `domain_owner_read`, which lets a company owner session read the workspace's domain rows of every team. It adds no function, table or grant and rewrites no row, so the role template is unchanged and needs no rerun. The owner must apply `0054` after `0053` on Preview, then rerun `scripts/db-role-evidence.ts` (zero drift) and `npm run test:live-roles`, directly and through the pooler. This release requires storage schema 32: until `0054` is applied, hosted startup refuses with 503 `storage_schema_mismatch`.
+
 An environment has no company owner when it has no initial administrator, when the initial administrator was not a member of any team when `0028` ran, or when the last company owner left every team (their row is then suspended). There the owner runs this statement once over the owner connection, after `0028`, with the email of a member of one of the teams. It makes that member company owner, or clears the suspension of a suspended owner. It writes no activity row, so record when and why it was run:
 
 ```sql
@@ -165,6 +167,23 @@ Never expose these through `NEXT_PUBLIC_*`. The deployed `TENANT_CONTEXT_SIGNING
 **Function region.** `vercel.json` sets `"regions": ["fra1"]`, so the application's functions run in Frankfurt (`fra1`), next to Neon (`aws-eu-central-1`) and the Blob store (`fra1`). Before this, functions ran in Vercel's default `iad1` (US East) and every database statement crossed the Atlantic. The setting takes effect on the next deployment, which the owner runs; nothing in the repository deploys it.
 
 Import `omarals95/RecruitmentOS` into Vercel and select the reviewed implementation branch. Run `npm ci` for install and `npm run build` for build. The repository includes Vercel's Node function duration configuration. Use a stable canonical production domain matching `BETTER_AUTH_URL`. Preview origins need their own corresponding isolated configuration; do not add arbitrary origins to auth.
+
+### Changing the application address
+
+`BETTER_AUTH_URL` is the application's only address: sign-in, every emailed link, OAuth and the MCP server URL use it, never the address a request came in on. The app cannot change it; a company owner sees it, read only, on **Admin portal > Domain**, with the checklist for this deployment. To change it:
+
+- **On Vercel:** add the domain to the Vercel project and point its DNS at Vercel; set `BETTER_AUTH_URL` to the new https origin (no trailing slash or path) in the project's environment variables for that environment; redeploy.
+- **With an env file** (local development, and any server off Vercel): set `BETTER_AUTH_URL` in the env file, then restart the app.
+
+Before you switch, a company owner can enter the new address under **Check an address** on the Domain page. The browser opens `<new address>/api/version` in a new tab; the address serves this deployment when the build and commit there equal the ones on the page. The server never requests the address. After the change, the first time a company owner opens the Domain page the app records the old and new address once in the activity of that owner's team; while a browser is on the old address the page shows a banner naming both.
+
+The change affects:
+
+1. DNS and the Vercel domain: the new address must point at this deployment.
+2. The Better Auth trusted origin: it follows `BETTER_AUTH_URL`, so sign-in accepts only the new address.
+3. OAuth and MCP redirect URIs, and the MCP server URL, which becomes `<new address>/api/mcp`: AI apps must reconnect.
+4. The Resend sending domain: emails keep coming from the domain verified in Resend.
+5. Links in emails already sent: they keep the old address.
 
 ## 4. Email and sign-in
 

@@ -22,8 +22,8 @@ export type AdminGroup = (typeof ADMIN_GROUPS)[number];
 /**
  * The Admin portal pages that exist today, one row per page, ordered by group. API tokens, the one
  * team page left here, follows the team role (a team's Members, CV storage, Speed and Task boards
- * are tabs of its detail page under Teams); History follows company authority, Company authority
- * and Roles & permissions the company owner level only (D1, D20), Organisation a company owner or
+ * are tabs of its detail page under Teams); History follows company authority, Company authority,
+ * Roles & permissions and Domain the company owner level only (D1, D20), Organisation a company owner or
  * a company admin with the organisation area, and Directory the role's directory view action, so a team role never yields
  * any of them and company authority never yields a team page. Teams is the one page that both open (architecture §14.1 "Who sees
  * it"): a team owner or admin lists their own teams, and a company owner or admin also sees every
@@ -96,6 +96,14 @@ export const ADMIN_TABS = [
     group: "Configuration",
     description:
       "Add, rename, group, order and archive the fields of every record kind, then publish the changes.",
+  },
+  {
+    key: "domain",
+    label: "Domain",
+    level: "owner",
+    group: "Look & feel",
+    description:
+      "See the web address this workspace runs on, check a new address, and follow the steps to change it in the deployment.",
   },
   {
     key: "tokens",

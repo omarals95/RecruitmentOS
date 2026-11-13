@@ -481,6 +481,38 @@ describe("escalation guards (architecture §11.6)", () => {
     }
   });
 
+  // ADM-40 (job 098): Domain is company owner only and never grantable (D20).
+  it("allows the domain area only to a company owner session, never to a company admin or a token", () => {
+    expect(OWNER_ADMIN_AREAS).toContain("domain");
+    expect(GRANTABLE_ADMIN_AREAS).not.toContain("domain");
+    for (const role of ROLES) {
+      for (const [level, areas, expected] of [
+        ["owner", [], true],
+        ["admin", [...ADMIN_AREAS], false],
+        [null, [], false],
+      ] as const)
+        for (const action of ["view", "edit", "admin"] as const)
+          expect(
+            allowed(
+              contextOf(
+                session(role),
+                {},
+                { companyLevel: level, companyAreas: [...areas] },
+              ),
+              { adminArea: "domain", action },
+            ),
+            `${role} ${level} ${action}`,
+          ).toBe(expected);
+      for (const p of principalsOf(role).filter((q) => q.authType === "token"))
+        expect(
+          allowed(contextOf(p, {}, { companyLevel: "owner" }), {
+            adminArea: "domain",
+            action: "view",
+          }),
+        ).toBe(false);
+    }
+  });
+
   it("allows a company owner session every area, whatever the team role", () => {
     for (const role of ROLES) {
       const ctx = contextOf(session(role), {}, { companyLevel: "owner" });

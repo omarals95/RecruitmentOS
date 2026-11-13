@@ -360,8 +360,14 @@ export const GRANTABLE_ADMIN_AREAS = [
   "people",
   "branding",
 ] as const;
-/** Company areas only a company owner holds, whatever companyAreas says. */
-export const OWNER_ADMIN_AREAS = ["roles", "ai", "plan", "home-units"] as const;
+/** Company areas only a company owner holds, whatever companyAreas says (domain drizzle/0054). */
+export const OWNER_ADMIN_AREAS = [
+  "roles",
+  "ai",
+  "plan",
+  "home-units",
+  "domain",
+] as const;
 export const ADMIN_AREAS = [
   ...GRANTABLE_ADMIN_AREAS,
   ...OWNER_ADMIN_AREAS,
