@@ -58,7 +58,8 @@ CREATE POLICY manager_delete ON app.group_members FOR DELETE USING (
 -- manages_group is true, group_grants false and that is not archived, after the workspace row lock,
 -- so a group that starts granting serialises with them; anything else is 42501. For every context,
 -- an INSERT of a member or manager row into an archived group, or of an archived child group, and an
--- UPDATE that makes an archived group the child, are RQ023; an INSERT of a manager row for a group
+-- UPDATE of a child row of an archived parent, or that makes an archived group the child, are RQ023;
+-- an INSERT of a manager row for a group
 -- for which group_grants is true is 42501, a company owner included. A company owner or people
 -- context may UPDATE a child row to another child group of the same workspace, changing nothing
 -- else (added_at is restamped): the replacement archive uses. Every other member or manager UPDATE
@@ -170,6 +171,10 @@ BEGIN
          OR (NEW.group_id, NEW.workspace_id, NEW.user_id, NEW.added_by)
            IS DISTINCT FROM (OLD.group_id, OLD.workspace_id, OLD.user_id, OLD.added_by) THEN
         RAISE EXCEPTION 'Group members and managers are added and removed, never changed' USING ERRCODE = '42501';
+      END IF;
+      -- The parent is unchanged (checked above): an archived one takes no new child this way either.
+      IF EXISTS (SELECT 1 FROM app.groups g WHERE g.id = OLD.group_id AND g.archived_at IS NOT NULL) THEN
+        RAISE EXCEPTION 'An archived group takes no new members' USING ERRCODE = 'RQ023';
       END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM app.groups g WHERE g.id = NEW.child_group_id AND g.archived_at IS NOT NULL) THEN

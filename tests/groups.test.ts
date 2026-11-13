@@ -1414,6 +1414,21 @@ describe("company groups under the split runtime roles", () => {
       ])
         for (const p of [owner, peopleAdmin])
           await refused(() => sqlAs(p, statement), "RQ023");
+      // An archived parent takes no new child through the replacement update either: the archived
+      // Old Parent still holds G, and replacing G there with a current group is refused, with the
+      // same effective rows.
+      const before = await expectEffective();
+      for (const p of [owner, peopleAdmin])
+        await refused(
+          () =>
+            sqlAs(
+              p,
+              `UPDATE app.group_members SET child_group_id = '${empty.id}' WHERE group_id = '${oldParent.id}' AND child_group_id = '${g.id}'`,
+            ),
+          "RQ023",
+        );
+      expect(await expectEffective()).toBe(before);
+      expect(await children(oldParent)).toEqual([g.id]);
     });
 
     it("refuses every other member or manager update, for a company owner too, with 42501", async () => {
